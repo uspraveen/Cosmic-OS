@@ -115,6 +115,60 @@ except Exception:
 '''
 
 
+_HOST_GRANT_FS_EXTENSION = '''
+_COSMIC_HOST_READ = {host_read_paths!r}
+_COSMIC_HOST_WRITE = {host_write_paths!r}
+
+def _cosmic_path_in_granted_tree(resolved, granted_paths):
+    for granted in granted_paths:
+        base = _cosmic_pathlib.Path(granted).resolve()
+        try:
+            resolved.relative_to(base)
+            return True
+        except ValueError:
+            continue
+    return False
+
+def _cosmic_resolve_path(value):
+    if isinstance(value, int):
+        raise PermissionError("Raw file descriptors are blocked in the COSMIC code sandbox.")
+    path = _cosmic_pathlib.Path(value)
+    if not path.is_absolute():
+        path = _cosmic_pathlib.Path.cwd() / path
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(_COSMIC_ROOT)
+        return resolved
+    except ValueError:
+        pass
+    if _cosmic_path_in_granted_tree(resolved, _COSMIC_HOST_READ + _COSMIC_HOST_WRITE):
+        return resolved
+    raise PermissionError(f"Path escapes COSMIC code sandbox: {{value}}")
+
+def _cosmic_mode_allows_write(mode):
+    mode = str(mode or "r")
+    return any(flag in mode for flag in ("w", "a", "+", "x"))
+
+def _cosmic_guarded_open(file, mode="r", buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None):
+    resolved = _cosmic_resolve_path(file)
+    if _cosmic_mode_allows_write(mode):
+        if not _cosmic_path_in_granted_tree(resolved, _COSMIC_HOST_WRITE):
+            try:
+                resolved.relative_to(_COSMIC_ROOT / "outputs")
+            except ValueError:
+                raise PermissionError(f"Write access is not granted for: {{file}}")
+    elif not _cosmic_path_in_granted_tree(resolved, _COSMIC_HOST_READ + _COSMIC_HOST_WRITE):
+        try:
+            resolved.relative_to(_COSMIC_ROOT)
+        except ValueError:
+            raise PermissionError(f"Read access is not granted for: {{file}}")
+    return _cosmic_orig_open(resolved, mode, buffering, encoding, errors, newline, closefd, opener)
+
+_cosmic_builtins.open = _cosmic_guarded_open
+_cosmic_io.open = _cosmic_guarded_open
+'''
+
+
 @dataclass(slots=True)
 class LocalCodeSandboxSettings:
     enabled: bool = True
@@ -126,6 +180,8 @@ class LocalCodeSandboxSettings:
     max_script_bytes: int = 256000
     max_files: int = 12
     max_file_bytes: int = 25 * 1024 * 1024
+    host_read_paths: tuple[str, ...] = ()
+    host_write_paths: tuple[str, ...] = ()
 
 
 def run_local_code_sandbox(
@@ -176,7 +232,11 @@ def run_local_code_sandbox(
         directory.mkdir(parents=True, exist_ok=True)
 
     script_path = code_dir / "main.py"
-    script_path.write_text(f"{_FS_PRELUDE}\n# User code starts here\n{code}\n", encoding="utf-8")
+    prelude = _compose_fs_prelude(
+        host_read_paths=list(settings.host_read_paths),
+        host_write_paths=list(settings.host_write_paths),
+    )
+    script_path.write_text(f"{prelude}\n# User code starts here\n{code}\n", encoding="utf-8")
 
     python_exe = sys.executable
     pip_log = ""
@@ -314,6 +374,15 @@ def _provision_venv(
     if completed.returncode != 0:
         raise RuntimeError(f"Package installation failed: {_truncate(''.join(log_parts), 2000)}")
     return str(python_exe), "".join(log_parts)
+
+
+def _compose_fs_prelude(*, host_read_paths: list[str], host_write_paths: list[str]) -> str:
+    if host_read_paths or host_write_paths:
+        return _FS_PRELUDE + _HOST_GRANT_FS_EXTENSION.format(
+            host_read_paths=host_read_paths,
+            host_write_paths=host_write_paths,
+        )
+    return _FS_PRELUDE
 
 
 def _build_env(*, root: Path, home_dir: Path, allow_network: bool) -> dict[str, str]:

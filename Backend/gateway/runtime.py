@@ -45,6 +45,7 @@ from .delivery.queue_store import DeliveryQueueStore, utcnow_iso
 from .event_automation_store import EventAutomationStore
 from .gmail_approval_store import GmailApprovalStore
 from .gmail_context_store import GmailContextStore
+from .sandbox_permission_store import SandboxPermissionStore
 from .memory import MemoryWriteAuditStore
 from .memory.client import (
     CosmicMemoryClient,
@@ -74,6 +75,7 @@ from .session_store import SessionStore
 from .usage_store import UsageStore
 from .wishlist import CapabilityWishlistService, CapabilityWishlistStore
 from .tool_opportunities import ToolOpportunityService, ToolOpportunityStore
+from orchestrator.local_code_sandbox import LocalCodeSandboxSettings, run_local_code_sandbox
 from orchestrator.store.ledger import TaskLedger
 
 try:
@@ -372,6 +374,7 @@ class GatewayRuntime:
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.gmail_context_store = GmailContextStore(config.gmail_context_db_path)
         self.gmail_approval_store = GmailApprovalStore(config.gmail_approvals_db_path)
+        self.sandbox_permission_store = SandboxPermissionStore(config.sandbox_permissions_db_path)
         self.event_automation_store = EventAutomationStore(config.event_automation_db_path)
         self.scheduler_store = SchedulerStore(config.scheduler_db_path)
         self.agent_email_integration_store = AgentEmailIntegrationStore(
@@ -501,6 +504,7 @@ class GatewayRuntime:
         self.delivery_queue_store.initialize()
         self.gmail_context_store.initialize()
         self.gmail_approval_store.initialize()
+        self.sandbox_permission_store.initialize()
         self.event_automation_store.initialize()
         self.scheduler_store.initialize(
             default_timezone=self.config.user_timezone_fallback,
@@ -3517,6 +3521,173 @@ class GatewayRuntime:
         )
         return {"status": "rejected", "approval": rejected}
 
+    def create_sandbox_permission(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.sandbox_permission_store.create_pending(payload)
+
+    def _local_code_sandbox_settings_for_permission(
+        self,
+        permission: dict[str, Any],
+    ) -> LocalCodeSandboxSettings:
+        timeout_value = permission.get("timeout_sec")
+        timeout_sec = self.config.code_sandbox_timeout_sec
+        if timeout_value not in (None, ""):
+            try:
+                timeout_sec = float(timeout_value)
+            except (TypeError, ValueError):
+                timeout_sec = self.config.code_sandbox_timeout_sec
+        return LocalCodeSandboxSettings(
+            enabled=True,
+            timeout_sec=timeout_sec,
+            allow_network=bool(permission.get("network")),
+            allow_pip=self.config.code_sandbox_allow_pip,
+            pip_timeout_sec=self.config.code_sandbox_pip_timeout_sec,
+            venv_cache_root=self.config.code_sandbox_venv_cache_root,
+            max_script_bytes=self.config.code_sandbox_max_script_bytes,
+            max_files=self.config.code_sandbox_max_files,
+            max_file_bytes=self.config.code_sandbox_max_file_bytes,
+            host_read_paths=tuple(permission.get("host_read_paths") or ()),
+            host_write_paths=tuple(permission.get("host_write_paths") or ()),
+        )
+
+    def _sandbox_permission_response_block(self, permission: dict[str, Any]) -> dict[str, Any]:
+        permission_id = self._safe_text(permission.get("permission_id"))
+        result = permission.get("result") if isinstance(permission.get("result"), dict) else None
+        result_preview = None
+        error_message = None
+        if result:
+            stdout = self._safe_text(result.get("stdout"))
+            stderr = self._safe_text(result.get("stderr"))
+            message = self._safe_text(result.get("message")) or self._safe_text(result.get("error_message"))
+            if result.get("error") and message:
+                error_message = message
+            excerpt = stdout or stderr or message
+            if not excerpt and result.get("artifacts"):
+                excerpt = "Sandbox produced artifacts."
+            result_preview = self._bounded_excerpt(excerpt, limit=700)
+        elif self._safe_text(permission.get("reviewer_note")):
+            error_message = self._safe_text(permission.get("reviewer_note"))
+        summary = (
+            self._safe_text(permission.get("summary"))
+            or self._safe_text(permission.get("description"))
+            or "Sandbox capability request"
+        )
+        return {
+            key: value
+            for key, value in {
+                "id": f"sandbox_permission:{permission_id}",
+                "type": "sandbox_permission_request",
+                "permission_id": permission_id,
+                "status": self._safe_text(permission.get("status")) or "pending",
+                "description": self._safe_text(permission.get("description")),
+                "summary": summary,
+                "network": bool(permission.get("network")),
+                "host_read_paths": permission.get("host_read_paths")
+                if isinstance(permission.get("host_read_paths"), list)
+                else [],
+                "host_write_paths": permission.get("host_write_paths")
+                if isinstance(permission.get("host_write_paths"), list)
+                else [],
+                "allowed_hosts": permission.get("allowed_hosts")
+                if isinstance(permission.get("allowed_hosts"), list)
+                else [],
+                "result_preview": result_preview,
+                "error_message": error_message,
+                "created_at": self._safe_text(permission.get("created_at")),
+            }.items()
+            if value not in (None, "", [], {})
+        }
+
+    async def _publish_sandbox_permission_block(self, permission: dict[str, Any]) -> None:
+        block = self._sandbox_permission_response_block(permission)
+        permission_id = self._safe_text(permission.get("permission_id"))
+        block_status = self._safe_text(block.get("status")) or "pending"
+        self._persist_response_action_status(
+            approval_id=permission_id,
+            block_type="sandbox_permission_request",
+            status=block_status,
+        )
+        self._persist_response_action_block(block)
+        await self._publish_response_action_update(response_block=block)
+
+    async def approve_sandbox_permission(self, permission_id: str) -> dict[str, Any]:
+        permission = self.sandbox_permission_store.get(permission_id)
+        if not permission:
+            raise ValueError("Sandbox permission not found.")
+        status = self._safe_text(permission.get("status"))
+        if status not in {"pending", "failed"}:
+            return {
+                "status": "ignored",
+                "permission": permission,
+                "reason": f"permission_is_{status or 'unknown'}",
+            }
+
+        code = str(permission.get("code") or "").strip()
+        if not code:
+            raise ValueError("Sandbox permission is missing executable code.")
+
+        running = self.sandbox_permission_store.mark_running(permission_id)
+        if running is None:
+            latest = self.sandbox_permission_store.get(permission_id) or permission
+            return {
+                "status": "ignored",
+                "permission": latest,
+                "reason": f"permission_is_{self._safe_text(latest.get('status')) or 'unknown'}",
+            }
+        await self._publish_sandbox_permission_block({**running, "status": "running"})
+
+        settings = self._local_code_sandbox_settings_for_permission(running)
+        task_id = self._safe_text(running.get("task_id")) or "gateway-sandbox"
+        try:
+            result = await asyncio.to_thread(
+                run_local_code_sandbox,
+                code=code,
+                artifacts_root=self.config.artifacts_root,
+                task_id=task_id,
+                description=str(running.get("description") or ""),
+                packages=running.get("packages") if isinstance(running.get("packages"), list) else [],
+                timeout_sec=running.get("timeout_sec"),
+                settings=settings,
+            )
+        except Exception as exc:
+            logger.exception("gateway.sandbox_permission.execute_failed permission_id=%s", permission_id)
+            result = {
+                "error": True,
+                "status": "failed",
+                "message": str(exc) or "Sandbox execution failed.",
+            }
+
+        executed = self.sandbox_permission_store.mark_executed(permission_id, result)
+        if executed is None:
+            executed = self.sandbox_permission_store.get(permission_id) or running
+        await self._publish_sandbox_permission_block(executed)
+        block_status = self._safe_text(executed.get("status")) or "failed"
+        return {"status": block_status, "permission": executed, "result": result}
+
+    def reject_sandbox_permission(self, permission_id: str, *, note: str | None = None) -> dict[str, Any]:
+        permission = self.sandbox_permission_store.get(permission_id)
+        if not permission:
+            raise ValueError("Sandbox permission not found.")
+        status = self._safe_text(permission.get("status"))
+        if status not in {"pending", "failed"}:
+            return {
+                "status": "ignored",
+                "permission": permission,
+                "reason": f"permission_is_{status or 'unknown'}",
+            }
+        rejected = self.sandbox_permission_store.mark_rejected(permission_id, note=note)
+        if rejected is None:
+            latest = self.sandbox_permission_store.get(permission_id) or permission
+            return {
+                "status": "ignored",
+                "permission": latest,
+                "reason": f"permission_is_{self._safe_text(latest.get('status')) or 'unknown'}",
+            }
+        self._schedule_background_task(
+            self._publish_sandbox_permission_block(rejected),
+            name=f"sandbox-permission-update-{permission_id}",
+        )
+        return {"status": "rejected", "permission": rejected}
+
     async def update_gmail_approval_draft(
         self,
         approval_id: str,
@@ -3921,6 +4092,20 @@ class GatewayRuntime:
                 blocks.append(self._gmail_approval_response_block(persisted))
         return blocks
 
+    def _historical_sandbox_permission_blocks(self, specialist_receipts: Any) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        for receipt in self._normalize_specialist_receipts(specialist_receipts):
+            permission = receipt.get("sandbox_permission")
+            if not isinstance(permission, dict):
+                continue
+            permission_id = self._safe_text(permission.get("permission_id"))
+            if not permission_id:
+                continue
+            persisted = self.sandbox_permission_store.get(permission_id)
+            if persisted is not None:
+                blocks.append(self._sandbox_permission_response_block(persisted))
+        return blocks
+
     def _append_trusted_response_blocks(
         self,
         blocks: list[dict[str, Any]],
@@ -3976,12 +4161,19 @@ class GatewayRuntime:
         response_block: dict[str, Any] | None = None,
     ) -> None:
         if isinstance(response_block, dict):
-            approval_id = self._safe_text(response_block.get("approval_id")) or approval_id
+            approval_id = (
+                self._safe_text(response_block.get("approval_id"))
+                or self._safe_text(response_block.get("permission_id"))
+                or approval_id
+            )
             block_type = self._safe_text(response_block.get("type")) or block_type
             status = self._safe_text(response_block.get("status")) or status
         event = {
             "type": "response.action.updated",
             "approval_id": approval_id,
+            "permission_id": self._safe_text(response_block.get("permission_id"))
+            if isinstance(response_block, dict)
+            else None,
             "block_type": block_type,
             "status": status,
             "response_block": response_block,
@@ -4282,6 +4474,58 @@ class GatewayRuntime:
             if was_created:
                 await self._publish_gmail_approval_notification(row)
         return persisted
+
+    async def _persist_sandbox_permission_receipts(self, event: dict[str, Any]) -> list[dict[str, Any]]:
+        receipts = self._normalize_specialist_receipts(event.get("specialist_receipts"))
+        persisted: list[dict[str, Any]] = []
+        for receipt in receipts:
+            permission = receipt.get("sandbox_permission")
+            if not isinstance(permission, dict):
+                continue
+            permission_id = self._safe_text(permission.get("permission_id"))
+            if not permission_id:
+                continue
+            row = self.sandbox_permission_store.get(permission_id)
+            persisted.append(row if row is not None else permission)
+        return persisted
+
+    async def _publish_sandbox_permission_notification(self, permission: dict[str, Any]) -> None:
+        summary = self._safe_text(permission.get("description")) or "Sandbox permission needed"
+        permission_id = self._safe_text(permission.get("permission_id"))
+        event = {
+            "type": "sandbox.notification",
+            "kind": "permission",
+            "event_type": "sandbox.permission",
+            "notification_id": f"sandbox:permission:{permission_id}",
+            "permission_id": permission_id,
+            "summary": summary,
+            "tab": "chat",
+            "timestamp": utcnow_iso(),
+        }
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            try:
+                await adapter.broadcast_all(event)
+            except Exception:
+                logger.exception(
+                    "gateway.sandbox_permission.broadcast_failed platform=%s",
+                    adapter.platform,
+                )
+        self._schedule_mobile_push(
+            session_id=self._safe_text(permission.get("session_id")) or None,
+            origin_channel="sandbox",
+            event_type="sandbox.permission",
+            title="Sandbox permission needed",
+            body=summary,
+            screen="chat",
+            priority="high",
+            data={
+                "type": "sandbox.permission",
+                "permission_id": permission_id,
+                "screen": "chat",
+            },
+        )
 
     async def _publish_gmail_approval_notification(self, approval: dict[str, Any]) -> None:
         subject = self._safe_text(approval.get("subject")) or "Gmail draft approval needed"
@@ -17456,6 +17700,11 @@ class GatewayRuntime:
                 if event.get("specialist_receipts")
                 else []
             )
+            sandbox_permissions = (
+                await self._persist_sandbox_permission_receipts(event)
+                if event.get("specialist_receipts")
+                else []
+            )
             response_blocks = (
                 [dict(item) for item in event.get("response_blocks") if isinstance(item, dict)]
                 if isinstance(event.get("response_blocks"), list)
@@ -17470,6 +17719,10 @@ class GatewayRuntime:
                     *[
                         self._gmail_approval_response_block(approval)
                         for approval in gmail_approvals
+                    ],
+                    *[
+                        self._sandbox_permission_response_block(permission)
+                        for permission in sandbox_permissions
                     ],
                     *self._calendar_response_blocks(event),
                 ],
@@ -19489,7 +19742,10 @@ class GatewayRuntime:
         )
         stored_blocks = self._append_trusted_response_blocks(
             stored_blocks,
-            self._historical_gmail_approval_blocks(metadata.get("specialist_receipts")),
+            [
+                *self._historical_gmail_approval_blocks(metadata.get("specialist_receipts")),
+                *self._historical_sandbox_permission_blocks(metadata.get("specialist_receipts")),
+            ],
         )
         response_blocks = self._build_client_response_blocks(
             content=None,

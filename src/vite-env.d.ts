@@ -141,6 +141,13 @@ interface Window {
       calendarId?: string | null
       responseStatus: 'accepted' | 'declined' | 'tentative' | 'needsAction'
     }) => Promise<any>
+    approveGatewaySandboxPermission: (payload: {
+      permissionId: string
+    }) => Promise<any>
+    rejectGatewaySandboxPermission: (payload: {
+      permissionId: string
+      note?: string
+    }) => Promise<any>
     cosmicMailRequest: (payload: GatewayConnectionPayload & {
       path: string
       method?: string

@@ -180,6 +180,14 @@ class GatewayConfig:
     gmail_agent_id: str = "cosmic/gmail-agent:1.0.0"
     gmail_context_db_path: Path = BACKEND_ROOT / "gateway" / "gmail_context.db"
     gmail_approvals_db_path: Path = BACKEND_ROOT / "gateway" / "gmail_approvals.db"
+    sandbox_permissions_db_path: Path = BACKEND_ROOT / "gateway" / "sandbox_permissions.db"
+    code_sandbox_timeout_sec: float = 45.0
+    code_sandbox_allow_pip: bool = True
+    code_sandbox_pip_timeout_sec: float = 120.0
+    code_sandbox_venv_cache_root: Path | None = None
+    code_sandbox_max_script_bytes: int = 256000
+    code_sandbox_max_files: int = 12
+    code_sandbox_max_file_bytes: int = 25 * 1024 * 1024
     event_automation_db_path: Path = BACKEND_ROOT / "gateway" / "event_automations.db"
     gmail_webhook_secret: str = ""
     gmail_process_inbound_timeout_sec: float = 180.0
@@ -626,6 +634,64 @@ class GatewayConfig:
                     str(BACKEND_ROOT / "gateway" / "gmail_approvals.db"),
                 )
             ).expanduser(),
+            sandbox_permissions_db_path=Path(
+                os.getenv(
+                    "GATEWAY_SANDBOX_PERMISSIONS_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "sandbox_permissions.db"),
+                )
+            ).expanduser(),
+            code_sandbox_timeout_sec=max(
+                1.0,
+                _env_float(
+                    "ORCHESTRATOR_CODE_SANDBOX_TIMEOUT_SEC",
+                    _env_float("GATEWAY_CODE_SANDBOX_TIMEOUT_SEC", 45.0),
+                ),
+            ),
+            code_sandbox_allow_pip=_env_bool(
+                "ORCHESTRATOR_CODE_SANDBOX_ALLOW_PIP",
+                _env_bool("GATEWAY_CODE_SANDBOX_ALLOW_PIP", True),
+            ),
+            code_sandbox_pip_timeout_sec=max(
+                5.0,
+                _env_float(
+                    "ORCHESTRATOR_CODE_SANDBOX_PIP_TIMEOUT_SEC",
+                    _env_float("GATEWAY_CODE_SANDBOX_PIP_TIMEOUT_SEC", 120.0),
+                ),
+            ),
+            code_sandbox_venv_cache_root=(
+                Path(
+                    os.getenv(
+                        "ORCHESTRATOR_CODE_SANDBOX_VENV_CACHE_ROOT",
+                        os.getenv("GATEWAY_CODE_SANDBOX_VENV_CACHE_ROOT", ""),
+                    )
+                ).expanduser()
+                if os.getenv(
+                    "ORCHESTRATOR_CODE_SANDBOX_VENV_CACHE_ROOT",
+                    os.getenv("GATEWAY_CODE_SANDBOX_VENV_CACHE_ROOT", ""),
+                ).strip()
+                else None
+            ),
+            code_sandbox_max_script_bytes=max(
+                1024,
+                _env_int(
+                    "ORCHESTRATOR_CODE_SANDBOX_MAX_SCRIPT_BYTES",
+                    _env_int("GATEWAY_CODE_SANDBOX_MAX_SCRIPT_BYTES", 256000),
+                ),
+            ),
+            code_sandbox_max_files=max(
+                0,
+                _env_int(
+                    "ORCHESTRATOR_CODE_SANDBOX_MAX_FILES",
+                    _env_int("GATEWAY_CODE_SANDBOX_MAX_FILES", 12),
+                ),
+            ),
+            code_sandbox_max_file_bytes=max(
+                1024,
+                _env_int(
+                    "ORCHESTRATOR_CODE_SANDBOX_MAX_FILE_BYTES",
+                    _env_int("GATEWAY_CODE_SANDBOX_MAX_FILE_BYTES", 25 * 1024 * 1024),
+                ),
+            ),
             event_automation_db_path=Path(
                 os.getenv(
                     "GATEWAY_EVENT_AUTOMATION_DB_PATH",

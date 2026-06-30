@@ -2973,6 +2973,37 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:approve-sandbox-permission', async (_, payload: { permissionId?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const permissionId = String(payload?.permissionId || '').trim()
+    if (!permissionId) {
+      throw new Error('Sandbox permission id is required.')
+    }
+    return callGatewayJson(config, `/channels/sandbox-permissions/${encodeURIComponent(permissionId)}/approve`, {
+      method: 'POST',
+      timeoutMs: 120000,
+    })
+  })
+
+  ipcMain.handle('gateway:reject-sandbox-permission', async (_, payload: { permissionId?: string; note?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const permissionId = String(payload?.permissionId || '').trim()
+    if (!permissionId) {
+      throw new Error('Sandbox permission id is required.')
+    }
+    return callGatewayJson(config, `/channels/sandbox-permissions/${encodeURIComponent(permissionId)}/reject`, {
+      method: 'POST',
+      body: { note: String(payload?.note || '').trim() || null },
+      timeoutMs: 30000,
+    })
+  })
+
   ipcMain.handle('gateway:update-gmail-approval-draft', async (_, payload: { approvalId?: string; subject?: string; bodyText?: string }) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

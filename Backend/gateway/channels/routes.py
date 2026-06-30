@@ -75,6 +75,21 @@ class GmailApprovalRejectRequest(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
 
 
+class SandboxPermissionCreateRequest(BaseModel):
+    description: str | None = Field(default=None, max_length=2000)
+    network: bool = False
+    host_read_paths: list[str] = Field(default_factory=list)
+    host_write_paths: list[str] = Field(default_factory=list)
+    allowed_hosts: list[str] = Field(default_factory=list)
+    code: str = Field(..., max_length=500000)
+    packages: list[str] = Field(default_factory=list)
+    timeout_sec: float | None = Field(default=None, ge=1.0, le=600.0)
+    request_id: str | None = Field(default=None, max_length=128)
+    session_id: str | None = Field(default=None, max_length=128)
+    task_id: str | None = Field(default=None, max_length=128)
+    channel: str | None = Field(default=None, max_length=128)
+
+
 class EmailDraftUpdateRequest(BaseModel):
     subject: str = Field(..., min_length=1, max_length=998)
     body_text: str = Field(..., max_length=200000)
@@ -2259,6 +2274,46 @@ async def reject_agent_email_approval(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.post("/internal/sandbox-permissions/create")
+async def create_sandbox_permission(
+    body: SandboxPermissionCreateRequest,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    created = runtime.create_sandbox_permission(body.model_dump())
+    return {"permission_id": created.get("permission_id"), "permission": created}
+
+
+@router.post("/channels/sandbox-permissions/{permission_id}/approve")
+async def approve_sandbox_permission(
+    permission_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.approve_sandbox_permission(permission_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.post("/channels/sandbox-permissions/{permission_id}/reject")
+async def reject_sandbox_permission(
+    permission_id: str,
+    body: GmailApprovalRejectRequest | None = None,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return runtime.reject_sandbox_permission(
+            permission_id,
+            note=body.note if body is not None else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.get("/channels/{platform}/status")

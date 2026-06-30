@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -109,6 +110,12 @@ def _artifact_lookup_progress(tool_input: dict[str, Any]) -> str:
 def _artifact_redeliver_progress(tool_input: dict[str, Any]) -> str:
     artifact_id = str(tool_input.get("artifact_id") or "").strip()
     return f"Re-surfacing file {artifact_id}..." if artifact_id else "Re-surfacing a previous produced file..."
+
+
+def _artifact_read_progress(tool_input: dict[str, Any]) -> str:
+    path = str(tool_input.get("path") or "").strip()
+    filename = Path(path).name if path else ""
+    return f"Reading full artifact: {filename}" if filename else "Reading full artifact text..."
 
 
 def _wishlist_search_progress(tool_input: dict[str, Any]) -> str:
@@ -543,6 +550,35 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "number",
                         "description": "Optional timeout, capped by the orchestrator sandbox setting.",
                     },
+                    "requested_capabilities": {
+                        "type": "object",
+                        "description": (
+                            "Optional elevated sandbox access. When network or VM file paths are requested, "
+                            "COSMIC shows an inline Allow/Deny card in the response area (like Gmail drafts). "
+                            "The sandbox stays locked until the user approves."
+                        ),
+                        "properties": {
+                            "network": {
+                                "type": "boolean",
+                                "description": "Request outbound network access for this run.",
+                            },
+                            "host_read_paths": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Absolute VM paths the sandbox may read.",
+                            },
+                            "host_write_paths": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Absolute VM paths the sandbox may write.",
+                            },
+                            "allowed_hosts": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional hostnames to allow when network is requested.",
+                            },
+                        },
+                    },
                 },
                 "required": ["code"],
             },
@@ -624,6 +660,43 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Re-surface a previous deliverable file as a Produced Files card in the current response.",
         progress_builder=_artifact_redeliver_progress,
         handler_method="_artifact_redeliver",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="artifact_read",
+        api_definition={
+            "name": "artifact_read",
+            "description": (
+                "Read the full text body of a COSMIC artifact by logical path. Use this after Firecrawl scrape/extract "
+                "when inline excerpts are truncated (look for truncation_detected or *_truncated flags) and you need the "
+                "complete page.md, page.html, or page.raw.html content from the tool result's artifacts list. "
+                "This works for supporting/internal scrape artifacts as well as deliverables. "
+                "artifact_redeliver only re-surfaces user-facing Produced Files cards; artifact_read loads bytes for editing or analysis."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Logical artifact path from a prior tool result, e.g. runs/artifacts/<task_id>/firecrawl_web_scrape/page.md",
+                    },
+                    "artifact_id": {
+                        "type": "string",
+                        "description": "Optional artifact_id echoed from the prior tool result for traceability.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters to return. Default 48000.",
+                        "default": 48000,
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+        group="artifacts",
+        prompt_summary="Load full text from a prior artifact path when inline specialist excerpts were truncated.",
+        progress_builder=_artifact_read_progress,
+        handler_method="_artifact_read",
         read_only=True,
     ),
     ToolSpec(
@@ -1345,6 +1418,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "description": (
                 "Use the Firecrawl specialist agent to scrape a live web page into robust formats such as markdown, html, links, images, or a screenshot. "
                 "Prefer this over plain web_fetch when you need page rendering resilience or structured scrape outputs. "
+                "Inline markdown/HTML in the tool result is excerpted only; when *_truncated flags or truncation_detected are present, "
+                "load the full body with artifact_read using the matching path from the returned artifacts list (for example page.md or page.raw.html). "
+                "You can also call firecrawl_recall_session to list prior Firecrawl runs for this session. "
                 "When the data you need is locked inside an image (a benchmark table, chart, or infographic rendered as a picture rather than text), read it visually one of two ways: "
                 "(1) if you know the exact image URL, scrape that URL directly — COSMIC fetches the image and the vision model reads it (Firecrawl itself cannot parse binary images, but this agent handles that case for you); "
                 "(2) otherwise request formats including 'screenshot', which is captured full-page by default so tables below the fold are included, and the vision model reads it. "
@@ -1546,7 +1622,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "firecrawl_recall_session",
             "description": (
-                "Read the Firecrawl agent's private run ledger for a prior session. Use this when you need exact recall of what the Firecrawl specialist already scraped or extracted."
+                "Read the Firecrawl agent's private run ledger for a prior session. Use this when you need exact recall of what the Firecrawl specialist already scraped or extracted, including artifact_refs for page.md/page.html/page.raw.html. "
+                "After a truncated scrape, prefer artifact_read on the returned artifact path when you already have it; use recall when you need to find the refs again."
             ),
             "input_schema": {
                 "type": "object",

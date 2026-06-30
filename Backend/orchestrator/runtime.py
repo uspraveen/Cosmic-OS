@@ -981,6 +981,11 @@ class OrchestratorRuntime:
                             result_str,
                             specialist_receipts=specialist_receipts,
                         )
+                        self._collect_sandbox_permission_receipt(
+                            tb.tool_name,
+                            result_str,
+                            specialist_receipts=specialist_receipts,
+                        )
 
                         yield {
                             **ev, "type": "tool.result",
@@ -1581,6 +1586,11 @@ class OrchestratorRuntime:
                         self._collect_specialist_receipt(
                             tool_name,
                             parsed_input,
+                            result_str,
+                            specialist_receipts=specialist_receipts,
+                        )
+                        self._collect_sandbox_permission_receipt(
+                            tool_name,
                             result_str,
                             specialist_receipts=specialist_receipts,
                         )
@@ -5325,6 +5335,35 @@ class OrchestratorRuntime:
         if dedupe_key in existing_keys:
             return
         specialist_receipts.append({key: value for key, value in receipt.items() if value not in (None, "", [], {})})
+        if len(specialist_receipts) > 4:
+            del specialist_receipts[:-4]
+
+    def _collect_sandbox_permission_receipt(
+        self,
+        tool_name: str,
+        result_str: str,
+        *,
+        specialist_receipts: list[dict[str, Any]],
+    ) -> None:
+        if tool_name != "cosmic_code_execution":
+            return
+        data = self._parse_tool_result_json(result_str)
+        if not isinstance(data, dict) or not data.get("permission_required"):
+            return
+        permission = data.get("sandbox_permission")
+        if not isinstance(permission, dict):
+            return
+        permission_id = str(permission.get("permission_id") or "").strip()
+        if not permission_id:
+            return
+        existing_ids = {
+            str(item.get("sandbox_permission", {}).get("permission_id") or "").strip()
+            for item in specialist_receipts
+            if isinstance(item, dict) and isinstance(item.get("sandbox_permission"), dict)
+        }
+        if permission_id in existing_ids:
+            return
+        specialist_receipts.append({"sandbox_permission": permission})
         if len(specialist_receipts) > 4:
             del specialist_receipts[:-4]
 

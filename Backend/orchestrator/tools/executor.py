@@ -21,12 +21,41 @@ import httpx
 from shared import begin_metered_call, build_model_key, build_usage_event, post_usage_event, validate_safe_sheet_id
 from shared.contracts import AgentResult, TaskEnvelope, TaskInProgress
 
+from ..config import BACKEND_ROOT
+from ..firecrawl_tool_enrichment import enrich_firecrawl_tool_result
 from ..local_code_sandbox import LocalCodeSandboxSettings, run_local_code_sandbox
+from ..sandbox_permissions import (
+    build_permission_summary,
+    build_sandbox_permission_receipt,
+    capabilities_require_permission,
+    normalize_requested_capabilities,
+)
 from .registry import get_local_tool_spec
 
 logger = logging.getLogger(__name__)
 HEARTBEAT_NOTES_HEADER = "# COSMIC Heartbeat Notes\n\n"
 HEARTBEAT_NOTES_MAX_CHARS = 32000
+_ARTIFACT_READ_MAX_CHARS = 200_000
+_ARTIFACT_READ_TEXT_SUFFIXES = frozenset(
+    {
+        ".md",
+        ".markdown",
+        ".txt",
+        ".html",
+        ".htm",
+        ".json",
+        ".jsonl",
+        ".csv",
+        ".tsv",
+        ".css",
+        ".js",
+        ".ts",
+        ".tsx",
+        ".py",
+        ".xml",
+        ".svg",
+    }
+)
 
 
 class ToolHTTPError(RuntimeError):
@@ -299,6 +328,82 @@ class ToolExecutor:
             except (TypeError, ValueError):
                 return {"error": True, "message": "timeout_sec must be numeric when provided."}
         task_id = self._coerce_task_id(tool_input, context) or "orchestrator"
+        capabilities = normalize_requested_capabilities(tool_input.get("requested_capabilities"))
+        settings = LocalCodeSandboxSettings(
+            enabled=self.local_code_settings.enabled,
+            timeout_sec=self.local_code_settings.timeout_sec,
+            allow_network=self.local_code_settings.allow_network,
+            allow_pip=self.local_code_settings.allow_pip,
+            pip_timeout_sec=self.local_code_settings.pip_timeout_sec,
+            venv_cache_root=self.local_code_settings.venv_cache_root,
+            max_script_bytes=self.local_code_settings.max_script_bytes,
+            max_files=self.local_code_settings.max_files,
+            max_file_bytes=self.local_code_settings.max_file_bytes,
+        )
+        if capabilities_require_permission(
+            capabilities,
+            settings_allow_network=settings.allow_network,
+        ):
+            permission_payload = await self._request_gateway_json(
+                "POST",
+                "/internal/sandbox-permissions/create",
+                json_body={
+                    "description": description or build_permission_summary(capabilities),
+                    "network": capabilities.get("network"),
+                    "host_read_paths": capabilities.get("host_read_paths"),
+                    "host_write_paths": capabilities.get("host_write_paths"),
+                    "allowed_hosts": capabilities.get("allowed_hosts"),
+                    "code": code,
+                    "packages": packages,
+                    "timeout_sec": timeout_sec,
+                    "request_id": context.request_id if context else None,
+                    "session_id": context.session_id if context else None,
+                    "task_id": task_id,
+                    "channel": context.channel if context else None,
+                },
+            )
+            if not isinstance(permission_payload, dict) or not permission_payload.get("permission_id"):
+                return {
+                    "error": True,
+                    "message": str(
+                        (permission_payload or {}).get("message")
+                        or "Could not create a sandbox permission request."
+                    ),
+                }
+            permission_id = str(permission_payload["permission_id"]).strip()
+            receipt = build_sandbox_permission_receipt(
+                permission_id=permission_id,
+                description=description or build_permission_summary(capabilities),
+                capabilities=capabilities,
+            )
+            response = {
+                "permission_required": True,
+                "status": "permission_required",
+                "tool": "cosmic_code_execution",
+                "message": "Sandbox needs your approval before it can use the requested network or VM file access.",
+                "sandbox_permission": receipt,
+            }
+            presentation = self._sandbox_permission_presentation_contract(
+                response=response,
+                context=context,
+            )
+            if presentation:
+                response["_cosmic_ui"] = presentation
+            return response
+
+        grant_settings = LocalCodeSandboxSettings(
+            enabled=settings.enabled,
+            timeout_sec=settings.timeout_sec,
+            allow_network=settings.allow_network or bool(capabilities.get("network")),
+            allow_pip=settings.allow_pip,
+            pip_timeout_sec=settings.pip_timeout_sec,
+            venv_cache_root=settings.venv_cache_root,
+            max_script_bytes=settings.max_script_bytes,
+            max_files=settings.max_files,
+            max_file_bytes=settings.max_file_bytes,
+            host_read_paths=tuple(capabilities.get("host_read_paths") or ()),
+            host_write_paths=tuple(capabilities.get("host_write_paths") or ()),
+        )
         return run_local_code_sandbox(
             code=code,
             artifacts_root=self.artifacts_root,
@@ -306,8 +411,42 @@ class ToolExecutor:
             description=description,
             packages=packages,
             timeout_sec=timeout_sec,
-            settings=self.local_code_settings,
+            settings=grant_settings,
         )
+
+    @staticmethod
+    def _sandbox_permission_presentation_contract(
+        *,
+        response: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> dict[str, Any] | None:
+        channel = str(context.channel if context else "").strip().lower()
+        channel_platform = channel.split(":", 1)[0]
+        if channel_platform not in {"desktop", "mobile"}:
+            return None
+        permission = response.get("sandbox_permission")
+        if not isinstance(permission, dict):
+            return None
+        permission_id = str(permission.get("permission_id") or "").strip()
+        if not permission_id:
+            return None
+        return {
+            "version": 1,
+            "render": "trusted_inline_block",
+            "block_type": "sandbox_permission_request",
+            "covers": [
+                "permission summary",
+                "requested network access",
+                "requested VM file paths",
+                "approval actions",
+            ],
+            "response_mode": "brief_acknowledgement",
+            "instruction": (
+                "The client will render a sandbox permission card with Allow/Deny controls beside your final response. "
+                "Briefly explain why the sandbox needs access and wait for the user to approve or deny. "
+                "Do not claim the sandbox already ran until approval completes."
+            ),
+        }
 
     # ── Specialist Agents ────────────────────────────────────────
 
@@ -649,6 +788,75 @@ class ToolExecutor:
             "message": "Previous produced file re-surfaced.",
             "artifacts": artifacts,
         }
+
+    async def _artifact_read(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        if self.artifacts_root is None:
+            return {"error": True, "message": "Artifact reads require COSMIC_ARTIFACTS_ROOT."}
+        path = str(tool_input.get("path") or "").strip()
+        artifact_id = str(tool_input.get("artifact_id") or "").strip() or None
+        if not path:
+            return {"error": True, "message": "path is required (use the logical path from a prior tool result's artifacts list)."}
+        resolved = self._resolve_logical_artifact_read_path(path)
+        if resolved is None:
+            return {"error": True, "message": "Artifact path could not be resolved safely."}
+        if not resolved.is_file():
+            return {"error": True, "message": f"Artifact file not found at {path}."}
+        suffix = resolved.suffix.lower()
+        if suffix not in _ARTIFACT_READ_TEXT_SUFFIXES:
+            return {
+                "error": True,
+                "message": f"artifact_read only supports text-like files; got {suffix or 'unknown'}. Use a specialist or Alpha for binary files.",
+            }
+        max_chars = min(max(1000, self._coerce_int(tool_input.get("max_chars"), 48_000)), _ARTIFACT_READ_MAX_CHARS)
+        try:
+            raw = resolved.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return {"error": True, "message": "Artifact is not valid UTF-8 text."}
+        except OSError as exc:
+            return {"error": True, "message": f"Could not read artifact: {exc}"}
+        truncated = len(raw) > max_chars
+        content = raw[:max_chars] if truncated else raw
+        return {
+            "found": True,
+            "artifact_id": artifact_id,
+            "path": path,
+            "filename": resolved.name,
+            "mime": mimetypes.guess_type(resolved.name)[0] or "text/plain",
+            "content": content,
+            "content_chars": len(content),
+            "full_chars": len(raw),
+            "truncated": truncated,
+            "message": "Loaded full artifact text." if not truncated else f"Loaded first {max_chars} characters of artifact text.",
+        }
+
+    def _resolve_logical_artifact_read_path(self, logical_path: str) -> Path | None:
+        value = str(logical_path or "").strip()
+        if not value or self.artifacts_root is None:
+            return None
+        candidate = Path(value).expanduser()
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+        else:
+            normalized = value.replace("\\", "/").lstrip("./")
+            if normalized.startswith("runs/artifacts/"):
+                relative = normalized[len("runs/artifacts/") :].strip("/")
+                if not relative:
+                    return None
+                resolved = (self.artifacts_root / Path(relative)).resolve()
+            else:
+                resolved = (BACKEND_ROOT / Path(normalized)).resolve()
+        root = self.artifacts_root.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return None
+        return resolved
 
     async def _cosmics_capability_wishlist_capture(
         self,
@@ -1173,13 +1381,14 @@ class ToolExecutor:
             value = tool_input.get(key)
             if value not in (None, "", [], {}):
                 payload[key] = value
-        return await self._dispatch_specialist_agent(
+        result = await self._dispatch_specialist_agent(
             intent="firecrawl.scrape",
             payload=payload,
             context=context,
             agent_id="cosmic/firecrawl-web-scrape-agent:1.0.0",
             wait_timeout_sec=125.0,
         )
+        return enrich_firecrawl_tool_result(result) if isinstance(result, dict) else result
 
     async def _firecrawl_extract(
         self,
@@ -1204,13 +1413,14 @@ class ToolExecutor:
             value = tool_input.get(key)
             if value not in (None, "", [], {}):
                 payload[key] = value
-        return await self._dispatch_specialist_agent(
+        result = await self._dispatch_specialist_agent(
             intent="firecrawl.extract",
             payload=payload,
             context=context,
             agent_id="cosmic/firecrawl-web-scrape-agent:1.0.0",
             wait_timeout_sec=185.0,
         )
+        return enrich_firecrawl_tool_result(result) if isinstance(result, dict) else result
 
     async def _firecrawl_agent(
         self,

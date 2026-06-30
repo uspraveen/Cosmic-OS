@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+
+_BLOCKED_HOST_PATH_PREFIXES = (
+    "/etc",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/root",
+    "/var/run",
+)
+_MAX_HOST_PATHS = 4
+_MAX_ALLOWED_HOSTS = 6
+
+
+def normalize_requested_capabilities(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+    network = bool(raw.get("network"))
+    host_read_paths = _normalize_host_paths(raw.get("host_read_paths"))
+    host_write_paths = _normalize_host_paths(raw.get("host_write_paths"))
+    allowed_hosts = _normalize_allowed_hosts(raw.get("allowed_hosts"))
+    return {
+        "network": network,
+        "host_read_paths": host_read_paths,
+        "host_write_paths": host_write_paths,
+        "allowed_hosts": allowed_hosts,
+    }
+
+
+def capabilities_require_permission(
+    capabilities: dict[str, Any],
+    *,
+    settings_allow_network: bool,
+) -> bool:
+    if capabilities.get("host_read_paths") or capabilities.get("host_write_paths"):
+        return True
+    if capabilities.get("network") and not settings_allow_network:
+        return True
+    return False
+
+
+def build_permission_summary(capabilities: dict[str, Any], *, description: str = "") -> str:
+    parts: list[str] = []
+    if description:
+        parts.append(description)
+    if capabilities.get("network"):
+        hosts = capabilities.get("allowed_hosts") or []
+        if hosts:
+            parts.append(f"Network access to: {', '.join(hosts)}")
+        else:
+            parts.append("Outbound network access")
+    read_paths = capabilities.get("host_read_paths") or []
+    if read_paths:
+        parts.append(f"Read VM paths: {', '.join(read_paths)}")
+    write_paths = capabilities.get("host_write_paths") or []
+    if write_paths:
+        parts.append(f"Write VM paths: {', '.join(write_paths)}")
+    return " · ".join(parts) if parts else "Sandbox capability request"
+
+
+def build_sandbox_permission_receipt(
+    *,
+    permission_id: str,
+    description: str,
+    capabilities: dict[str, Any],
+    status: str = "pending",
+) -> dict[str, Any]:
+    return {
+        "permission_id": permission_id,
+        "status": status,
+        "description": description,
+        "network": bool(capabilities.get("network")),
+        "host_read_paths": list(capabilities.get("host_read_paths") or []),
+        "host_write_paths": list(capabilities.get("host_write_paths") or []),
+        "allowed_hosts": list(capabilities.get("allowed_hosts") or []),
+        "summary": build_permission_summary(capabilities, description=description),
+    }
+
+
+def sandbox_grants_from_capabilities(capabilities: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "network": bool(capabilities.get("network")),
+        "host_read_paths": list(capabilities.get("host_read_paths") or []),
+        "host_write_paths": list(capabilities.get("host_write_paths") or []),
+        "allowed_hosts": list(capabilities.get("allowed_hosts") or []),
+    }
+
+
+def _normalize_host_paths(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        path = _normalize_host_path(str(item or "").strip())
+        if not path or path in seen:
+            continue
+        normalized.append(path)
+        seen.add(path)
+        if len(normalized) >= _MAX_HOST_PATHS:
+            break
+    return normalized
+
+
+def _normalize_host_path(value: str) -> str | None:
+    if not value:
+        return None
+    candidate = Path(value).expanduser()
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    text = resolved.as_posix()
+    lower = text.lower()
+    for prefix in _BLOCKED_HOST_PATH_PREFIXES:
+        if lower == prefix.rstrip("/") or lower.startswith(prefix.rstrip("/") + "/"):
+            return None
+    return text
+
+
+def _normalize_allowed_hosts(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    hosts: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        host = _normalize_host_label(str(item or "").strip())
+        if not host or host in seen:
+            continue
+        hosts.append(host)
+        seen.add(host)
+        if len(hosts) >= _MAX_ALLOWED_HOSTS:
+            break
+    return hosts
+
+
+def _normalize_host_label(value: str) -> str | None:
+    if not value:
+        return None
+    if value.startswith(("http://", "https://")):
+        parsed = urlparse(value)
+        value = parsed.netloc or ""
+    value = value.split("/", 1)[0].strip().lower()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    if ":" in value:
+        value = value.rsplit(":", 1)[0]
+    if not value or not re.fullmatch(r"[a-z0-9._-]+", value):
+        return None
+    return value

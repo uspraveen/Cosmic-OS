@@ -1,4 +1,4 @@
-import { ArrowDownToLine, CalendarDays, Check, ChevronDown, ChevronRight, Copy, Mail, Mic, Pencil, Save, Square, Terminal, X } from 'lucide-react'
+import { ArrowDownToLine, CalendarDays, Check, ChevronDown, ChevronRight, Copy, Mail, Mic, Pencil, Save, Shield, Square, Terminal, X } from 'lucide-react'
 import { Fragment, type ClipboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
@@ -234,9 +234,10 @@ interface ResponseSlotBlock {
 
 interface ResponseActionBlock {
   id: string
-  type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event'
+  type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event' | 'sandbox_permission_request'
   status?: string | null
   approvalId?: string | null
+  permissionId?: string | null
   eventId?: string | null
   calendarId?: string | null
   accountId?: string | null
@@ -259,6 +260,12 @@ interface ResponseActionBlock {
   meetingLink?: string | null
   responseStatus?: string | null
   canRespond?: boolean
+  network?: boolean
+  hostReadPaths?: string[]
+  hostWritePaths?: string[]
+  allowedHosts?: string[]
+  resultPreview?: string | null
+  errorMessage?: string | null
 }
 
 type ResponseBlock =
@@ -572,7 +579,7 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
       })
       continue
     }
-    if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event') {
+    if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event' || type === 'sandbox_permission_request') {
       const stringList = (raw: unknown) => Array.isArray(raw)
         ? raw.map((value) => String(value || '').trim()).filter(Boolean)
         : []
@@ -614,6 +621,13 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
         meetingLink: typeof (item as any).meeting_link === 'string' ? (item as any).meeting_link.trim() : null,
         responseStatus: typeof (item as any).response_status === 'string' ? (item as any).response_status.trim() : null,
         canRespond: Boolean((item as any).can_respond),
+        permissionId: typeof (item as any).permission_id === 'string' ? (item as any).permission_id.trim() : null,
+        network: Boolean((item as any).network),
+        hostReadPaths: stringList((item as any).host_read_paths),
+        hostWritePaths: stringList((item as any).host_write_paths),
+        allowedHosts: stringList((item as any).allowed_hosts),
+        resultPreview: typeof (item as any).result_preview === 'string' ? (item as any).result_preview.trim() : null,
+        errorMessage: typeof (item as any).error_message === 'string' ? (item as any).error_message.trim() : null,
       })
       continue
     }
@@ -2888,6 +2902,133 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
   )
 }
 
+const formatSandboxCapabilityList = (values?: string[]) => (
+  values && values.length > 0 ? values.join(', ') : null
+)
+
+const SandboxPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) => {
+  const [status, setStatus] = useState(block.status || 'pending')
+  const [resultPreview, setResultPreview] = useState(block.resultPreview || '')
+  const [errorMessage, setErrorMessage] = useState(block.errorMessage || '')
+  const [busy, setBusy] = useState<'approve' | 'reject' | null>(null)
+  const [error, setError] = useState('')
+  const isPending = ['pending', 'failed'].includes(status.toLowerCase())
+  const isRunning = status.toLowerCase() === 'running'
+  const title = block.summary || block.description || 'Sandbox permission'
+  const readPaths = formatSandboxCapabilityList(block.hostReadPaths)
+  const writePaths = formatSandboxCapabilityList(block.hostWritePaths)
+  const allowedHosts = formatSandboxCapabilityList(block.allowedHosts)
+
+  useEffect(() => {
+    setStatus(block.status || 'pending')
+    setResultPreview(block.resultPreview || '')
+    setErrorMessage(block.errorMessage || '')
+  }, [block.errorMessage, block.resultPreview, block.status])
+
+  const act = async (kind: 'approve' | 'reject') => {
+    if (!block.permissionId || busy || isRunning) return
+    setBusy(kind)
+    setError('')
+    try {
+        if (kind === 'approve') {
+        if (!window.cosmic?.approveGatewaySandboxPermission) {
+          throw new Error('Sandbox approval action is unavailable.')
+        }
+        setStatus('running')
+        const result = await window.cosmic.approveGatewaySandboxPermission({ permissionId: block.permissionId })
+        if (String(result?.status || '').trim() === 'ignored') {
+          throw new Error('This sandbox request was already handled on another device.')
+        }
+        const nextStatus = String(result?.status || result?.permission?.status || 'completed').trim()
+        const preview = String(result?.permission?.result?.stdout || result?.result?.stdout || '').trim()
+        const failure = String(
+          result?.permission?.result?.message
+          || result?.result?.message
+          || '',
+        ).trim()
+        if (nextStatus) setStatus(nextStatus)
+        if (preview) setResultPreview(preview.slice(0, 700))
+        if (failure && nextStatus === 'failed') setErrorMessage(failure)
+      } else {
+        if (!window.cosmic?.rejectGatewaySandboxPermission) {
+          throw new Error('Sandbox rejection action is unavailable.')
+        }
+        const result = await window.cosmic.rejectGatewaySandboxPermission({
+          permissionId: block.permissionId,
+          note: 'Rejected from inline response.',
+        })
+        if (String(result?.status || '').trim() === 'ignored') {
+          throw new Error('This sandbox request was already handled on another device.')
+        }
+        const nextStatus = String(result?.status || result?.permission?.status || 'rejected').trim()
+        if (nextStatus) setStatus(nextStatus)
+      }
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Action failed.')
+      if (kind === 'approve') setStatus(block.status || 'failed')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <section className="assistant-action-card" data-kind={block.type}>
+      <div className="assistant-action-card-head">
+        <div className="assistant-action-card-heading">
+          <span className="assistant-action-card-icon" aria-hidden="true">
+            <Shield size={15} />
+          </span>
+          <div className="assistant-action-card-heading-copy">
+            <div className="assistant-action-card-kicker">Sandbox access</div>
+            <div className="assistant-action-card-title">{title}</div>
+          </div>
+        </div>
+        <div className="assistant-action-card-head-actions">
+          <div className={`assistant-action-card-status is-${status.toLowerCase()}`}>
+            {status}
+          </div>
+        </div>
+      </div>
+      <div className="assistant-action-card-details">
+        {block.network && (
+          <div><span>Network</span>{allowedHosts ? `Allowed hosts: ${allowedHosts}` : 'Outbound access requested'}</div>
+        )}
+        {readPaths && <div><span>Read</span>{readPaths}</div>}
+        {writePaths && <div><span>Write</span>{writePaths}</div>}
+        {resultPreview && <div><span>Result</span>{resultPreview}</div>}
+        {errorMessage && <div><span>Error</span>{errorMessage}</div>}
+      </div>
+      {error && <div className="assistant-action-card-error">{error}</div>}
+      <div className="assistant-action-card-actions">
+        {isRunning ? (
+          <button type="button" className="assistant-action-button is-primary" disabled>
+            Running sandbox…
+          </button>
+        ) : isPending ? (
+          <>
+            <button
+              type="button"
+              className="assistant-action-button"
+              disabled={Boolean(busy)}
+              onClick={() => void act('reject')}
+            >
+              {busy === 'reject' ? 'Denying…' : 'Deny'}
+            </button>
+            <button
+              type="button"
+              className="assistant-action-button is-primary"
+              disabled={Boolean(busy)}
+              onClick={() => void act('approve')}
+            >
+              {busy === 'approve' ? 'Running…' : 'Allow & run'}
+            </button>
+          </>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
 const AssistantResponseBlocks = ({
   blocks,
 }: {
@@ -2908,6 +3049,9 @@ const AssistantResponseBlocks = ({
         }
         if (block.type === 'gmail_draft_approval' || block.type === 'agent_email_draft_approval' || block.type === 'calendar_event') {
           return <AssistantActionBlock key={block.id} block={block} />
+        }
+        if (block.type === 'sandbox_permission_request') {
+          return <SandboxPermissionActionBlock key={block.id} block={block} />
         }
         if (block.type === 'code') {
           return (
@@ -5661,6 +5805,7 @@ export default function App() {
           normalizedBlock.type === 'gmail_draft_approval'
           || normalizedBlock.type === 'agent_email_draft_approval'
           || normalizedBlock.type === 'calendar_event'
+          || normalizedBlock.type === 'sandbox_permission_request'
         )) {
           setMessages((prev) => prev.map((message) => ({
             ...message,
@@ -5670,14 +5815,15 @@ export default function App() {
           })))
           return
         }
-        const approvalId = String(event.approval_id || '').trim()
+        const approvalId = String(event.approval_id || event.permission_id || '').trim()
         const blockType = String(event.block_type || '').trim()
         const nextStatus = String(event.status || '').trim()
         if (!approvalId || !blockType || !nextStatus) return
         setMessages((prev) => prev.map((message) => ({
           ...message,
           responseBlocks: message.responseBlocks?.map((block) => (
-            'approvalId' in block && block.approvalId === approvalId && block.type === blockType
+            ('approvalId' in block && block.approvalId === approvalId && block.type === blockType)
+            || ('permissionId' in block && block.permissionId === approvalId && block.type === blockType)
               ? { ...block, status: nextStatus }
               : block
           )),

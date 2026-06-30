@@ -105,6 +105,33 @@ async def test_tool_executor_cosmic_code_execution_blocks_path_escape() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tool_executor_artifact_read_loads_supporting_scrape_file() -> None:
+    root = Path.cwd() / ".pytest-local-code-sandbox" / uuid4().hex
+    artifacts_root = root / "artifacts"
+    logical_path = "runs/artifacts/tsk_fc_1/firecrawl_web_scrape/page.md"
+    stored_path = artifacts_root / "tsk_fc_1" / "firecrawl_web_scrape" / "page.md"
+    stored_path.parent.mkdir(parents=True, exist_ok=True)
+    stored_path.write_text("# Portfolio\n\nFull markdown body.", encoding="utf-8")
+    try:
+        executor = ToolExecutor(artifacts_root=artifacts_root)
+        raw_result = await executor.execute(
+            "artifact_read",
+            {
+                "path": logical_path,
+                "artifact_id": "art_fc_1",
+            },
+            context=ToolExecutionContext(task_id="tsk_fc_1", session_id="sess_fc_1"),
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    result = json.loads(raw_result)
+    assert result["found"] is True
+    assert "Full markdown body." in result["content"]
+    assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
 async def test_tool_executor_memory_search_uses_gateway_active_search_and_preserves_payload() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url == httpx.URL("http://gateway/internal/memory/active-search")
