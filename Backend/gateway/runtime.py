@@ -3718,7 +3718,143 @@ class GatewayRuntime:
             executed = self.sandbox_permission_store.get(permission_id) or running
         await self._publish_sandbox_permission_block(executed)
         block_status = self._safe_text(executed.get("status")) or "failed"
+        # Hand the sandbox result back to the orchestrator so the assistant can
+        # continue the original task (e.g. read/edit the files it just located).
+        # Gmail/calendar approvals are terminal actions; a code-execution result
+        # is an input the model still needs to act on.
+        if block_status == "completed":
+            self._schedule_background_task(
+                self._continue_turn_after_sandbox(executed, result),
+                name=f"sandbox-continuation-{permission_id}",
+            )
         return {"status": block_status, "permission": executed, "result": result}
+
+    def _compose_sandbox_continuation_query(
+        self,
+        permission: dict[str, Any],
+        result: dict[str, Any],
+    ) -> str:
+        def _clip(value: Any, limit: int) -> str:
+            text = str(value or "").strip()
+            if len(text) <= limit:
+                return text
+            return text[:limit].rstrip() + f"\n...[truncated {len(text) - limit} chars]"
+
+        description = self._safe_text(permission.get("description")) or "the approved sandbox run"
+        status = (
+            self._safe_text(result.get("status"))
+            or self._safe_text(permission.get("status"))
+            or "completed"
+        )
+        parts: list[str] = [
+            "[SANDBOX CONTINUATION — system message, not from the user]",
+            f"The user approved your sandbox permission request and it has now executed (status: {status}).",
+            f"Requested purpose: {description}.",
+        ]
+        capabilities: list[str] = []
+        if permission.get("network"):
+            hosts = permission.get("allowed_hosts")
+            if isinstance(hosts, list) and hosts:
+                capabilities.append("network to " + ", ".join(str(h) for h in hosts))
+            else:
+                capabilities.append("network")
+        read_paths = permission.get("host_read_paths")
+        if isinstance(read_paths, list) and read_paths:
+            capabilities.append("host read: " + ", ".join(str(p) for p in read_paths))
+        write_paths = permission.get("host_write_paths")
+        if isinstance(write_paths, list) and write_paths:
+            capabilities.append("host write: " + ", ".join(str(p) for p in write_paths))
+        if capabilities:
+            parts.append("Granted capabilities: " + "; ".join(capabilities) + ".")
+        stdout = _clip(result.get("stdout"), 6000)
+        if stdout:
+            parts.append("Sandbox stdout:\n" + stdout)
+        stderr = _clip(result.get("stderr"), 2000)
+        if stderr:
+            parts.append("Sandbox stderr:\n" + stderr)
+        artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
+        artifact_names = [
+            self._safe_text(item.get("filename"))
+            for item in artifacts
+            if isinstance(item, dict) and self._safe_text(item.get("filename"))
+        ]
+        if artifact_names:
+            parts.append("Artifacts produced: " + ", ".join(artifact_names))
+        parts.append(
+            "Continue the user's original task now using this result. If you need to read, "
+            "transform, or edit files, issue another cosmic_code_execution call with the same "
+            "requested_capabilities — the user has already granted them this session, so reuse them "
+            "and prefer doing the remaining work in a single script. Do not ask the user to restate "
+            "the task or re-approve unless you need a broader capability than was already granted."
+        )
+        return "\n\n".join(part for part in parts if part)
+
+    async def _continue_turn_after_sandbox(
+        self,
+        permission: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        channel = self._safe_text(permission.get("channel"))
+        session_id = self._safe_text(permission.get("session_id"))
+        permission_id = self._safe_text(permission.get("permission_id"))
+        if not channel or not session_id:
+            return
+        if self.registry.get_adapter(channel) is None:
+            logger.info(
+                "gateway.sandbox_permission.continuation_skipped channel_unavailable channel=%s permission_id=%s",
+                channel,
+                permission_id,
+            )
+            return
+        query = self._compose_sandbox_continuation_query(permission, result)
+        new_request_id = f"req_sbxcont_{uuid4().hex[:16]}"
+        message = {
+            "type": "query",
+            "content": query,
+            "channel": channel,
+            "session_id": session_id,
+            "request_id": new_request_id,
+            "metadata": {
+                "origin": "sandbox_continuation",
+                "permission_id": permission_id,
+            },
+        }
+        record = {
+            "status": "accepted",
+            "request_id": new_request_id,
+            "session_id": session_id,
+            "source": "user",
+            "source_id": f"sandbox_continuation:{permission_id}",
+            "channel": channel,
+            "route": "opus",
+            "dispatch_target": "orchestrator",
+            "classification": {
+                "route": "opus",
+                "is_task": True,
+                "is_continuation": True,
+                "signals": ["sandbox_continuation"],
+                "confidence": 1.0,
+            },
+            "message": message,
+            "assembled_conversation_context": self._build_conversation_context(
+                session_id,
+                fallback_context=[],
+            ),
+            "memory_context": "",
+            "visual_response_enhancement_enabled": (
+                self._channel_platform(channel) == "desktop"
+            ),
+            "gateway_preferences": self.get_desktop_preferences_snapshot(),
+            "accepted_at": utcnow_iso(),
+        }
+        self.request_records[new_request_id] = record
+        try:
+            self.start_request_fulfillment(record)
+        except Exception:
+            logger.exception(
+                "gateway.sandbox_permission.continuation_failed permission_id=%s",
+                permission_id,
+            )
 
     def reject_sandbox_permission(self, permission_id: str, *, note: str | None = None) -> dict[str, Any]:
         permission = self.sandbox_permission_store.get(permission_id)
