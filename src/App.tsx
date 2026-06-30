@@ -693,7 +693,6 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
   return normalized.length > 0 ? normalized : undefined
 }
 
-import { appendStreamText, mergeCompletedStreamText } from './streamText'
 const appendActivityLogEntry = (
   current: ActivityLogEntry[] | undefined,
   entry: ActivityLogEntryLike,
