@@ -106,6 +106,7 @@ Gateway owns the schedule because Gateway already owns sessions, delivery, prefe
 - The heartbeat request uses an empty live conversation context and a compact memory/context block.
 - Gateway resolves delivery at run time: active desktop first, then active mobile, then Cosmic Mail/email when chat is silent and configured, then the latest mobile push target, then queued desktop fallback.
 - When desktop and mobile chat are silent, Gateway annotates Reachability with an explicit suggestion that Cosmic can email the user rather than suppressing solely for offline presence.
+- If chat stays silent and no heartbeat note has been delivered for 24h+, Reachability marks `email_checkin_due`. Offline-only suppress reasons are rejected: Gateway either forces a short Cosmic Mail check-in or accepts suppress only after rewriting the reason to a non-offline justification.
 - Gateway includes a compact `recent_user_visible_deliveries` digest. It is capped and derived from canonical scheduler/session records, not from model notes.
 - `visual_response_enhancement_enabled` is disabled for heartbeat turns unless explicitly changed later.
 - Heartbeat response chunks and progress are not streamed live; useful final responses still retain their compact Flow/activity log for later inspection.

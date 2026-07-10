@@ -545,3 +545,83 @@ def test_ensure_proactive_email_recipients_sets_owner_inbox() -> None:
     }
     runtime._ensure_proactive_email_recipients(already)
     assert already["to_recipients"] == [{"email": "someone@example.com", "name": None}]
+
+
+def test_offline_presence_suppress_reason_detection() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    assert runtime._is_offline_presence_suppress_reason(
+        "User still offline (0 connections). Nothing time-ripe for a mobile push."
+    )
+    assert not runtime._is_offline_presence_suppress_reason(
+        "No material change since last beat; Gmail drafts unchanged."
+    )
+
+
+def test_email_reach_policy_forces_checkin_on_prolonged_silence() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.request_records = {
+        "req_heartbeat_test": {
+            "channel": "agent-email:iamcosmic001@mail.thelearnchain.com",
+            "message": {
+                "metadata": {
+                    "delivery_state": {
+                        "chat_channels_silent": True,
+                        "email_delivery_available": True,
+                        "email_checkin_due": True,
+                        "hours_since_last_delivered": 240,
+                        "selected_channel": "agent-email:iamcosmic001@mail.thelearnchain.com",
+                    }
+                }
+            },
+        }
+    }
+
+    decision = runtime._apply_heartbeat_email_reach_policy(
+        decision={
+            "decision": "suppress",
+            "message": "",
+            "reason": "User still offline (0 connections). Nothing time-ripe for a mobile push.",
+        },
+        request_id="req_heartbeat_test",
+        channel="agent-email:iamcosmic001@mail.thelearnchain.com",
+    )
+
+    assert decision["decision"] == "deliver"
+    assert "Checking in by email" in decision["message"]
+    assert decision["policy"] == "force_email_checkin_on_offline_suppress"
+
+
+def test_email_reach_policy_sanitizes_offline_suppress_when_checkin_not_due() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.request_records = {
+        "req_heartbeat_test": {
+            "channel": "agent-email:iamcosmic001@mail.thelearnchain.com",
+            "message": {
+                "metadata": {
+                    "delivery_state": {
+                        "chat_channels_silent": True,
+                        "email_delivery_available": True,
+                        "email_checkin_due": False,
+                        "hours_since_last_delivered": 2,
+                        "selected_channel": "agent-email:iamcosmic001@mail.thelearnchain.com",
+                    }
+                }
+            },
+        }
+    }
+
+    decision = runtime._apply_heartbeat_email_reach_policy(
+        decision={
+            "decision": "suppress",
+            "message": "",
+            "reason": "User still offline. Nothing time-ripe for a mobile push.",
+        },
+        request_id="req_heartbeat_test",
+        channel="agent-email:iamcosmic001@mail.thelearnchain.com",
+    )
+
+    assert decision["decision"] == "suppress"
+    assert decision["reason"].startswith("No material user-facing change")
+    assert "mobile push" not in decision["reason"].lower()
+    assert "0 connections" not in decision["reason"].lower()
+    assert decision["policy"] == "sanitize_offline_suppress_reason"

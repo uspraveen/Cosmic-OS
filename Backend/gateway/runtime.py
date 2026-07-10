@@ -164,6 +164,16 @@ HEARTBEAT_SUPPRESS_TOKEN = "heartbeat_ok"
 HEARTBEAT_NOTES_CHAR_LIMIT = 4000
 HEARTBEAT_RECENT_DELIVERY_WINDOW_SEC = 36 * 60 * 60
 HEARTBEAT_RECENT_DELIVERY_LIMIT = 8
+# If chat has been silent and no heartbeat note was successfully delivered for this
+# long, Gateway treats Cosmic Mail as a required reach path for a short check-in
+# instead of allowing another offline-only suppress loop.
+HEARTBEAT_PROLONGED_SILENCE_SEC = 24 * 60 * 60
+HEARTBEAT_EMAIL_CHECKIN_COOLDOWN_SEC = 24 * 60 * 60
+_HEARTBEAT_OFFLINE_SUPPRESS_RE = re.compile(
+    r"(offline|0 connections|no (?:live )?connections|mobile push|"
+    r"chat (?:is |are )?silent|user still offline|nothing time-ripe for a mobile push)",
+    re.IGNORECASE,
+)
 GMAIL_SURFACE_DECISION_SOURCE = "gmail_surface"
 TASK_ENVELOPE_ALLOWED_SOURCES = {"user", "cron", "webhook", "heartbeat", "hook", "agent"}
 TASK_ENVELOPE_SOURCE_ALIASES = {
@@ -2216,6 +2226,147 @@ class GatewayRuntime:
             or "agent-email"
         )
 
+    def _heartbeat_seconds_since_last_delivery(self) -> float | None:
+        try:
+            heartbeat = self.scheduler_store.get_heartbeat()
+        except Exception:
+            return None
+        last_delivered_at = self._safe_text(heartbeat.get("last_delivered_at"))
+        if not last_delivered_at:
+            return None
+        delivered_dt = self._parse_utc_iso(last_delivered_at)
+        if delivered_dt is None:
+            return None
+        return max(0.0, (datetime.now(timezone.utc) - delivered_dt).total_seconds())
+
+    def _is_offline_presence_suppress_reason(self, reason: str | None) -> bool:
+        text = self._safe_text(reason) or ""
+        if not text:
+            return False
+        return _HEARTBEAT_OFFLINE_SUPPRESS_RE.search(text) is not None
+
+    def _build_email_silence_checkin_message(
+        self,
+        *,
+        reason: str | None = None,
+        delivery_state: dict[str, Any] | None = None,
+    ) -> str:
+        state = delivery_state if isinstance(delivery_state, dict) else {}
+        hours = state.get("hours_since_last_delivered")
+        try:
+            hours_label = f"{int(float(hours))}h" if hours is not None else "a while"
+        except (TypeError, ValueError):
+            hours_label = "a while"
+        watchpoint_hint = ""
+        reason_text = self._safe_text(reason) or ""
+        # Keep any concrete open-item phrases from the model reason when present.
+        for marker in (
+            "Gmail drafts",
+            "GitHub tokens",
+            "STEM OPT",
+            "YC Startup School",
+            "deadletters",
+        ):
+            if marker.lower() in reason_text.lower():
+                watchpoint_hint = (
+                    " Still watching a few open items (including things like "
+                    f"{marker})."
+                )
+                break
+        if not watchpoint_hint:
+            watchpoint_hint = (
+                " Still watching a few open items from earlier beats."
+            )
+        return (
+            f"Checking in by email because desktop/mobile have been quiet for {hours_label}."
+            f"{watchpoint_hint} "
+            "Reply if you want me to dig into any of them."
+        )
+
+    def _apply_heartbeat_email_reach_policy(
+        self,
+        *,
+        decision: dict[str, Any],
+        request_id: str | None,
+        channel: str | None,
+    ) -> dict[str, Any]:
+        """Block offline-only suppresses when email can reach the user."""
+        if not isinstance(decision, dict):
+            return decision
+        if (self._safe_text(decision.get("decision")) or "").lower() != "suppress":
+            return decision
+
+        request_record = (
+            self.request_records.get(request_id)
+            if request_id and isinstance(self.request_records.get(request_id), dict)
+            else {}
+        )
+        metadata = (
+            request_record.get("message", {}).get("metadata")
+            if isinstance(request_record.get("message"), dict)
+            else {}
+        )
+        if not isinstance(metadata, dict):
+            metadata = {}
+        delivery_state = (
+            metadata.get("delivery_state")
+            if isinstance(metadata.get("delivery_state"), dict)
+            else {}
+        )
+        selected_channel = (
+            self._safe_text(channel)
+            or self._safe_text(request_record.get("channel"))
+            or self._safe_text(delivery_state.get("selected_channel"))
+            or ""
+        )
+        email_available = bool(delivery_state.get("email_delivery_available")) or (
+            self._channel_platform(selected_channel) == "agent-email"
+        )
+        chat_silent = bool(delivery_state.get("chat_channels_silent")) or (
+            self._channel_platform(selected_channel) == "agent-email"
+        )
+        if not (email_available and chat_silent):
+            return decision
+
+        reason = self._safe_text(decision.get("reason")) or ""
+        if not self._is_offline_presence_suppress_reason(reason):
+            return decision
+
+        email_checkin_due = bool(delivery_state.get("email_checkin_due"))
+        if not email_checkin_due:
+            # Presence is not a valid suppress reason when email can reach the user.
+            sanitized = (
+                "No material user-facing change since the last beat "
+                "(ignored offline/chat-presence framing because Cosmic Mail is available)."
+            )
+            updated = dict(decision)
+            updated["reason"] = sanitized
+            updated["notes"] = self._safe_text(decision.get("notes")) or (
+                "gateway_sanitized_offline_suppress_reason"
+            )
+            updated["policy"] = "sanitize_offline_suppress_reason"
+            return updated
+
+        message = self._build_email_silence_checkin_message(
+            reason=reason,
+            delivery_state=delivery_state,
+        )
+        updated = dict(decision)
+        updated["decision"] = "deliver"
+        updated["message"] = message
+        updated["reason"] = (
+            "Gateway overrode an offline-only suppress during prolonged silence; "
+            "Cosmic Mail is the selected reach path."
+        )
+        updated["policy"] = "force_email_checkin_on_offline_suppress"
+        updated["original_suppress_reason"] = reason
+        logger.info(
+            "gateway.heartbeat_email_checkin_forced request_id=%s channel=%s",
+            request_id,
+            selected_channel,
+        )
+        return updated
+
     def _annotate_heartbeat_reachability(
         self, delivery_state: dict[str, Any]
     ) -> dict[str, Any]:
@@ -2228,18 +2379,47 @@ class GatewayRuntime:
         email_recipient = self._safe_text(
             delivery_state.get("proactive_email_recipient")
         )
+        seconds_since = self._heartbeat_seconds_since_last_delivery()
+        hours_since = (
+            round(seconds_since / 3600.0, 1) if seconds_since is not None else None
+        )
+        prolonged_silence = bool(
+            chat_silent
+            and email_available
+            and seconds_since is not None
+            and seconds_since >= HEARTBEAT_PROLONGED_SILENCE_SEC
+        )
+        email_checkin_due = bool(
+            prolonged_silence
+            and seconds_since is not None
+            and seconds_since >= HEARTBEAT_EMAIL_CHECKIN_COOLDOWN_SEC
+        )
         delivery_state["chat_channels_silent"] = chat_silent
+        delivery_state["hours_since_last_delivered"] = hours_since
+        delivery_state["prolonged_silence"] = prolonged_silence
+        delivery_state["email_checkin_due"] = email_checkin_due
         if chat_silent and email_available:
             recipient_clause = (
                 f" to {email_recipient}" if email_recipient else ""
             )
             channel_clause = f" via {email_channel}" if email_channel else ""
-            delivery_state["gateway_reach_suggestion"] = (
-                "Desktop and mobile chat are currently silent (no live connections). "
-                "If this heartbeat finds something genuinely worth surfacing, Gateway "
-                f"can reach the user by Cosmic Mail/email{recipient_clause}{channel_clause}. "
-                "Do not suppress solely because chat looks offline."
-            )
+            if email_checkin_due:
+                delivery_state["gateway_reach_suggestion"] = (
+                    "Desktop and mobile chat are silent, and no heartbeat note has reached "
+                    f"the user for about {hours_since}h. Cosmic Mail/email{recipient_clause}"
+                    f"{channel_clause} is the selected reach path. Do NOT suppress citing "
+                    "offline presence, 0 connections, or mobile push. Either deliver a short "
+                    "email check-in on the most important open watchpoint, or suppress only "
+                    "with a concrete non-offline reason (for example: no material change)."
+                )
+            else:
+                delivery_state["gateway_reach_suggestion"] = (
+                    "Desktop and mobile chat are currently silent (no live connections). "
+                    "If this heartbeat finds something genuinely worth surfacing, Gateway "
+                    f"can reach the user by Cosmic Mail/email{recipient_clause}{channel_clause}. "
+                    "Do not suppress solely because chat looks offline, and never justify "
+                    "suppress with mobile-push/offline language while email is available."
+                )
             delivery_state["suggested_reach_path"] = "agent-email"
         elif chat_silent:
             delivery_state["gateway_reach_suggestion"] = (
@@ -2490,8 +2670,13 @@ class GatewayRuntime:
             "When Reachability shows desktop and mobile chat are silent and Gateway suggests Cosmic Mail/"
             "email as the reach path, do not suppress solely because the user looks offline. If something "
             "is genuinely worth surfacing, choose deliver — Gateway will route the note through the "
-            "selected reach path (including email). Still suppress for low-value noise, unchanged "
-            "watchpoints already surfaced repeatedly, or when nothing material changed. "
+            "selected reach path (including email). "
+            "If Reachability marks email_checkin_due or prolonged_silence, you MUST NOT suppress with "
+            "offline/0-connections/mobile-push language. Either deliver a short email check-in on the "
+            "most important open watchpoint, or suppress only with a concrete non-offline reason such as "
+            "no material change since the last beat. "
+            "Still suppress for low-value noise, unchanged "
+            "watchpoints already surfaced repeatedly after a recent successful delivery, or when nothing material changed. "
             "Your final response must be one JSON object and nothing else. Do not use Markdown. "
             "Schema: {\"decision\":\"suppress\"|\"deliver\",\"message\":\"\",\"reason\":\"\","
             "\"confidence\":0.0,\"pending_checks\":[],\"notes\":\"\"}. "
@@ -6574,6 +6759,9 @@ class GatewayRuntime:
                     f"- Delivery selection reason: {self._safe_text(delivery_state.get('selection_reason')) or 'desktop_default'}",
                     f"- Suggested reach path: {self._safe_text(delivery_state.get('suggested_reach_path')) or 'desktop'}",
                     f"- Email delivery available: {email_available}",
+                    f"- Hours since last delivered heartbeat: {delivery_state.get('hours_since_last_delivered')}",
+                    f"- Prolonged silence: {bool(delivery_state.get('prolonged_silence'))}",
+                    f"- Email check-in due: {bool(delivery_state.get('email_checkin_due'))}",
                 ]
             )
             email_channel = self._safe_text(delivery_state.get("agent_email_channel"))
@@ -18039,6 +18227,12 @@ class GatewayRuntime:
                 if is_heartbeat_response
                 else None
             )
+            if heartbeat_decision:
+                heartbeat_decision = self._apply_heartbeat_email_reach_policy(
+                    decision=heartbeat_decision,
+                    request_id=request_id,
+                    channel=event_channel,
+                )
             if heartbeat_decision and heartbeat_decision["decision"] == "suppress":
                 if request_id:
                     self._record_heartbeat_outcome(
@@ -18069,6 +18263,22 @@ class GatewayRuntime:
                     heartbeat_decision.get("message"),
                 )
                 event["heartbeat_decision"] = heartbeat_decision
+                if self._safe_text(heartbeat_decision.get("policy")) == (
+                    "force_email_checkin_on_offline_suppress"
+                ):
+                    self._trace_request_event(
+                        request_id=request_id,
+                        session_id=session_id,
+                        channel=event_channel,
+                        route=self._safe_text(event.get("route")) or "opus",
+                        event_type="response.complete",
+                        stage="response",
+                        status="active",
+                        title="Heartbeat email check-in forced",
+                        detail=self._safe_text(heartbeat_decision.get("reason")),
+                        task_id=task_id,
+                        completed=False,
+                    )
             gmail_surface_decision = (
                 self._parse_gmail_surface_decision(event)
                 if self._is_gmail_surface_decision_event(event)
