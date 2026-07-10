@@ -2191,6 +2191,96 @@ class GatewayRuntime:
             return True
         return bool(preference.get("enabled", True))
 
+    def _primary_proactive_email_recipient(self) -> str | None:
+        """Owner inbox for proactive Cosmic Mail when chat channels are silent."""
+        try:
+            stored = self.agent_email_integration_store.get_primary()
+        except Exception:
+            logger.exception("gateway.proactive_email_recipient_lookup_failed")
+            return None
+        if stored is None:
+            return None
+        for candidate in stored.trusted_senders:
+            email = self._safe_text(candidate)
+            if email and "@" in email:
+                return email
+        return None
+
+    def _agent_email_reach_channel(self) -> str | None:
+        if not self._agent_email_effectively_enabled():
+            return None
+        if "agent-email" not in self.registry.adapters:
+            return None
+        return (
+            self._preferred_linked_channel("agent-email")
+            or "agent-email"
+        )
+
+    def _annotate_heartbeat_reachability(
+        self, delivery_state: dict[str, Any]
+    ) -> dict[str, Any]:
+        chat_silent = (
+            int(delivery_state.get("desktop_fresh_connection_count") or 0) <= 0
+            and int(delivery_state.get("mobile_connection_count") or 0) <= 0
+        )
+        email_available = bool(delivery_state.get("email_delivery_available"))
+        email_channel = self._safe_text(delivery_state.get("agent_email_channel"))
+        email_recipient = self._safe_text(
+            delivery_state.get("proactive_email_recipient")
+        )
+        delivery_state["chat_channels_silent"] = chat_silent
+        if chat_silent and email_available:
+            recipient_clause = (
+                f" to {email_recipient}" if email_recipient else ""
+            )
+            channel_clause = f" via {email_channel}" if email_channel else ""
+            delivery_state["gateway_reach_suggestion"] = (
+                "Desktop and mobile chat are currently silent (no live connections). "
+                "If this heartbeat finds something genuinely worth surfacing, Gateway "
+                f"can reach the user by Cosmic Mail/email{recipient_clause}{channel_clause}. "
+                "Do not suppress solely because chat looks offline."
+            )
+            delivery_state["suggested_reach_path"] = "agent-email"
+        elif chat_silent:
+            delivery_state["gateway_reach_suggestion"] = (
+                "Desktop and mobile chat are currently silent (no live connections). "
+                "Cosmic Mail/email is not available as a fallback right now."
+            )
+            delivery_state["suggested_reach_path"] = (
+                "mobile_push"
+                if int(delivery_state.get("mobile_push_target_count") or 0) > 0
+                else "none"
+            )
+        else:
+            delivery_state["gateway_reach_suggestion"] = (
+                "Live desktop/mobile chat is available; prefer the selected chat channel."
+            )
+            delivery_state["suggested_reach_path"] = self._safe_text(
+                delivery_state.get("selected_platform")
+            ) or "desktop"
+        return delivery_state
+
+    def _ensure_proactive_email_recipients(self, event: dict[str, Any]) -> None:
+        """Attach owner recipient for proactive agent-email sends (heartbeat/cron)."""
+        if event.get("to_recipients") or event.get("to"):
+            return
+        if self._safe_text(event.get("recipient_email")) or self._safe_text(
+            event.get("email_to")
+        ):
+            return
+        metadata = (
+            event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        )
+        if self._safe_text(event.get("thread_id")) or self._safe_text(
+            metadata.get("thread_id")
+        ):
+            return
+        recipient = self._primary_proactive_email_recipient()
+        if not recipient:
+            return
+        event["to_recipients"] = [{"email": recipient, "name": None}]
+        event["recipient_email"] = recipient
+
     async def _heartbeat_delivery_target(
         self,
         heartbeat: dict[str, Any],
@@ -2198,6 +2288,11 @@ class GatewayRuntime:
         session_id: str,
     ) -> tuple[str, dict[str, Any]]:
         configured_channel = self._safe_text(heartbeat.get("delivery_channel"))
+        email_available = self._agent_email_effectively_enabled()
+        email_channel = self._agent_email_reach_channel() if email_available else None
+        email_recipient = (
+            self._primary_proactive_email_recipient() if email_available else None
+        )
         delivery_state: dict[str, Any] = {
             "configured_channel": configured_channel or "desktop",
             "selected_channel": "desktop",
@@ -2208,6 +2303,12 @@ class GatewayRuntime:
             "desktop_stale_connection_count": 0,
             "mobile_connection_count": 0,
             "mobile_push_target_count": 0,
+            "email_delivery_available": email_available and bool(email_channel),
+            "agent_email_channel": email_channel,
+            "proactive_email_recipient": email_recipient,
+            "chat_channels_silent": True,
+            "suggested_reach_path": "none",
+            "gateway_reach_suggestion": None,
         }
 
         if configured_channel and configured_channel not in {"auto", "desktop"}:
@@ -2226,9 +2327,13 @@ class GatewayRuntime:
                         "selected_platform": self._channel_platform(resolved_channel)
                         or "desktop",
                         "selection_reason": "configured_channel",
+                        "chat_channels_silent": self._channel_platform(resolved_channel)
+                        not in {"desktop", "mobile"},
                     }
                 )
-                return resolved_channel, delivery_state
+                return resolved_channel, self._annotate_heartbeat_reachability(
+                    delivery_state
+                )
             except Exception:
                 logger.exception(
                     "gateway.heartbeat_configured_delivery_channel_failed channel=%s",
@@ -2259,9 +2364,10 @@ class GatewayRuntime:
                     "selected_channel": channel,
                     "selected_platform": "desktop",
                     "selection_reason": "desktop_connected_fresh",
+                    "chat_channels_silent": False,
                 }
             )
-            return channel, delivery_state
+            return channel, self._annotate_heartbeat_reachability(delivery_state)
 
         mobile_adapter = self.registry.adapters.get("mobile")
         mobile_connections: list[dict[str, Any]] = []
@@ -2299,14 +2405,29 @@ class GatewayRuntime:
                         "selected_channel": channel,
                         "selected_platform": "mobile",
                         "selection_reason": "mobile_connected",
+                        "chat_channels_silent": False,
                     }
                 )
-                return channel, delivery_state
+                return channel, self._annotate_heartbeat_reachability(delivery_state)
 
         push_targets = self.mobile_device_store.list_push_targets(session_id=session_id)
         if not push_targets:
             push_targets = self.mobile_device_store.list_push_targets(session_id=None)
         delivery_state["mobile_push_target_count"] = len(push_targets)
+
+        # Chat is silent. Prefer Cosmic Mail over push/desktop deadletters so a
+        # deliver decision can still reach the user when desktop/mobile are offline.
+        if email_channel:
+            delivery_state.update(
+                {
+                    "selected_channel": email_channel,
+                    "selected_platform": "agent-email",
+                    "selection_reason": "agent_email_offline_fallback",
+                    "chat_channels_silent": True,
+                }
+            )
+            return email_channel, self._annotate_heartbeat_reachability(delivery_state)
+
         if push_targets:
             device_id = self._safe_text(push_targets[0].get("device_id"))
             channel = f"mobile:{device_id}" if device_id else "mobile"
@@ -2315,11 +2436,13 @@ class GatewayRuntime:
                     "selected_channel": channel,
                     "selected_platform": "mobile",
                     "selection_reason": "mobile_push_target",
+                    "chat_channels_silent": True,
                 }
             )
-            return channel, delivery_state
+            return channel, self._annotate_heartbeat_reachability(delivery_state)
 
-        return "desktop", delivery_state
+        delivery_state["chat_channels_silent"] = True
+        return "desktop", self._annotate_heartbeat_reachability(delivery_state)
 
     def _build_heartbeat_query(self, context_block: str | None) -> str:
         stored_prompt = ""
@@ -2364,6 +2487,11 @@ class GatewayRuntime:
             "Use the best COSMIC-owned "
             "delivery path available; if a proactive item is better sent as email, you may use Cosmic Mail "
             "or email capabilities when available. "
+            "When Reachability shows desktop and mobile chat are silent and Gateway suggests Cosmic Mail/"
+            "email as the reach path, do not suppress solely because the user looks offline. If something "
+            "is genuinely worth surfacing, choose deliver — Gateway will route the note through the "
+            "selected reach path (including email). Still suppress for low-value noise, unchanged "
+            "watchpoints already surfaced repeatedly, or when nothing material changed. "
             "Your final response must be one JSON object and nothing else. Do not use Markdown. "
             "Schema: {\"decision\":\"suppress\"|\"deliver\",\"message\":\"\",\"reason\":\"\","
             "\"confidence\":0.0,\"pending_checks\":[],\"notes\":\"\"}. "
@@ -6311,7 +6439,11 @@ class GatewayRuntime:
             "user_timezone": self.current_user_timezone(),
             "delivery_channel": channel,
             "delivery_state": delivery_state or {},
-            "email_delivery_available": self._agent_email_effectively_enabled(),
+            "email_delivery_available": bool(
+                (delivery_state or {}).get("email_delivery_available")
+                if isinstance(delivery_state, dict)
+                else self._agent_email_effectively_enabled()
+            ),
             "scheduler": self.scheduler_store.summary(),
             "delivery_queue": self.delivery_queue_store.summary(
                 since=last_delivered_at
@@ -6423,15 +6555,43 @@ class GatewayRuntime:
             else {}
         )
         if delivery_state:
+            chat_silent = bool(delivery_state.get("chat_channels_silent"))
+            email_available = bool(
+                delivery_state.get("email_delivery_available")
+                if "email_delivery_available" in delivery_state
+                else context_packet.get("email_delivery_available")
+            )
             lines.extend(
                 [
+                    "",
+                    "### Reachability",
+                    f"- Desktop/mobile chat silent: {chat_silent}",
                     f"- Active desktop connections: {int(delivery_state.get('desktop_connection_count') or 0)}",
+                    f"- Fresh desktop connections: {int(delivery_state.get('desktop_fresh_connection_count') or 0)}",
                     f"- Active mobile connections: {int(delivery_state.get('mobile_connection_count') or 0)}",
                     f"- Mobile push targets: {int(delivery_state.get('mobile_push_target_count') or 0)}",
-                    f"- Delivery selection: {self._safe_text(delivery_state.get('selection_reason')) or 'desktop_default'}",
-                    f"- Email delivery available: {bool(context_packet.get('email_delivery_available'))}",
+                    f"- Selected delivery channel: {self._safe_text(delivery_state.get('selected_channel')) or self._safe_text(context_packet.get('delivery_channel')) or 'desktop'}",
+                    f"- Delivery selection reason: {self._safe_text(delivery_state.get('selection_reason')) or 'desktop_default'}",
+                    f"- Suggested reach path: {self._safe_text(delivery_state.get('suggested_reach_path')) or 'desktop'}",
+                    f"- Email delivery available: {email_available}",
                 ]
             )
+            email_channel = self._safe_text(delivery_state.get("agent_email_channel"))
+            if email_channel:
+                lines.append(f"- Cosmic Mail channel: {email_channel}")
+            email_recipient = self._safe_text(
+                delivery_state.get("proactive_email_recipient")
+            )
+            if email_recipient:
+                lines.append(f"- Proactive email recipient: {email_recipient}")
+            suggestion = self._safe_text(delivery_state.get("gateway_reach_suggestion"))
+            if suggestion:
+                lines.append(f"- Gateway suggestion: {suggestion}")
+            elif chat_silent and email_available:
+                lines.append(
+                    "- Gateway suggestion: Desktop and mobile chat are silent. "
+                    "If you need to reach the user, deliver via Cosmic Mail/email rather than suppressing solely for offline presence."
+                )
         working_set = (
             context_packet.get("working_set_snapshot")
             if isinstance(context_packet.get("working_set_snapshot"), dict)
@@ -14304,6 +14464,8 @@ class GatewayRuntime:
             raise ChannelUnavailableError(
                 f"No adapter registered for channel: {channel!r}"
             )
+        if self._channel_platform(channel) == "agent-email":
+            self._ensure_proactive_email_recipients(event)
         await adapter.send(event, channel=channel)
 
     def _delivery_dedupe_key(self, event: dict[str, Any], channel: str) -> str | None:

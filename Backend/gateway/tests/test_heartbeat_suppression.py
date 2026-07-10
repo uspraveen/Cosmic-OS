@@ -440,3 +440,108 @@ def test_heartbeat_context_renders_delivery_facts_before_stale_notes() -> None:
     assert facts_index < notes_index
     assert "Completed/stored items are not pending" in block
     assert "may contain stale or inferential presence language" in block
+
+
+def test_heartbeat_context_renders_silent_chat_email_reach_suggestion() -> None:
+    runtime = object.__new__(GatewayRuntime)
+
+    block = runtime._render_heartbeat_context_block(
+        {
+            "current_session_id": "sess_20260710",
+            "user_timezone": "America/Chicago",
+            "delivery_channel": "agent-email:iamcosmic001@mail.thelearnchain.com",
+            "email_delivery_available": True,
+            "delivery_state": {
+                "desktop_connection_count": 0,
+                "desktop_fresh_connection_count": 0,
+                "mobile_connection_count": 0,
+                "mobile_push_target_count": 2,
+                "selected_channel": "agent-email:iamcosmic001@mail.thelearnchain.com",
+                "selection_reason": "agent_email_offline_fallback",
+                "suggested_reach_path": "agent-email",
+                "chat_channels_silent": True,
+                "email_delivery_available": True,
+                "agent_email_channel": "agent-email:iamcosmic001@mail.thelearnchain.com",
+                "proactive_email_recipient": "uspraveenraj@gmail.com",
+                "gateway_reach_suggestion": (
+                    "Desktop and mobile chat are currently silent (no live connections). "
+                    "If this heartbeat finds something genuinely worth surfacing, Gateway "
+                    "can reach the user by Cosmic Mail/email to uspraveenraj@gmail.com."
+                ),
+            },
+        }
+    )
+
+    assert block is not None
+    assert "### Reachability" in block
+    assert "Desktop/mobile chat silent: True" in block
+    assert "Email delivery available: True" in block
+    assert "Proactive email recipient: uspraveenraj@gmail.com" in block
+    assert "Gateway suggestion:" in block
+    assert "Do not suppress solely because chat looks offline" in block or (
+        "can reach the user by Cosmic Mail/email" in block
+    )
+
+
+def test_heartbeat_delivery_falls_back_to_email_when_chat_silent() -> None:
+    runtime = object.__new__(GatewayRuntime)
+
+    class _Registry:
+        adapters: dict = {}
+
+    class _MobileStore:
+        def list_push_targets(self, session_id=None):
+            return [{"device_id": "mob_offline"}]
+
+    class _EmailStore:
+        def get_primary(self):
+            return type(
+                "Rec",
+                (),
+                {
+                    "trusted_senders": ("uspraveenraj@gmail.com", "other@example.com"),
+                },
+            )()
+
+    runtime.registry = _Registry()
+    runtime.mobile_device_store = _MobileStore()
+    runtime.agent_email_integration_store = _EmailStore()
+    runtime._agent_email_effectively_enabled = lambda: True  # type: ignore[method-assign]
+    runtime._agent_email_reach_channel = (  # type: ignore[method-assign]
+        lambda: "agent-email:iamcosmic001@mail.thelearnchain.com"
+    )
+    runtime._primary_proactive_email_recipient = (  # type: ignore[method-assign]
+        lambda: "uspraveenraj@gmail.com"
+    )
+    channel, state = asyncio.run(
+        runtime._heartbeat_delivery_target(
+            {"delivery_channel": "desktop"},
+            session_id="sess_test",
+        )
+    )
+
+    assert channel == "agent-email:iamcosmic001@mail.thelearnchain.com"
+    assert state["selection_reason"] == "agent_email_offline_fallback"
+    assert state["chat_channels_silent"] is True
+    assert state["suggested_reach_path"] == "agent-email"
+    assert "Cosmic Mail/email" in (state.get("gateway_reach_suggestion") or "")
+    assert state["mobile_push_target_count"] == 1
+
+
+def test_ensure_proactive_email_recipients_sets_owner_inbox() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime._primary_proactive_email_recipient = (  # type: ignore[method-assign]
+        lambda: "uspraveenraj@gmail.com"
+    )
+
+    event: dict = {"type": "response.complete", "content": "Hello"}
+    runtime._ensure_proactive_email_recipients(event)
+    assert event["recipient_email"] == "uspraveenraj@gmail.com"
+    assert event["to_recipients"] == [{"email": "uspraveenraj@gmail.com", "name": None}]
+
+    already = {
+        "type": "response.complete",
+        "to_recipients": [{"email": "someone@example.com", "name": None}],
+    }
+    runtime._ensure_proactive_email_recipients(already)
+    assert already["to_recipients"] == [{"email": "someone@example.com", "name": None}]

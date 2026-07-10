@@ -104,7 +104,8 @@ Gateway owns the schedule because Gateway already owns sessions, delivery, prefe
 - The scheduler loop calls the heartbeat after due crons.
 - Gateway builds a normal `TaskEnvelope` with `source="heartbeat"` and `priority="low"`.
 - The heartbeat request uses an empty live conversation context and a compact memory/context block.
-- Gateway resolves delivery at run time: active desktop first, then active mobile, then the latest mobile push target, then queued desktop fallback.
+- Gateway resolves delivery at run time: active desktop first, then active mobile, then Cosmic Mail/email when chat is silent and configured, then the latest mobile push target, then queued desktop fallback.
+- When desktop and mobile chat are silent, Gateway annotates Reachability with an explicit suggestion that Cosmic can email the user rather than suppressing solely for offline presence.
 - Gateway includes a compact `recent_user_visible_deliveries` digest. It is capped and derived from canonical scheduler/session records, not from model notes.
 - `visual_response_enhancement_enabled` is disabled for heartbeat turns unless explicitly changed later.
 - Heartbeat response chunks and progress are not streamed live; useful final responses still retain their compact Flow/activity log for later inspection.
@@ -161,7 +162,9 @@ The goal is not to make the model announce every calendar item. The goal is to g
 Useful heartbeat responses use the existing response path. That means:
 
 - Desktop receives the note when connected.
-- If desktop is offline, Gateway can target the active mobile app or the latest mobile push target.
+- If desktop is offline, Gateway can target the active mobile app.
+- If desktop and mobile chat are both silent and Cosmic Mail is configured, Gateway selects email as the offline reach path and tells the heartbeat model that it can deliver via email.
+- Otherwise Gateway can target the latest mobile push target or queue for desktop.
 - Mobile push labels heartbeat responses with a heart so the user knows it is proactive.
 - If the heartbeat decides the item is better mailed, it may use Cosmic Mail/email capabilities instead of forcing a chat note.
 - Cross-channel sync continues to work for visible heartbeat notes.
