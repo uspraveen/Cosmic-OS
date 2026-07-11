@@ -506,3 +506,73 @@ async def test_agent_email_adapter_get_status_falls_back_to_first_active_mailbox
 
     assert status["primary_mailbox_address"] == "assistant@example.com"
     assert status["primary_mailbox"]["id"] == "mbx_primary"
+
+
+def test_looks_like_email_process_narration_detects_tool_loop_monologue() -> None:
+    from gateway.channels.agent_email import looks_like_email_process_narration
+
+    leaked = """
+Saving this to memory and replying to the email thread now.
+
+Let me retry the email delegation with the correct input format.
+
+Goal field has a 500-char limit. Let me shorten it.
+
+Still over 500. Let me trim significantly.
+
+The agent searched but didn't send. Let me delegate again with the specific thread ID and explicit send instruction.
+
+Let me provide the exact email body so the agent doesn't have to draft from scratch.
+
+Let me check the email agent's input schema to understand the correct format.
+
+Now I understand the schema. Let me use the proper fields — `goal` for the short instruction, `draft_seed` for the email body, and `thread_id` to target the right thread.
+""".strip()
+    assert looks_like_email_process_narration(leaked) is True
+    assert (
+        looks_like_email_process_narration(
+            "Got it — thanks for the correction on YC Startup School. I'll drop that from the prep watchlist."
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_email_adapter_suppresses_process_narration_body() -> None:
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+        primary_mailbox_address="assistant@example.com",
+    )
+
+    class FakeClient:
+        async def resolve_mailbox(self, **kwargs):
+            raise AssertionError("should not send process narration")
+
+        async def create_draft(self, payload):
+            raise AssertionError("should not create draft for process narration")
+
+        async def send_draft(self, draft_id):
+            raise AssertionError("should not send draft for process narration")
+
+        async def reply_to_thread(self, thread_id, payload):
+            raise AssertionError("should not reply with process narration")
+
+    adapter.client = FakeClient()  # type: ignore[assignment]
+    message = {
+        "type": "response.complete",
+        "content": (
+            "Let me retry the email delegation with the correct input format.\n\n"
+            "Goal field has a 500-char limit. Let me shorten it.\n\n"
+            "Still over 500. Let me trim significantly.\n\n"
+            "The agent searched but didn't send. Let me delegate again.\n\n"
+            "Let me check the email agent's input schema."
+        ),
+        "thread_id": "thr_123",
+        "trusted_sender": True,
+        "email_thread_reply_eligible": True,
+        "channel": "agent-email:assistant@example.com",
+    }
+    await adapter.send(message, channel="agent-email:assistant@example.com")
+    assert message["email_delivery_status"] == "suppressed"
+    assert message["email_delivery"]["reason"] == "process_narration"

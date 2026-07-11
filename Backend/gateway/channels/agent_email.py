@@ -19,6 +19,45 @@ def _safe_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+_PROCESS_NARRATION_LINE_RE = re.compile(
+    r"(?im)^(?:let me|still over|the agent |now i |good —|good -|"
+    r"draft is prepared|goal field|now i understand|the draft is prepared|"
+    r"i'll delegate|i will delegate|passing everything together|"
+    r"try one more approach|usage hint says)\b"
+)
+_PROCESS_NARRATION_MARKERS = (
+    "draft_id",
+    "draft_seed",
+    "input schema",
+    "delegate again",
+    "explicit send instruction",
+    "tool call",
+    "correct input format",
+)
+
+
+def looks_like_email_process_narration(text: str) -> bool:
+    """Detect internal tool-loop monologue that must never be emailed."""
+    body = str(text or "").strip()
+    if not body:
+        return False
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    if not lines:
+        return False
+    narration_lines = sum(1 for line in lines if _PROCESS_NARRATION_LINE_RE.search(line))
+    marker_hits = sum(1 for marker in _PROCESS_NARRATION_MARKERS if marker in body.lower())
+    let_me_hits = len(re.findall(r"(?i)\blet me\b", body))
+    if narration_lines >= 3:
+        return True
+    if let_me_hits >= 3 and narration_lines >= 2:
+        return True
+    if marker_hits >= 2 and narration_lines >= 1:
+        return True
+    if let_me_hits >= 5:
+        return True
+    return False
+
+
 def _normalize_hex_signature(raw: str) -> str:
     text = str(raw or "").strip()
     if "=" in text:
@@ -323,11 +362,30 @@ class AgentEmailAdapter(ChannelAdapter):
 
     async def send(self, message: dict[str, Any], channel: str | None = None) -> None:
         if not self._is_sendable_event(message):
+            message["email_delivery"] = {
+                "status": "skipped",
+                "reason": "non_sendable_event",
+            }
+            message["email_delivery_status"] = "skipped"
             return
         target_channel = _safe_text(channel) or _safe_text(message.get("channel"))
         raw_body = self._build_text_body(message)
         text_body = self._render_plain_text_body(raw_body)
         html_body = self._build_html_body(raw_body)
+        if not text_body.strip():
+            message["email_delivery"] = {
+                "status": "suppressed",
+                "reason": "empty_body",
+            }
+            message["email_delivery_status"] = "suppressed"
+            return
+        if looks_like_email_process_narration(text_body):
+            message["email_delivery"] = {
+                "status": "suppressed",
+                "reason": "process_narration",
+            }
+            message["email_delivery_status"] = "suppressed"
+            return
 
         def record_delivery(
             delivery: dict[str, Any],

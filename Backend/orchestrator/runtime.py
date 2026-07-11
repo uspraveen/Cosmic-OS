@@ -875,10 +875,14 @@ class OrchestratorRuntime:
 
                 turn_text = "".join(turn_text_parts)
                 turn_reasoning = "".join(turn_reasoning_parts)
-                full_response_text = self._append_stream_text(
-                    full_response_text,
-                    turn_text,
-                )
+                # Pre-tool "Let me..." narration still streams live via response.chunk,
+                # but must not accumulate into the final user-facing email/chat body.
+                # Otherwise a long tool loop emails process monologue when the turn ends.
+                if turn_stop_reason not in {"tool_use", "pause_turn"}:
+                    full_response_text = self._append_stream_text(
+                        full_response_text,
+                        turn_text,
+                    )
                 full_reasoning_text += turn_reasoning
 
                 # ── Server-side tool continuation (pause_turn) ────
@@ -1486,10 +1490,13 @@ class OrchestratorRuntime:
                 stop_reason = turn_finish_reason
                 turn_text = "".join(turn_text_parts)
                 turn_reasoning = "".join(turn_reasoning_parts)
-                full_response_text = self._append_stream_text(full_response_text, turn_text)
+                normalized_tool_calls = self._normalize_openai_tool_calls(turn_tool_calls)
+                # Streamed pre-tool narration stays live; only final end-turn text
+                # becomes the persisted/emailable response body.
+                if not normalized_tool_calls:
+                    full_response_text = self._append_stream_text(full_response_text, turn_text)
                 full_reasoning_text += turn_reasoning
 
-                normalized_tool_calls = self._normalize_openai_tool_calls(turn_tool_calls)
                 if normalized_tool_calls:
                     assistant_message: dict[str, Any] = {
                         "role": "assistant",
