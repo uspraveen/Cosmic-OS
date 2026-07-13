@@ -3436,6 +3436,7 @@ export default function App() {
   const streamedResponseTaskIdsRef = useRef<Set<string>>(new Set())
   const activeStreamingRequestIdRef = useRef<string | null>(null)
   const activeStreamingTaskIdRef = useRef<string | null>(null)
+  const userStoppedStreamKeysRef = useRef<Set<string>>(new Set())
   const messagesRef = useRef<Message[]>([])
   const backgroundTasksRef = useRef<BackgroundTask[]>([])
   const activeSessionIdRef = useRef<string | null>(null)
@@ -4329,6 +4330,63 @@ export default function App() {
     activeStreamingTaskIdRef.current = null
   }
 
+  const markStreamStopped = (requestId?: string | null, taskId?: string | null) => {
+    const normalizedRequestId = String(requestId || '').trim()
+    const normalizedTaskId = String(taskId || '').trim()
+    if (normalizedRequestId) {
+      userStoppedStreamKeysRef.current.add(`req:${normalizedRequestId}`)
+    }
+    if (normalizedTaskId) {
+      userStoppedStreamKeysRef.current.add(`task:${normalizedTaskId}`)
+    }
+  }
+
+  const isStreamUserStopped = (requestId?: string | null, taskId?: string | null) => {
+    const normalizedRequestId = String(requestId || '').trim()
+    const normalizedTaskId = String(taskId || '').trim()
+    if (normalizedRequestId && userStoppedStreamKeysRef.current.has(`req:${normalizedRequestId}`)) {
+      return true
+    }
+    if (normalizedTaskId && userStoppedStreamKeysRef.current.has(`task:${normalizedTaskId}`)) {
+      return true
+    }
+    return false
+  }
+
+  const isStreamEventStopped = (event: any) => (
+    isStreamUserStopped(
+      typeof event?.request_id === 'string' ? event.request_id : null,
+      typeof event?.task_id === 'string' ? event.task_id : null,
+    )
+  )
+
+  const applyOptimisticStreamStop = (requestId?: string | null, taskId?: string | null) => {
+    const normalizedRequestId = String(requestId || '').trim() || null
+    const normalizedTaskId = String(taskId || '').trim() || null
+    if (!normalizedRequestId && !normalizedTaskId) {
+      return
+    }
+    markStreamStopped(normalizedRequestId, normalizedTaskId)
+    setIsStreaming(false)
+    clearActiveStreamingRefs()
+    setStreamingProgress('')
+    setMessages((prev) => prev.map((message) => {
+      if (message.role !== 'assistant') {
+        return message
+      }
+      const matchesRequest = normalizedRequestId && message.requestId === normalizedRequestId
+      const matchesTask = normalizedTaskId && message.sourceId === normalizedTaskId
+      if (!matchesRequest && !matchesTask) {
+        return message
+      }
+      return {
+        ...message,
+        progress: undefined,
+        stopped: true,
+      }
+    }))
+  }
+
   const findAssistantMessageIdForForegroundStream = (messages: Message[], stream: GatewayForegroundStreamSnapshot) => {
     const targetMessageId = String(stream.messageId || '').trim()
     if (targetMessageId) {
@@ -4442,7 +4500,7 @@ export default function App() {
         sourceId: taskId || String(stream.sourceId || '').trim() || existingMessage?.sourceId || null,
         channel: stream.channel ?? existingMessage?.channel ?? null,
         createdAt: stream.updatedAt || existingMessage?.createdAt || new Date().toISOString(),
-        stopped: false,
+        stopped: isStreamUserStopped(requestId, taskId) || existingMessage?.stopped || false,
       }
       if (existingIndex >= 0) {
         nextMessages = nextMessages.map((message, index) => (
@@ -4471,7 +4529,11 @@ export default function App() {
       enqueueUnreadHeartbeatNotificationsFromMessages(nextMessages, activeSessionIdRef.current)
     }
 
-    const activeStream = [...streams].reverse().find((stream) => !stream.completed && !stream.failed) || null
+    const activeStream = [...streams].reverse().find((stream) => (
+      !stream.completed &&
+      !stream.failed &&
+      !isStreamUserStopped(stream.requestId, stream.taskId)
+    )) || null
     if (activeStream) {
       activeStreamingRequestIdRef.current = String(activeStream.requestId || '').trim() || null
       activeStreamingTaskIdRef.current = String(activeStream.taskId || '').trim() || null
@@ -5538,6 +5600,9 @@ export default function App() {
         if (typeof event.request_id === 'string' && event.request_id.trim()) {
           activeStreamingRequestIdRef.current = event.request_id.trim()
         }
+        if (!isStreamEventStopped(event)) {
+          setIsStreaming(true)
+        }
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         setMessages((prev) => {
           const existingId = findAssistantMessageIdForEvent(event)
@@ -5554,6 +5619,9 @@ export default function App() {
       if (eventType === 'task.created') {
         if (typeof event.task_id === 'string' && event.task_id.trim()) {
           activeStreamingTaskIdRef.current = event.task_id.trim()
+        }
+        if (!isStreamEventStopped(event)) {
+          setIsStreaming(true)
         }
         setMessages((prev) => {
           const { messages: nextMessages } = ensureAssistantMessageForEvent(prev, event)
@@ -5593,6 +5661,9 @@ export default function App() {
       }
 
       if (eventType === 'task.progress') {
+        if (isStreamEventStopped(event)) {
+          return
+        }
         if (typeof event.task_id !== 'string' && typeof event.request_id !== 'string') {
           return
         }
@@ -5641,6 +5712,9 @@ export default function App() {
       }
 
       if (eventType === 'response.chunk') {
+        if (isStreamEventStopped(event)) {
+          return
+        }
         markResponseStreamSeen(event)
         setMessages((prev) => {
           if (!event.content) return prev
@@ -5661,6 +5735,9 @@ export default function App() {
       }
 
       if (eventType === 'response.thinking.chunk') {
+        if (isStreamEventStopped(event)) {
+          return
+        }
         setMessages((prev) => {
           if (!event.content) return prev
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -5680,6 +5757,9 @@ export default function App() {
       }
 
       if (eventType === 'response.blocks.snapshot') {
+        if (isStreamEventStopped(event)) {
+          return
+        }
         markResponseStreamSeen(event)
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         const responseBlocks = normalizeResponseBlocks((event as any).response_blocks ?? (event as any).blocks)
@@ -5708,6 +5788,12 @@ export default function App() {
       }
 
       if (eventType === 'response.complete') {
+        if (isStreamEventStopped(event)) {
+          setIsStreaming(false)
+          clearActiveStreamingRefs()
+          setStreamingProgress('')
+          return
+        }
         markResponseStreamSeen(event)
         setStreamingProgress('')
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
@@ -5950,6 +6036,12 @@ export default function App() {
       }
 
       if (eventType === 'task.completed' || eventType === 'task.cancelled') {
+        if (eventType === 'task.cancelled') {
+          markStreamStopped(
+            typeof event.request_id === 'string' ? event.request_id : null,
+            typeof event.task_id === 'string' ? event.task_id : null,
+          )
+        }
         setIsStreaming(false)
         clearActiveStreamingRefs()
         setStreamingProgress('')
@@ -6521,14 +6613,15 @@ export default function App() {
     if (!requestId && !taskId && !activeAlphaTaskId) {
       return
     }
+    applyOptimisticStreamStop(requestId, taskId || activeAlphaTaskId)
     if (requestId || taskId) {
-      const cancelPromise = window.cosmic?.cancelGatewayResponse?.({
+      window.cosmic?.cancelGatewayResponse?.({
         requestId: requestId || undefined,
         taskId: taskId || undefined,
-      })
-      cancelPromise?.catch(() => { })
+      })?.catch(() => { })
     }
     if (activeAlphaTaskId && activeAlphaTaskId !== taskId) {
+      applyOptimisticStreamStop(null, activeAlphaTaskId)
       window.cosmic?.cancelGatewayResponse?.({ taskId: activeAlphaTaskId })?.catch(() => { })
     }
   }
@@ -6539,6 +6632,7 @@ export default function App() {
     if (!taskId && !requestId) {
       return
     }
+    applyOptimisticStreamStop(requestId || null, taskId || null)
     window.cosmic?.cancelGatewayResponse?.({
       taskId: taskId || undefined,
       requestId: taskId ? undefined : requestId || undefined,
@@ -6549,11 +6643,11 @@ export default function App() {
     const requestId = String(task.requestId || '').trim()
     const taskId = String(task.taskId || '').trim()
     if (!requestId && !taskId) return
-    const cancelPromise = window.cosmic?.cancelGatewayResponse?.({
+    applyOptimisticStreamStop(requestId || null, taskId || null)
+    window.cosmic?.cancelGatewayResponse?.({
       requestId: requestId || undefined,
       taskId: taskId || undefined,
-    })
-    cancelPromise?.catch(() => { })
+    })?.catch(() => { })
   }
 
   const handleShowLauncherTray = () => {

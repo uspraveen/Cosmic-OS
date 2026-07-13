@@ -642,6 +642,16 @@ export class GatewayConnectionManager {
     if (!normalizedRequestId && !normalizedTaskId) {
       throw new Error('A requestId or taskId is required to stop a response.')
     }
+    this.upsertForegroundStream(
+      {
+        request_id: normalizedRequestId || undefined,
+        task_id: normalizedTaskId || undefined,
+      },
+      {
+        completed: true,
+        failed: false,
+      },
+    )
     this.sendJson({
       type: 'cancel',
       request_id: `cancel_${crypto.randomUUID()}`,
