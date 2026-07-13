@@ -87,5 +87,11 @@ def test_gmail_context_store_preserves_terminal_status_on_upsert() -> None:
             }
         )
         assert again["status"] == "notified"
+        by_id = store.get_by_message_id("msg_loop")
+        assert by_id is not None
+        assert by_id["status"] == "notified"
+        notified = store.list_recent(statuses=["notified"], limit=5)
+        assert len(notified) == 1
+        assert notified[0]["message_id"] == "msg_loop"
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

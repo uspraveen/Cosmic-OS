@@ -151,22 +151,46 @@ class GmailContextStore:
         limit: int = 5,
         lookback_hours: int = 72,
         status: str = "active",
+        statuses: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         cutoff = (
             datetime.now(timezone.utc) - timedelta(hours=max(1, lookback_hours))
         ).isoformat().replace("+00:00", "Z")
+        status_filter = [
+            str(item).strip()
+            for item in (statuses if statuses is not None else [status])
+            if str(item).strip()
+        ] or ["active"]
+        placeholders = ", ".join("?" for _ in status_filter)
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT *
                 FROM surfaced_gmail_items
-                WHERE status = ? AND updated_at >= ?
+                WHERE status IN ({placeholders}) AND updated_at >= ?
                 ORDER BY updated_at DESC
                 LIMIT ?
                 """,
-                (status, cutoff, max(1, limit)),
+                (*status_filter, cutoff, max(1, limit)),
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
+
+    def get_by_message_id(self, message_id: str) -> dict[str, Any] | None:
+        normalized = str(message_id or "").strip()
+        if not normalized:
+            return None
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM surfaced_gmail_items
+                WHERE message_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone()
+        return self._row_to_dict(row) if row is not None else None
 
     def mark_status(self, surfaced_id: str, status: str) -> bool:
         normalized_id = str(surfaced_id or "").strip()

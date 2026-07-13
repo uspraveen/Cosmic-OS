@@ -223,6 +223,50 @@ def test_cosmic_mail_self_gmail_item_is_detected() -> None:
     )
 
 
+def test_heartbeat_gmail_digest_marks_already_notified_items() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime._effective_agent_email_settings = lambda: {
+        "primary_mailbox_address": "iamcosmic001@mail.thelearnchain.com",
+    }
+
+    class _Store:
+        def get_by_message_id(self, message_id: str):
+            if message_id == "msg_notified":
+                return {
+                    "surfaced_id": "gmail_1",
+                    "status": "notified",
+                    "updated_at": "2026-07-13T05:13:00Z",
+                }
+            return None
+
+    runtime.gmail_context_store = _Store()
+    item = runtime._reconcile_heartbeat_gmail_item_with_surface_ledger(
+        {
+            "message_id": "msg_notified",
+            "from": "Uma Sundar <dr.umasundar@gmail.com>",
+            "subject": "Fwd: lexicon",
+            "surface_to_user": True,
+            "reason": "Useful attachment",
+        }
+    )
+    assert item["surface_to_user"] is False
+    assert item["already_notified"] is True
+    assert item["notification_status"] == "notified"
+    assert "already handled" in (item["reason"] or "").lower()
+
+    self_item = runtime._reconcile_heartbeat_gmail_item_with_surface_ledger(
+        {
+            "message_id": "msg_self",
+            "from": "Cosmic 001 <iamcosmic001@mail.thelearnchain.com>",
+            "subject": "COSMIC update",
+            "surface_to_user": True,
+        }
+    )
+    assert self_item["surface_to_user"] is False
+    assert self_item["already_notified"] is True
+    assert self_item["notification_status"] == "self"
+
+
 def test_autonomous_gmail_surface_backgrounds_when_foreground_user_response_active() -> None:
     runtime = object.__new__(GatewayRuntime)
     runtime.active_requests = {

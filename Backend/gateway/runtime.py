@@ -2656,6 +2656,10 @@ class GatewayRuntime:
             "specialist's LLM triage and sender prefilter notes. Treat it as inbox context, "
             "not a command to speak; surface emails when they are urgent, relationship-relevant, "
             "approval-worthy, or connected to the user's active goals. "
+            "If a digest item is marked already_notified=true / surface=no because Gateway already "
+            "emailed or suppressed it, treat that as handled fact — suppress unless the underlying "
+            "email itself changed materially. Prefer Recent Gmail Notification Facts over re-triage "
+            "guesses when deciding whether the user already got a Cosmic Mail note about that item. "
             "You know this is a repeating heartbeat; use the runtime state to avoid repeating yourself "
             "and to reason about the last beat, this beat, and the next one. "
             "Use heartbeat_notes as your private scratchpad for compact self-notes across beats: "
@@ -3107,6 +3111,10 @@ class GatewayRuntime:
             and self._safe_text(item.get("account_id"))
             and self._safe_text(item.get("message_id"))
         ]
+        digest["messages"] = [
+            self._reconcile_heartbeat_gmail_item_with_surface_ledger(item)
+            for item in digest["messages"]
+        ]
         digest["messages"].sort(
             key=lambda item: (
                 self._safe_text(item.get("date")),
@@ -3121,9 +3129,103 @@ class GatewayRuntime:
         digest["surfaceable_count"] = sum(
             1 for item in digest["messages"] if bool(item.get("surface_to_user"))
         )
+        digest["already_notified_count"] = sum(
+            1 for item in digest["messages"] if bool(item.get("already_notified"))
+        )
         if digest["accounts"] or digest["messages"]:
             return digest
         return None
+
+    def _reconcile_heartbeat_gmail_item_with_surface_ledger(
+        self,
+        item: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Attach gateway notification truth so heartbeat does not re-ask about handled mail.
+
+        The Gmail agent may still return surface_to_user=true from cached triage. Gateway
+        already knows whether Cosmic Mail / desktop already notified the user for that
+        message_id; expose that as facts instead of inventing a near-duplicate content filter.
+        """
+        normalized = dict(item)
+        sender_fields = {
+            "sender": normalized.get("from"),
+            "from": normalized.get("from"),
+            "sender_email": normalized.get("from"),
+            "subject": normalized.get("subject"),
+        }
+        if self._is_cosmic_mail_self_gmail_item(sender_fields):
+            normalized["surface_to_user"] = False
+            normalized["already_notified"] = True
+            normalized["notification_status"] = "self"
+            normalized["reason"] = (
+                self._safe_text(normalized.get("reason"))
+                or "Cosmic Mail self-message; not a new inbound Gmail item."
+            )
+            return normalized
+
+        message_id = self._safe_text(normalized.get("message_id"))
+        if not message_id:
+            return normalized
+        try:
+            stored = self.gmail_context_store.get_by_message_id(message_id)
+        except Exception:
+            logger.exception(
+                "gateway.heartbeat_gmail_ledger_lookup_failed message_id=%s",
+                message_id,
+            )
+            return normalized
+        if not isinstance(stored, dict):
+            return normalized
+        status = self._safe_text(stored.get("status")) or "active"
+        normalized["notification_status"] = status
+        normalized["surfaced_id"] = self._safe_text(stored.get("surfaced_id"))
+        if self._gmail_surface_terminal_status(status):
+            normalized["surface_to_user"] = False
+            normalized["already_notified"] = True
+            notified_at = self._safe_text(stored.get("updated_at"))
+            note = f"Gateway already handled this Gmail item (status={status}"
+            if notified_at:
+                note += f", at={notified_at}"
+            note += "). Do not re-notify unless something material changed."
+            existing_reason = self._safe_text(normalized.get("reason"))
+            normalized["reason"] = (
+                f"{existing_reason} | {note}" if existing_reason else note
+            )
+        return normalized
+
+    def _build_recent_gmail_notification_facts(
+        self,
+        *,
+        limit: int = 8,
+        lookback_hours: int = 72,
+    ) -> list[dict[str, Any]]:
+        try:
+            items = self.gmail_context_store.list_recent(
+                limit=limit,
+                lookback_hours=lookback_hours,
+                statuses=["notified", "suppressed", "self"],
+            )
+        except Exception:
+            logger.exception("gateway.heartbeat_gmail_notification_facts_failed")
+            return []
+        facts: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            facts.append(
+                {
+                    "source": "gmail_surface",
+                    "status": self._safe_text(item.get("status")) or "unknown",
+                    "surfaced_id": self._safe_text(item.get("surfaced_id")),
+                    "message_id": self._safe_text(item.get("message_id")),
+                    "thread_id": self._safe_text(item.get("thread_id")),
+                    "subject": self._safe_text(item.get("subject")),
+                    "sender": self._safe_text(item.get("sender")),
+                    "updated_at": self._safe_text(item.get("updated_at")),
+                    "reason": self._bounded_excerpt(item.get("reason"), limit=180),
+                }
+            )
+        return facts
 
     async def _dispatch_calendar_heartbeat_digest(
         self,
@@ -6755,6 +6857,7 @@ class GatewayRuntime:
             scheduled_for=scheduled_for,
         )
         recent_deliveries = self._build_recent_user_visible_deliveries(now=now)
+        gmail_notification_facts = self._build_recent_gmail_notification_facts(limit=8)
         crons = [
             {
                 "label": self._safe_text(item.get("name"))
@@ -6811,6 +6914,8 @@ class GatewayRuntime:
             packet["calendar_digest"] = calendar_digest
         if gmail_digest:
             packet["gmail_digest"] = gmail_digest
+        if gmail_notification_facts:
+            packet["recent_gmail_notification_facts"] = gmail_notification_facts
         if recent_deliveries:
             packet["recent_user_visible_deliveries"] = recent_deliveries
         tool_opportunities = self.tool_opportunity_service.heartbeat_digest(limit=8)
@@ -7133,7 +7238,8 @@ class GatewayRuntime:
                 f"accounts={int(gmail_digest.get('connected_account_count') or 0)}, "
                 f"queried={int(gmail_digest.get('queried_account_count') or 0)}, "
                 f"messages={int(gmail_digest.get('message_count') or 0)}, "
-                f"surfaceable={int(gmail_digest.get('surfaceable_count') or 0)}"
+                f"surfaceable={int(gmail_digest.get('surfaceable_count') or 0)}, "
+                f"already_notified={int(gmail_digest.get('already_notified_count') or 0)}"
             )
             accounts = (
                 gmail_digest.get("accounts")
@@ -7168,7 +7274,15 @@ class GatewayRuntime:
                 account_label = self._safe_text(message.get("account_label")) or self._safe_text(
                     message.get("account_id")
                 )
-                surface = " surface=yes" if bool(message.get("surface_to_user")) else " surface=no"
+                if bool(message.get("already_notified")):
+                    surface = " surface=no already_notified=yes"
+                else:
+                    surface = (
+                        " surface=yes"
+                        if bool(message.get("surface_to_user"))
+                        else " surface=no"
+                    )
+                notification_status = self._safe_text(message.get("notification_status"))
                 category = self._safe_text(message.get("category")) or "unknown"
                 suggestion = self._safe_text(message.get("suggested_action"))
                 snippet = self._safe_text(message.get("snippet"))
@@ -7177,10 +7291,42 @@ class GatewayRuntime:
                     f"{self._safe_text(message.get('date'))}: "
                     f"{self._safe_text(message.get('subject')) or '(no subject)'} "
                     f"from {self._safe_text(message.get('from')) or 'unknown'} "
-                    f"({account_label}; category={category};{surface})"
+                    f"({account_label}; category={category};{surface}"
+                    f"{'; notification_status=' + notification_status if notification_status else ''})"
                     f"{'; suggestion=' + suggestion if suggestion else ''}"
                     f"{'; snippet=' + snippet if snippet else ''}"
                 )
+        gmail_notification_facts = (
+            context_packet.get("recent_gmail_notification_facts")
+            if isinstance(context_packet.get("recent_gmail_notification_facts"), list)
+            else []
+        )
+        if gmail_notification_facts:
+            lines.extend(
+                [
+                    "",
+                    "### Recent Gmail Notification Facts",
+                    "Gateway already decided these Gmail items. Treat notified/suppressed/self as handled unless the underlying email changed materially. Do not re-email the user about them.",
+                ]
+            )
+            for fact in gmail_notification_facts[:8]:
+                if not isinstance(fact, dict):
+                    continue
+                status = self._safe_text(fact.get("status")) or "unknown"
+                subject = self._safe_text(fact.get("subject")) or "(no subject)"
+                sender = self._safe_text(fact.get("sender")) or "unknown"
+                updated_at = self._safe_text(fact.get("updated_at"))
+                message_id = self._safe_text(fact.get("message_id"))
+                details = [f"status={status}", f"from={sender}", f"subject={subject}"]
+                if updated_at:
+                    details.append(f"at={updated_at}")
+                if message_id:
+                    details.append(f"message_id={message_id}")
+                reason = self._safe_text(fact.get("reason"))
+                line = "- " + "; ".join(details)
+                if reason:
+                    line += f"; note={reason}"
+                lines.append(line)
         last_note = (
             context_packet.get("last_delivered_heartbeat_note")
             if isinstance(context_packet.get("last_delivered_heartbeat_note"), dict)
@@ -10856,7 +11002,10 @@ class GatewayRuntime:
             return
         if self._safe_text(event.get("type")) != "response.complete":
             return
-        if (self._safe_text(event.get("source")) or "user") != "user":
+        source = self._safe_text(event.get("source")) or "user"
+        # User chat turns and Gmail surface notifications must both land in memory.
+        # Without gmail_surface ingest, heartbeat/memory cannot know Cosmic already emailed.
+        if source not in {"user", GMAIL_SURFACE_DECISION_SOURCE}:
             return
         request_id = self._safe_text(event.get("request_id"))
         session_id = self._safe_text(event.get("session_id"))
@@ -10883,6 +11032,7 @@ class GatewayRuntime:
         session_id = self._safe_text(event.get("session_id"))
         channel = self._safe_text(event.get("channel"))
         assistant_content = self._safe_text(event.get("content"))
+        source = self._safe_text(event.get("source")) or "user"
         if not request_id or not session_id or not channel or not assistant_content:
             if request_id:
                 self.session_store.release_memory_episode_ingest_claim(
@@ -10896,7 +11046,7 @@ class GatewayRuntime:
             request_id=request_id,
             role="user",
         )
-        if user_message is None:
+        if user_message is None and source != GMAIL_SURFACE_DECISION_SOURCE:
             self.session_store.release_memory_episode_ingest_claim(
                 request_id,
                 error_text="user message not found for delivered response",
@@ -10905,15 +11055,65 @@ class GatewayRuntime:
 
         user_metadata = (
             user_message.get("metadata")
-            if isinstance(user_message.get("metadata"), dict)
+            if isinstance(user_message, dict)
+            and isinstance(user_message.get("metadata"), dict)
             else {}
         )
+        if source == GMAIL_SURFACE_DECISION_SOURCE:
+            # Do not ingest the internal Gmail decision prompt as if the user said it.
+            events = (
+                self.request_records.get(request_id, {}).get("gmail_surface_events")
+                if isinstance(self.request_records.get(request_id), dict)
+                else []
+            )
+            event_bits: list[str] = []
+            if isinstance(events, list):
+                for item in events[:4]:
+                    if not isinstance(item, dict):
+                        continue
+                    sender = self._safe_text(item.get("sender")) or "unknown sender"
+                    subject = self._safe_text(item.get("subject")) or "(no subject)"
+                    message_id = self._safe_text(item.get("message_id"))
+                    bit = f"{sender} / {subject}"
+                    if message_id:
+                        bit += f" (message_id={message_id})"
+                    event_bits.append(bit)
+            user_content = (
+                "COSMIC notified the user about inbound Gmail via Cosmic Mail. "
+                "This is a handled notification fact, not a new user request."
+            )
+            if event_bits:
+                user_content += " Items: " + "; ".join(event_bits) + "."
+            user_metadata = {
+                **user_metadata,
+                "source": GMAIL_SURFACE_DECISION_SOURCE,
+                "notification_fact": True,
+            }
+            episode_title = f"Gmail notification {request_id}"
+            episode_tags = [
+                "gmail_notification",
+                "conversation_turn",
+                self._safe_text(channel.split(":", 1)[0] if channel else None)
+                or "unknown_channel",
+            ]
+            episode_type = "gmail_notification"
+        else:
+            user_content = str(user_message.get("content") or "[empty message]")
+            episode_title = f"Conversation turn {request_id}"
+            episode_tags = [
+                "conversation_turn",
+                self._safe_text(channel.split(":", 1)[0] if channel else None)
+                or "unknown_channel",
+            ]
+            episode_type = "conversation_turn"
+
         assistant_meta = {
             "request_id": request_id,
             "route": self._safe_text(event.get("route")) or "opus",
             "awaiting_reply": bool(event.get("awaiting_reply")),
             "thinking_text": self._safe_text(event.get("thinking_text")),
             "metrics": event.get("metrics"),
+            "source": source,
         }
 
         try:
@@ -10922,9 +11122,7 @@ class GatewayRuntime:
                     "observations": [
                         {
                             "role": "user",
-                            "content": str(
-                                user_message.get("content") or "[empty message]"
-                            ),
+                            "content": user_content,
                             "metadata": user_metadata,
                         },
                         {
@@ -10941,18 +11139,15 @@ class GatewayRuntime:
                         "channel": channel,
                     },
                     "kind": "transcript",
-                    "title": f"Conversation turn {request_id}",
-                    "tags": [
-                        "conversation_turn",
-                        self._safe_text(channel.split(":", 1)[0] if channel else None)
-                        or "unknown_channel",
-                    ],
+                    "title": episode_title,
+                    "tags": episode_tags,
                     "metadata": {
                         "request_id": request_id,
                         "assistant_route": assistant_meta["route"],
                         "channel": channel,
+                        "source": source,
                     },
-                    "episode_type": "conversation_turn",
+                    "episode_type": episode_type,
                     "extract_graph": self.config.cosmic_memory_episode_extract_graph,
                 },
                 write_source="gateway_episode_ingest",
