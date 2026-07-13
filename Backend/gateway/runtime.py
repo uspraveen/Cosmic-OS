@@ -3701,6 +3701,114 @@ class GatewayRuntime:
                     lines.append(f"- {label}: {', '.join(values)}")
         return "\n".join(lines)
 
+    def _extract_email_address(self, value: Any) -> str | None:
+        text = self._safe_text(value)
+        if not text:
+            return None
+        match = re.search(r"<([^>]+)>", text)
+        candidate = (match.group(1) if match else text).strip().lower()
+        if "@" not in candidate:
+            return None
+        return candidate
+
+    def _cosmic_mail_self_addresses(self) -> set[str]:
+        addresses: set[str] = set()
+        primary = self._extract_email_address(
+            self._effective_agent_email_settings().get("primary_mailbox_address")
+        )
+        if primary:
+            addresses.add(primary)
+        # Hard-coded known Cosmic Mail domains / local parts used in production.
+        addresses.add("iamcosmic001@mail.thelearnchain.com")
+        return addresses
+
+    def _is_cosmic_mail_self_gmail_item(self, item: dict[str, Any]) -> bool:
+        """True when the inbound Gmail item is Cosmic Mail notifying the user.
+
+        Without this guard, delivering a Gmail surface note via Cosmic Mail lands
+        back in the user's Gmail, Gmail watch re-triages it, and Cosmic emails
+        again — a notification feedback loop.
+        """
+        if not isinstance(item, dict):
+            return False
+        sender_email = self._extract_email_address(
+            item.get("sender_email") or item.get("sender") or item.get("from")
+        )
+        if not sender_email:
+            return False
+        if sender_email in self._cosmic_mail_self_addresses():
+            return True
+        if sender_email.endswith("@mail.thelearnchain.com"):
+            return True
+        display = (
+            self._safe_text(item.get("sender")) or self._safe_text(item.get("from")) or ""
+        ).lower()
+        subject = (self._safe_text(item.get("subject")) or "").lower()
+        if "cosmic 001" in display and subject.startswith("cosmic update"):
+            return True
+        if "iamcosmic" in sender_email and "cosmic update" in subject:
+            return True
+        return False
+
+    def _gmail_surface_terminal_status(self, status: Any) -> bool:
+        return (self._safe_text(status) or "").lower() in {
+            "notified",
+            "delivered",
+            "suppressed",
+            "ignored",
+            "self",
+        }
+
+    def _mark_gmail_surface_items_status(
+        self,
+        *,
+        request_id: str | None,
+        status: str,
+    ) -> None:
+        normalized_request_id = self._safe_text(request_id)
+        if not normalized_request_id:
+            return
+        request_record = self.request_records.get(normalized_request_id)
+        if not isinstance(request_record, dict):
+            return
+        message = (
+            request_record.get("message")
+            if isinstance(request_record.get("message"), dict)
+            else {}
+        )
+        metadata = (
+            message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        )
+        surfaced_ids = self._normalize_string_list(
+            metadata.get("surfaced_ids")
+            if isinstance(metadata.get("surfaced_ids"), list)
+            else [],
+            limit=24,
+        )
+        if not surfaced_ids:
+            events = (
+                request_record.get("gmail_surface_events")
+                if isinstance(request_record.get("gmail_surface_events"), list)
+                else []
+            )
+            surfaced_ids = self._normalize_string_list(
+                [
+                    event.get("surfaced_id")
+                    for event in events
+                    if isinstance(event, dict)
+                ],
+                limit=24,
+            )
+        for surfaced_id in surfaced_ids:
+            try:
+                self.gmail_context_store.mark_status(surfaced_id, status)
+            except Exception:
+                logger.exception(
+                    "gateway.gmail_surface_mark_status_failed surfaced_id=%s status=%s",
+                    surfaced_id,
+                    status,
+                )
+
     async def _publish_gmail_inbound_notification(self, result: dict[str, Any]) -> None:
         if self._safe_text(result.get("status")) != "completed":
             return
@@ -3708,24 +3816,69 @@ class GatewayRuntime:
         raw_items = output.get("messages") if isinstance(output.get("messages"), list) else []
         if not raw_items and isinstance(output.get("items"), list):
             raw_items = output.get("items") or []
-        items = [
+        candidate_items = [
             item
             for item in raw_items
             if isinstance(item, dict) and bool(item.get("surface_to_user"))
         ]
+        if not candidate_items:
+            return
+
+        # Drop Cosmic Mail self-notifications before any broadcast/decision work.
+        self_items = [
+            item for item in candidate_items if self._is_cosmic_mail_self_gmail_item(item)
+        ]
+        for item in self_items:
+            try:
+                stored = self._upsert_surfaced_gmail_item(
+                    result=result,
+                    item={**item, "status": "self"},
+                    item_count=len(candidate_items),
+                )
+                surfaced_id = self._safe_text(stored.get("surfaced_id"))
+                if surfaced_id:
+                    self.gmail_context_store.mark_status(surfaced_id, "self")
+            except Exception:
+                logger.exception("gateway.gmail_self_item_mark_failed")
+            logger.info(
+                "gateway.gmail_surface_skipped_self_email message_id=%s sender=%s subject=%s",
+                self._safe_text(item.get("message_id")),
+                self._safe_text(item.get("sender")) or self._safe_text(item.get("from")),
+                self._safe_text(item.get("subject")),
+            )
+
+        items = [
+            item
+            for item in candidate_items
+            if not self._is_cosmic_mail_self_gmail_item(item)
+        ]
         if not items:
             return
+
         stored_items: list[dict[str, Any]] = []
+        dispatch_raw: list[dict[str, Any]] = []
+        dispatch_stored: list[dict[str, Any]] = []
         for item in items:
-            stored_items.append(
-                self._upsert_surfaced_gmail_item(
-                    result=result,
-                    item=item,
-                    item_count=len(items),
-                )
+            stored = self._upsert_surfaced_gmail_item(
+                result=result,
+                item=item,
+                item_count=len(items),
             )
-        first = items[0]
-        first_stored = stored_items[0] if stored_items else {}
+            stored_items.append(stored)
+            if self._gmail_surface_terminal_status(stored.get("status")):
+                logger.info(
+                    "gateway.gmail_surface_skipped_already_terminal surfaced_id=%s status=%s message_id=%s",
+                    self._safe_text(stored.get("surfaced_id")),
+                    self._safe_text(stored.get("status")),
+                    self._safe_text(item.get("message_id")),
+                )
+                continue
+            dispatch_raw.append(item)
+            dispatch_stored.append(stored)
+        if not dispatch_raw:
+            return
+        first = dispatch_raw[0]
+        first_stored = dispatch_stored[0] if dispatch_stored else {}
         subject = self._safe_text(first.get("subject")) or "New Gmail item"
         sender = self._safe_text(first.get("sender")) or self._safe_text(first.get("from"))
         event = {
@@ -3743,7 +3896,7 @@ class GatewayRuntime:
             "category": self._safe_text(first.get("category")),
             "priority": first.get("priority"),
             "suggested_action": self._safe_text(first.get("suggested_action")),
-            "item_count": len(items),
+            "item_count": len(dispatch_raw),
         }
         for adapter in self.registry.adapters.values():
             if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
@@ -3757,14 +3910,14 @@ class GatewayRuntime:
                 )
         await self._evaluate_gmail_event_automations(
             result=result,
-            raw_items=items,
-            stored_items=stored_items,
+            raw_items=dispatch_raw,
+            stored_items=dispatch_stored,
         )
         self._schedule_background_task(
             self._dispatch_gmail_surface_decision(
                 result=result,
-                raw_items=items,
-                stored_items=stored_items,
+                raw_items=dispatch_raw,
+                stored_items=dispatch_stored,
             ),
             name="gmail-surface-decision",
         )
@@ -8878,9 +9031,10 @@ class GatewayRuntime:
         if state is not None and state.channel != normalized_channel:
             state = None
 
-        if state is None and normalized_task_id:
-            cancelled = await self.orchestrator.cancel_task(normalized_task_id)
-            if cancelled:
+        if state is None:
+            if normalized_task_id:
+                await self.orchestrator.cancel_task(normalized_task_id)
+            if normalized_request_id or normalized_task_id:
                 await self.deliver_channel_event(
                     {
                         "type": "task.cancelled",
@@ -8892,21 +9046,22 @@ class GatewayRuntime:
                         "message": "Response stopped.",
                     }
                 )
-            return cancelled
-
-        if state is None:
+                return True
             return False
 
         state.cancel_requested = True
         if state.route == "opus" and state.task_id:
-            cancelled = await self.orchestrator.cancel_task(state.task_id)
-            if cancelled:
-                return True
+            await self.orchestrator.cancel_task(state.task_id)
 
         worker = state.worker
         if worker is not None and not worker.done():
             worker.cancel()
             return True
+
+        if state.cancel_requested and not state.completed:
+            await self._emit_cancelled_event(state)
+            return True
+
         return False
 
     async def background_active_request(self, *, channel: str, request_id: str) -> bool:
@@ -18288,6 +18443,10 @@ class GatewayRuntime:
                 gmail_surface_decision
                 and gmail_surface_decision["decision"] == "suppress"
             ):
+                self._mark_gmail_surface_items_status(
+                    request_id=request_id,
+                    status="suppressed",
+                )
                 self._trace_request_event(
                     request_id=request_id,
                     session_id=session_id,
@@ -18307,6 +18466,10 @@ class GatewayRuntime:
                 gmail_surface_decision
                 and gmail_surface_decision["decision"] == "deliver"
             ):
+                self._mark_gmail_surface_items_status(
+                    request_id=request_id,
+                    status="notified",
+                )
                 self._replace_structured_decision_payload_with_message(
                     event,
                     gmail_surface_decision.get("message"),

@@ -55,3 +55,37 @@ def test_gmail_context_store_upserts_and_lists_recent_items() -> None:
         assert recent[0]["account_email"] == "user@example.com"
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_gmail_context_store_preserves_terminal_status_on_upsert() -> None:
+    from gateway.gmail_context_store import GmailContextStore
+
+    temp_dir = Path(__file__).resolve().parent / f".tmp_{uuid.uuid4().hex}"
+    temp_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        store = GmailContextStore(temp_dir / "gmail_context.db")
+        store.initialize()
+        first = store.upsert_surfaced_item(
+            {
+                "account_id": "acc_1",
+                "message_id": "msg_loop",
+                "thread_id": "thr_loop",
+                "subject": "COSMIC update",
+                "sender": "Cosmic 001 <iamcosmic001@mail.thelearnchain.com>",
+            }
+        )
+        assert store.mark_status(first["surfaced_id"], "notified")
+        again = store.upsert_surfaced_item(
+            {
+                "account_id": "acc_1",
+                "message_id": "msg_loop",
+                "thread_id": "thr_loop",
+                "subject": "COSMIC update",
+                "sender": "Cosmic 001 <iamcosmic001@mail.thelearnchain.com>",
+                "status": "active",
+                "reason": "re-triaged",
+            }
+        )
+        assert again["status"] == "notified"
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)

@@ -99,7 +99,14 @@ class GmailContextStore:
                     priority = excluded.priority,
                     suggested_action = excluded.suggested_action,
                     reason = excluded.reason,
-                    status = excluded.status,
+                    -- Never re-open an item that already finished a surface decision.
+                    status = CASE
+                        WHEN surfaced_gmail_items.status IN (
+                            'notified', 'delivered', 'suppressed', 'ignored', 'self'
+                        )
+                        THEN surfaced_gmail_items.status
+                        ELSE excluded.status
+                    END,
                     item_count = excluded.item_count,
                     source_task_id = excluded.source_task_id,
                     updated_at = excluded.updated_at,

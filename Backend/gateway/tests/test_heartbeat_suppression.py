@@ -196,6 +196,33 @@ def test_gmail_surface_decision_uses_valid_task_envelope_source() -> None:
     assert runtime._task_envelope_source({"source": "unknown_private_source"}) == "user"
 
 
+def test_cosmic_mail_self_gmail_item_is_detected() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime._effective_agent_email_settings = lambda: {
+        "primary_mailbox_address": "iamcosmic001@mail.thelearnchain.com",
+    }
+
+    assert runtime._is_cosmic_mail_self_gmail_item(
+        {
+            "sender": "Cosmic 001 <iamcosmic001@mail.thelearnchain.com>",
+            "subject": "COSMIC update",
+            "message_id": "abc",
+        }
+    )
+    assert runtime._is_cosmic_mail_self_gmail_item(
+        {
+            "from": "alerts@mail.thelearnchain.com",
+            "subject": "Something else",
+        }
+    )
+    assert not runtime._is_cosmic_mail_self_gmail_item(
+        {
+            "sender": "Uma Sundar <dr.umasundar@gmail.com>",
+            "subject": "Fwd: lexicon",
+        }
+    )
+
+
 def test_autonomous_gmail_surface_backgrounds_when_foreground_user_response_active() -> None:
     runtime = object.__new__(GatewayRuntime)
     runtime.active_requests = {
