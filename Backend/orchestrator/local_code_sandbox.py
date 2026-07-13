@@ -203,6 +203,63 @@ def _cosmic_guarded_listdir(path="."):
 _cosmic_os.listdir = _cosmic_guarded_listdir
 '''
 
+_NETWORK_HOST_ALLOWLIST_EXTENSION = '''
+import json as _cosmic_json
+_COSMIC_ALLOWED_HOSTS = _cosmic_json.loads(_cosmic_os.environ.get("COSMIC_CODE_SANDBOX_ALLOWED_HOSTS", "[]") or "[]")
+
+def _cosmic_normalize_host_label(host):
+    text = str(host or "").strip().lower()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    if ":" in text and not text.startswith("http"):
+        text = text.rsplit(":", 1)[0]
+    return text
+
+def _cosmic_host_is_allowed(host):
+    normalized = _cosmic_normalize_host_label(host)
+    if not normalized:
+        return False
+    if not _COSMIC_ALLOWED_HOSTS:
+        return True
+    for allowed in _COSMIC_ALLOWED_HOSTS:
+        allowed_norm = _cosmic_normalize_host_label(allowed)
+        if not allowed_norm:
+            continue
+        if normalized == allowed_norm or normalized.endswith("." + allowed_norm):
+            return True
+    return False
+
+_cosmic_orig_create_connection = _cosmic_socket.create_connection
+def _cosmic_filtered_create_connection(address, *args, **kwargs):
+    host = address[0] if isinstance(address, tuple) and address else address
+    if not _cosmic_host_is_allowed(host):
+        raise PermissionError(f"Network access to host is not allowed: {{host}}")
+    return _cosmic_orig_create_connection(address, *args, **kwargs)
+_cosmic_socket.create_connection = _cosmic_filtered_create_connection
+
+_cosmic_orig_getaddrinfo = _cosmic_socket.getaddrinfo
+def _cosmic_filtered_getaddrinfo(host, port, *args, **kwargs):
+    if host and not _cosmic_host_is_allowed(host):
+        raise PermissionError(f"Network access to host is not allowed: {{host}}")
+    return _cosmic_orig_getaddrinfo(host, port, *args, **kwargs)
+_cosmic_socket.getaddrinfo = _cosmic_filtered_getaddrinfo
+'''
+
+_FONT_FALLBACK_PRELUDE = '''
+try:
+    import matplotlib as _cosmic_mpl
+    _cosmic_mpl.rcParams["font.family"] = "DejaVu Sans"
+    _cosmic_mpl.rcParams["font.sans-serif"] = [
+        "DejaVu Sans",
+        "Liberation Sans",
+        "Arial",
+        "Helvetica",
+        "sans-serif",
+    ]
+except Exception:
+    pass
+'''
+
 
 @dataclass(slots=True)
 class LocalCodeSandboxSettings:
@@ -217,6 +274,7 @@ class LocalCodeSandboxSettings:
     max_file_bytes: int = 25 * 1024 * 1024
     host_read_paths: tuple[str, ...] = ()
     host_write_paths: tuple[str, ...] = ()
+    allowed_hosts: tuple[str, ...] = ()
 
 
 def run_local_code_sandbox(
@@ -272,9 +330,11 @@ def run_local_code_sandbox(
         directory.mkdir(parents=True, exist_ok=True)
 
     script_path = code_dir / "main.py"
-    prelude = _compose_fs_prelude(
+    prelude = _compose_prelude(
         host_read_paths=list(settings.host_read_paths),
         host_write_paths=list(settings.host_write_paths),
+        allow_network=settings.allow_network,
+        allowed_hosts=list(settings.allowed_hosts),
     )
     script_path.write_text(f"{prelude}\n# User code starts here\n{code}\n", encoding="utf-8")
 
@@ -287,7 +347,12 @@ def run_local_code_sandbox(
             root=root,
         )
 
-    env = _build_env(root=root, home_dir=home_dir, allow_network=settings.allow_network)
+    env = _build_env(
+        root=root,
+        home_dir=home_dir,
+        allow_network=settings.allow_network,
+        allowed_hosts=list(settings.allowed_hosts),
+    )
     effective_timeout = _coerce_timeout(timeout_sec, settings.timeout_sec)
     started = time.perf_counter()
     timed_out = False
@@ -424,6 +489,23 @@ def _provision_venv(
     return str(python_exe), "".join(log_parts)
 
 
+def _compose_prelude(
+    *,
+    host_read_paths: list[str],
+    host_write_paths: list[str],
+    allow_network: bool,
+    allowed_hosts: list[str],
+) -> str:
+    prelude = _compose_fs_prelude(
+        host_read_paths=host_read_paths,
+        host_write_paths=host_write_paths,
+    )
+    if allow_network and allowed_hosts:
+        prelude += _NETWORK_HOST_ALLOWLIST_EXTENSION
+    prelude += _FONT_FALLBACK_PRELUDE
+    return prelude
+
+
 def _compose_fs_prelude(*, host_read_paths: list[str], host_write_paths: list[str]) -> str:
     if host_read_paths or host_write_paths:
         return _FS_PRELUDE + _HOST_GRANT_FS_EXTENSION.format(
@@ -433,13 +515,20 @@ def _compose_fs_prelude(*, host_read_paths: list[str], host_write_paths: list[st
     return _FS_PRELUDE
 
 
-def _build_env(*, root: Path, home_dir: Path, allow_network: bool) -> dict[str, str]:
+def _build_env(
+    *,
+    root: Path,
+    home_dir: Path,
+    allow_network: bool,
+    allowed_hosts: list[str] | None = None,
+) -> dict[str, str]:
     env = {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
         "COSMIC_CODE_SANDBOX_ROOT": str(root),
         "COSMIC_CODE_SANDBOX_ALLOW_NETWORK": "true" if allow_network else "false",
+        "COSMIC_CODE_SANDBOX_ALLOWED_HOSTS": json.dumps(allowed_hosts or []),
         "HOME": str(home_dir),
         "USERPROFILE": str(home_dir),
         "TMPDIR": str(root / "tmp"),

@@ -4248,6 +4248,7 @@ class GatewayRuntime:
             max_file_bytes=self.config.code_sandbox_max_file_bytes,
             host_read_paths=tuple(permission.get("host_read_paths") or ()),
             host_write_paths=tuple(permission.get("host_write_paths") or ()),
+            allowed_hosts=tuple(permission.get("allowed_hosts") or ()),
         )
 
     def _sandbox_permission_response_block(self, permission: dict[str, Any]) -> dict[str, Any]:

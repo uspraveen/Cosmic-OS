@@ -153,9 +153,13 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
     if (loading) return 'Checking VM status'
     if (gatewayStatus?.status === 'authenticated') return 'Codex authenticated on VM'
     if (gatewayStatus?.status === 'login_pending') return 'Login waiting for browser approval'
+    if (gatewayStatus?.status === 'relogin_required') return 'Codex needs re-authentication on the VM'
+    if (gatewayStatus?.status === 'login_required') return 'Codex sign-in required on the VM'
     if (authMode === 'api_key') return hasApiKey ? 'API key saved on VM' : 'API key needed'
     return 'ChatGPT sign-in selected'
   }, [authMode, gatewayStatus?.status, hasApiKey, loading])
+
+  const needsReauth = gatewayStatus?.status === 'relogin_required' || gatewayStatus?.status === 'login_required'
 
   const applyGatewayStatus = (rawStatus: unknown) => {
     const status = (rawStatus && typeof rawStatus === 'object' ? rawStatus : {}) as CodexGatewayStatus
@@ -294,12 +298,14 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
             <span>Feeds the VM Alpha agent runner when backend handoff is enabled.</span>
           </div>
         </div>
-        <div className={`cosmic-agents-detail-status-pill ${authMode === 'api_key' && !hasApiKey ? 'warn' : gatewayStatus?.status === 'login_pending' ? 'pending' : 'ready'}`}>
-          {gatewayStatus?.status === 'login_pending'
-            ? 'Pending'
-            : authMode === 'api_key' && !hasApiKey
-              ? 'Setup'
-              : 'Ready'}
+        <div className={`cosmic-agents-detail-status-pill ${needsReauth ? 'warn' : gatewayStatus?.status === 'login_pending' ? 'pending' : authMode === 'api_key' && !hasApiKey ? 'warn' : 'ready'}`}>
+          {needsReauth
+            ? 'Reauth'
+            : gatewayStatus?.status === 'login_pending'
+              ? 'Pending'
+              : authMode === 'api_key' && !hasApiKey
+                ? 'Setup'
+                : 'Ready'}
         </div>
       </div>
 

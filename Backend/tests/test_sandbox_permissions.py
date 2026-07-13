@@ -266,3 +266,44 @@ def test_build_sandbox_permission_receipt_shape() -> None:
     assert payload["permission_id"] == "sbx_perm_test"
     assert payload["network"] is True
     assert "api.github.com" in payload["summary"]
+
+
+def test_local_sandbox_network_blocks_hosts_outside_allowlist(tmp_path: Path) -> None:
+    code = (
+        "import socket\n"
+        "def probe(host):\n"
+        "    try:\n"
+        "        socket.getaddrinfo(host, 80)\n"
+        "        print('ALLOWED:' + host)\n"
+        "    except Exception as exc:\n"
+        "        print('BLOCKED:' + host + ':' + str(exc))\n"
+        "probe('example.com')\n"
+        "probe('blocked.example')\n"
+    )
+    result = run_local_code_sandbox(
+        code=code,
+        artifacts_root=tmp_path / "artifacts",
+        task_id="task_network_allowlist",
+        settings=LocalCodeSandboxSettings(
+            allow_network=True,
+            allowed_hosts=("example.com",),
+        ),
+    )
+    assert result.get("status") == "completed", result
+    stdout = str(result.get("stdout"))
+    assert "ALLOWED:example.com" in stdout
+    assert "BLOCKED:blocked.example" in stdout
+
+
+def test_session_grant_covers_network_host_subset() -> None:
+    granted = union_session_grant(
+        [{"network": True, "allowed_hosts": ["example.com"]}]
+    )
+    assert session_grant_covers(
+        {"network": True, "allowed_hosts": ["example.com"]},
+        granted,
+    )
+    assert not session_grant_covers(
+        {"network": True, "allowed_hosts": ["api.github.com"]},
+        granted,
+    )

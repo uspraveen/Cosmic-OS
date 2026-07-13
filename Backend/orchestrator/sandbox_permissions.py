@@ -148,6 +148,22 @@ def session_grant_covers(requested: dict[str, Any], granted: dict[str, Any]) -> 
         return False
     if requested.get("network") and not granted.get("network"):
         return False
+    requested_hosts = [
+        str(host).strip().lower()
+        for host in (requested.get("allowed_hosts") or [])
+        if str(host).strip()
+    ]
+    granted_hosts = [
+        str(host).strip().lower()
+        for host in (granted.get("allowed_hosts") or [])
+        if str(host).strip()
+    ]
+    if requested_hosts:
+        if not granted_hosts:
+            return False
+        for host in requested_hosts:
+            if host not in granted_hosts:
+                return False
     readable = list(granted.get("host_read_paths") or []) + list(
         granted.get("host_write_paths") or []
     )

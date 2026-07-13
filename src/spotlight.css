@@ -621,6 +621,42 @@ body,
   padding: 14px 20px 0;
 }
 
+.composer-pending-approval-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 20px 0;
+  padding: 8px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 176, 66, 0.35);
+  background: linear-gradient(180deg, rgba(255, 176, 66, 0.16), rgba(255, 176, 66, 0.06));
+  color: rgba(255, 214, 158, 0.95);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.composer-pending-approval-chip:hover {
+  border-color: rgba(255, 176, 66, 0.55);
+  background: linear-gradient(180deg, rgba(255, 176, 66, 0.22), rgba(255, 176, 66, 0.1));
+}
+
+.composer-pending-approval-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgb(255, 176, 66);
+  box-shadow: 0 0 0 3px rgba(255, 176, 66, 0.22);
+  flex-shrink: 0;
+  animation: composer-pending-approval-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes composer-pending-approval-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
 .composer-attachment-chip {
   min-width: 0;
   display: inline-flex;

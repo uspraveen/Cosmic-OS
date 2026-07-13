@@ -11,12 +11,16 @@ import CalendarMonthView from './CalendarMonthView'
 import {
   AUTH_ATTENTION_REMINDER_INTERVAL_MS,
   AUTH_ATTENTION_SNOOZE_MS,
+  getCodexAuthAttentionItems,
+  getCursorAuthAttentionItems,
   getGoogleAuthAttentionItems,
   loadAuthAttentionPrefs,
+  mergeAuthAttentionItems,
   pruneAuthAttentionPrefs,
   saveAuthAttentionPrefs,
   type AuthAttentionItem,
   type AuthAttentionPrefs,
+  type AgentGatewayStatus,
 } from './authAttention'
 import type { IntegrationsSnapshot } from './integrations'
 import {
@@ -479,6 +483,27 @@ export default function DynamicIsland({
 
   const requestIntegrationsSnapshot = useCallback(() => {
     window.cosmic?.getIntegrations?.()
+  }, [])
+
+  const [integrationsSnapshot, setIntegrationsSnapshot] = useState<IntegrationsSnapshot | null>(null)
+  const integrationsSnapshotRef = useRef<IntegrationsSnapshot | null>(null)
+  integrationsSnapshotRef.current = integrationsSnapshot
+
+  const rebuildAuthAttentionItems = useCallback(async (snapshot?: IntegrationsSnapshot | null) => {
+    const googleItems = getGoogleAuthAttentionItems(snapshot)
+    let codexItems: AuthAttentionItem[] = []
+    let cursorItems: AuthAttentionItem[] = []
+    try {
+      const [codexStatus, cursorStatus] = await Promise.all([
+        window.cosmic?.getGatewayCodexStatus?.(),
+        window.cosmic?.getGatewayCursorStatus?.(),
+      ])
+      codexItems = getCodexAuthAttentionItems(codexStatus as AgentGatewayStatus | null | undefined)
+      cursorItems = getCursorAuthAttentionItems(cursorStatus as AgentGatewayStatus | null | undefined)
+    } catch {
+      // Keep Google-only attention items when the VM is offline.
+    }
+    setAuthAttentionItems(mergeAuthAttentionItems(googleItems, codexItems, cursorItems))
   }, [])
 
   const openCalendarEventDetail = useCallback((event: CalendarAgendaEvent) => {
@@ -974,10 +999,12 @@ export default function DynamicIsland({
 
   useEffect(() => {
     const offIntegrations = window.cosmic?.onIntegrationsUpdate((snapshot: IntegrationsSnapshot) => {
-      setAuthAttentionItems(getGoogleAuthAttentionItems(snapshot))
+      setIntegrationsSnapshot(snapshot)
+      void rebuildAuthAttentionItems(snapshot)
     })
     const offShown = window.cosmic?.onShown(() => {
       requestIntegrationsSnapshot()
+      void rebuildAuthAttentionItems(integrationsSnapshotRef.current)
     })
     const offIntegration = window.cosmic?.onIntegrationEvent((event: IntegrationToastEvent) => {
       if (event.provider === 'google') {
@@ -986,14 +1013,18 @@ export default function DynamicIsland({
     })
 
     requestIntegrationsSnapshot()
-    const intervalId = window.setInterval(requestIntegrationsSnapshot, AUTH_ATTENTION_REFRESH_MS)
+    void rebuildAuthAttentionItems(integrationsSnapshotRef.current)
+    const intervalId = window.setInterval(() => {
+      requestIntegrationsSnapshot()
+      void rebuildAuthAttentionItems(integrationsSnapshotRef.current)
+    }, AUTH_ATTENTION_REFRESH_MS)
     return () => {
       offIntegrations?.()
       offShown?.()
       offIntegration?.()
       window.clearInterval(intervalId)
     }
-  }, [requestIntegrationsSnapshot])
+  }, [rebuildAuthAttentionItems, requestIntegrationsSnapshot])
 
   useEffect(() => {
     if (authAttentionReminder) return
@@ -2063,10 +2094,11 @@ export default function DynamicIsland({
       clearTimeout(authAttentionTimerRef.current)
       authAttentionTimerRef.current = null
     }
+    const targetView = authAttentionReminder?.item.settingsView || 'integrations-google'
     setAuthAttentionReminder(null)
-    setSettingsInitialView('integrations-google')
+    setSettingsInitialView(targetView)
     setShowSettings(true)
-  }, [])
+  }, [authAttentionReminder])
 
   const snoozeAuthAttentionReminder = useCallback(() => {
     const item = authAttentionReminder?.item
@@ -2100,6 +2132,11 @@ export default function DynamicIsland({
   const renderAuthAttentionReminder = () => {
     if (!authAttentionReminder) return null
     const { item, count } = authAttentionReminder
+    const providerLabel = item.provider === 'codex'
+      ? 'Alpha Codex'
+      : item.provider === 'cursor'
+        ? 'Alpha Cursor'
+        : 'Google Workspace'
     return (
       <motion.div
         key={item.key}
@@ -2113,7 +2150,7 @@ export default function DynamicIsland({
             <BellRing size={15} strokeWidth={2.2} />
           </div>
           <div className="auth-attention-copy">
-            <span className="auth-attention-provider">Google Workspace</span>
+            <span className="auth-attention-provider">{providerLabel}</span>
             <strong>{item.title}</strong>
             <span className="auth-attention-account">
               {item.email ? item.email : item.accountLabel}

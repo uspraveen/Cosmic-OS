@@ -25,6 +25,8 @@ import {
   type AlphaConsoleAnchor,
 } from './alphaStreamLayout'
 import { appendStreamText, mergeCompletedStreamText } from './streamText'
+import { canClaimActiveStreamSlot, isEventForActiveStream as isEventForActiveStreamIds, shouldBindToLastAssistantMessage } from './streamIdentity'
+import { findPendingApprovals } from './pendingApprovals'
 
 export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'task' | 'meeting' | 'spaces'
@@ -3525,6 +3527,17 @@ export default function App() {
   const backgroundTaskCount = backgroundTasks.length
   const taskDashboardCount = pendingTaskCount + backgroundTaskCount
   const orderedPendingTaskInputs = useMemo(() => [...pendingTaskInputs].reverse(), [pendingTaskInputs])
+  // Approval cards (sandbox permission, Gmail/agent-email drafts, calendar
+  // responses) live inline in their message and never disappear on their
+  // own, but the streaming/task-completed UI around them settles as soon as
+  // the model stops talking - which can be the very turn where it asked for
+  // permission. This keeps a durable, message-independent signal that
+  // something still needs a decision even after the exchange "looks done".
+  const pendingApprovals = useMemo(() => findPendingApprovals(messages), [messages])
+  const pendingApprovalCount = useMemo(
+    () => pendingApprovals.reduce((total, item) => total + item.blockIds.length, 0),
+    [pendingApprovals],
+  )
   const orderedBackgroundTasks = useMemo(() => backgroundTasks
     .map((task, index) => ({ task, index }))
     .filter(({ task }) => task.requestId !== foregroundingRequestId)
@@ -4330,6 +4343,18 @@ export default function App() {
     activeStreamingTaskIdRef.current = null
   }
 
+  // Stream identity guard: decides whether an incoming event belongs to the
+  // single stream we currently treat as "the" foreground stream (the one
+  // driving the composer-disabled/streaming indicator and eligible for the
+  // stop button). Autonomous single-shot deliveries (heartbeat digests,
+  // Gmail surface decisions, cron results) carry their own request/task id
+  // that is never pre-bound, so without this guard they would be treated as
+  // updates to whatever task happens to be active, corrupting its transcript
+  // and prematurely clearing its streaming state. See ./streamIdentity.ts.
+  const isEventForActiveStream = (event: any) => (
+    isEventForActiveStreamIds(event, activeStreamingRequestIdRef.current, activeStreamingTaskIdRef.current)
+  )
+
   const markStreamStopped = (requestId?: string | null, taskId?: string | null) => {
     const normalizedRequestId = String(requestId || '').trim()
     const normalizedTaskId = String(taskId || '').trim()
@@ -4702,7 +4727,10 @@ export default function App() {
     }
 
     const last = messages[messages.length - 1]
-    if (last?.role === 'assistant') {
+    if (
+      last?.role === 'assistant' &&
+      shouldBindToLastAssistantMessage(event, activeStreamingRequestIdRef.current, activeStreamingTaskIdRef.current)
+    ) {
       bindAssistantMessageToEvent(event, last.id)
       return {
         messages,
@@ -5598,7 +5626,12 @@ export default function App() {
 
       if (eventType === 'route_result') {
         if (typeof event.request_id === 'string' && event.request_id.trim()) {
-          activeStreamingRequestIdRef.current = event.request_id.trim()
+          const incomingRequestId = event.request_id.trim()
+          // Never let an unrelated request steal the single "active foreground
+          // stream" slot away from a stream that's already in flight.
+          if (canClaimActiveStreamSlot(incomingRequestId, activeStreamingRequestIdRef.current)) {
+            activeStreamingRequestIdRef.current = incomingRequestId
+          }
         }
         if (!isStreamEventStopped(event)) {
           setIsStreaming(true)
@@ -5618,7 +5651,13 @@ export default function App() {
 
       if (eventType === 'task.created') {
         if (typeof event.task_id === 'string' && event.task_id.trim()) {
-          activeStreamingTaskIdRef.current = event.task_id.trim()
+          const incomingTaskId = event.task_id.trim()
+          if (
+            canClaimActiveStreamSlot(incomingTaskId, activeStreamingTaskIdRef.current) ||
+            isEventForActiveStream(event)
+          ) {
+            activeStreamingTaskIdRef.current = incomingTaskId
+          }
         }
         if (!isStreamEventStopped(event)) {
           setIsStreaming(true)
@@ -5872,8 +5911,10 @@ export default function App() {
             artifacts: producedArtifacts,
           })
         }
-        setIsStreaming(false)
-        clearActiveStreamingRefs()
+        if (isEventForActiveStream(event)) {
+          setIsStreaming(false)
+          clearActiveStreamingRefs()
+        }
         return
       }
 
@@ -6010,9 +6051,11 @@ export default function App() {
       }
 
       if (eventType === 'task.failed') {
-        setIsStreaming(false)
-        clearActiveStreamingRefs()
-        setStreamingProgress('')
+        if (isEventForActiveStream(event)) {
+          setIsStreaming(false)
+          clearActiveStreamingRefs()
+          setStreamingProgress('')
+        }
         if (event.task_id) {
           removePendingTaskInputsForTask(String(event.task_id))
         }
@@ -6042,9 +6085,11 @@ export default function App() {
             typeof event.task_id === 'string' ? event.task_id : null,
           )
         }
-        setIsStreaming(false)
-        clearActiveStreamingRefs()
-        setStreamingProgress('')
+        if (isEventForActiveStream(event)) {
+          setIsStreaming(false)
+          clearActiveStreamingRefs()
+          setStreamingProgress('')
+        }
         if (event.task_id) {
           removePendingTaskInputsForTask(String(event.task_id))
         }
@@ -6089,9 +6134,11 @@ export default function App() {
       }
 
       if (eventType === 'error') {
-        setIsStreaming(false)
-        clearActiveStreamingRefs()
-        setStreamingProgress('')
+        if (isEventForActiveStream(event)) {
+          setIsStreaming(false)
+          clearActiveStreamingRefs()
+          setStreamingProgress('')
+        }
         if (event.message) {
           setMessages((prev) => {
             const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
@@ -6370,7 +6417,7 @@ export default function App() {
     // Reserve the assistant slot before the first streaming event arrives.
     setMessages(prev => [
       ...prev,
-      createAssistantMessage({ id: assistantMessageId }),
+      createAssistantMessage({ id: assistantMessageId, requestId }),
     ])
 
     setIsStreaming(true)
@@ -8131,6 +8178,18 @@ export default function App() {
                   </div>
                 ) : (
                   <>
+                    {pendingApprovalCount > 0 && (
+                      <button
+                        type="button"
+                        className="composer-pending-approval-chip"
+                        onClick={scrollToBottom}
+                      >
+                        <span className="composer-pending-approval-chip-dot" aria-hidden="true" />
+                        {pendingApprovalCount === 1
+                          ? 'Cosmic is waiting on your approval above'
+                          : `Cosmic is waiting on ${pendingApprovalCount} approvals above`}
+                      </button>
+                    )}
                     {pendingAttachments.length > 0 && (
                       <div className="composer-attachment-bar">
                         {pendingAttachments.map((attachment) => (

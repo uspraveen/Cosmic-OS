@@ -121,9 +121,13 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
     if (loading) return 'Checking VM status'
     if (gatewayStatus?.status === 'authenticated') return 'Cursor authenticated on VM'
     if (gatewayStatus?.status === 'login_pending') return 'OAuth waiting for browser approval'
+    if (gatewayStatus?.status === 'relogin_required') return 'Cursor needs re-authentication on the VM'
+    if (gatewayStatus?.status === 'login_required') return 'Cursor OAuth sign-in required on the VM'
     if (gatewayStatus?.cli?.available === false) return 'Cursor CLI missing on VM'
     return 'OAuth sign-in required'
   }, [gatewayStatus, loading])
+
+  const needsReauth = gatewayStatus?.status === 'relogin_required' || gatewayStatus?.status === 'login_required'
 
   const loginOutput = [
     ...(gatewayStatus?.login_session?.stdout || []),
@@ -212,7 +216,13 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
           </div>
         </div>
         <div className={`cosmic-agents-detail-status-pill ${gatewayStatus?.status === 'authenticated' ? 'ready' : gatewayStatus?.status === 'login_pending' ? 'pending' : 'warn'}`}>
-          {gatewayStatus?.status === 'authenticated' ? 'Ready' : gatewayStatus?.status === 'login_pending' ? 'Pending' : 'Setup'}
+          {gatewayStatus?.status === 'authenticated'
+            ? 'Ready'
+            : gatewayStatus?.status === 'login_pending'
+              ? 'Pending'
+              : needsReauth
+                ? 'Reauth'
+                : 'Setup'}
         </div>
       </div>
 

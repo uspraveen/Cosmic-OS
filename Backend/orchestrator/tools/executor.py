@@ -414,6 +414,7 @@ class ToolExecutor:
             max_file_bytes=settings.max_file_bytes,
             host_read_paths=tuple(capabilities.get("host_read_paths") or ()),
             host_write_paths=tuple(capabilities.get("host_write_paths") or ()),
+            allowed_hosts=tuple(capabilities.get("allowed_hosts") or ()),
         )
         return run_local_code_sandbox(
             code=code,
