@@ -424,6 +424,33 @@ async def resolve_credential(body: ResolveRequest, request: Request):
     return result
 
 
+@router.post("/internal/credentials/google/auth-health-version")
+async def google_auth_health_version(body: GoogleAuthHealthRequest, request: Request):
+    """Cheap change marker for the auth-health probe cache.
+
+    Pure local DB read - no token refresh, no Google API calls. Agents poll
+    this on every heartbeat to detect that an account's status changed (e.g.
+    a user just reconnected) and bypass their longer-lived auth-health cache
+    immediately instead of waiting out the full cache TTL.
+    """
+    _check_internal_token(request)
+    mgr = _get_manager(request)
+    tool = _normalize_google_tool(body.tool)
+    required_scopes = _normalize_scope_list(body.required_scopes)
+    if not tool:
+        raise HTTPException(status_code=400, detail="Unknown Google tool for auth health probe.")
+    accounts = [
+        account
+        for account in mgr.list_accounts("google")
+        if _account_participates_in_tool(account, tool=tool, required_scopes=required_scopes)
+    ]
+    version = "|".join(
+        f"{a.get('account_id')}:{a.get('status')}:{a.get('updated_at')}"
+        for a in sorted(accounts, key=lambda a: str(a.get("account_id") or ""))
+    )
+    return {"version": version}
+
+
 @router.post("/internal/credentials/google/auth-health")
 async def google_auth_health(body: GoogleAuthHealthRequest, request: Request):
     """Probe Google auth health for a specialist without mutating user data.

@@ -411,6 +411,71 @@ async def test_agent_runtime_publishes_google_provider_auth_health(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_agent_runtime_google_auth_health_version_invalidates_cache_early(tmp_path: Path) -> None:
+    """A reconnect mid-cache-window must be picked up on the next probe, not
+    only after the full provider_health_probe_interval_sec has elapsed."""
+    card_path = _write_google_agent_card(tmp_path)
+    client = FakeRedis()
+    probe_calls = 0
+    version_calls = 0
+    current_version = "acc_1:reauth_required:2026-01-01T00:00:00Z"
+    current_healthy = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal probe_calls, version_calls
+        if request.url.path == "/internal/credentials/google/auth-health-version":
+            version_calls += 1
+            return httpx.Response(200, json={"version": current_version})
+        probe_calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "status": "healthy" if current_healthy else "reauth_required",
+                "healthy": current_healthy,
+                "available": current_healthy,
+                "provider": "google",
+                "tool": "gmail",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        agent = DummyAgent(
+            agent_card_path=card_path,
+            redis_client=client,
+            registry_db_path=tmp_path / "registry.db",
+            instance_id="inst_001",
+            agent_secret="agent-secret",
+            gateway_url="http://gateway",
+            gateway_internal_token="internal-token",
+            http_client=http_client,
+        )
+
+        first = await agent.provider_health_probe()
+        assert first["status"] == "reauth_required"
+        assert probe_calls == 1
+
+        # Nothing changed yet and we're still well inside the card's 30s TTL -
+        # a second call should reuse the cached result, not re-run the
+        # expensive probe (it should still do the cheap version check though).
+        second = await agent.provider_health_probe()
+        assert second["status"] == "reauth_required"
+        assert probe_calls == 1
+        assert version_calls == 2
+
+        # Simulate the user successfully reconnecting mid-cache-window: the
+        # account row changed, so the cheap version marker changes even
+        # though we're nowhere near the 30s TTL yet.
+        current_version = "acc_1:active:2026-01-01T00:05:00Z"
+        current_healthy = True
+
+        third = await agent.provider_health_probe()
+        assert third["status"] == "healthy"
+        assert probe_calls == 2  # the version change forced a fresh, real probe
+
+        await agent.stop()
+
+
+@pytest.mark.asyncio
 async def test_agent_runtime_refreshes_heartbeat_on_load_transition(tmp_path: Path) -> None:
     card_path = _write_agent_card(tmp_path)
     client = FakeRedis()

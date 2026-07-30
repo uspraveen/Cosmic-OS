@@ -120,6 +120,7 @@ class AgentRuntime:
         self.memory_read: MemoryRead | None = None
         self.memory_write: MemoryWrite | None = None
         self._provider_health_probe_cache: dict[str, Any] | None = None
+        self._provider_health_probe_cache_version: str | None = None
         self._provider_health_probe_last_at = 0.0
 
     async def on_startup(self) -> None:
@@ -533,20 +534,62 @@ class AgentRuntime:
         For Google-backed agents, this asks Gateway to verify account auth and
         run a tiny scoped provider call. Results are cached so 10s heartbeats
         do not hammer Google APIs.
+
+        The full probe is expensive (it can refresh tokens and makes a live
+        Google API call), so it is cached for provider_health_probe_interval_sec.
+        That alone meant a user reconnecting an account could still see stale
+        "needs reauth" heartbeats for up to that whole interval. Before trusting
+        a live cache entry we do one cheap version check (a local DB read, no
+        Google calls) and only reuse the cache if nothing has actually changed.
         """
         probe_config = self._google_provider_health_probe_config()
         if probe_config is None:
             return None
         now = asyncio.get_running_loop().time()
-        if (
+        cache_live = (
             self._provider_health_probe_cache is not None
             and now - self._provider_health_probe_last_at < self.provider_health_probe_interval_sec
-        ):
-            return dict(self._provider_health_probe_cache)
+        )
+        if cache_live:
+            current_version = await self._fetch_provider_health_version(probe_config)
+            # A version-check failure fails open (keep the cache) rather than
+            # forcing an expensive probe on every transient network hiccup.
+            if current_version is None or current_version == self._provider_health_probe_cache_version:
+                return dict(self._provider_health_probe_cache)
         probe = await self._run_google_provider_health_probe(probe_config)
         self._provider_health_probe_cache = dict(probe)
+        self._provider_health_probe_cache_version = await self._fetch_provider_health_version(probe_config)
         self._provider_health_probe_last_at = now
         return probe
+
+    async def _fetch_provider_health_version(self, probe_config: dict[str, Any]) -> str | None:
+        """Cheap change marker for the account(s) behind this probe. Returns
+        None (meaning "unknown, don't invalidate") on any failure."""
+        if not self.gateway_url or not self.gateway_internal_token:
+            return None
+        url = f"{self.gateway_url.rstrip('/')}/internal/credentials/google/auth-health-version"
+        try:
+            response = await self._http_client.post(
+                url,
+                json={
+                    "agent_id": self.agent_id,
+                    "tool": probe_config["tool"],
+                    "required_scopes": probe_config["required_scopes"],
+                },
+                headers={
+                    "X-Internal-Token": self.gateway_internal_token,
+                    "Content-Type": "application/json",
+                },
+                timeout=5.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                return None
+            version = payload.get("version")
+            return str(version) if version is not None else None
+        except Exception:
+            return None
 
     async def _run_google_provider_health_probe(self, probe_config: dict[str, Any]) -> dict[str, Any]:
         if not self.gateway_url or not self.gateway_internal_token:
