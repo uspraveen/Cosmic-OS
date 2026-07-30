@@ -1832,8 +1832,9 @@
 
 .cosmic-google-card-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
   padding: 18px 20px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.02);
@@ -1844,6 +1845,7 @@
   align-items: center;
   gap: 14px;
   min-width: 0;
+  width: 100%;
 }
 
 .cosmic-google-avatar {
@@ -1870,6 +1872,7 @@
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .cosmic-google-card-info strong {
@@ -1892,8 +1895,8 @@
 
 .cosmic-google-card-badges {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  flex-shrink: 0;
 }
 
 .cosmic-google-badge {
