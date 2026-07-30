@@ -204,6 +204,7 @@ interface IntegrationToastEvent {
   provider?: string
   type?: string
   message?: string
+  account_id?: string
   account_label?: string
   email?: string
   display_name?: string
@@ -232,6 +233,13 @@ const CALENDAR_REFRESH_MS = 5 * 60 * 1000
 const CALENDAR_STALE_AFTER_MS = 2 * 60 * 1000
 const AUTH_ATTENTION_REFRESH_MS = 5 * 60 * 1000
 const AUTH_ATTENTION_AUTO_DISMISS_MS = 10 * 1000
+// A snapshot fetched moments after a successful reconnect can still race it
+// (a downstream health cache, the post-event snapshot refetch, etc.) and
+// briefly report the account as needing reauth again. Suppress reauth
+// attention items for a recently-reconnected account for this long so that
+// race can never surface as a confusing "needs reauth" notification right
+// after the user was just told the account connected successfully.
+const RECENT_RECONNECT_GRACE_MS = 90 * 1000
 
 /** Severe + advisory island alerts; used by weather slide and auto-peek scheduling. */
 const WEATHER_ALERT_PEEK_MS = 5000
@@ -447,6 +455,9 @@ export default function DynamicIsland({
 
   // Temporary Google integration toast (connect / disconnect / remove) — show in island then auto-dismiss
   const [integrationToast, setIntegrationToast] = useState<IntegrationToastState | null>(null)
+  // Accounts that just completed a successful reconnect - see
+  // RECENT_RECONNECT_GRACE_MS above.
+  const recentlyReconnectedRef = useRef<Map<string, number>>(new Map())
   const [authAttentionItems, setAuthAttentionItems] = useState<AuthAttentionItem[]>([])
   const [authAttentionPrefs, setAuthAttentionPrefs] = useState<AuthAttentionPrefs>(() => loadAuthAttentionPrefs())
   const [authAttentionReminder, setAuthAttentionReminder] = useState<AuthAttentionReminderState | null>(null)
@@ -490,7 +501,12 @@ export default function DynamicIsland({
   integrationsSnapshotRef.current = integrationsSnapshot
 
   const rebuildAuthAttentionItems = useCallback(async (snapshot?: IntegrationsSnapshot | null) => {
-    const googleItems = getGoogleAuthAttentionItems(snapshot)
+    const now = Date.now()
+    const recent = recentlyReconnectedRef.current
+    for (const [accountId, reconnectedAt] of recent) {
+      if (now - reconnectedAt > RECENT_RECONNECT_GRACE_MS) recent.delete(accountId)
+    }
+    const googleItems = getGoogleAuthAttentionItems(snapshot).filter((item) => !recent.has(item.accountId))
     let codexItems: AuthAttentionItem[] = []
     let cursorItems: AuthAttentionItem[] = []
     try {
@@ -1122,6 +1138,9 @@ export default function DynamicIsland({
           provider,
         )
       } else if (t === 'auth_success') {
+        if (event.account_id) {
+          recentlyReconnectedRef.current.set(event.account_id, Date.now())
+        }
         showToast(
           'success',
           accountName ? `Connected ${accountName}` : 'Google connected',
