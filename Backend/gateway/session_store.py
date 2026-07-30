@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
@@ -2114,10 +2115,15 @@ class SessionStore:
             )
             connection.commit()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self):
         connection = sqlite3.connect(str(self.db_path), check_same_thread=False)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _ensure_column(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
@@ -377,7 +378,12 @@ class MemoryWriteAuditStore:
             "created_at": row["created_at"],
         }
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.db_path, check_same_thread=False)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()

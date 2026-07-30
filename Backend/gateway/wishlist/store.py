@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
@@ -745,7 +746,12 @@ class CapabilityWishlistStore:
             return ""
         return " ".join(f"{token}*" for token in tokens[:10])
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()

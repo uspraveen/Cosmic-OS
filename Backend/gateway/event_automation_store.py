@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
@@ -417,12 +418,17 @@ class EventAutomationStore:
             "updated_at": row["updated_at"],
         }
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _loads(value: Any) -> dict[str, Any]:

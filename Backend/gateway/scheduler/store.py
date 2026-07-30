@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
@@ -1105,10 +1106,15 @@ class SchedulerStore:
                 ).fetchall()
         return [self._heartbeat_consumption_record(row) for row in rows if row is not None]
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self):
         connection = sqlite3.connect(str(self.db_path), check_same_thread=False)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _clean_optional_text(value: Any) -> str | None:

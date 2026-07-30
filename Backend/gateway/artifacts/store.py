@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -670,10 +671,15 @@ class ArtifactStore:
             )
             connection.commit()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, column_type: str) -> None:
         rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
