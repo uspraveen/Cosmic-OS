@@ -369,6 +369,12 @@ def test_cursor_model_normalization_preserves_explicit_fast_variant() -> None:
     assert normalize_cursor_model("Composer 2.5") == "composer-2.5"
     assert normalize_cursor_model("composer-2.5-fast") == "composer-2.5-fast"
     assert normalize_cursor_model("auto") is None
+    assert normalize_cursor_model("Grok") == "cursor-grok-4.5-high"
+    assert normalize_cursor_model("Cursor Grok 4.5") == "cursor-grok-4.5-high"
+    assert normalize_cursor_model("cursor-grok-4.5") == "cursor-grok-4.5-high"
+    assert normalize_cursor_model("cursor-grok-4.5-high") == "cursor-grok-4.5-high"
+    assert normalize_cursor_model("cursor-grok-4.5-high-fast") == "cursor-grok-4.5-high-fast"
+    assert normalize_cursor_model("cursor-grok-4.5-medium") == "cursor-grok-4.5-medium"
 
 
 def test_cursor_runner_detects_fast_model_mismatch(tmp_path: Path) -> None:
@@ -391,6 +397,14 @@ def test_cursor_runner_detects_fast_model_mismatch(tmp_path: Path) -> None:
     assert runner._model_mismatch(
         requested_model="composer-2.5",
         observed_model="Composer 2",
+    )
+    assert runner._model_mismatch(
+        requested_model="cursor-grok-4.5-high",
+        observed_model="Cursor Grok 4.5 Fast",
+    )
+    assert not runner._model_mismatch(
+        requested_model="cursor-grok-4.5-high",
+        observed_model="Cursor Grok 4.5",
     )
 
 

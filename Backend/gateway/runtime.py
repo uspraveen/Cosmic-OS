@@ -4042,6 +4042,9 @@ class GatewayRuntime:
         if status not in {"pending", "failed"}:
             return {"status": "ignored", "approval": approval, "reason": f"approval_is_{status or 'unknown'}"}
 
+        # Drop any cached retryable send failure so Approve can actually retry.
+        await self._clear_gmail_send_draft_idempotency(approval)
+
         self.gmail_approval_store.mark_sending(approval_id)
         result = await self._dispatch_gmail_send_draft(approval)
         if self._safe_text(result.get("status")) == "completed":
@@ -5080,7 +5083,8 @@ class GatewayRuntime:
             priority="high",
             signature="",
             created_at=utcnow(),
-            source="approval_edit",
+            # User edited the pending draft in the desktop UI.
+            source="user",
             source_id=f"gmail:{self._safe_text(approval.get('approval_id'))}",
             channel="gmail",
         )
@@ -5231,6 +5235,26 @@ class GatewayRuntime:
             poll_interval_sec=self.config.gmail_process_inbound_poll_interval_sec,
         )
 
+    async def _clear_gmail_send_draft_idempotency(self, approval: dict[str, Any]) -> None:
+        if self._redis is None:
+            return
+        account_id = self._safe_text(approval.get("account_id"))
+        draft_id = self._safe_text(approval.get("draft_id"))
+        if not account_id or not draft_id:
+            return
+        key = f"gmail-send-draft:{account_id}:{draft_id}"
+        try:
+            await self._redis.delete(
+                f"idempotency:{key}",
+                f"idempotency:result:{key}",
+            )
+        except Exception:
+            logger.exception(
+                "gateway.gmail_approval.idempotency_clear_failed account_id=%s draft_id=%s",
+                account_id,
+                draft_id,
+            )
+
     async def _dispatch_gmail_send_draft(self, approval: dict[str, Any]) -> dict[str, Any]:
         if self._redis is None:
             return {"status": "failed", "error_message": "Redis is not available for Gmail send."}
@@ -5271,7 +5295,8 @@ class GatewayRuntime:
             priority="high",
             signature="",
             created_at=utcnow(),
-            source="approval",
+            # User clicked approve in the desktop UI; keep provenance in source_id.
+            source="user",
             source_id=f"gmail:{self._safe_text(approval.get('approval_id'))}",
             channel="gmail",
         )

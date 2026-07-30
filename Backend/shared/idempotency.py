@@ -81,11 +81,22 @@ async def execute_with_idempotency(
     try:
         result = await handler(task)
         if isinstance(result, AgentResult):
-            await client.set(
-                result_key,
-                result.model_dump_json(),
-                ex=RESULT_TTL_SEC,
+            # Never cache retryable failures — otherwise a transient Gmail/API
+            # error (e.g. 404 during reconnect) blocks every later retry for 24h.
+            error = result.error
+            retryable_failure = (
+                result.status == "failed"
+                and error is not None
+                and bool(getattr(error, "retryable", False))
             )
+            if retryable_failure:
+                await client.delete(dedupe_key)
+            else:
+                await client.set(
+                    result_key,
+                    result.model_dump_json(),
+                    ex=RESULT_TTL_SEC,
+                )
         return result
     except Exception:
         await client.delete(dedupe_key)

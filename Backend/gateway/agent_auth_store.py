@@ -35,6 +35,18 @@ _CURSOR_MODEL_ALIASES = {
     "composer-2.5-normal": "composer-2.5",
     "composer 2.5 normal": "composer-2.5",
     "normal composer 2.5": "composer-2.5",
+    # Cursor Grok 4.5 — High effort, not Fast (effort/fast are part of the CLI model id).
+    "grok": "cursor-grok-4.5-high",
+    "grok 4.5": "cursor-grok-4.5-high",
+    "grok4.5": "cursor-grok-4.5-high",
+    "grok-4.5": "cursor-grok-4.5-high",
+    "grok-4.5-high": "cursor-grok-4.5-high",
+    "cursor grok": "cursor-grok-4.5-high",
+    "cursor-grok": "cursor-grok-4.5-high",
+    "cursor grok 4.5": "cursor-grok-4.5-high",
+    "cursor-grok-4.5": "cursor-grok-4.5-high",
+    "cursor-grok-4.5-high": "cursor-grok-4.5-high",
+    "cursor grok 4.5 high": "cursor-grok-4.5-high",
 }
 
 
@@ -88,7 +100,7 @@ class AgentAuthStore:
             PROVIDER_CURSOR,
             include_secret=include_secret,
             default_auth_mode="oauth",
-            default_preferred_model="composer-2.5",
+            default_preferred_model="cursor-grok-4.5-high",
         )
 
     def save_codex(

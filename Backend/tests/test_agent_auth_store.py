@@ -93,7 +93,7 @@ def test_cursor_auth_store_uses_oauth_without_api_key_secret() -> None:
         store.initialize()
 
         initial = store.get_cursor(include_secret=False)
-        assert initial["preferred_model"] == "composer-2.5"
+        assert initial["preferred_model"] == "cursor-grok-4.5-high"
 
         saved = store.save_cursor(
             preferred_model="Composer 2",
@@ -113,6 +113,13 @@ def test_cursor_auth_store_uses_oauth_without_api_key_secret() -> None:
         updated = store.save_cursor(approval_mode="full_auto")
         assert updated["preferred_model"] == "composer-2.5"
         assert updated["approval_mode"] == "full_auto"
+
+        grok = store.save_cursor(preferred_model="Grok 4.5")
+        assert grok["preferred_model"] == "cursor-grok-4.5-high"
+
+        # Explicit Fast variant must not be rewritten to High.
+        grok_fast = store.save_cursor(preferred_model="cursor-grok-4.5-high-fast")
+        assert grok_fast["preferred_model"] == "cursor-grok-4.5-high-fast"
 
         manual = store.save_cursor(preferred_model="gpt-5")
         assert manual["preferred_model"] == "gpt-5"

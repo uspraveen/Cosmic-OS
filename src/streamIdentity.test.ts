@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  canAdoptTaskForActiveStream,
   canClaimActiveStreamSlot,
   isEventForActiveStream,
   shouldBindToLastAssistantMessage,
@@ -48,6 +49,58 @@ describe('shouldBindToLastAssistantMessage', () => {
     expect(
       shouldBindToLastAssistantMessage({ request_id: 'gmail_surface_req_7' }, 'req_document_task', null),
     ).toBe(false)
+  })
+})
+
+describe('canAdoptTaskForActiveStream', () => {
+  it("adopts the foreground request's own task id (request id matches)", () => {
+    expect(
+      canAdoptTaskForActiveStream({ request_id: 'req_user', task_id: 'task_1' }, 'req_user', null),
+    ).toBe(true)
+  })
+
+  it('adopts a task when nothing is active at all (idle heartbeat foreground)', () => {
+    expect(
+      canAdoptTaskForActiveStream({ request_id: 'req_heartbeat_1', task_id: 'task_hb' }, null, null),
+    ).toBe(true)
+  })
+
+  it("refuses an unrelated autonomous task while the user's request is streaming", () => {
+    // Regression test for the chimera identity: the user's request holds the
+    // request slot, the task slot is still empty, and a heartbeat/cron
+    // task.created races in. Adopting it would make the autonomous task's
+    // completion clear the user's streaming state and break the stop button.
+    expect(
+      canAdoptTaskForActiveStream({ request_id: 'req_heartbeat_1', task_id: 'task_hb' }, 'req_user', null),
+    ).toBe(false)
+  })
+
+  it('refuses a task with no request id while another request is active', () => {
+    expect(
+      canAdoptTaskForActiveStream({ task_id: 'task_orphan' }, 'req_user', null),
+    ).toBe(false)
+  })
+
+  it('allows re-adopting the already-tracked task id', () => {
+    expect(
+      canAdoptTaskForActiveStream({ task_id: 'task_1' }, 'req_user', 'task_1'),
+    ).toBe(true)
+  })
+
+  it('lets the active request rebind to a newer task id it spawned', () => {
+    expect(
+      canAdoptTaskForActiveStream({ request_id: 'req_user', task_id: 'task_2' }, 'req_user', 'task_1'),
+    ).toBe(true)
+  })
+
+  it("refuses to replace the in-flight task id from a foreign request", () => {
+    expect(
+      canAdoptTaskForActiveStream({ request_id: 'req_cron_5', task_id: 'task_other' }, 'req_user', 'task_1'),
+    ).toBe(false)
+  })
+
+  it('ignores events without a task id', () => {
+    expect(canAdoptTaskForActiveStream({ request_id: 'req_user' }, null, null)).toBe(false)
   })
 })
 

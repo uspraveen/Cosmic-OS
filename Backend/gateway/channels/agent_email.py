@@ -603,11 +603,13 @@ class AgentEmailAdapter(ChannelAdapter):
         event_type = _safe_text(message.get("type"))
         if not event_type:
             return True
+        # Never email raw gateway/orchestrator exception payloads. Those arrive as
+        # type=error with message=str(exc) and previously became "COSMIC notification"
+        # emails like "'NoneType' object is not subscriptable".
         return event_type in {
             "response.complete",
             "task.failed",
             "task.cancelled",
-            "error",
         }
 
     def _build_html_body(self, text_body: str) -> str:

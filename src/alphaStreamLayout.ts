@@ -111,7 +111,7 @@ export const ensureAlphaConsoleAnchor = (
   if (existing.some((item) => alphaTaskKey(item.taskId) === key)) {
     return existing
   }
-  return [...existing, { taskId: taskId ?? null, offset }].sort((a, b) => a.offset - b.offset)
+  return [...existing, { taskId: taskId ?? null, offset: safeOffset }].sort((a, b) => a.offset - b.offset)
 }
 
 export const buildAlphaStreamSegments = (options: {

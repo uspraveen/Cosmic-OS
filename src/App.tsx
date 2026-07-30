@@ -25,7 +25,8 @@ import {
   type AlphaConsoleAnchor,
 } from './alphaStreamLayout'
 import { appendStreamText, mergeCompletedStreamText } from './streamText'
-import { canClaimActiveStreamSlot, isEventForActiveStream as isEventForActiveStreamIds, shouldBindToLastAssistantMessage } from './streamIdentity'
+import { canAdoptTaskForActiveStream, canClaimActiveStreamSlot, extractEventStreamIds, isEventForActiveStream as isEventForActiveStreamIds, shouldBindToLastAssistantMessage } from './streamIdentity'
+import { groupRepliesWithTheirQuery } from './transcriptOrder'
 import { findPendingApprovals } from './pendingApprovals'
 
 export type SearchPosition = 'bottom' | 'middle'
@@ -1018,7 +1019,7 @@ const buildProgressActivityEntries = (
 }
 
 const historyToMessages = (history: any[] = []): Message[] => {
-  return history
+  return groupRepliesWithTheirQuery(history
     .filter((item) => item && (item.role === 'user' || item.role === 'assistant'))
     .map((item, index) => ({
       id: String(item.message_id || `${item.role}-${index}-${crypto.randomUUID()}`),
@@ -1045,7 +1046,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       createdAt: typeof item?.created_at === 'string' ? item.created_at : null,
       activity: typeof item?.metadata?.activity === 'string' ? item.metadata.activity : undefined,
       progress: normalizeTabularProgress(item?.metadata?.tabular_progress) ?? normalizeDocsProgress(item?.metadata?.docs_progress),
-    }))
+    })))
 }
 
 const isHeartbeatMessage = (message: Pick<Message, 'role' | 'source' | 'sourceId'>) => (
@@ -1185,7 +1186,11 @@ const normalizeForegroundStreamSnapshots = (value: unknown): GatewayForegroundSt
     })
 }
 
-const mergeHydratedMessages = (current: Message[], hydrated: Message[]): Message[] => {
+const mergeHydratedMessages = (
+  current: Message[],
+  hydrated: Message[],
+  preserveInFlight: { requestId?: string | null; taskId?: string | null } = {},
+): Message[] => {
   if (!Array.isArray(hydrated) || hydrated.length === 0) {
     return hydrated
   }
@@ -1201,7 +1206,8 @@ const mergeHydratedMessages = (current: Message[], hydrated: Message[]): Message
     }
   }
 
-  return hydrated.map((message) => {
+  const consumed = new Set<Message>()
+  const merged = hydrated.map((message) => {
     const existing =
       (typeof message.id === 'string' && message.id.trim()
         ? currentById.get(message.id.trim())
@@ -1213,6 +1219,7 @@ const mergeHydratedMessages = (current: Message[], hydrated: Message[]): Message
     if (!existing) {
       return message
     }
+    consumed.add(existing)
 
     return {
       ...message,
@@ -1240,6 +1247,27 @@ const mergeHydratedMessages = (current: Message[], hydrated: Message[]): Message
       backgroundState: message.backgroundState ?? existing.backgroundState,
     }
   })
+
+  // A history refresh can land while a stream is still in flight; its
+  // assistant placeholder (and, right after send, the user message) is not
+  // persisted server-side yet, so a plain replace would erase the streaming
+  // bubble mid-answer. Carry those messages over and regroup so the
+  // placeholder stays attached to its query.
+  const inFlightRequestId = String(preserveInFlight.requestId || '').trim()
+  const inFlightTaskId = String(preserveInFlight.taskId || '').trim()
+  const carried = (inFlightRequestId || inFlightTaskId)
+    ? current.filter((message) => (
+      !consumed.has(message) &&
+      (
+        (inFlightRequestId && message.requestId === inFlightRequestId) ||
+        (inFlightTaskId && message.sourceId === inFlightTaskId)
+      )
+    ))
+    : []
+  if (carried.length === 0) {
+    return merged
+  }
+  return groupRepliesWithTheirQuery([...merged, ...carried])
 }
 
 /** Extract a human-readable channel label from the raw channel string. */
@@ -4476,10 +4504,10 @@ export default function App() {
       ))
       if (!historyHasActiveAssistant && activeInFlightMessages.length > 0) {
         const historyMessageIds = new Set(historyMessages.map((message) => message.id))
-        const nextMessages = [
+        const nextMessages = groupRepliesWithTheirQuery([
           ...historyMessages,
           ...activeInFlightMessages.filter((message) => !historyMessageIds.has(message.id)),
-        ]
+        ])
         setMessages(nextMessages)
         messagesRef.current = nextMessages
         return
@@ -4548,6 +4576,7 @@ export default function App() {
       }
     }
 
+    nextMessages = groupRepliesWithTheirQuery(nextMessages)
     setMessages(nextMessages)
     messagesRef.current = nextMessages
     if (usingHistoryTail) {
@@ -4726,9 +4755,42 @@ export default function App() {
       }
     }
 
+    // Recover the stream's own bubble by identity even when the in-flight
+    // binding maps were reset (e.g. by a history refresh mid-stream). This
+    // must run before the last-bubble fallback: after an autonomous delivery
+    // (heartbeat/cron) lands, "last assistant message" can be that delivery,
+    // and binding a chunk to it would splice the user's answer into it.
+    const { requestId: eventRequestId, taskId: eventTaskId } = extractEventStreamIds(event)
+    if (eventRequestId || eventTaskId) {
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const candidate = messages[index]
+        if (candidate.role !== 'assistant') {
+          continue
+        }
+        if (
+          (eventRequestId && candidate.requestId === eventRequestId) ||
+          (eventTaskId && candidate.sourceId === eventTaskId)
+        ) {
+          bindAssistantMessageToEvent(event, candidate.id)
+          return {
+            messages,
+            messageId: candidate.id,
+          }
+        }
+      }
+    }
+
     const last = messages[messages.length - 1]
+    const lastBelongsToDifferentStream = Boolean(
+      last?.role === 'assistant' &&
+      (
+        (last.requestId && eventRequestId && last.requestId !== eventRequestId) ||
+        (last.sourceId && eventTaskId && last.sourceId !== eventTaskId)
+      ),
+    )
     if (
       last?.role === 'assistant' &&
+      !lastBelongsToDifferentStream &&
       shouldBindToLastAssistantMessage(event, activeStreamingRequestIdRef.current, activeStreamingTaskIdRef.current)
     ) {
       bindAssistantMessageToEvent(event, last.id)
@@ -4741,7 +4803,11 @@ export default function App() {
     const messageId = createAssistantMessageId()
     bindAssistantMessageToEvent(event, messageId)
     return {
-      messages: [...messages, createAssistantMessage({ id: messageId })],
+      messages: [...messages, createAssistantMessage({
+        id: messageId,
+        requestId: eventRequestId || null,
+        sourceId: eventTaskId || null,
+      })],
       messageId,
     }
   }
@@ -4759,7 +4825,10 @@ export default function App() {
       resetInFlightAssistantMaps()
       rememberHeartbeatConsumptions(payload?.heartbeat_consumptions)
       const hydratedMessages = historyToMessages(payload?.messages)
-      setMessages((prev) => mergeHydratedMessages(prev, hydratedMessages))
+      setMessages((prev) => mergeHydratedMessages(prev, hydratedMessages, {
+        requestId: activeStreamingRequestIdRef.current,
+        taskId: activeStreamingTaskIdRef.current,
+      }))
       enqueueUnreadHeartbeatNotificationsFromMessages(hydratedMessages, targetSessionId)
       activeSessionIdRef.current = targetSessionId
       setActiveSessionId(targetSessionId)
@@ -5633,7 +5702,10 @@ export default function App() {
             activeStreamingRequestIdRef.current = incomingRequestId
           }
         }
-        if (!isStreamEventStopped(event)) {
+        // Only the stream that owns (or just claimed) the active slot may
+        // drive the global streaming indicator; a stray route_result from an
+        // unrelated stream must not re-enable it with nothing to stop.
+        if (!isStreamEventStopped(event) && isEventForActiveStream(event)) {
           setIsStreaming(true)
         }
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
@@ -5644,7 +5716,10 @@ export default function App() {
           }
           const messageId = createAssistantMessageId()
           bindAssistantMessageToEvent(event, messageId)
-          return [...prev, createAssistantMessage({ id: messageId })]
+          return [...prev, createAssistantMessage({
+            id: messageId,
+            requestId: typeof event.request_id === 'string' && event.request_id.trim() ? event.request_id.trim() : null,
+          })]
         })
         return
       }
@@ -5652,14 +5727,16 @@ export default function App() {
       if (eventType === 'task.created') {
         if (typeof event.task_id === 'string' && event.task_id.trim()) {
           const incomingTaskId = event.task_id.trim()
-          if (
-            canClaimActiveStreamSlot(incomingTaskId, activeStreamingTaskIdRef.current) ||
-            isEventForActiveStream(event)
-          ) {
+          // The task slot is usually still empty while the user's request is
+          // streaming (request id arrives first, orchestrator task id later),
+          // so "the slot is free" is not enough to claim it — an unrelated
+          // autonomous task.created would create a chimera identity whose
+          // completion clears the user's stream and breaks the stop button.
+          if (canAdoptTaskForActiveStream(event, activeStreamingRequestIdRef.current, activeStreamingTaskIdRef.current)) {
             activeStreamingTaskIdRef.current = incomingTaskId
           }
         }
-        if (!isStreamEventStopped(event)) {
+        if (!isStreamEventStopped(event) && isEventForActiveStream(event)) {
           setIsStreaming(true)
         }
         setMessages((prev) => {
@@ -5718,7 +5795,9 @@ export default function App() {
           ? undefined
           : buildProgressActivityEntries(event, activityText, statusMessage, progressState)
         const activityLog = normalizeActivityLog((event as any).activity_log)
-        if (!alphaTerminalEntry) {
+        // The global progress label sits under the active query; progress
+        // from any other stream must stay on its own message only.
+        if (!alphaTerminalEntry && isEventForActiveStream(event)) {
           setStreamingProgress(activityText)
         }
         setMessages((prev) => {

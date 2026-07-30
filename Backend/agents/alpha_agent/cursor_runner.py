@@ -38,6 +38,18 @@ CURSOR_MODEL_ALIASES = {
     "composer-2.5-normal": "composer-2.5",
     "composer 2.5 normal": "composer-2.5",
     "normal composer 2.5": "composer-2.5",
+    # Cursor Grok 4.5 — High effort, not Fast (effort/fast are part of the CLI model id).
+    "grok": "cursor-grok-4.5-high",
+    "grok 4.5": "cursor-grok-4.5-high",
+    "grok4.5": "cursor-grok-4.5-high",
+    "grok-4.5": "cursor-grok-4.5-high",
+    "grok-4.5-high": "cursor-grok-4.5-high",
+    "cursor grok": "cursor-grok-4.5-high",
+    "cursor-grok": "cursor-grok-4.5-high",
+    "cursor grok 4.5": "cursor-grok-4.5-high",
+    "cursor-grok-4.5": "cursor-grok-4.5-high",
+    "cursor-grok-4.5-high": "cursor-grok-4.5-high",
+    "cursor grok 4.5 high": "cursor-grok-4.5-high",
 }
 
 

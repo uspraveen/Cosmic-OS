@@ -5,6 +5,7 @@ type CursorApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
 
 const MODEL_OPTIONS = [
   { value: 'auto', label: 'Auto', note: 'Use CLI config' },
+  { value: 'cursor-grok-4.5-high', label: 'Cursor Grok 4.5', note: 'High effort, not Fast' },
   { value: 'composer-2.5', label: 'Composer 2.5', note: 'Standard, not Fast' },
   { value: 'gpt-5', label: 'GPT-5', note: 'Manual' },
   { value: 'claude-4-sonnet', label: 'Claude Sonnet', note: 'Manual' },
@@ -51,6 +52,19 @@ function normalizeCursorModelOption(value: unknown) {
   const normalized = String(value ?? 'auto').trim()
   if (!normalized || normalized === 'auto') return 'auto'
   const lowered = normalized.toLowerCase()
+  if ([
+    'grok',
+    'grok 4.5',
+    'grok4.5',
+    'grok-4.5',
+    'grok-4.5-high',
+    'cursor grok',
+    'cursor-grok',
+    'cursor grok 4.5',
+    'cursor-grok-4.5',
+    'cursor-grok-4.5-high',
+    'cursor grok 4.5 high',
+  ].includes(lowered)) return 'cursor-grok-4.5-high'
   if ([
     'composer',
     'composer-2',

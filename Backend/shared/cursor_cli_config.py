@@ -8,9 +8,10 @@ from typing import Any
 
 
 CURSOR_CLI_CONFIG_RELATIVE_PATH = Path(".cursor") / "cli-config.json"
-DEFAULT_CURSOR_MODEL = "composer-2.5"
+DEFAULT_CURSOR_MODEL = "cursor-grok-4.5-high"
+DEFAULT_CURSOR_MODEL_DISPLAY = "Cursor Grok 4.5"
+# Composer still uses an explicit Fast parameter; keep those models pinned to Standard.
 NON_FAST_CURSOR_MODELS = ("composer-2.5", "composer-2")
-DEFAULT_CURSOR_MODEL_DISPLAY = "Composer 2.5"
 FAST_PARAMETER = {"id": "fast", "value": "false"}
 
 
@@ -32,6 +33,13 @@ def _non_fast_parameters(value: Any) -> list[dict[str, Any]]:
     return parameters
 
 
+def _default_model_parameters() -> list[dict[str, Any]]:
+    # Grok effort/fast are encoded in the model id (…-high vs …-high-fast), not a Fast param.
+    if DEFAULT_CURSOR_MODEL.startswith("composer-"):
+        return _non_fast_parameters(None)
+    return []
+
+
 def _cursor_model_config(value: Any) -> dict[str, Any]:
     model = dict(value) if isinstance(value, dict) else {}
     model["modelId"] = DEFAULT_CURSOR_MODEL
@@ -45,7 +53,7 @@ def _cursor_model_config(value: Any) -> dict[str, Any]:
 
 
 def ensure_cursor_cli_non_fast_config(cursor_home: str | Path) -> tuple[Path, bool, dict[str, Any]]:
-    """Preserve Cursor CLI auth/config while disabling Composer Fast parameters."""
+    """Preserve Cursor CLI auth/config while pinning the Cosmic default model (non-Fast)."""
 
     path = cursor_cli_config_path(cursor_home)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -80,11 +88,7 @@ def ensure_cursor_cli_non_fast_config(cursor_home: str | Path) -> tuple[Path, bo
     config["model"] = _cursor_model_config(config.get("model"))
     config["selectedModel"] = {
         "modelId": DEFAULT_CURSOR_MODEL,
-        "parameters": _non_fast_parameters(
-            config.get("selectedModel", {}).get("parameters")
-            if isinstance(config.get("selectedModel"), dict)
-            else None
-        ),
+        "parameters": _default_model_parameters(),
     }
     config["hasChangedDefaultModel"] = True
 

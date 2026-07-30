@@ -77,6 +77,45 @@ export const shouldBindToLastAssistantMessage = (
 }
 
 /**
+ * True when a `task.created` event may bind its task id into the singular
+ * active-stream slot. This is stricter than "the task slot is empty":
+ * while a foreground request is streaming, its task slot is usually still
+ * empty (the request id arrives first, the orchestrator task id later), so
+ * an unrelated autonomous run (heartbeat digest, cron, Gmail surface
+ * decision) racing in with its own `task.created` would otherwise claim the
+ * task slot and produce a chimera identity — half the user's stream, half
+ * the autonomous one. The autonomous run's terminal event would then match
+ * the active stream by task id, clearing the user's streaming state
+ * mid-answer and pointing the stop button at the wrong stream.
+ */
+export const canAdoptTaskForActiveStream = (
+  event: StreamEventIdentity | null | undefined,
+  activeRequestId: string | null | undefined,
+  activeTaskId: string | null | undefined,
+): boolean => {
+  const { requestId: eventRequestId, taskId: eventTaskId } = extractEventStreamIds(event)
+  if (!eventTaskId) {
+    return false
+  }
+  const normalizedActiveRequestId = normalizeId(activeRequestId)
+  if (normalizedActiveRequestId && eventRequestId === normalizedActiveRequestId) {
+    // The active stream's own task (including a newer task id spawned by the
+    // same request) may always (re)bind.
+    return true
+  }
+  const normalizedActiveTaskId = normalizeId(activeTaskId)
+  if (normalizedActiveTaskId) {
+    return normalizedActiveTaskId === eventTaskId
+  }
+  if (normalizedActiveRequestId) {
+    // A different (or identity-less) request while a stream is in flight:
+    // never adopt its task into the active slot.
+    return false
+  }
+  return true
+}
+
+/**
  * True when claiming the singular "active stream" slot for `incomingId`
  * would not clobber a different stream that's already in flight. Use before
  * overwriting an active-request/active-task ref from an event that starts a
