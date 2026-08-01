@@ -197,11 +197,19 @@ class RequestTraceStore:
                     source_id = excluded.source_id,
                     task_id = excluded.task_id,
                     user_query_excerpt = excluded.user_query_excerpt,
-                    status = excluded.status,
-                    final_event_type = excluded.final_event_type,
+                    status = CASE
+                        WHEN request_traces.status = 'sent' AND excluded.status != 'sent'
+                            THEN request_traces.status
+                        ELSE excluded.status
+                    END,
+                    final_event_type = COALESCE(excluded.final_event_type, request_traces.final_event_type),
                     final_message = COALESCE(excluded.final_message, request_traces.final_message),
                     specialist_receipts_json = excluded.specialist_receipts_json,
-                    delivery_json = excluded.delivery_json,
+                    delivery_json = CASE
+                        WHEN request_traces.status = 'sent' AND excluded.status != 'sent'
+                            THEN request_traces.delivery_json
+                        ELSE excluded.delivery_json
+                    END,
                     events_json = excluded.events_json,
                     updated_at = excluded.updated_at,
                     completed_at = COALESCE(excluded.completed_at, request_traces.completed_at)
