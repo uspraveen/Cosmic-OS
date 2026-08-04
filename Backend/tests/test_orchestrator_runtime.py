@@ -370,6 +370,103 @@ async def test_orchestrator_runtime_streams_fireworks_glm_text_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_runtime_forces_final_text_when_tool_budget_exhausted() -> None:
+    """Reproduces a real production incident: a user emailed Cosmic asking it
+    to find a specific Google Doc. The Fireworks GLM loop kept retrying a
+    failing Drive search across every iteration, never once producing visible
+    text, until it hit max_tool_iterations. The loop then broke and shipped
+    whatever text had accumulated - nothing - as the final response, so the
+    user's email thread went completely silent (not even an error reached
+    them, since empty content is treated as non-sendable). The fix forces one
+    extra tools-disabled completion so the turn always ends with real text
+    summarizing what was tried, instead of shipping an empty response."""
+    runtime_root = Path.cwd() / "pytest-glm-budget-runtime" / uuid4().hex
+    runtime_root.mkdir(parents=True, exist_ok=False)
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        if not str(request.url).endswith("/chat/completions"):
+            return httpx.Response(204)
+        call_count += 1
+        payload = json.loads(request.content.decode("utf-8"))
+        if call_count == 1:
+            assert "tools" in payload
+            chunks = [
+                b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+                b'"function":{"name":"memory_search","arguments":"{\\"query\\": \\"Fall 2026 doc\\"}"}}]},'
+                b'"finish_reason":null}]}\n\n',
+                b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],'
+                b'"usage":{"prompt_tokens":50,"completion_tokens":10,"total_tokens":60}}\n\n',
+                b"data: [DONE]\n\n",
+            ]
+        else:
+            # The finalization call must not offer tools again, otherwise the
+            # model could just keep looping instead of answering in words.
+            assert "tools" not in payload
+            assert payload["messages"][-1]["role"] == "user"
+            chunks = [
+                b'data: {"choices":[{"delta":{"content":"I could not find the Fall 2026 doc after '
+                b'several searches. Here is what I tried and what I need from you to finish."},'
+                b'"finish_reason":null}]}\n\n',
+                b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+                b'"usage":{"prompt_tokens":80,"completion_tokens":20,"total_tokens":100}}\n\n',
+                b"data: [DONE]\n\n",
+            ]
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=SSEByteStream(chunks),
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="",
+        fireworks_api_key="fireworks-key",
+        max_tool_iterations=1,
+        task_ledger_db_path=runtime_root / "task_ledger_glm_budget.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    await runtime.start()
+    assert runtime._tool_executor is not None
+
+    async def fake_execute(tool_name: str, tool_input: dict[str, object], *, context=None) -> str:
+        del context, tool_input
+        assert tool_name == "memory_search"
+        return json.dumps({"items": []})
+
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        base_task = _signed_task("signing-secret")
+        task = base_task.model_copy(
+            update={
+                "input": {
+                    **base_task.input,
+                    "cosmic_orchestrator_model": {
+                        "provider": "fireworks_glm",
+                        "model": "accounts/fireworks/models/glm-5p2",
+                    },
+                }
+            }
+        )
+        task = task.model_copy(update={"signature": sign_task_envelope(task, "signing-secret")})
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+        rmtree(runtime_root, ignore_errors=True)
+
+    assert call_count == 2
+    complete = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete["content"] == (
+        "I could not find the Fall 2026 doc after several searches. "
+        "Here is what I tried and what I need from you to finish."
+    )
+    assert complete["result_type"] == "max_iterations_finalized"
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runtime_falls_back_from_glm_to_kimi_for_images() -> None:
     runtime_root = Path.cwd() / "pytest-glm-image-runtime" / uuid4().hex
     runtime_root.mkdir(parents=True, exist_ok=False)

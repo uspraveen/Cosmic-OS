@@ -1655,6 +1655,58 @@ class OrchestratorRuntime:
             hit_max_iterations = iteration >= max_iterations and bool(stop_reason == "tool_calls")
             result_type = "max_iterations" if hit_max_iterations else "success"
 
+            if hit_max_iterations and not full_response_text.strip():
+                openai_messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You are out of tool calls for this turn and have not "
+                            "replied yet. Do not call any more tools. Respond "
+                            "directly now: summarize what you found, what you "
+                            "tried, what is still unresolved, and what you need "
+                            "from the user (such as a direct link or account "
+                            "access) to finish, if anything."
+                        ),
+                    }
+                )
+                try:
+                    finalize_text, finalize_usage = await self._finalize_openai_text_without_tools(
+                        model_name=effective_model,
+                        messages=openai_messages,
+                        usage_context={
+                            "task_id": task.task_id,
+                            "request_id": request_id,
+                            "session_id": session_id,
+                            "route": "opus",
+                            "operation": usage_operation,
+                            "metadata_json": {
+                                "provider": effective_provider,
+                                "model": effective_model,
+                                "preferred_provider": preferred_provider,
+                                "preferred_model": preferred_model,
+                                "iteration": iteration,
+                                "source": task.source,
+                                "source_id": task.source_id,
+                                "channel": channel,
+                                "finalization": True,
+                            },
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "orchestrator.max_iterations_finalization_failed task_id=%s",
+                        task.task_id,
+                    )
+                    finalize_text = ""
+                    finalize_usage = {}
+                if finalize_text:
+                    for event in collect_content_events(finalize_text):
+                        yield event
+                    full_response_text = self._append_stream_text(full_response_text, finalize_text)
+                    cumulative_usage = self._merge_usage(cumulative_usage, finalize_usage)
+                    stop_reason = "end_turn"
+                    result_type = "max_iterations_finalized"
+
             final_response_blocks: list[dict[str, Any]] | None = None
             if visual_coordinator is not None:
                 final_visual = await visual_coordinator.finalize(
@@ -2303,6 +2355,46 @@ class OrchestratorRuntime:
                 if yielded_any or attempt == 2:
                     raise RuntimeError(f"Fireworks API error: {exc}") from exc
                 await asyncio.sleep(0.5 * (2**attempt))
+
+    async def _finalize_openai_text_without_tools(
+        self,
+        *,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        usage_context: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, int]]:
+        """One extra non-tool completion to force a text reply after a turn's
+        tool-call budget is exhausted. Without this, a turn that spends every
+        iteration on tool calls (for example repeatedly retrying a search
+        that keeps failing) exits with an empty response: the loop just
+        breaks and ships whatever visible text happened to accumulate, which
+        is nothing, since every iteration was a tool call. Passing tools=[]
+        omits the tools field from the request body entirely, so the model
+        cannot call anything and must answer in words."""
+        text_parts: list[str] = []
+        usage: dict[str, int] = {}
+        async for payload in self._stream_openai_chat_events(
+            model_name=model_name,
+            messages=messages,
+            tools=[],
+            usage_context=usage_context,
+        ):
+            usage_batch = self._extract_openai_usage(payload)
+            if usage_batch:
+                usage = self._merge_usage(usage, usage_batch)
+            choices = payload.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            first = choices[0]
+            if not isinstance(first, dict):
+                continue
+            delta = first.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            content_chunk = str(delta.get("content") or "")
+            if content_chunk:
+                text_parts.append(content_chunk)
+        return "".join(text_parts).strip(), usage
 
     @staticmethod
     def _extract_openai_usage(payload: dict[str, Any]) -> dict[str, int]:
