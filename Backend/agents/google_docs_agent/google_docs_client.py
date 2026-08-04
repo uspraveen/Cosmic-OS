@@ -24,15 +24,53 @@ class GoogleDocsClient:
         query: str = "",
         max_results: int = 10,
     ) -> list[dict[str, Any]]:
-        q_parts = ["mimeType='application/vnd.google-apps.document'", "trashed=false"]
+        base_parts = ["mimeType='application/vnd.google-apps.document'", "trashed=false"]
         normalized_query = str(query or "").strip()
-        if normalized_query:
-            escaped = _drive_query_literal(normalized_query)
-            q_parts.append(f"(name contains '{escaped}' or fullText contains '{escaped}')")
-        params = {
+        bounded_results = max(1, min(int(max_results), 50))
+
+        if not normalized_query:
+            return await self._run_drive_files_list(
+                q_parts=base_parts,
+                order_by="viewedByMeTime desc,modifiedTime desc",
+                page_size=bounded_results,
+            )
+
+        escaped = _drive_query_literal(normalized_query)
+
+        # The Drive API rejects `orderBy` whenever `q` contains a fullText
+        # clause ("Sorting is not supported for queries with fullText
+        # terms"). Combining name+fullText in one sorted query - the
+        # previous behavior here - therefore failed on every single query,
+        # regardless of phrasing. A title match is what most "find the doc
+        # named X" / "most recently opened" requests need and Drive can sort
+        # those, so try that first.
+        name_matches = await self._run_drive_files_list(
+            q_parts=[*base_parts, f"name contains '{escaped}'"],
+            order_by="viewedByMeTime desc,modifiedTime desc",
+            page_size=bounded_results,
+        )
+        if name_matches:
+            return name_matches
+
+        # Nothing matched by title: fall back to a full-text content search.
+        # Drive doesn't support ordering these, so omit orderBy entirely
+        # rather than re-triggering the same 403.
+        return await self._run_drive_files_list(
+            q_parts=[*base_parts, f"fullText contains '{escaped}'"],
+            order_by=None,
+            page_size=bounded_results,
+        )
+
+    async def _run_drive_files_list(
+        self,
+        *,
+        q_parts: list[str],
+        order_by: str | None,
+        page_size: int,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
             "q": " and ".join(q_parts),
-            "pageSize": max(1, min(int(max_results), 50)),
-            "orderBy": "viewedByMeTime desc,modifiedTime desc",
+            "pageSize": page_size,
             "fields": (
                 "files(id,name,mimeType,webViewLink,modifiedTime,viewedByMeTime,"
                 "createdTime,owners(displayName,emailAddress),lastModifyingUser(displayName,emailAddress))"
@@ -40,6 +78,8 @@ class GoogleDocsClient:
             "supportsAllDrives": "true",
             "includeItemsFromAllDrives": "true",
         }
+        if order_by:
+            params["orderBy"] = order_by
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.get(f"{_DRIVE_BASE}/files", headers=self._headers, params=params)
             self._raise_for_status(resp, "list Google Docs")
