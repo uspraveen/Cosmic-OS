@@ -176,6 +176,43 @@ class GmailContextStore:
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def list_stale_active(
+        self,
+        *,
+        stale_after_sec: float,
+        limit: int = 3,
+        created_after: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Active items whose decision dispatch never resolved within
+        stale_after_sec of being created. Ordered oldest-first: those are
+        the most overdue and the ones most likely to be worth recovering.
+
+        created_after is an optional fixed floor (ISO timestamp): pass it to
+        exclude a pre-existing backlog that predates when a backfill sweep
+        went live, without needing any persistent "have I run before" state.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=max(1.0, stale_after_sec))
+        ).isoformat().replace("+00:00", "Z")
+        clauses = ["status = 'active'", "created_at <= ?"]
+        params: list[Any] = [cutoff]
+        if created_after:
+            clauses.append("created_at >= ?")
+            params.append(created_after)
+        params.append(max(1, limit))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM surfaced_gmail_items
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def get_by_message_id(self, message_id: str) -> dict[str, Any] | None:
         normalized = str(message_id or "").strip()
         if not normalized:

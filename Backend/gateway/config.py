@@ -193,6 +193,9 @@ class GatewayConfig:
     gmail_process_inbound_timeout_sec: float = 180.0
     gmail_process_inbound_poll_interval_sec: float = 0.25
     gmail_watch_renewal_interval_sec: float = 21_600.0
+    gmail_surface_backfill_interval_sec: float = 600.0
+    gmail_surface_backfill_stale_after_sec: float = 1200.0
+    gmail_surface_backfill_batch_limit: int = 3
     calendar_agent_id: str = "cosmic/calendar-agent:1.0.0"
     email_process_inbound_timeout_sec: float = 180.0
     email_process_inbound_poll_interval_sec: float = 0.25
@@ -714,6 +717,18 @@ class GatewayConfig:
             gmail_watch_renewal_interval_sec=max(
                 3600.0,
                 _env_float("GATEWAY_GMAIL_WATCH_RENEWAL_INTERVAL_SEC", 21_600.0),
+            ),
+            gmail_surface_backfill_interval_sec=max(
+                60.0,
+                _env_float("GATEWAY_GMAIL_SURFACE_BACKFILL_INTERVAL_SEC", 600.0),
+            ),
+            gmail_surface_backfill_stale_after_sec=max(
+                300.0,
+                _env_float("GATEWAY_GMAIL_SURFACE_BACKFILL_STALE_AFTER_SEC", 1200.0),
+            ),
+            gmail_surface_backfill_batch_limit=max(
+                1,
+                _env_int("GATEWAY_GMAIL_SURFACE_BACKFILL_BATCH_LIMIT", 3),
             ),
             calendar_agent_id=(
                 os.getenv(

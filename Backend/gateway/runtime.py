@@ -175,6 +175,15 @@ _HEARTBEAT_OFFLINE_SUPPRESS_RE = re.compile(
     re.IGNORECASE,
 )
 GMAIL_SURFACE_DECISION_SOURCE = "gmail_surface"
+# Fixed point in time the stale-active backfill sweep went live. The
+# pre-existing backlog of items stuck in status=active (created before this
+# point) is deliberately excluded from backfill - explicit product decision
+# to fix the dispatch-durability gap going forward only, not to bulk-replay
+# months of accumulated items. Using a fixed constant rather than "process
+# start time" is deliberate: recomputing "now" on every gateway restart
+# would keep re-excluding items that went stale between deploy and the next
+# restart, silently defeating the fix it introduces.
+GMAIL_SURFACE_BACKFILL_ELIGIBLE_SINCE = "2026-08-05T00:00:00Z"
 TASK_ENVELOPE_ALLOWED_SOURCES = {"user", "cron", "webhook", "heartbeat", "hook", "agent"}
 TASK_ENVELOPE_SOURCE_ALIASES = {
     GMAIL_SURFACE_DECISION_SOURCE: "webhook",
@@ -480,6 +489,7 @@ class GatewayRuntime:
         self._scheduler_worker: asyncio.Task[None] | None = None
         self._scheduler_wakeup = asyncio.Event()
         self._gmail_watch_renewal_worker: asyncio.Task[None] | None = None
+        self._gmail_surface_backfill_worker: asyncio.Task[None] | None = None
         self._task_input_worker: asyncio.Task[None] | None = None
         self._specialist_event_worker: asyncio.Task[None] | None = None
         self._rollover_finalize_lock = asyncio.Lock()
@@ -572,6 +582,10 @@ class GatewayRuntime:
             self._gmail_watch_renewal_loop(),
             name="gateway-gmail-watch-renewal",
         )
+        self._gmail_surface_backfill_worker = asyncio.create_task(
+            self._gmail_surface_backfill_loop(),
+            name="gateway-gmail-surface-backfill",
+        )
         if self._redis is not None:
             self._task_input_worker = asyncio.create_task(
                 self._task_input_consumer_loop(),
@@ -609,6 +623,12 @@ class GatewayRuntime:
                 self._gmail_watch_renewal_worker, return_exceptions=True
             )
             self._gmail_watch_renewal_worker = None
+        if self._gmail_surface_backfill_worker is not None:
+            self._gmail_surface_backfill_worker.cancel()
+            await asyncio.gather(
+                self._gmail_surface_backfill_worker, return_exceptions=True
+            )
+            self._gmail_surface_backfill_worker = None
         if self._task_input_worker is not None:
             self._task_input_worker.cancel()
             await asyncio.gather(self._task_input_worker, return_exceptions=True)
@@ -5503,6 +5523,54 @@ class GatewayRuntime:
             logger.exception(
                 "gateway.gmail_surface_decision.dispatch_failed task_id=%s",
                 self._safe_text(result.get("task_id")),
+            )
+
+    async def _gmail_surface_backfill_loop(self) -> None:
+        """_dispatch_gmail_surface_decision runs as a bare asyncio task via
+        _schedule_background_task, which is not durable: an exception in that
+        path, or a gateway restart/crash while it is in flight, silently
+        strands the surfaced item in status=active with nothing to ever
+        retry it. This loop reconciles that by periodically giving items
+        that have been active well past a normal decision's duration one
+        more chance, a small batch at a time so a pile of stranded items
+        can't flood the orchestrator with simultaneous decision calls."""
+        while True:
+            try:
+                await asyncio.sleep(self.config.gmail_surface_backfill_interval_sec)
+                await self._backfill_stale_gmail_surface_decisions()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("gateway.gmail_surface_backfill_loop_failed")
+
+    async def _backfill_stale_gmail_surface_decisions(self) -> None:
+        try:
+            stale_items = self.gmail_context_store.list_stale_active(
+                stale_after_sec=self.config.gmail_surface_backfill_stale_after_sec,
+                limit=self.config.gmail_surface_backfill_batch_limit,
+                created_after=GMAIL_SURFACE_BACKFILL_ELIGIBLE_SINCE,
+            )
+        except Exception:
+            logger.exception("gateway.gmail_surface_backfill_list_failed")
+            return
+        for stored in stale_items:
+            surfaced_id = self._safe_text(stored.get("surfaced_id"))
+            if not surfaced_id:
+                continue
+            logger.info(
+                "gateway.gmail_surface_backfill_redispatch surfaced_id=%s message_id=%s created_at=%s",
+                surfaced_id,
+                self._safe_text(stored.get("message_id")),
+                self._safe_text(stored.get("created_at")),
+            )
+            result = {
+                "task_id": self._safe_text(stored.get("source_task_id")),
+                "email": self._safe_text(stored.get("account_email")),
+            }
+            await self._dispatch_gmail_surface_decision(
+                result=result,
+                raw_items=[{}],
+                stored_items=[stored],
             )
 
     async def _build_gmail_surface_decision_request_record(
