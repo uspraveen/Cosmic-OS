@@ -120,7 +120,16 @@ export const GOOGLE_TOOL_DEFINITIONS: IntegrationToolDefinition[] = [
     label: 'Drive',
     platformLabel: 'Files',
     description: 'Google Docs and Sheets discovery, comments, permissions, and Drive-backed actions.',
-    scopes: ['https://www.googleapis.com/auth/drive.file'],
+    // drive.file only grants visibility into files this app created or that
+    // were explicitly picked through it - it can never see documents the
+    // user created independently, no matter how Cosmic searches. Adding
+    // drive.readonly (read-only, does not grant write access beyond what
+    // drive.file already allows) lets discovery/search actually cover the
+    // user's real Drive.
+    scopes: [
+      'https://www.googleapis.com/auth/drive.file',
+      'https://www.googleapis.com/auth/drive.readonly',
+    ],
   },
 ]
 
