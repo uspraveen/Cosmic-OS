@@ -577,10 +577,35 @@ class AgentEmailAdapter(ChannelAdapter):
             return explicit[:200]
         event_type = _safe_text(message.get("type"))
         if event_type == "response.complete":
-            return "COSMIC update"
+            derived = self._derive_subject_from_content(_safe_text(message.get("content")))
+            return derived or "COSMIC update"
         if event_type == "task.failed":
             return "COSMIC task failed"
         return "COSMIC notification"
+
+    @staticmethod
+    def _derive_subject_from_content(content: str) -> str:
+        """A brand-new proactive email (not a reply within an existing
+        thread) previously always used the fixed subject "COSMIC update"
+        whenever no explicit subject was set. Since every unrelated topic -
+        a financial fraud alert, a document search, anything else - shared
+        that identical subject and sender/recipient pair, Gmail's own
+        conversation-view grouping merged them into one thread regardless of
+        Cosmic Mail's own internal thread bookkeeping. Deriving a real,
+        content-specific subject line keeps unrelated proactive emails from
+        visually collapsing into whatever thread happens to share a subject."""
+        if not content:
+            return ""
+        plain = render_markdown_email_text(content)
+        for raw_line in plain.splitlines():
+            line = re.sub(r"[*_`#>]+", "", raw_line).strip()
+            if not line:
+                continue
+            if len(line) <= 78:
+                return line
+            truncated = line[:75].rsplit(" ", 1)[0].strip()
+            return f"{truncated or line[:75]}…"
+        return ""
 
     def _build_text_body(self, message: dict[str, Any]) -> str:
         content = _safe_text(message.get("content"))
