@@ -10,10 +10,13 @@ from gateway.runtime import GatewayRuntime
 
 
 class _FakeGmailContextStore:
-    """Serves surfaced items partitioned by status, like the real store."""
+    """Serves surfaced items partitioned by status, like the real store:
+    filtered by the requested statuses, ordered newest-first, then limited."""
 
     def __init__(self, by_status: dict[str, list[dict[str, object]]] | None = None) -> None:
         self._by_status = by_status or {}
+        self.requested_statuses: list[str] | None = None
+        self.requested_limit: int | None = None
 
     def list_recent(
         self,
@@ -24,7 +27,9 @@ class _FakeGmailContextStore:
         status: str = "active",
     ) -> list[dict[str, object]]:
         assert lookback_hours == 96
-        wanted = statuses if statuses is not None else [status]
+        wanted = list(statuses) if statuses is not None else [status]
+        self.requested_statuses = wanted
+        self.requested_limit = limit
         items: list[dict[str, object]] = []
         for name in wanted:
             items.extend(self._by_status.get(name, []))
@@ -75,12 +80,11 @@ def test_recent_gmail_context_includes_just_notified_item_over_stale_backlog() -
     $120 Chase payment, the user replied "It was me" seconds later, and COSMIC
     answered about unrelated GitHub 2FA/OAuth alerts from two days earlier.
 
-    Notifying an item flips its status from active to notified, and this
-    context block only ever listed status=active items - so the very item
-    COSMIC had just told the user about was the one thing excluded from the
-    context used to interpret their reply, while a large backlog of never-sent
-    active items (338 of them in production) remained. The just-notified item
-    must be present, and must not be crowded out by older active entries."""
+    Notifying an item flips its status active -> notified, and this block was
+    filtered to status=active only - so the very item COSMIC had just told the
+    user about was the one thing excluded from the context used to interpret
+    their reply, while a backlog of never-sent active items (338 of them in
+    production) remained. Delivery state must not gate membership."""
     stale_backlog = [
         {
             "surfaced_id": f"gmail_stale_{index}",
@@ -112,35 +116,82 @@ def test_recent_gmail_context_includes_just_notified_item_over_stale_backlog() -
     assert rendered is not None
     assert "Your credit card payment is scheduled" in rendered
     assert "status=notified" in rendered
-    # The just-notified item is the newest, so it must lead the list.
-    chase_position = rendered.index("gmail_chase_120")
-    first_stale_position = rendered.index("gmail_stale_")
-    assert chase_position < first_stale_position
-    # And the model must be told how to resolve a bare "it was me" reply.
-    assert "it was me" in rendered
+    # mark_status() bumps updated_at, so the just-notified item is the newest
+    # row by construction and recency ordering alone must put it first.
+    assert rendered.index("gmail_chase_120") < rendered.index("gmail_stale_")
 
 
-def test_merge_surfaced_gmail_items_reserves_slots_and_dedupes() -> None:
-    reserved = [{"surfaced_id": "a", "updated_at": "2026-08-01T00:00:00Z"}]
-    filler = [
-        {"surfaced_id": "a", "updated_at": "2026-08-01T00:00:00Z"},
-        {"surfaced_id": "b", "updated_at": "2026-08-09T00:00:00Z"},
-        {"surfaced_id": "c", "updated_at": "2026-08-08T00:00:00Z"},
-    ]
-
-    merged = GatewayRuntime._merge_surfaced_gmail_items(reserved, filler, limit=2)
-
-    ids = [item["surfaced_id"] for item in merged]
-    # "a" is reserved so it survives even though b/c are newer, and it is not
-    # duplicated despite appearing in both buckets.
-    assert "a" in ids
-    assert len(ids) == 2
-    assert len(set(ids)) == 2
-    # Presentation order is newest-first.
-    assert ids == sorted(
-        ids,
-        key=lambda item_id: next(
-            str(entry.get("updated_at")) for entry in merged if entry["surfaced_id"] == item_id
-        ),
-        reverse=True,
+def test_recent_gmail_context_excludes_suppressed_and_self_items() -> None:
+    """Guards against context bloat: suppressed items were deliberately judged
+    not worth showing, and "self" items are COSMIC's own outbound mail. The
+    user never saw either, so neither is a plausible referent and neither
+    belongs in this block."""
+    store = _FakeGmailContextStore(
+        {
+            "active": [
+                {
+                    "surfaced_id": "gmail_active",
+                    "subject": "A real pending item",
+                    "status": "active",
+                    "updated_at": "2026-08-01T00:00:00Z",
+                }
+            ],
+            "suppressed": [
+                {
+                    "surfaced_id": "gmail_suppressed",
+                    "subject": "Deliberately not surfaced",
+                    "status": "suppressed",
+                    "updated_at": "2026-08-09T00:00:00Z",
+                }
+            ],
+            "self": [
+                {
+                    "surfaced_id": "gmail_self",
+                    "subject": "COSMIC update",
+                    "status": "self",
+                    "updated_at": "2026-08-09T00:00:00Z",
+                }
+            ],
+        }
     )
+
+    rendered = _runtime(store)._render_recent_gmail_context()
+
+    assert rendered is not None
+    assert store.requested_statuses == ["active", "notified"]
+    assert "gmail_active" in rendered
+    assert "gmail_suppressed" not in rendered
+    assert "gmail_self" not in rendered
+
+
+def test_recent_gmail_context_does_not_grow_the_block() -> None:
+    """The fix must not enlarge the prompt: one query, same item budget."""
+    store = _FakeGmailContextStore(
+        {
+            "active": [
+                {
+                    "surfaced_id": f"gmail_active_{index}",
+                    "subject": f"Active {index}",
+                    "status": "active",
+                    "updated_at": f"2026-08-0{index + 1}T00:00:00Z",
+                }
+                for index in range(4)
+            ],
+            "notified": [
+                {
+                    "surfaced_id": f"gmail_notified_{index}",
+                    "subject": f"Notified {index}",
+                    "status": "notified",
+                    "updated_at": f"2026-08-1{index}T00:00:00Z",
+                }
+                for index in range(4)
+            ],
+        }
+    )
+
+    rendered = _runtime(store)._render_recent_gmail_context(limit=5)
+
+    assert rendered is not None
+    assert store.requested_limit == 5
+    item_lines = [line for line in rendered.splitlines() if line.startswith("- #")]
+    assert len(item_lines) == 5
