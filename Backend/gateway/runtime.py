@@ -1926,10 +1926,34 @@ class GatewayRuntime:
 
     def _render_recent_gmail_context(self, *, limit: int = 5) -> str | None:
         try:
-            items = self.gmail_context_store.list_recent(limit=limit, lookback_hours=96)
+            # Items COSMIC actually notified the user about are the most
+            # likely referent for a short follow-up like "it was me" or
+            # "that was me" - but notifying an item flips its status from
+            # active to notified, which previously dropped it out of this
+            # block entirely (it only listed status=active). That left the
+            # model resolving such replies against the stale un-actioned
+            # backlog instead of what it had just told the user. Reserve
+            # slots for recently notified items so they can never be
+            # crowded out by that backlog.
+            notified_limit = max(1, min(limit - 1, (limit + 1) // 2)) if limit > 1 else 1
+            notified_items = self.gmail_context_store.list_recent(
+                limit=notified_limit,
+                lookback_hours=96,
+                statuses=["notified"],
+            )
+            active_items = self.gmail_context_store.list_recent(
+                limit=limit,
+                lookback_hours=96,
+                statuses=["active"],
+            )
         except Exception:
             logger.exception("gateway.gmail_context_render_failed")
             return None
+        items = self._merge_surfaced_gmail_items(
+            notified_items,
+            active_items,
+            limit=limit,
+        )
         if not items:
             return None
 
@@ -1942,7 +1966,15 @@ class GatewayRuntime:
                 "Agent with the exact account_id when shown plus thread_id/message_id "
                 "for exact thread context. If account_id is missing, use account_email "
                 "as account_hint instead of inventing an id. "
-                "Ask a clarifying question if more than one item plausibly matches."
+                "Ask a clarifying question if more than one item plausibly matches. "
+                "status=notified means COSMIC already told the user about that item; "
+                "status=active means it was never sent to the user. When the user "
+                "replies with a short confirmation or reaction that names no subject "
+                "(for example 'it was me', 'that was me', 'I did that', 'ignore it'), "
+                "they are almost always responding to what COSMIC most recently "
+                "notified them about, so resolve it against the newest notified item "
+                "and the immediately preceding assistant messages rather than against "
+                "an older active item."
             ),
         ]
         for index, item in enumerate(items[:limit], start=1):
@@ -1965,6 +1997,9 @@ class GatewayRuntime:
             category = self._safe_text(item.get("category"))
             if category:
                 parts.append(f"category={category}")
+            status = self._safe_text(item.get("status"))
+            if status:
+                parts.append(f"status={status}")
             priority = item.get("priority")
             if priority is not None:
                 parts.append(f"priority={priority}")
@@ -2001,6 +2036,39 @@ class GatewayRuntime:
                 parts.append(f"surfaced_at={updated_at}")
             lines.append("- " + "; ".join(part for part in parts if part))
         return "\n".join(lines)
+
+    @staticmethod
+    def _merge_surfaced_gmail_items(
+        reserved: list[dict[str, Any]],
+        filler: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Take everything in `reserved` first (up to limit), then top up
+        from `filler`, deduped. The final list is ordered newest-first for
+        presentation, but selection happens before sorting so reserved
+        entries cannot be pushed out by a newer filler entry."""
+        selected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for bucket in (reserved, filler):
+            for item in bucket:
+                if not isinstance(item, dict):
+                    continue
+                if len(selected) >= limit:
+                    break
+                key = str(item.get("surfaced_id") or "").strip()
+                if key:
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                selected.append(item)
+            if len(selected) >= limit:
+                break
+        selected.sort(
+            key=lambda entry: str(entry.get("updated_at") or ""),
+            reverse=True,
+        )
+        return selected
 
     def _scheduler_record(
         self, record: dict[str, Any], *, include_history: bool = False
