@@ -500,6 +500,22 @@ async def google_auth_health(body: GoogleAuthHealthRequest, request: Request):
             "needs_reconnect": False,
             "error": "",
         }
+        if (
+            account_id
+            and account.get("status") == "needs_auth"
+            and account.get("has_refresh_token")
+        ):
+            # Nothing else ever retries a needs_auth account. This probe is the
+            # natural place to give it one throttled attempt, so an account
+            # condemned by a transient failure heals itself instead of waiting
+            # on the user to notice a reconnect prompt.
+            try:
+                if await mgr.attempt_account_recovery(account_id):
+                    account = mgr.get_account(account_id) or account
+            except Exception:
+                logger.exception(
+                    "google_auth_health.recovery_failed account_id=%s", account_id
+                )
         if not account_id or account.get("status") != "active" or not account.get("has_refresh_token"):
             account_result.update(
                 {

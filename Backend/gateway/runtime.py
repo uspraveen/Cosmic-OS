@@ -508,6 +508,7 @@ class GatewayRuntime:
         self._scheduler_run_lock = asyncio.Lock()
         self._recent_push_dedupe: dict[str, float] = {}
         self._recent_google_reauth_pushes: dict[str, float] = {}
+        self._recent_google_reauth_broadcasts: dict[str, float] = {}
         self._codex_login_session: dict[str, Any] | None = None
         self._cursor_login_session: dict[str, Any] | None = None
         self._heartbeat_outcomes_by_request_id: dict[str, dict[str, str]] = {}
@@ -13861,7 +13862,29 @@ class GatewayRuntime:
             "timestamp": utcnow_iso(),
         }
 
+        # The same unsatisfied condition is re-probed continuously, so without
+        # this an unchanged problem re-announces itself hundreds of times a day.
+        # Keyed by what the user would actually see, so a genuinely new or
+        # changed problem still gets through immediately.
+        broadcast_signature = "|".join(
+            [
+                self._safe_text(tool),
+                self._safe_text(status),
+                *sorted(
+                    f"{account.get('account_id')}:{account.get('error')}"
+                    for account in event["accounts"]
+                ),
+            ]
+        )
         live_targets = 0
+        if self._google_reauth_broadcast_recently_sent(broadcast_signature):
+            return {
+                "status": "suppressed",
+                "reason": "duplicate_reauth_broadcast",
+                "live_targets": 0,
+                "push_count": 0,
+                "account_count": len(reauth_accounts),
+            }
         for adapter in self.registry.adapters.values():
             if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
                 continue
@@ -13872,6 +13895,8 @@ class GatewayRuntime:
                     "gateway.google_reauth.broadcast_failed platform=%s",
                     adapter.platform,
                 )
+        if live_targets:
+            self._mark_google_reauth_broadcast_sent(broadcast_signature)
 
         push_count = 0
         for account in reauth_accounts:
@@ -13936,6 +13961,24 @@ class GatewayRuntime:
             return True
         self._recent_google_reauth_pushes[key] = now
         return False
+
+    def _google_reauth_broadcast_recently_sent(
+        self, signature: str, *, ttl_sec: float = 1800.0
+    ) -> bool:
+        now = time.monotonic()
+        stale_before = now - max(ttl_sec * 2, ttl_sec + 60.0)
+        self._recent_google_reauth_broadcasts = {
+            key: sent_at
+            for key, sent_at in self._recent_google_reauth_broadcasts.items()
+            if sent_at >= stale_before
+        }
+        sent_at = self._recent_google_reauth_broadcasts.get(signature)
+        return sent_at is not None and now - sent_at < ttl_sec
+
+    def _mark_google_reauth_broadcast_sent(self, signature: str) -> None:
+        # Only recorded once the event actually reached a live client, so a
+        # broadcast into an empty room does not suppress the next real one.
+        self._recent_google_reauth_broadcasts[signature] = time.monotonic()
 
     def _google_tool_display_name(self, tool: str | None) -> str:
         normalized = self._safe_text(tool).lower()

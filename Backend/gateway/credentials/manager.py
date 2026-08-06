@@ -11,6 +11,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -41,6 +42,89 @@ _GOOGLE_SCOPE_IMPLICATIONS = {
         "https://www.googleapis.com/auth/calendar.readonly",
     },
 }
+
+
+# OAuth error codes that mean the grant itself is dead. Anything else is an
+# accident of the moment and must not cost the user a reconnect.
+_GOOGLE_FATAL_REFRESH_ERRORS = {
+    "invalid_grant",
+    "invalid_client",
+    "unauthorized_client",
+    "invalid_scope",
+}
+
+# A refresh that fails transiently is retried in place before giving up.
+_REFRESH_MAX_ATTEMPTS = 3
+_REFRESH_RETRY_BACKOFF_SEC = (0.5, 1.5)
+
+# How long a needs_auth account waits between self-heal attempts.
+_RECOVERY_COOLDOWN_SEC = 900.0
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_ts(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _oauth_error_payload(exc: BaseException | None) -> tuple[str, str]:
+    """Pull the OAuth (error, error_description) pair out of a failed refresh."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return "", ""
+    try:
+        payload = response.json()
+    except Exception:
+        return "", ""
+    if not isinstance(payload, dict):
+        return "", ""
+    return (
+        str(payload.get("error") or "").strip().lower(),
+        str(payload.get("error_description") or "").strip(),
+    )
+
+
+def classify_refresh_failure(exc: BaseException | None) -> str:
+    """Classify a token-refresh failure as 'fatal' or 'transient'.
+
+    Only Google explicitly rejecting the grant means the user has to
+    reconnect. Timeouts, connection resets, 5xx, rate limits and local
+    resource exhaustion (e.g. EMFILE, which once condemned a perfectly
+    healthy account for a week) say nothing at all about the refresh token.
+    """
+    if exc is None:
+        return "transient"
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) not in {400, 401}:
+        return "transient"
+    error_code, _ = _oauth_error_payload(exc)
+    if error_code:
+        return "fatal" if error_code in _GOOGLE_FATAL_REFRESH_ERRORS else "transient"
+    # 400/401 with no parseable OAuth error body: Google's token endpoint uses
+    # these for genuine grant failures, so keep the historical behaviour.
+    return "fatal"
+
+
+def describe_refresh_failure(exc: BaseException | None) -> str:
+    """Human-readable failure reason, preferring Google's own OAuth error.
+
+    The raw httpx message is just a status line and URL. When an account is
+    condemned, this string is the only surviving evidence of why, so it needs
+    to name the actual cause.
+    """
+    error_code, description = _oauth_error_payload(exc)
+    if error_code:
+        detail = f"{error_code}: {description}" if description else error_code
+        return f"Token refresh failed: {detail}"
+    return f"Token refresh failed: {exc}"
 
 
 def _is_generic_account_label(value: str | None) -> bool:
@@ -629,6 +713,52 @@ class CredentialManager:
             credential_ref=cred["credential_ref"] if cred else "",
         )
 
+    async def attempt_account_recovery(
+        self,
+        account_id: str,
+        *,
+        cooldown_sec: float = _RECOVERY_COOLDOWN_SEC,
+    ) -> bool:
+        """Give a needs_auth account one throttled chance to revive itself.
+
+        needs_auth is otherwise terminal: resolve_credential only considers
+        active accounts, so nothing ever revisits one and the single exit is a
+        manual reconnect. That is correct when the grant is genuinely revoked
+        and wrong whenever the account was condemned by something unrelated to
+        the grant. One refresh settles which it is - a revoked grant fails
+        again and stays put, a healthy one is restored by the success path.
+
+        Returns True only when the account came back as usable.
+        """
+        acct = self._store.get_account(account_id)
+        if acct is None or acct.get("status") != "needs_auth":
+            return False
+        cred = self._store.get_active_credential(account_id)
+        if cred is None or not cred.get("refresh_token"):
+            return False
+
+        metadata = acct.get("_metadata") or {}
+        last_attempt = _parse_iso_ts(metadata.get("last_recovery_attempt_at"))
+        if last_attempt is not None and time.time() - last_attempt < cooldown_sec:
+            return False
+
+        # Stamp before attempting so concurrent probes cannot stampede Google.
+        self._store.update_account(
+            account_id,
+            metadata_patch={"last_recovery_attempt_at": _utcnow_iso()},
+        )
+        try:
+            await self._refresh_access_token(cred)
+        except Exception:
+            # _record_refresh_failure already captured the reason and decided
+            # whether the account stays condemned.
+            return False
+        restored = self._store.get_account(account_id)
+        recovered = bool(restored and restored.get("status") == "active")
+        if recovered:
+            logger.info("credentials.account_recovered account_id=%s", account_id)
+        return recovered
+
     async def refresh_credential(self, credential_ref: str) -> dict[str, Any] | None:
         """Refresh an access token by credential_ref. Used by orchestrator.refresh_credential."""
         cred = self._store.get_credential_by_ref(credential_ref)
@@ -672,28 +802,28 @@ class CredentialManager:
         acct = self._store.get_account(cred["account_id"])
         adapter = get_provider_adapter(acct["provider"])
 
-        try:
-            token_resp = await adapter.refresh_token(
-                cred["refresh_token"],
-                self._google_client_id,
-                self._google_client_secret,
+        token_resp = None
+        last_exc: BaseException | None = None
+        for attempt in range(_REFRESH_MAX_ATTEMPTS):
+            try:
+                token_resp = await adapter.refresh_token(
+                    cred["refresh_token"],
+                    self._google_client_id,
+                    self._google_client_secret,
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                if classify_refresh_failure(exc) == "fatal":
+                    break
+                if attempt + 1 < _REFRESH_MAX_ATTEMPTS:
+                    await asyncio.sleep(_REFRESH_RETRY_BACKOFF_SEC[attempt])
+
+        if token_resp is None:
+            self._record_refresh_failure(cred, acct, last_exc)
+            raise last_exc if last_exc is not None else RuntimeError(
+                f"Token refresh returned no response for {cred['credential_ref']}"
             )
-        except Exception as exc:
-            logger.error("Token refresh failed for %s: %s", cred["credential_ref"], exc)
-            self._store.log_audit(
-                action="refresh",
-                provider=acct["provider"],
-                result="failed",
-                credential_ref=cred["credential_ref"],
-            )
-            self._store.update_account(
-                cred["account_id"],
-                status="needs_auth",
-                metadata_patch={
-                    "last_auth_error": f"Token refresh failed: {exc}",
-                },
-            )
-            raise
 
         now_ts = time.time()
         expires_at_ts = now_ts + max(60, token_resp.expires_in)
@@ -713,6 +843,10 @@ class CredentialManager:
             # Re-fetch the new credential
             new_cred = self._store.get_active_credential(cred["account_id"])
             if new_cred:
+                # Same clearing the plain path does below: a rotated refresh
+                # token is still a successful refresh, so the account must not
+                # be left carrying a stale needs_auth/error state.
+                self._clear_account_auth_error(cred["account_id"])
                 return new_cred
 
         # Otherwise just update the access token
@@ -723,15 +857,61 @@ class CredentialManager:
         )
 
         # Clear auth error metadata on success
-        self._store.update_account(
-            cred["account_id"],
-            status="active",
-            metadata_patch={"last_auth_error": ""},
-        )
+        self._clear_account_auth_error(cred["account_id"])
 
         cred["access_token"] = token_resp.access_token
         cred["access_token_expires_at"] = expires_at_ts
         return cred
+
+    def _clear_account_auth_error(self, account_id: str) -> None:
+        self._store.update_account(
+            account_id,
+            status="active",
+            metadata_patch={
+                "last_auth_error": "",
+                "last_refresh_error": "",
+                "last_refresh_failure_kind": "",
+            },
+        )
+
+    def _record_refresh_failure(
+        self,
+        cred: dict[str, Any],
+        acct: dict[str, Any],
+        exc: BaseException | None,
+    ) -> None:
+        failure_kind = classify_refresh_failure(exc)
+        message = describe_refresh_failure(exc)[:500]
+        logger.error(
+            "credentials.refresh_failed credential_ref=%s kind=%s error=%s",
+            cred["credential_ref"],
+            failure_kind,
+            exc,
+        )
+        self._store.log_audit(
+            action="refresh",
+            provider=acct["provider"],
+            result="failed" if failure_kind == "fatal" else "failed_transient",
+            credential_ref=cred["credential_ref"],
+        )
+        metadata_patch: dict[str, Any] = {
+            "last_refresh_error": message,
+            "last_refresh_failure_kind": failure_kind,
+            "last_refresh_failure_at": _utcnow_iso(),
+        }
+        if failure_kind == "fatal":
+            metadata_patch["last_auth_error"] = message
+            self._store.update_account(
+                cred["account_id"],
+                status="needs_auth",
+                metadata_patch=metadata_patch,
+            )
+            return
+        # Transient: leave the account active. Marking it needs_auth here would
+        # be a one-way door - resolve_credential only considers active accounts,
+        # so nothing would ever retry it and the user would be forced to
+        # reconnect by hand over a blip that had nothing to do with the grant.
+        self._store.update_account(cred["account_id"], metadata_patch=metadata_patch)
 
     def _resolve_account_hint(
         self,
