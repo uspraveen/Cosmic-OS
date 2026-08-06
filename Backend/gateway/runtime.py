@@ -9596,6 +9596,65 @@ class GatewayRuntime:
         history = self.session_store.get_history(session_id)
         return [self._hydrate_history_message_for_client(item) for item in history]
 
+    def get_session_history_for_client(self, session_id: str) -> list[dict[str, Any]]:
+        """Session history as a client should see it: the session, plus the
+        email threads that ran alongside it.
+
+        Deliberately separate from get_session_history, which feeds model
+        context (heartbeat prompts). Thread messages belong in what the user
+        looks at, not in the day session's reasoning context - that isolation
+        is the whole reason email threads get their own session.
+        """
+        history = self.get_session_history(session_id)
+        if self._is_email_thread_session(session_id):
+            # Viewing a thread directly: it is already complete on its own.
+            return history
+
+        record = self.session_store.get_session_record(session_id)
+        started_at = self._safe_text((record or {}).get("created_at"))
+        if not started_at:
+            return history
+
+        try:
+            thread_messages = self.session_store.list_email_thread_messages_in_window(
+                started_at=started_at,
+                ended_at=self.session_store.next_session_started_at(session_id),
+            )
+        except Exception:
+            # The user's own session must still render if this lookup fails.
+            logger.exception(
+                "gateway.session_history.email_thread_merge_failed session_id=%s",
+                session_id,
+            )
+            return history
+        if not thread_messages:
+            return history
+
+        subject_by_thread: dict[str, str] = {}
+        for item in thread_messages:
+            thread_id = self._safe_text(item.get("session_id"))
+            if not thread_id or thread_id in subject_by_thread:
+                continue
+            metadata = item.get("metadata")
+            subject = self._safe_text(
+                (metadata or {}).get("subject") if isinstance(metadata, dict) else ""
+            )
+            if subject:
+                subject_by_thread[thread_id] = subject
+
+        merged = list(history)
+        for item in thread_messages:
+            thread_id = self._safe_text(item.get("session_id"))
+            hydrated = self._hydrate_history_message_for_client(item)
+            # The thread session id is the grouping key: unique per thread and
+            # stable, so the client never has to parse it apart.
+            hydrated["email_thread_id"] = thread_id
+            hydrated["email_thread_subject"] = subject_by_thread.get(thread_id, "")
+            merged.append(hydrated)
+
+        merged.sort(key=lambda item: self._safe_text(item.get("created_at")))
+        return merged
+
     def get_heartbeat_consumptions(
         self,
         *,

@@ -375,6 +375,96 @@ class SessionStore:
             )
         return history
 
+    EMAIL_THREAD_SESSION_PREFIX = "email-thread:"
+
+    def list_email_thread_messages_in_window(
+        self,
+        *,
+        started_at: str,
+        ended_at: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Messages from per-thread email sessions inside a time window.
+
+        An inbound email reply is routed to its own
+        `email-thread:<mailbox>:<id>` session so the orchestrator answers with
+        thread-scoped context instead of the day's mixed history. That
+        isolation is deliberate and must stay, but it also means a client
+        loading a single session never saw the reply or anything after it -
+        an email thread appeared to stop dead after its opening message.
+
+        The window keeps each message in the day it actually happened, so a
+        long-running thread is not duplicated into every later transcript.
+        """
+        clauses = ["session_id LIKE ?", "created_at >= ?"]
+        params: list[Any] = [f"{self.EMAIL_THREAD_SESSION_PREFIX}%", started_at]
+        if ended_at:
+            clauses.append("created_at < ?")
+            params.append(ended_at)
+
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    message_id,
+                    session_id,
+                    role,
+                    content,
+                    route,
+                    request_id,
+                    in_reply_to_request_id,
+                    awaiting_reply,
+                    channel,
+                    created_at,
+                    metadata_json
+                FROM messages
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at ASC
+                """,
+                params,
+            ).fetchall()
+
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else None
+            messages.append(
+                {
+                    "message_id": row["message_id"],
+                    "session_id": row["session_id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                    "route": row["route"],
+                    "request_id": row["request_id"],
+                    "in_reply_to_request_id": row["in_reply_to_request_id"],
+                    "awaiting_reply": bool(row["awaiting_reply"]),
+                    "channel": row["channel"],
+                    "created_at": row["created_at"],
+                    "metadata": metadata,
+                }
+            )
+        return messages
+
+    def next_session_started_at(self, session_id: str) -> str | None:
+        """When the session after this one began, or None if it is the latest.
+
+        Bounds the email-thread window to the same span the daily session
+        covers, so thread activity lands in the transcript for its own day.
+        """
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT MIN(created_at) AS next_created_at
+                FROM sessions
+                WHERE session_id != ?
+                  AND session_id NOT LIKE ?
+                  AND created_at > (SELECT created_at FROM sessions WHERE session_id = ?)
+                """,
+                (session_id, f"{self.EMAIL_THREAD_SESSION_PREFIX}%", session_id),
+            ).fetchone()
+        if row is None:
+            return None
+        value = row["next_created_at"]
+        return str(value) if value else None
+
     def count_history(self, session_id: str) -> int:
         with self._lock, self._connect() as connection:
             row = connection.execute(

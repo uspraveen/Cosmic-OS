@@ -27,6 +27,7 @@ import {
 import { appendStreamText, mergeCompletedStreamText } from './streamText'
 import { canAdoptTaskForActiveStream, canClaimActiveStreamSlot, extractEventStreamIds, isEventForActiveStream as isEventForActiveStreamIds, shouldBindToLastAssistantMessage } from './streamIdentity'
 import { groupRepliesWithTheirQuery } from './transcriptOrder'
+import { groupEmailThreads, type EmailThreadUnit } from './emailThreads'
 import { findPendingApprovals } from './pendingApprovals'
 
 export type SearchPosition = 'bottom' | 'middle'
@@ -54,6 +55,9 @@ interface Message {
   source?: string | null
   sourceId?: string | null
   createdAt?: string | null
+  /** Set only on messages from a per-thread email session; groups a thread. */
+  emailThreadId?: string | null
+  emailThreadSubject?: string | null
   progress?: DocsProgressState | TabularProgressState
   backgroundState?: 'working' | 'ready' | 'failed'
 }
@@ -1044,6 +1048,8 @@ const historyToMessages = (history: any[] = []): Message[] => {
       source: typeof item?.metadata?.source === 'string' ? item.metadata.source : null,
       sourceId: typeof item?.metadata?.source_id === 'string' ? item.metadata.source_id : null,
       createdAt: typeof item?.created_at === 'string' ? item.created_at : null,
+      emailThreadId: typeof item?.email_thread_id === 'string' ? item.email_thread_id : null,
+      emailThreadSubject: typeof item?.email_thread_subject === 'string' ? item.email_thread_subject : null,
       activity: typeof item?.metadata?.activity === 'string' ? item.metadata.activity : undefined,
       progress: normalizeTabularProgress(item?.metadata?.tabular_progress) ?? normalizeDocsProgress(item?.metadata?.docs_progress),
     })))
@@ -1242,6 +1248,8 @@ const mergeHydratedMessages = (
       source: message.source ?? existing.source,
       sourceId: message.sourceId ?? existing.sourceId,
       channel: message.channel ?? existing.channel,
+      emailThreadId: message.emailThreadId ?? existing.emailThreadId,
+      emailThreadSubject: message.emailThreadSubject ?? existing.emailThreadSubject,
       stopped: message.stopped ?? existing.stopped,
       progress: message.progress ?? existing.progress,
       backgroundState: message.backgroundState ?? existing.backgroundState,
@@ -3524,7 +3532,35 @@ export default function App() {
   const [downloadingArtifactId, setDownloadingArtifactId] = useState<string | null>(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
   const [streamingProgress, setStreamingProgress] = useState('')
-  const [expandedCrossChannelIds, setExpandedCrossChannelIds] = useState<Set<string>>(new Set())
+  // Tracks the cards the user has deliberately collapsed. Inverted on purpose:
+  // channel conversations (mobile, WhatsApp, Telegram, email threads) are part
+  // of the transcript, so they read expanded by default and collapse only when
+  // asked. Storing "expanded" instead would hide every one of them on load.
+  const [collapsedCrossChannelIds, setCollapsedCrossChannelIds] = useState<Set<string>>(new Set())
+  const toggleCrossChannelCollapsed = useCallback((id: string) => {
+    setCollapsedCrossChannelIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  // Email threads live in their own gateway session, so their messages arrive
+  // interleaved with every other channel. Collapse each thread into one unit
+  // rendered at its newest message; the rest of the transcript is untouched.
+  const emailThreadRender = useMemo(() => {
+    const anchors = new Map<string, EmailThreadUnit<Message>>()
+    const absorbed = new Set<string>()
+    for (const unit of groupEmailThreads(messages)) {
+      if (unit.kind !== 'email-thread') continue
+      anchors.set(unit.anchorId, unit)
+      for (const message of unit.messages) {
+        if (message.id !== unit.anchorId) absorbed.add(message.id)
+      }
+    }
+    return { anchors, absorbed }
+  }, [messages])
   const [unreadBoundaryMessageId, setUnreadBoundaryMessageId] = useState<string | null>(null)
 
   // --- AUTH STATE ---
@@ -7899,10 +7935,84 @@ export default function App() {
                       </div>
                     ) : null
 
+                    // Email thread: every message of the thread renders inside a
+                    // single card at the thread's newest message, so an ongoing
+                    // conversation is not torn apart by whatever else arrived
+                    // between its replies.
+                    if (emailThreadRender.absorbed.has(msg.id)) {
+                      return unreadDivider ? <Fragment key={msg.id}>{unreadDivider}</Fragment> : null
+                    }
+                    const emailThread = emailThreadRender.anchors.get(msg.id)
+                    if (emailThread) {
+                      const isCollapsed = collapsedCrossChannelIds.has(emailThread.threadId)
+                      return (
+                        <Fragment key={msg.id}>
+                          {unreadDivider}
+                          <div className="cross-channel-group" style={{ marginBottom: 16 }}>
+                            <button
+                              className="cross-channel-bar"
+                              onClick={() => toggleCrossChannelCollapsed(emailThread.threadId)}
+                              style={{
+                                width: '100%', display: 'flex', alignItems: 'center', gap: 10,
+                                padding: '10px 14px', borderRadius: 12,
+                                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                                color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: 13,
+                                transition: 'background 0.15s',
+                              }}
+                            >
+                              <span style={{
+                                padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                                background: 'rgba(233,196,106,0.15)', color: '#e9c46a',
+                              }}>
+                                Email
+                              </span>
+                              <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {emailThread.subject}
+                              </span>
+                              <span style={{ fontSize: 11, opacity: 0.5 }}>
+                                {emailThread.messages.length} message{emailThread.messages.length === 1 ? '' : 's'}
+                              </span>
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"
+                                style={{ transform: isCollapsed ? 'rotate(0deg)' : 'rotate(180deg)', transition: 'transform 0.2s' }}>
+                                <path d="M7 10l5 5 5-5z" />
+                              </svg>
+                            </button>
+                            {!isCollapsed && (
+                              <div style={{ padding: '12px 14px 4px', borderLeft: '2px solid rgba(255,255,255,0.06)', marginLeft: 16 }}>
+                                {emailThread.messages.map((threadMsg) => (
+                                  threadMsg.role === 'user' ? (
+                                    <div key={threadMsg.id} className="message-row user" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                                      <ExpandableQueryPill text={cleanText(threadMsg.content)} />
+                                      <UserMessageAttachments attachments={threadMsg.attachments} />
+                                    </div>
+                                  ) : (
+                                    <div key={threadMsg.id} className="message-row assistant" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                                      {threadMsg.responseBlocks && threadMsg.responseBlocks.length > 0 ? (
+                                        <AssistantResponseBlocks blocks={threadMsg.responseBlocks} />
+                                      ) : (
+                                        <AssistantMarkdownBlock content={threadMsg.content} />
+                                      )}
+                                      <AssistantMessageArtifacts
+                                        messageId={threadMsg.id}
+                                        producedArtifacts={threadMsg.producedArtifacts}
+                                        supportingArtifacts={threadMsg.supportingArtifacts}
+                                        downloadingArtifactId={downloadingArtifactId}
+                                        onDownload={handleDownloadProducedArtifact}
+                                      />
+                                    </div>
+                                  )
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </Fragment>
+                      )
+                    }
+
                     // Cross-channel messages: show as collapsible row with channel badge
                     const extLabel = channelLabel(msg.channel)
                     if (extLabel && msg.role === 'user') {
-                      const isExpanded = expandedCrossChannelIds.has(msg.id)
+                      const isExpanded = !collapsedCrossChannelIds.has(msg.id)
                       // Find the assistant response paired with this user message (next message)
                       const pairedResponse = messages[idx + 1]?.role === 'assistant' && isExternalChannel(messages[idx + 1])
                         ? messages[idx + 1] : null
@@ -7912,12 +8022,7 @@ export default function App() {
                         <div className="cross-channel-group" style={{ marginBottom: 16 }}>
                           <button
                             className="cross-channel-bar"
-                            onClick={() => setExpandedCrossChannelIds((prev) => {
-                              const next = new Set(prev)
-                              if (next.has(msg.id)) next.delete(msg.id)
-                              else next.add(msg.id)
-                              return next
-                            })}
+                            onClick={() => toggleCrossChannelCollapsed(msg.id)}
                             style={{
                               width: '100%', display: 'flex', alignItems: 'center', gap: 10,
                               padding: '10px 14px', borderRadius: 12,

@@ -1212,7 +1212,7 @@ async def get_session_history(
 ) -> dict[str, Any]:
     return {
         "session_id": session_id,
-        "messages": runtime.get_session_history(session_id),
+        "messages": runtime.get_session_history_for_client(session_id),
         "heartbeat_consumptions": runtime.get_heartbeat_consumptions(
             session_id=session_id,
             limit=500,
