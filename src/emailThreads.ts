@@ -99,6 +99,30 @@ export const threadSubject = <T extends ThreadableMessage>(messages: T[]): strin
   return 'Email thread'
 }
 
+/**
+ * Drop the `Email from: … / Email subject: …` header the gateway prepends to
+ * an inbound email's content.
+ *
+ * That prefix exists so the orchestrator knows who wrote what; on screen it is
+ * pure duplication, since the card header already carries the subject and the
+ * sender is rendered as its own label. Used for messages stored before the
+ * body was kept separately — anything that does not match the exact shape the
+ * gateway emits is left completely alone.
+ */
+export const stripEmailEnvelope = (content: string): string => {
+  const lines = content.split('\n')
+  let index = 0
+  if (/^Email from:\s/.test(lines[index] ?? '')) index += 1
+  if (!/^Email subject:\s/.test(lines[index] ?? '')) return content
+  index += 1
+  // Bounded on purpose: an envelope with no body would otherwise run off the
+  // end of the array forever, since a missing line reads as blank.
+  while (index < lines.length && lines[index].trim() === '') index += 1
+  const body = lines.slice(index).join('\n').trim()
+  // An email with no body at all is better shown as-is than as an empty pill.
+  return body || content
+}
+
 export const stripReplyPrefixes = (subject: string): string => {
   let result = subject.trim()
   // Threads accumulate prefixes ("Re: Fwd: Re: ..."); strip them all.

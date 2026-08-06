@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { groupEmailThreads, stripReplyPrefixes, type TranscriptUnit } from './emailThreads'
+import {
+  groupEmailThreads,
+  stripEmailEnvelope,
+  stripReplyPrefixes,
+  type TranscriptUnit,
+} from './emailThreads'
 
 interface Msg {
   id: string
@@ -113,6 +118,64 @@ describe('groupEmailThreads', () => {
   it('falls back to a generic label when no message carries a subject', () => {
     const units = groupEmailThreads([mail('m1', 't')])
     expect(units[0].kind === 'email-thread' && units[0].subject).toBe('Email thread')
+  })
+})
+
+describe('stripEmailEnvelope', () => {
+  it('drops the header the gateway prepends for the model', () => {
+    const stored = [
+      'Email from: Praveen Raj U S <uspraveenraj@gmail.com>',
+      "Email subject: Re: Vinai just replied — and he's actively working your SPC referral.",
+      '',
+      'Who is Gopal Raman? Can you pull his profile?',
+    ].join('\n')
+    expect(stripEmailEnvelope(stored)).toBe('Who is Gopal Raman? Can you pull his profile?')
+  })
+
+  it('handles an envelope with no sender line', () => {
+    expect(stripEmailEnvelope('Email subject: Lease\n\nSigned and sent.')).toBe('Signed and sent.')
+  })
+
+  it('keeps multi-paragraph bodies intact', () => {
+    const stored = 'Email from: A <a@b.c>\nEmail subject: S\n\nFirst para.\n\nSecond para.'
+    expect(stripEmailEnvelope(stored)).toBe('First para.\n\nSecond para.')
+  })
+
+  it('leaves a normal typed message completely alone', () => {
+    expect(stripEmailEnvelope('Can you email Vinai about the referral?')).toBe(
+      'Can you email Vinai about the referral?',
+    )
+  })
+
+  it('does not strip a sender line that is not followed by a subject line', () => {
+    // Only the exact shape the gateway emits is safe to remove.
+    const text = 'Email from: someone\nActually this is body text.'
+    expect(stripEmailEnvelope(text)).toBe(text)
+  })
+
+  it('keeps the original when the envelope has no body after it', () => {
+    const text = 'Email from: A <a@b.c>\nEmail subject: Just a subject'
+    expect(stripEmailEnvelope(text)).toBe(text)
+  })
+
+  it('cleans a real stored message, verbatim from production', () => {
+    // Copied out of the live sessions DB - the SPC reply that started all of
+    // this. Messages saved before the body was stored separately still have
+    // to render cleanly, so this path is not just a theoretical fallback.
+    const stored =
+      'Email from: Praveen Raj U S <uspraveenraj@gmail.com>\n' +
+      "Email subject: Re: Vinai just replied — and he's actively working your SPC referral. He says…\n" +
+      '\n' +
+      'Find Gopal’s LinkedIn and more info On Wed, Aug 5, 2026 at 1:51 PM Cosmic 001 < iamcosmic001@mail.thelearnchain.com> wrote: > Vinai just replied'
+    const cleaned = stripEmailEnvelope(stored)
+    expect(cleaned.startsWith('Find Gopal’s LinkedIn and more info')).toBe(true)
+    expect(cleaned).not.toContain('Email from:')
+    expect(cleaned).not.toContain('Email subject:')
+  })
+
+  it('does not mistake body text that merely mentions the prefix', () => {
+    const text = 'Please note the Email subject: line was wrong in your last mail.'
+    expect(stripEmailEnvelope(text)).toBe(text)
   })
 })
 

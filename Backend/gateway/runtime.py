@@ -8503,6 +8503,11 @@ class GatewayRuntime:
                 "subject",
                 "from_address",
                 "from_name",
+                # Display fields for the transcript. `content` stays the
+                # model's bounded excerpt; these let the UI show the real
+                # sender and the full body instead of the raw envelope blob.
+                "body_text",
+                "body_truncated",
                 "session_scope",
                 "rollover_exempt",
             ):

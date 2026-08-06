@@ -15,6 +15,14 @@ from shared import (
 from .base import ChannelAdapter, ChannelUnavailableError, MessageCallback, PermanentDeliveryError
 
 
+# The `content` field is what the orchestrator reads, so it stays a bounded
+# excerpt to protect the prompt budget. The full body is carried separately in
+# metadata purely for display - the transcript used to show the model's clipped
+# excerpt, so a long email looked silently cut off with no indication why.
+MODEL_BODY_EXCERPT_CHARS = 800
+STORED_BODY_CHARS = 20000
+
+
 def _safe_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -244,6 +252,7 @@ class AgentEmailAdapter(ChannelAdapter):
             raise ValueError("Cosmic Mail webhook payload is missing message_id or thread_id.")
 
         attachments = self._normalize_attachments(message.get("attachments"), message_id=message_id)
+        body = self._extract_body(message)
         from_contacts = _normalize_contact_list(message.get("from_recipients"))
         if not from_contacts:
             from_address = _safe_text(message.get("from_address"))
@@ -280,6 +289,11 @@ class AgentEmailAdapter(ChannelAdapter):
                 "received_at": _safe_text(message.get("received_at")) or None,
                 "sent_at": _safe_text(message.get("sent_at")) or None,
                 "internet_message_id": _safe_text(message.get("internet_message_id")) or None,
+                # Display copy of the body, independent of the excerpt the
+                # model sees. Bounded so a pathological email cannot bloat the
+                # session row.
+                "body_text": body[:STORED_BODY_CHARS],
+                "body_truncated": len(body) > STORED_BODY_CHARS,
                 "attachments": attachments,
                 "has_attachments": bool(attachments),
                 "attachment_count": len(attachments),
@@ -662,12 +676,9 @@ class AgentEmailAdapter(ChannelAdapter):
             )
         return attachments
 
-    def _build_content_summary(self, message: dict[str, Any], *, from_contacts: list[dict[str, Any]]) -> str:
-        subject = _safe_text(message.get("subject")) or "(no subject)"
-        from_name = from_contacts[0].get("name") if from_contacts else None
-        from_address = from_contacts[0].get("email") if from_contacts else None
-        sender = " ".join(part for part in [from_name, f"<{from_address}>" if from_address else None] if part).strip()
-        body = (
+    @staticmethod
+    def _extract_body(message: dict[str, Any]) -> str:
+        return (
             _safe_text(message.get("text_body"))
             or _safe_text(message.get("body_text"))
             or _safe_text(message.get("snippet"))
@@ -675,7 +686,14 @@ class AgentEmailAdapter(ChannelAdapter):
             or _safe_text(message.get("body_preview"))
             or _safe_text(message.get("body"))
         )
-        excerpt = body[:800]
+
+    def _build_content_summary(self, message: dict[str, Any], *, from_contacts: list[dict[str, Any]]) -> str:
+        subject = _safe_text(message.get("subject")) or "(no subject)"
+        from_name = from_contacts[0].get("name") if from_contacts else None
+        from_address = from_contacts[0].get("email") if from_contacts else None
+        sender = " ".join(part for part in [from_name, f"<{from_address}>" if from_address else None] if part).strip()
+        body = self._extract_body(message)
+        excerpt = body[:MODEL_BODY_EXCERPT_CHARS]
         lines = [f"Email subject: {subject}"]
         if sender:
             lines.insert(0, f"Email from: {sender}")

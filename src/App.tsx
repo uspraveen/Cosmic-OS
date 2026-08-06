@@ -27,7 +27,7 @@ import {
 import { appendStreamText, mergeCompletedStreamText } from './streamText'
 import { canAdoptTaskForActiveStream, canClaimActiveStreamSlot, extractEventStreamIds, isEventForActiveStream as isEventForActiveStreamIds, shouldBindToLastAssistantMessage } from './streamIdentity'
 import { groupRepliesWithTheirQuery } from './transcriptOrder'
-import { groupEmailThreads, type EmailThreadUnit } from './emailThreads'
+import { groupEmailThreads, stripEmailEnvelope, type EmailThreadUnit } from './emailThreads'
 import { findPendingApprovals } from './pendingApprovals'
 
 export type SearchPosition = 'bottom' | 'middle'
@@ -58,6 +58,11 @@ interface Message {
   /** Set only on messages from a per-thread email session; groups a thread. */
   emailThreadId?: string | null
   emailThreadSubject?: string | null
+  /** Inbound email display fields, kept apart from the model's excerpt. */
+  emailFromName?: string | null
+  emailFromAddress?: string | null
+  emailBody?: string | null
+  emailBodyTruncated?: boolean
   progress?: DocsProgressState | TabularProgressState
   backgroundState?: 'working' | 'ready' | 'failed'
 }
@@ -1050,6 +1055,10 @@ const historyToMessages = (history: any[] = []): Message[] => {
       createdAt: typeof item?.created_at === 'string' ? item.created_at : null,
       emailThreadId: typeof item?.email_thread_id === 'string' ? item.email_thread_id : null,
       emailThreadSubject: typeof item?.email_thread_subject === 'string' ? item.email_thread_subject : null,
+      emailFromName: typeof item?.metadata?.from_name === 'string' ? item.metadata.from_name : null,
+      emailFromAddress: typeof item?.metadata?.from_address === 'string' ? item.metadata.from_address : null,
+      emailBody: typeof item?.metadata?.body_text === 'string' ? item.metadata.body_text : null,
+      emailBodyTruncated: Boolean(item?.metadata?.body_truncated),
       activity: typeof item?.metadata?.activity === 'string' ? item.metadata.activity : undefined,
       progress: normalizeTabularProgress(item?.metadata?.tabular_progress) ?? normalizeDocsProgress(item?.metadata?.docs_progress),
     })))
@@ -1250,6 +1259,10 @@ const mergeHydratedMessages = (
       channel: message.channel ?? existing.channel,
       emailThreadId: message.emailThreadId ?? existing.emailThreadId,
       emailThreadSubject: message.emailThreadSubject ?? existing.emailThreadSubject,
+      emailFromName: message.emailFromName ?? existing.emailFromName,
+      emailFromAddress: message.emailFromAddress ?? existing.emailFromAddress,
+      emailBody: message.emailBody ?? existing.emailBody,
+      emailBodyTruncated: message.emailBodyTruncated ?? existing.emailBodyTruncated,
       stopped: message.stopped ?? existing.stopped,
       progress: message.progress ?? existing.progress,
       backgroundState: message.backgroundState ?? existing.backgroundState,
@@ -1677,6 +1690,51 @@ const UserMessageAttachments = ({ attachments }: { attachments?: MessageAttachme
           </div>
         </div>
       ))}
+    </div>
+  )
+}
+
+/** Who wrote an inbound email, as the transcript should label it. */
+const emailSenderName = (message: Message): string =>
+  String(message.emailFromName || '').trim() || String(message.emailFromAddress || '').trim()
+
+/**
+ * The body to show for an inbound email.
+ *
+ * `content` is the model's view: a bounded excerpt behind an `Email from: /
+ * Email subject:` header. Prefer the full body stored for display, and fall
+ * back to stripping that header off older messages saved before it existed.
+ */
+const emailDisplayBody = (message: Message): string => {
+  const stored = String(message.emailBody || '').trim()
+  return cleanText(stored || stripEmailEnvelope(String(message.content || '')))
+}
+
+const EmailThreadUserRow = ({
+  message,
+  previous,
+}: {
+  message: Message
+  previous?: Message
+}) => {
+  const sender = emailSenderName(message)
+  // Consecutive emails from the same person are labelled once, the way any
+  // chat groups a run of messages — otherwise your own name repeats on every
+  // reply in a two-person thread.
+  const showSender = Boolean(sender) && (previous?.role !== 'user' || emailSenderName(previous) !== sender)
+  return (
+    <div
+      className="message-row user"
+      style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}
+    >
+      {showSender && (
+        <span style={{ fontSize: 11, opacity: 0.45, marginBottom: 4 }}>{sender}</span>
+      )}
+      <ExpandableQueryPill text={emailDisplayBody(message)} />
+      {message.emailBodyTruncated && (
+        <span style={{ fontSize: 11, opacity: 0.45, marginTop: 4 }}>Message truncated</span>
+      )}
+      <UserMessageAttachments attachments={message.attachments} />
     </div>
   )
 }
@@ -7979,12 +8037,13 @@ export default function App() {
                             </button>
                             {!isCollapsed && (
                               <div style={{ padding: '12px 14px 4px', borderLeft: '2px solid rgba(255,255,255,0.06)', marginLeft: 16 }}>
-                                {emailThread.messages.map((threadMsg) => (
+                                {emailThread.messages.map((threadMsg, threadIdx) => (
                                   threadMsg.role === 'user' ? (
-                                    <div key={threadMsg.id} className="message-row user" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                                      <ExpandableQueryPill text={cleanText(threadMsg.content)} />
-                                      <UserMessageAttachments attachments={threadMsg.attachments} />
-                                    </div>
+                                    <EmailThreadUserRow
+                                      key={threadMsg.id}
+                                      message={threadMsg}
+                                      previous={emailThread.messages[threadIdx - 1]}
+                                    />
                                   ) : (
                                     <div key={threadMsg.id} className="message-row assistant" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
                                       {threadMsg.responseBlocks && threadMsg.responseBlocks.length > 0 ? (
