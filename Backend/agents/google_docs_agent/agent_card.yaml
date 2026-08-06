@@ -66,15 +66,19 @@ intents:
       - Prefer recall plus docs.read for continuing edits on an existing document from the same project/session.
 
 auth_requirements:
-  # docs.resolve_resource and docs.read carry drive.readonly in addition to
-  # drive.file. drive.file is a Drive-restricted scope: it only grants
-  # visibility into files this app itself created or that the user
-  # explicitly picked through it, never the user's Drive at large. Search
-  # and read need to see documents the user created independently (e.g.
-  # directly in the Google Docs UI, never touched by Cosmic), which
-  # drive.file alone cannot see no matter how the search query is built.
-  # drive.readonly is read-only, so docs.create/docs.edit keep drive.file
-  # only - it's sufficient for writing to files this app creates.
+  # Only docs.resolve_resource carries drive.readonly. drive.file is a
+  # Drive-restricted scope: it grants visibility only into files this app
+  # created or that the user explicitly picked through it, never the user's
+  # Drive at large. Discovery - finding a document the user created
+  # independently, e.g. directly in the Google Docs UI - is impossible under
+  # drive.file no matter how the query is built, so it needs drive.readonly.
+  #
+  # Every other intent deliberately stays on drive.file. These scope lists are
+  # enforced all-or-nothing by the gateway, so listing a scope the user has
+  # not consented to does not degrade an operation, it fails it outright.
+  # docs.read fetches by document id from the Docs API (documents scope) and
+  # never calls Drive, so requiring drive.readonly there only broke reads that
+  # worked fine - including reads of documents the user had explicitly shared.
   docs.resolve_resource:
     provider: google
     scopes:
@@ -91,7 +95,6 @@ auth_requirements:
     scopes:
       - https://www.googleapis.com/auth/documents
       - https://www.googleapis.com/auth/drive.file
-      - https://www.googleapis.com/auth/drive.readonly
   docs.edit:
     provider: google
     scopes:

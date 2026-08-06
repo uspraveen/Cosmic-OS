@@ -645,18 +645,34 @@ class AgentRuntime:
         auth_requirements = self.agent_card.get("auth_requirements")
         if not isinstance(auth_requirements, dict):
             return None
-        scopes: set[str] = set()
+        intent_scopes: list[set[str]] = []
         for requirement in auth_requirements.values():
             if not isinstance(requirement, dict):
                 continue
             if str(requirement.get("provider") or "").strip().lower() != "google":
                 continue
-            for scope in requirement.get("scopes") or []:
-                normalized = str(scope or "").strip()
-                if normalized:
-                    scopes.add(normalized)
-        if not scopes:
+            normalized = {
+                str(scope or "").strip()
+                for scope in requirement.get("scopes") or []
+                if str(scope or "").strip()
+            }
+            if normalized:
+                intent_scopes.append(normalized)
+        if not intent_scopes:
             return None
+
+        # Health asks "can this agent do useful work for this account?", so it
+        # probes the baseline every intent needs. Probing the union instead
+        # meant one advanced intent's extra scope made the whole agent report
+        # reauth_required for every account that had not re-consented - even
+        # though most of its intents were fine. Intents needing more than the
+        # baseline still fail individually at dispatch, which is where a
+        # missing capability belongs.
+        scopes = set.intersection(*intent_scopes)
+        if not scopes:
+            # No common baseline (fully disjoint intents): fall back to the
+            # union rather than probing nothing at all.
+            scopes = set().union(*intent_scopes)
         return {"provider": "google", "tool": tool, "required_scopes": sorted(scopes)}
 
     def _google_provider_tool_name(self) -> str | None:
