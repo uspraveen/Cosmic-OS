@@ -88,6 +88,7 @@ except (
     ImageOps = None
     UnidentifiedImageError = Exception
 
+from shared.cursor_cli import cursor_cli_env, find_cursor_agent_binary
 from shared import (
     AgentEmailIntegrationStore,
     CosmicMailClient,
@@ -20737,49 +20738,50 @@ class GatewayRuntime:
             }
 
     def _cursor_binary(self) -> str | None:
-        binary = shutil.which("cursor-agent")
-        if binary:
-            return binary
-        names = ["cursor-agent.exe", "cursor-agent.cmd", "cursor-agent"] if os.name == "nt" else ["cursor-agent"]
-        candidates: list[Path] = []
-        for name in names:
-            candidates.extend(
-                [
-                    Path.home() / ".local" / "bin" / name,
-                    Path("/usr/local/bin") / name,
-                    Path("/usr/bin") / name,
-                    Path("/home/ubuntu/.local/bin") / name,
-                ]
-            )
-        for candidate in candidates:
-            if candidate.exists():
-                return str(candidate)
-        return None
+        # Resolved against the same Cursor home this runtime runs the CLI under
+        # - that is where `cursor-agent` installs and self-updates itself.
+        return find_cursor_agent_binary(self.config.alpha_cursor_home)
 
     def _cursor_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        env["HOME"] = str(self.config.alpha_cursor_home)
-        env["CURSOR_AGENT"] = "1"
-        existing_path = env.get("PATH", "")
-        local_bin = str(Path.home() / ".local" / "bin")
-        env["PATH"] = f"{local_bin}{os.pathsep}/usr/local/bin{os.pathsep}{existing_path}"
-        return env
+        return cursor_cli_env(self.config.alpha_cursor_home)
 
     async def _capture_codex_stream(
         self,
         stream: asyncio.StreamReader | None,
         lines: list[str],
     ) -> None:
+        """Capture a login CLI's output into `lines`, newline or not.
+
+        These CLIs draw a spinner while they wait for browser approval: they
+        print the sign-in URL and then redraw with carriage returns, never
+        emitting a newline after it. `readline()` would block on that forever
+        and the desktop would never see the URL it exists to show. So split on
+        either terminator, and surface an unterminated tail as a provisional
+        last line - replaced in place once it does terminate.
+        """
         if stream is None:
             return
+        buffer = ""
+        provisional = False
         while True:
-            chunk = await stream.readline()
+            chunk = await stream.read(2048)
             if not chunk:
                 break
-            line = chunk.decode("utf-8", errors="replace").strip()
-            if line:
-                lines.append(line)
-                del lines[:-30]
+            if provisional:
+                lines.pop()
+                provisional = False
+            buffer += chunk.decode("utf-8", errors="replace")
+            segments = re.split(r"[\r\n]+", buffer)
+            buffer = segments.pop()
+            for segment in segments:
+                text = segment.strip()
+                if text:
+                    lines.append(text)
+            tail = buffer.strip()
+            if tail:
+                lines.append(tail)
+                provisional = True
+            del lines[:-30]
 
     async def _watch_codex_login_process(
         self,

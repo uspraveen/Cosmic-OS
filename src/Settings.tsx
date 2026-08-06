@@ -89,6 +89,15 @@ export default function Settings({
     return () => window.removeEventListener('keydown', handleEsc)
   }, [onClose])
 
+  // A connect/login button whose whole job is to hand the user to the browser
+  // should not leave the panel sitting on top of it. Main announces every
+  // browser hand-off, so this covers Google, Codex, Cursor, Telegram and
+  // anything added later without each one having to opt in.
+  useEffect(() => {
+    if (!isOpen) return
+    return window.cosmic?.onExternalOpened?.(() => onClose())
+  }, [isOpen, onClose])
+
   useEffect(() => {
     if (!isOpen) setCurrentView('main')
   }, [isOpen])

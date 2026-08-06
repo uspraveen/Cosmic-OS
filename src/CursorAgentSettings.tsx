@@ -1,5 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, CheckCircle2, ExternalLink, LogIn, RefreshCw, ShieldCheck, Terminal, Trash2 } from 'lucide-react'
+import {
+  describeLoginReason,
+  extractLoginUrl,
+  loginSessionLines,
+  loginStartOutcome,
+  stripAnsi,
+} from './agentLogin'
 
 type CursorApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
 
@@ -37,6 +44,7 @@ interface CursorGatewayStatus {
     reason?: string
   }
   login_session?: {
+    session_id?: string
     state?: string
     stdout?: string[]
     stderr?: string[]
@@ -78,7 +86,7 @@ function normalizeCursorModelOption(value: unknown) {
 }
 
 function extractFirstUrl(value: string) {
-  return value.match(/https?:\/\/\S+/)?.[0]?.replace(/[),.]+$/, '') || ''
+  return extractLoginUrl([value])
 }
 
 export default function CursorAgentSettings({ active }: CursorAgentSettingsProps) {
@@ -90,6 +98,7 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
   const [saving, setSaving] = useState(false)
   const [banner, setBanner] = useState('')
   const [error, setError] = useState('')
+  const openedLoginUrlRef = useRef('')
 
   useEffect(() => {
     if (!banner) return
@@ -131,22 +140,41 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
     return () => window.clearInterval(timer)
   }, [active, gatewayStatus?.status])
 
+  // The CLI prints its sign-in URL a moment after the process starts, so the
+  // click that starts a login cannot open it. Open it as soon as it appears -
+  // once per login session, so a status poll never reopens the tab. Settings
+  // dismisses itself off the main process's external-opened signal.
+  useEffect(() => {
+    if (!active) return
+    const session = gatewayStatus?.login_session
+    if (!session || session.state !== 'running') return
+    const url = extractLoginUrl(loginSessionLines(session))
+    if (!url) return
+    const key = `${session.session_id || ''}:${url}`
+    if (openedLoginUrlRef.current === key) return
+    openedLoginUrlRef.current = key
+    void window.cosmic?.openExternal(url)
+  }, [active, gatewayStatus?.login_session])
+
+  const cliMissing = gatewayStatus?.cli?.available === false
+
   const connectionLabel = useMemo(() => {
     if (loading) return 'Checking VM status'
+    // A missing CLI outranks every auth state: no sign-in can fix it, and
+    // calling it "needs re-authentication" sends the user round a loop that
+    // cannot terminate.
+    if (cliMissing) return 'Cursor CLI missing on VM'
     if (gatewayStatus?.status === 'authenticated') return 'Cursor authenticated on VM'
     if (gatewayStatus?.status === 'login_pending') return 'OAuth waiting for browser approval'
     if (gatewayStatus?.status === 'relogin_required') return 'Cursor needs re-authentication on the VM'
     if (gatewayStatus?.status === 'login_required') return 'Cursor OAuth sign-in required on the VM'
-    if (gatewayStatus?.cli?.available === false) return 'Cursor CLI missing on VM'
     return 'OAuth sign-in required'
-  }, [gatewayStatus, loading])
+  }, [cliMissing, gatewayStatus, loading])
 
   const needsReauth = gatewayStatus?.status === 'relogin_required' || gatewayStatus?.status === 'login_required'
 
-  const loginOutput = [
-    ...(gatewayStatus?.login_session?.stdout || []),
-    ...(gatewayStatus?.login_session?.stderr || []),
-  ].slice(-8)
+  const loginOutput = loginSessionLines(gatewayStatus?.login_session).slice(-8)
+  const loginUrl = extractLoginUrl(loginOutput)
 
   const applyGatewayStatus = (rawStatus: unknown) => {
     const status = (rawStatus && typeof rawStatus === 'object' ? rawStatus : {}) as CursorGatewayStatus
@@ -181,7 +209,12 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
     try {
       const status = await window.cosmic?.startGatewayCursorLogin()
       applyGatewayStatus(status)
-      setBanner('Cursor OAuth login started on the VM.')
+      // The endpoint answers 200 whether or not it managed to start anything;
+      // the truth is in the status it returns. Reporting success blind is what
+      // made a dead Login button look like a working one.
+      const outcome = loginStartOutcome(status as CursorGatewayStatus | null, 'Cursor')
+      if (outcome.ok) setBanner(outcome.message)
+      else setError(outcome.message)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to start Cursor login on the VM.')
     } finally {
@@ -230,13 +263,15 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
           </div>
         </div>
         <div className={`cosmic-agents-detail-status-pill ${gatewayStatus?.status === 'authenticated' ? 'ready' : gatewayStatus?.status === 'login_pending' ? 'pending' : 'warn'}`}>
-          {gatewayStatus?.status === 'authenticated'
-            ? 'Ready'
-            : gatewayStatus?.status === 'login_pending'
-              ? 'Pending'
-              : needsReauth
-                ? 'Reauth'
-                : 'Setup'}
+          {cliMissing
+            ? 'Setup'
+            : gatewayStatus?.status === 'authenticated'
+              ? 'Ready'
+              : gatewayStatus?.status === 'login_pending'
+                ? 'Pending'
+                : needsReauth
+                  ? 'Reauth'
+                  : 'Setup'}
         </div>
       </div>
 
@@ -258,7 +293,13 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
                 <Trash2 size={15} />
               </button>
             ) : (
-              <button type="button" className="cosmic-agents-detail-btn" onClick={startCursorLogin} disabled={saving}>
+              <button
+                type="button"
+                className="cosmic-agents-detail-btn"
+                onClick={startCursorLogin}
+                disabled={saving || cliMissing}
+                title={cliMissing ? 'Install the Cursor CLI on the VM first' : undefined}
+              >
                 <LogIn size={15} />
                 {gatewayStatus?.status === 'login_pending' ? 'Restart' : 'Login'}
               </button>
@@ -266,14 +307,26 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
           </div>
         </div>
 
-        {loginOutput.length ? (
+        {cliMissing ? (
+          <p className="cosmic-agents-detail-section-copy">{describeLoginReason(gatewayStatus)}</p>
+        ) : loginOutput.length ? (
           <div className="cosmic-agents-detail-login-output">
+            {loginUrl ? (
+              <span>
+                Sign-in page opened in your browser.
+                <button type="button" onClick={() => window.cosmic?.openExternal(loginUrl)}>
+                  <ExternalLink size={12} />
+                  Open again
+                </button>
+              </span>
+            ) : null}
             {loginOutput.map((line, index) => {
+              const cleanLine = stripAnsi(line)
               const url = extractFirstUrl(line)
               return (
                 <span key={`${line}-${index}`}>
-                  {line}
-                  {url ? (
+                  {cleanLine}
+                  {url && url !== loginUrl ? (
                     <button type="button" onClick={() => window.cosmic?.openExternal(url)}>
                       <ExternalLink size={12} />
                       Open

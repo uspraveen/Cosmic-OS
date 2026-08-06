@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Bot, CheckCircle2, Code2, Copy, ExternalLink, KeyRound, LogIn, ShieldCheck, Terminal, Trash2 } from 'lucide-react'
+import { describeLoginReason, loginStartOutcome } from './agentLogin'
 
 type CodexAuthMode = 'chatgpt' | 'api_key'
 type CodexApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
@@ -149,15 +150,18 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
     return () => window.clearInterval(timer)
   }, [active, gatewayStatus?.status])
 
+  const cliMissing = gatewayStatus?.cli?.available === false
+
   const connectionLabel = useMemo(() => {
     if (loading) return 'Checking VM status'
+    if (cliMissing) return 'Codex CLI missing on VM'
     if (gatewayStatus?.status === 'authenticated') return 'Codex authenticated on VM'
     if (gatewayStatus?.status === 'login_pending') return 'Login waiting for browser approval'
     if (gatewayStatus?.status === 'relogin_required') return 'Codex needs re-authentication on the VM'
     if (gatewayStatus?.status === 'login_required') return 'Codex sign-in required on the VM'
     if (authMode === 'api_key') return hasApiKey ? 'API key saved on VM' : 'API key needed'
     return 'ChatGPT sign-in selected'
-  }, [authMode, gatewayStatus?.status, hasApiKey, loading])
+  }, [authMode, cliMissing, gatewayStatus?.status, hasApiKey, loading])
 
   const needsReauth = gatewayStatus?.status === 'relogin_required' || gatewayStatus?.status === 'login_required'
 
@@ -260,7 +264,11 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
     try {
       const status = await window.cosmic?.startGatewayCodexLogin()
       applyGatewayStatus(status)
-      setBanner('Codex ChatGPT login started on the VM.')
+      // Same trap the Cursor panel fell into: the endpoint answers 200 even
+      // when it refused to start anything. Read the status it returned.
+      const outcome = loginStartOutcome(status as CodexGatewayStatus | null, 'Codex')
+      if (outcome.ok) setBanner(outcome.message)
+      else setError(outcome.message)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to start Codex login on the VM.')
     } finally {
@@ -391,11 +399,19 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
               <span className="cosmic-agents-detail-kicker">ChatGPT login</span>
               <h4>{gatewayStatus?.status === 'authenticated' ? 'Signed in on VM' : 'VM sign-in session'}</h4>
             </div>
-            <button type="button" className="cosmic-agents-detail-btn" onClick={startChatGptLogin} disabled={saving}>
+            <button
+              type="button"
+              className="cosmic-agents-detail-btn"
+              onClick={startChatGptLogin}
+              disabled={saving || cliMissing}
+              title={cliMissing ? 'Install the Codex CLI on the VM first' : undefined}
+            >
               {gatewayStatus?.status === 'login_pending' ? 'Restart' : 'Login'}
             </button>
           </div>
-          {hasDeviceLogin ? (
+          {cliMissing ? (
+            <p className="cosmic-agents-detail-section-copy">{describeLoginReason(gatewayStatus)}</p>
+          ) : hasDeviceLogin ? (
             <div className="cosmic-agents-login-card">
               <div className="cosmic-agents-login-card-head">
                 <div>

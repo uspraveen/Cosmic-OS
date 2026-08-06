@@ -230,6 +230,13 @@ contextBridge.exposeInMainWorld('cosmic', {
   controlMedia: (action: string) => ipcRenderer.send('media:control', action),
   setVolume: (level: number) => ipcRenderer.send('media:set_volume', level),
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
+  // Fires whenever the main process actually hands a URL to the system browser,
+  // whoever asked for it.
+  onExternalOpened: (cb: (data: { url: string }) => void) => {
+    const listener = (_: any, data: { url: string }) => cb(data)
+    ipcRenderer.on('external-opened', listener)
+    return () => ipcRenderer.removeListener('external-opened', listener)
+  },
 
   // SETTINGS
   getSettings: () => ipcRenderer.send('settings:get-all'),

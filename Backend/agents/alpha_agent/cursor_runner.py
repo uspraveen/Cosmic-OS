@@ -6,12 +6,13 @@ import json
 import os
 import re
 import signal
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from shared.cursor_cli import cursor_cli_env
+from shared.cursor_cli import find_cursor_agent_binary as resolve_cursor_agent_binary
 from shared.cursor_cli_config import ensure_cursor_cli_non_fast_config
 from shared.contracts import ArtifactManifest
 
@@ -70,25 +71,8 @@ def normalize_cursor_model(value: str | None) -> str | None:
     return CURSOR_MODEL_ALIASES.get(alias_key, normalized)
 
 
-def find_cursor_agent_binary() -> str | None:
-    binary = shutil.which("cursor-agent")
-    if binary:
-        return binary
-    names = ["cursor-agent.exe", "cursor-agent.cmd", "cursor-agent"] if os.name == "nt" else ["cursor-agent"]
-    candidates: list[Path] = []
-    for name in names:
-        candidates.extend(
-            [
-                Path.home() / ".local" / "bin" / name,
-                Path("/usr/local/bin") / name,
-                Path("/usr/bin") / name,
-                Path("/home/ubuntu/.local/bin") / name,
-            ]
-        )
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-    return None
+def find_cursor_agent_binary(cursor_home: str | Path | None = None) -> str | None:
+    return resolve_cursor_agent_binary(cursor_home)
 
 
 @dataclass(frozen=True)
@@ -141,7 +125,7 @@ class CursorWorkspaceRunner:
         self.config = config
 
     def cursor_binary(self) -> str | None:
-        return find_cursor_agent_binary()
+        return find_cursor_agent_binary(self.config.cursor_home)
 
     def is_available(self) -> bool:
         return self.cursor_binary() is not None
@@ -704,10 +688,4 @@ class CursorWorkspaceRunner:
         )
 
     def _env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        env["HOME"] = str(self.config.cursor_home)
-        env["CURSOR_AGENT"] = "1"
-        existing_path = env.get("PATH", "")
-        local_bin = str(Path.home() / ".local" / "bin")
-        env["PATH"] = f"{local_bin}{os.pathsep}/usr/local/bin{os.pathsep}{existing_path}"
-        return env
+        return cursor_cli_env(self.config.cursor_home)

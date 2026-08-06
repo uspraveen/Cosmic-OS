@@ -301,6 +301,7 @@ interface Window {
     restoreApp: () => void
     restartApp: () => void
     openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>
+    onExternalOpened?: (cb: (data: { url: string }) => void) => () => void
 
     // Voice APIs
     startVoice: () => void

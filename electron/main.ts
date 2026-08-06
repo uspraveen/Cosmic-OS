@@ -62,6 +62,18 @@ function isSafeExternalUrl(value: unknown): value is string {
   }
 }
 
+// Every browser hand-off goes through here so the renderer can react to one
+// signal instead of each call site remembering to announce itself. The settings
+// panel uses it to get out of the way once the browser has the user's attention.
+async function openExternalAndAnnounce(url: string): Promise<void> {
+  await shell.openExternal(url.trim())
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) {
+      window.webContents.send('external-opened', { url: url.trim() })
+    }
+  }
+}
+
 function zoomCenterCropPngToOriginalSize(img: Electron.NativeImage, zoom: number): Electron.NativeImage {
   if (zoom <= 1) return img
   const { width, height } = img.getSize()
@@ -2775,7 +2787,7 @@ app.whenReady().then(() => {
     if (!isSafeExternalUrl(url)) {
       return { ok: false, error: 'invalid_url' }
     }
-    await shell.openExternal(url.trim())
+    await openExternalAndAnnounce(url)
     return { ok: true }
   })
 
@@ -3592,7 +3604,7 @@ app.whenReady().then(() => {
     }, 240_000)
 
     try {
-      await shell.openExternal(oauthPayload.url)
+      await openExternalAndAnnounce(oauthPayload.url)
     } catch (e) {
       finish({
         type: 'err',
