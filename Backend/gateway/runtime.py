@@ -89,6 +89,7 @@ except (
     UnidentifiedImageError = Exception
 
 from shared.cursor_cli import cursor_cli_env, find_cursor_agent_binary
+from shared.scratchpad import derive_reconciliation_query, excerpt_head_and_tail
 from shared import (
     AgentEmailIntegrationStore,
     CosmicMailClient,
@@ -162,7 +163,15 @@ Return exactly one JSON object and no surrounding prose:
 Use decision=suppress with an empty message when there is no meaningful user-facing result. Use decision=deliver only when the review surfaced a genuinely valuable new opportunity, a consequential improvement recommendation, or a live-tool issue the user should know about. The message must be a short natural note for the user, not process narration or a maintenance report."""
 HEARTBEAT_SOURCE_ID = "default"
 HEARTBEAT_SUPPRESS_TOKEN = "heartbeat_ok"
-HEARTBEAT_NOTES_CHAR_LIMIT = 4000
+# The scratchpad is the heartbeat's only memory across beats, and the write
+# path allows 32k. A 4k ambient view meant the beat reasoned from a shrinking
+# fraction of what it had written. Head+tail excerpting makes the budget honest;
+# this raises it enough to hold standing state plus a real recent window.
+HEARTBEAT_NOTES_CHAR_LIMIT = 6000
+# Bounded so a large scratchpad cannot inflate every beat's prompt.
+HEARTBEAT_MEMORY_RECONCILIATION_QUERY_CHARS = 900
+HEARTBEAT_MEMORY_RECONCILIATION_MAX_ITEMS = 5
+HEARTBEAT_MEMORY_RECONCILIATION_ITEM_CHARS = 320
 HEARTBEAT_RECENT_DELIVERY_WINDOW_SEC = 36 * 60 * 60
 HEARTBEAT_RECENT_DELIVERY_LIMIT = 8
 # If chat has been silent and no heartbeat note was successfully delivered for this
@@ -2704,6 +2713,13 @@ class GatewayRuntime:
             "and to reason about the last beat, this beat, and the next one. "
             "Use heartbeat_notes as your private scratchpad for compact self-notes across beats: "
             "read it when continuity matters, append or replace short watchpoints, and remove stale notes. "
+            "The scratchpad owns self-observation only - what you delivered, suppressed, or plan to check. "
+            "It does not own facts about the world; durable memory does. When a note restates a world fact "
+            "(a deadline, a status, a commitment), that copy can go stale the moment the user corrects the "
+            "original, so prefer recording what to watch and where the fact lives over restating the fact. "
+            "When Durable Memory On These Same Subjects contradicts a note, the memory is correct: act on it, "
+            "and repair or delete the offending note in this same beat so the contradiction cannot outlive it. "
+            "A retraction is an instruction to stop surfacing something, not one input among several. "
             "Never infer that a reminder, cron, email, or calendar item was missed from desktop inactivity, "
             "missing heartbeat consumption, lack of chat activity, or stale heartbeat notes. Use explicit "
             "delivery facts when present, and treat completed/delivered scheduled items as already handled "
@@ -2736,6 +2752,68 @@ class GatewayRuntime:
             return prompt
         return f"{prompt}\n\n{context_block}"
 
+    async def _build_heartbeat_notes_reconciliation(
+        self, heartbeat_notes: str
+    ) -> list[dict[str, str]]:
+        """Retrieve durable memory using the scratchpad's own claims as the query.
+
+        The scratchpad is allowed to hold self-observation ("I delivered at
+        12:14"), which is never wrong. It is not the owner of world facts, but
+        it restates them anyway - and an unowned second copy cannot be reached
+        by a correction to the original.
+
+        So resolve it at render time. Every claim the notes assert is turned
+        into a retrieval query, and whatever durable memory says about those
+        same subjects is rendered next to the notes. Correcting a memory then
+        corrects every later beat automatically, with no cleanup pass.
+
+        Measured on live data: the fixed generic heartbeat query did not
+        surface the correcting memory anywhere in its results, while this query
+        ranked it first.
+        """
+        query = derive_reconciliation_query(
+            heartbeat_notes,
+            limit=HEARTBEAT_MEMORY_RECONCILIATION_QUERY_CHARS,
+        )
+        if not query or not self.memory_client.enabled:
+            return []
+        try:
+            response = await self.memory_client.passive_search(
+                {
+                    "query": query,
+                    "kinds": list(self.config.cosmic_memory_passive_kinds),
+                    "max_results": HEARTBEAT_MEMORY_RECONCILIATION_MAX_ITEMS,
+                    "token_budget": 2000,
+                }
+            )
+        except Exception:
+            # Never let a memory hiccup stop a beat; the notes still render.
+            logger.exception("gateway.heartbeat_notes_reconciliation_failed")
+            return []
+        raw_items = response.get("items") if isinstance(response, dict) else None
+        if not isinstance(raw_items, list):
+            return []
+        items: list[dict[str, str]] = []
+        for entry in raw_items[:HEARTBEAT_MEMORY_RECONCILIATION_MAX_ITEMS]:
+            if not isinstance(entry, dict):
+                continue
+            content = self._bounded_excerpt(
+                entry.get("content"),
+                limit=HEARTBEAT_MEMORY_RECONCILIATION_ITEM_CHARS,
+            )
+            title = self._safe_text(entry.get("title")) or ""
+            if not content and not title:
+                continue
+            items.append(
+                {
+                    "memory_id": self._safe_text(entry.get("memory_id")) or "",
+                    "title": title,
+                    "content": content,
+                    "updated_at": self._safe_text(entry.get("updated_at")) or "",
+                }
+            )
+        return items
+
     def _read_heartbeat_notes_excerpt(self) -> str:
         path = self.config.heartbeat_notes_path
         try:
@@ -2745,7 +2823,11 @@ class GatewayRuntime:
         except OSError:
             logger.exception("gateway.heartbeat_notes_read_failed path=%s", path)
             return ""
-        return self._bounded_excerpt(text, limit=HEARTBEAT_NOTES_CHAR_LIMIT) or ""
+        # Deliberately not _bounded_excerpt: that keeps the head and collapses
+        # whitespace, which on an append-only Markdown log shows the oldest
+        # notes as a flattened blob and hides every recent one. See
+        # shared/scratchpad.py for what that cost in production.
+        return excerpt_head_and_tail(text, limit=HEARTBEAT_NOTES_CHAR_LIMIT)
 
     def _build_recent_user_visible_deliveries(
         self,
@@ -7024,6 +7106,11 @@ class GatewayRuntime:
         heartbeat_notes = self._read_heartbeat_notes_excerpt()
         if heartbeat_notes:
             packet["heartbeat_notes"] = heartbeat_notes
+            reconciliation = await self._build_heartbeat_notes_reconciliation(
+                heartbeat_notes
+            )
+            if reconciliation:
+                packet["heartbeat_notes_reconciliation"] = reconciliation
         if calendar_digest:
             packet["calendar_digest"] = calendar_digest
         if gmail_digest:
@@ -7233,9 +7320,29 @@ class GatewayRuntime:
                     "",
                     "### Heartbeat Notes",
                     "These are model-written continuity notes and may contain stale or inferential presence language. Do not treat them as delivery, open, or offline truth when Recent User-Visible Delivery Facts disagree.",
+                    "They are a scratchpad, not a source of truth about the world. They own only self-observation (what you delivered, suppressed, or planned). Any world fact restated here is an unowned copy and may have been corrected since it was written.",
                 ]
             )
             lines.append(heartbeat_notes)
+            reconciliation = context_packet.get("heartbeat_notes_reconciliation")
+            if isinstance(reconciliation, list) and reconciliation:
+                lines.extend(
+                    [
+                        "",
+                        "### Durable Memory On These Same Subjects",
+                        "Retrieved just now using the notes above as the query. Durable memory owns world facts; the notes do not.",
+                        "Where a memory contradicts a note, the memory wins: act on the memory, and fix the note in this same beat via heartbeat_notes so the contradiction cannot survive to the next one.",
+                        "A memory that retracts a deadline, commitment, or status is an instruction to stop surfacing it, not a competing opinion.",
+                    ]
+                )
+                for item in reconciliation:
+                    if not isinstance(item, dict):
+                        continue
+                    title = self._safe_text(item.get("title")) or "(untitled)"
+                    updated_at = self._safe_text(item.get("updated_at")) or ""
+                    content = self._safe_text(item.get("content")) or ""
+                    stamp = f" (updated {updated_at})" if updated_at else ""
+                    lines.append(f"- {title}{stamp}: {content}")
         tool_opportunities = (
             context_packet.get("tool_opportunities")
             if isinstance(context_packet.get("tool_opportunities"), dict)

@@ -1583,3 +1583,36 @@ async def test_tool_executor_delegate_rehydrates_transient_explicit_input_artifa
             "audience": "deliverable",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_notes_append_survives_the_document_cap(tmp_path: Path) -> None:
+    """Past the cap, the old head-truncating write silently discarded appends.
+
+    The scratchpad became append-proof with no error anywhere: the tool still
+    reported success, the file just never gained the new note. The live file was
+    growing ~4KB/day against a 32k cap when this was found.
+    """
+    from orchestrator.tools.executor import HEARTBEAT_NOTES_MAX_CHARS
+
+    notes_path = tmp_path / "heartbeat_notes.md"
+    notes_path.write_text(
+        "# COSMIC Heartbeat Notes\n\n"
+        "## Active watchpoints\n- lease runs to Dec 8 2026\n\n"
+        + ("- old filler note\n" * ((HEARTBEAT_NOTES_MAX_CHARS // 18) + 500)),
+        encoding="utf-8",
+    )
+    assert notes_path.stat().st_size > HEARTBEAT_NOTES_MAX_CHARS
+
+    executor = ToolExecutor(heartbeat_notes_path=notes_path)
+    result = json.loads(
+        await executor.execute(
+            "heartbeat_notes", {"action": "append", "content": "- 8/9 THE NEW NOTE"}
+        )
+    )
+
+    assert result["updated"] is True
+    written = notes_path.read_text(encoding="utf-8")
+    assert "THE NEW NOTE" in written, "an append past the cap must not be discarded"
+    assert "lease runs to Dec 8 2026" in written, "standing state must survive too"
+    assert len(written) <= HEARTBEAT_NOTES_MAX_CHARS + len("# COSMIC Heartbeat Notes\n\n") + 2

@@ -20,6 +20,7 @@ import httpx
 
 from shared import begin_metered_call, build_model_key, build_usage_event, post_usage_event, validate_safe_sheet_id
 from shared.contracts import AgentResult, TaskEnvelope, TaskInProgress
+from shared.scratchpad import truncate_keeping_newest
 
 from ..config import BACKEND_ROOT
 from ..firecrawl_tool_enrichment import enrich_firecrawl_tool_result
@@ -1745,7 +1746,7 @@ class ToolExecutor:
         changed = False
         message = "Heartbeat notes read."
         if action == "append":
-            content = self._normalize_heartbeat_notes_content(tool_input.get("content"))
+            content = self._normalize_heartbeat_notes_fragment(tool_input.get("content"))
             if not content:
                 return {"error": True, "message": "content is required for append"}
             body = current.rstrip()
@@ -1753,7 +1754,7 @@ class ToolExecutor:
             changed = True
             message = "Heartbeat notes appended."
         elif action == "replace":
-            content = self._normalize_heartbeat_notes_content(tool_input.get("content"))
+            content = self._normalize_heartbeat_notes_fragment(tool_input.get("content"))
             if not content:
                 return {"error": True, "message": "content is required for replace"}
             current = content
@@ -2644,7 +2645,12 @@ class ToolExecutor:
             return HEARTBEAT_NOTES_HEADER
         return text
 
-    def _normalize_heartbeat_notes_content(self, value: Any) -> str:
+    def _normalize_heartbeat_notes_fragment(self, value: Any) -> str:
+        """Bound a single note the caller is adding.
+
+        Head-truncation is correct here: a fragment is one note, and a note
+        that alone exceeds the whole-document budget is pathological.
+        """
         text = str(value or "").strip()
         if not text:
             return ""
@@ -2652,8 +2658,22 @@ class ToolExecutor:
             text = text[:HEARTBEAT_NOTES_MAX_CHARS].rstrip()
         return text
 
+    def _normalize_heartbeat_notes_document(self, value: Any) -> str:
+        """Bound the whole scratchpad, keeping standing state and new entries.
+
+        This used to head-truncate as well, which is a latent trap on an
+        append-only file: once the document reached the cap, every append would
+        be chopped off the end and silently discarded, leaving the scratchpad
+        append-proof with no error anywhere. The file was growing ~4KB/day
+        against a 32k cap when this was found.
+        """
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return truncate_keeping_newest(text, limit=HEARTBEAT_NOTES_MAX_CHARS)
+
     def _write_heartbeat_notes_text(self, value: str) -> str:
-        text = self._normalize_heartbeat_notes_content(value) or HEARTBEAT_NOTES_HEADER
+        text = self._normalize_heartbeat_notes_document(value) or HEARTBEAT_NOTES_HEADER
         if not text.lstrip().startswith("# COSMIC Heartbeat Notes"):
             text = f"{HEARTBEAT_NOTES_HEADER}{text}"
         if not text.endswith("\n"):
