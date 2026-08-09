@@ -9709,6 +9709,29 @@ class GatewayRuntime:
         history = self.session_store.get_history(session_id)
         return [self._hydrate_history_message_for_client(item) for item in history]
 
+    def _email_thread_subject(self, thread_session_id: str) -> str:
+        """Subject of an email thread, for labelling its card.
+
+        Read from the thread's own messages, the same place
+        get_session_history_for_client takes it from, so a live message and a
+        refetched one never disagree about what the thread is called.
+        """
+        try:
+            for item in self.get_session_history(thread_session_id):
+                metadata = item.get("metadata") if isinstance(item, dict) else None
+                subject = self._safe_text(
+                    metadata.get("subject") if isinstance(metadata, dict) else ""
+                )
+                if subject:
+                    return subject
+        except Exception:
+            # A missing label must never cost the user the message itself.
+            logger.exception(
+                "gateway.email_thread_subject_lookup_failed session_id=%s",
+                thread_session_id,
+            )
+        return ""
+
     def get_session_history_for_client(self, session_id: str) -> list[dict[str, Any]]:
         """Session history as a client should see it: the session, plus the
         email threads that ran alongside it.
@@ -13883,6 +13906,18 @@ class GatewayRuntime:
         if not session_id or not channel:
             return
         origin_platform = self._channel_platform(channel)
+        # An inbound email runs in its own `email-thread:` session so the
+        # orchestrator gets thread-scoped context. Clients are not subscribed to
+        # that session - they watch the day session - so broadcasting under the
+        # storage session reached nobody, and an email exchange only appeared
+        # after the desktop happened to refetch history. Deliver under the
+        # session the client is actually watching, and carry the thread tags so
+        # it groups into the same card the history endpoint produces.
+        client_session_id = session_id
+        thread_subject = ""
+        if self._is_email_thread_session(session_id):
+            client_session_id = self._current_session_id()
+            thread_subject = self._email_thread_subject(session_id)
         client_artifacts = self._hydrate_artifact_list_for_client(
             produced_artifacts or []
         )
@@ -13895,13 +13930,18 @@ class GatewayRuntime:
 
         event: dict[str, Any] = {
             "type": "crosschannel.message",
-            "session_id": session_id,
+            "session_id": client_session_id,
             "role": role,
             "content": content,
             "channel": channel,
             "route": route,
             "timestamp": utcnow_iso(),
         }
+        if client_session_id != session_id:
+            # Same two fields get_session_history_for_client sets, so a live
+            # message and a refetched one land in the same thread card.
+            event["email_thread_id"] = session_id
+            event["email_thread_subject"] = thread_subject
         if message_id:
             event["message_id"] = message_id
         if source:
@@ -13930,7 +13970,7 @@ class GatewayRuntime:
                 continue
             if adapter.platform == origin_platform:
                 continue
-            await adapter.broadcast_to_session(session_id, event)
+            await adapter.broadcast_to_session(client_session_id, event)
 
     async def publish_agent_email_notification(
         self,

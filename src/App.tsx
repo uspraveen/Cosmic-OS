@@ -6152,9 +6152,20 @@ export default function App() {
           (!responseBlocks || responseBlocks.length === 0)
         ) return
         const eventSessionId = typeof event.session_id === 'string' ? event.session_id : null
+        const eventThreadId = typeof (event as any).email_thread_id === 'string'
+          ? (event as any).email_thread_id
+          : null
 
-        // If the session rolled over, show a divider and clear old messages
-        if (eventSessionId && activeSessionIdRef.current && eventSessionId !== activeSessionIdRef.current) {
+        // If the session rolled over, show a divider and clear old messages.
+        // An `email-thread:` id is never a rollover - it is a side session that
+        // belongs inside the current day. Treating one as a rollover would wipe
+        // the whole transcript, so refuse it even if an older gateway sends it.
+        if (
+          eventSessionId &&
+          activeSessionIdRef.current &&
+          eventSessionId !== activeSessionIdRef.current &&
+          !eventSessionId.startsWith('email-thread:')
+        ) {
           setActiveSessionId(eventSessionId)
           setMessages([
             {
@@ -6194,6 +6205,16 @@ export default function App() {
             createdAt: new Date().toISOString(),
             sources: role === 'assistant' && Array.isArray(event.sources) ? event.sources : undefined,
             thinking: role === 'assistant' && typeof event.thinking_text === 'string' ? event.thinking_text : undefined,
+            // Live email messages carry the same thread tags the history
+            // endpoint sets, so they group into the existing thread card
+            // instead of appearing as loose messages.
+            emailThreadId: eventThreadId,
+            emailThreadSubject: typeof (event as any).email_thread_subject === 'string'
+              ? (event as any).email_thread_subject
+              : null,
+            emailFromName: typeof (event as any).from_name === 'string' ? (event as any).from_name : null,
+            emailFromAddress: typeof (event as any).from_address === 'string' ? (event as any).from_address : null,
+            emailBody: typeof (event as any).body_text === 'string' ? (event as any).body_text : null,
           }
           if (eventMessageId) {
             const existingIndex = prev.findIndex((message) => message.id === eventMessageId)
