@@ -417,6 +417,9 @@ class GatewayRuntime:
             google_client_id=config.google_client_id,
             google_client_secret=config.google_client_secret,
             google_redirect_uri=config.google_redirect_uri,
+            github_client_id=config.github_client_id,
+            github_client_secret=config.github_client_secret,
+            github_redirect_uri=config.github_redirect_uri,
         )
         self.memory_client = CosmicMemoryClient(
             base_url=config.cosmic_memory_url,

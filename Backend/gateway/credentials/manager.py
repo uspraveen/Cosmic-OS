@@ -180,6 +180,24 @@ def google_scopes_satisfy(granted_scopes: list[str] | set[str], required_scopes:
     return required.issubset(effective_granted)
 
 
+def provider_scopes_satisfy(
+    provider: str,
+    granted_scopes: list[str] | set[str],
+    required_scopes: list[str] | set[str],
+) -> bool:
+    """Does this credential cover what the caller needs?
+
+    Scope coverage is a Google concept. A GitHub App authorises per repository
+    at install time, and its user-to-server tokens legitimately come back with
+    an empty scope list - so Google's rule (which treats "no scopes" as "no
+    access") rejects every healthy GitHub credential, and the caller sees a
+    connected account that can do nothing.
+    """
+    if str(provider or "").strip() == "github":
+        return True
+    return google_scopes_satisfy(granted_scopes, required_scopes)
+
+
 # Google Calendar scopes for Phase 1
 GOOGLE_CALENDAR_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
@@ -218,6 +236,12 @@ GOOGLE_DEFAULT_SCOPES = (
     + GOOGLE_SHEETS_SCOPES
 )
 
+# GitHub App user-to-server scopes. Repository access is NOT granted here - it
+# comes from which repositories the user selects when installing the App, which
+# is the whole reason for preferring an App over an OAuth App. `read:user` only
+# identifies the account so it can be labelled in Settings.
+GITHUB_DEFAULT_SCOPES = ("read:user",)
+
 
 class OAuthFlowState:
     """Transient PKCE + state for an in-progress OAuth flow."""
@@ -250,17 +274,56 @@ class CredentialManager:
         google_client_id: str = "",
         google_client_secret: str = "",
         google_redirect_uri: str = "",
+        github_client_id: str = "",
+        github_client_secret: str = "",
+        github_redirect_uri: str = "",
     ) -> None:
         self._store = store
         self._google_client_id = google_client_id
         self._google_client_secret = google_client_secret
         self._google_redirect_uri = google_redirect_uri
+        self._github_client_id = github_client_id
+        self._github_client_secret = github_client_secret
+        self._github_redirect_uri = github_redirect_uri
         # In-flight OAuth flows: state -> OAuthFlowState
         self._pending_flows: dict[str, OAuthFlowState] = {}
+
+    def _oauth_client(self, provider: str) -> tuple[str, str, str]:
+        """(client_id, client_secret, redirect_uri) for one provider.
+
+        Explicit per provider on purpose. This used to hand Google's client id,
+        secret and redirect URI to whatever adapter was selected, so the first
+        non-Google provider added would have POSTed Google's client secret to a
+        third party's token endpoint. An unknown provider now fails loudly.
+        """
+        if provider == "google":
+            return (
+                self._google_client_id,
+                self._google_client_secret,
+                self._google_redirect_uri,
+            )
+        if provider == "github":
+            return (
+                self._github_client_id,
+                self._github_client_secret,
+                self._github_redirect_uri,
+            )
+        raise ValueError(f"No OAuth client credentials configured for provider: {provider}")
 
     @property
     def google_configured(self) -> bool:
         return bool(self._google_client_id and self._google_client_secret)
+
+    @property
+    def github_configured(self) -> bool:
+        return bool(self._github_client_id and self._github_client_secret)
+
+    def provider_configured(self, provider: str) -> bool:
+        try:
+            client_id, client_secret, _redirect = self._oauth_client(provider)
+        except ValueError:
+            return False
+        return bool(client_id and client_secret)
 
     # ── OAuth Connect Flow ────────────────────────────────────────────
 
@@ -275,8 +338,14 @@ class CredentialManager:
             if not self.google_configured:
                 raise ValueError("Google OAuth client credentials are not configured.")
             effective_scopes = scopes or GOOGLE_DEFAULT_SCOPES
+        elif provider == "github":
+            if not self.github_configured:
+                raise ValueError("GitHub OAuth client credentials are not configured.")
+            effective_scopes = scopes or GITHUB_DEFAULT_SCOPES
         else:
             effective_scopes = scopes or []
+
+        client_id, _client_secret, redirect_uri = self._oauth_client(provider)
 
         flow = OAuthFlowState(provider, effective_scopes, metadata=metadata)
         self._pending_flows[flow.state] = flow
@@ -286,8 +355,8 @@ class CredentialManager:
             scopes=effective_scopes,
             state=flow.state,
             code_challenge=flow.code_challenge,
-            redirect_uri=self._google_redirect_uri,
-            client_id=self._google_client_id,
+            redirect_uri=redirect_uri,
+            client_id=client_id,
         )
 
         authorize_url = f"{adapter.authorize_url}?{urlencode(params)}"
@@ -306,22 +375,32 @@ class CredentialManager:
 
         adapter = get_provider_adapter(flow.provider)
 
+        client_id, client_secret, redirect_uri = self._oauth_client(flow.provider)
+
         # Exchange code for tokens
         token_resp = await adapter.exchange_code(
             code=code,
             code_verifier=flow.code_verifier,
-            redirect_uri=self._google_redirect_uri,
-            client_id=self._google_client_id,
-            client_secret=self._google_client_secret,
+            redirect_uri=redirect_uri,
+            client_id=client_id,
+            client_secret=client_secret,
         )
 
-        # Fetch user profile
+        # Fetch user profile. The adapter maps its own field names; see
+        # ProviderAdapter.normalize_profile.
         profile = await adapter.get_user_info(token_resp.access_token)
-        provider_account_id = str(profile.get("id") or "")
-        email = str(profile.get("email") or "")
-        display_name = str(profile.get("name") or "")
-        avatar_url = str(profile.get("picture") or "")
-        hosted_domain = str(profile.get("hd") or "")
+        identity = adapter.normalize_profile(profile)
+        provider_account_id = identity["provider_account_id"]
+        email = identity["email"]
+        display_name = identity["display_name"]
+        avatar_url = identity["avatar_url"]
+        hosted_domain = identity["hosted_domain"]
+        if not provider_account_id:
+            # A blank id collides with every other blank id, so two accounts
+            # would silently overwrite each other in the store.
+            raise ValueError(
+                f"{flow.provider} did not return an account id for this user."
+            )
         now_ts = time.time()
         requested_label = str(flow.metadata.get("account_label") or "").strip()
         if _is_generic_account_label(requested_label):
@@ -463,6 +542,20 @@ class CredentialManager:
         entry.pop("_metadata", None)
         return entry
 
+    def update_account_metadata(
+        self, account_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Merge extra provider-specific facts onto an account.
+
+        Used for things the OAuth exchange itself does not carry - GitHub's
+        installation id arrives as a callback query parameter, not in the token
+        response.
+        """
+        if not account_id or not isinstance(patch, dict) or not patch:
+            return self._store.get_account(account_id) if account_id else None
+        self._store.update_account(account_id, metadata_patch=patch)
+        return self._store.get_account(account_id)
+
     async def disconnect_account(self, account_id: str) -> dict[str, Any]:
         """Revoke tokens and mark account as revoked."""
         acct = self._store.get_account(account_id)
@@ -473,10 +566,11 @@ class CredentialManager:
         if cred and cred["refresh_token"]:
             try:
                 adapter = get_provider_adapter(acct["provider"])
+                revoke_id, revoke_secret, _redirect = self._oauth_client(acct["provider"])
                 await adapter.revoke_token(
                     cred["refresh_token"],
-                    self._google_client_id,
-                    self._google_client_secret,
+                    revoke_id,
+                    revoke_secret,
                 )
             except Exception as exc:
                 logger.warning("Failed to revoke token on provider side: %s", exc)
@@ -589,7 +683,9 @@ class CredentialManager:
             return None
 
         # 6. Check scope coverage
-        if not google_scopes_satisfy(cred["granted_scopes"], required_scopes):
+        if not provider_scopes_satisfy(
+            provider, cred["granted_scopes"], required_scopes
+        ):
             # Scope mismatch — needs re-consent
             self._store.log_audit(
                 action="resolve",
@@ -801,6 +897,7 @@ class CredentialManager:
         """Refresh the access token using the stored refresh token."""
         acct = self._store.get_account(cred["account_id"])
         adapter = get_provider_adapter(acct["provider"])
+        client_id, client_secret, _redirect = self._oauth_client(acct["provider"])
 
         token_resp = None
         last_exc: BaseException | None = None
@@ -808,8 +905,8 @@ class CredentialManager:
             try:
                 token_resp = await adapter.refresh_token(
                     cred["refresh_token"],
-                    self._google_client_id,
-                    self._google_client_secret,
+                    client_id,
+                    client_secret,
                 )
                 break
             except Exception as exc:

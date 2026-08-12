@@ -229,11 +229,23 @@ class GatewayConfig:
     memory_write_dedup_ttl_sec: int = 86_400
     session_summary_max_output_tokens: int = 2500
     max_background_tasks_per_session: int = 5
-    # Google OAuth / Credential Manager
+    # OAuth providers / Credential Manager
     credentials_db_path: Path = BACKEND_ROOT / "gateway" / "credentials.db"
     google_client_id: str = ""
     google_client_secret: str = ""
     google_redirect_uri: str = "http://localhost:8085/"
+    # GitHub App (user-to-server). The redirect is loopback on the *user's*
+    # machine, not this VM: the desktop bridge listens, catches the code, and
+    # relays it to whichever gateway that desktop is paired with. A VM hostname
+    # here would have to be pre-registered per user, which cannot work for a
+    # shared App. Deliberately a different port from Google's 8085 so the two
+    # listeners can never collide.
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    github_redirect_uri: str = "http://localhost:8086/"
+    # Needed for the first-time install URL (github.com/apps/<slug>/installations/new),
+    # which is not derivable from the client id.
+    github_app_slug: str = ""
 
     @classmethod
     def from_env(cls) -> "GatewayConfig":
@@ -850,4 +862,11 @@ class GatewayConfig:
                 "GOOGLE_REDIRECT_URI", "http://localhost:8085/"
             ).strip()
             or "http://localhost:8085/",
+            github_client_id=os.getenv("GITHUB_CLIENT_ID", "").strip(),
+            github_client_secret=os.getenv("GITHUB_CLIENT_SECRET", "").strip(),
+            github_redirect_uri=os.getenv(
+                "GITHUB_REDIRECT_URI", "http://localhost:8086/"
+            ).strip()
+            or "http://localhost:8086/",
+            github_app_slug=os.getenv("GITHUB_APP_SLUG", "").strip(),
         )

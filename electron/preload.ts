@@ -112,6 +112,11 @@ contextBridge.exposeInMainWorld('cosmic', {
   saveGatewayCodexConfig: (payload: any) => ipcRenderer.invoke('gateway:save-codex-config', payload),
   startGatewayCodexLogin: () => ipcRenderer.invoke('gateway:start-codex-login'),
   logoutGatewayCodex: () => ipcRenderer.invoke('gateway:logout-codex'),
+  getGitHubAccounts: () => ipcRenderer.invoke('gateway:github-accounts'),
+  connectGitHubAccount: (payload?: { accountLabel?: string }) =>
+    ipcRenderer.invoke('gateway:github-connect', payload || {}),
+  disconnectGitHubAccount: (accountId: string) =>
+    ipcRenderer.invoke('gateway:github-disconnect', accountId),
   getGatewayCursorStatus: () => ipcRenderer.invoke('gateway:get-cursor-status'),
   saveGatewayCursorConfig: (payload: any) => ipcRenderer.invoke('gateway:save-cursor-config', payload),
   startGatewayCursorLogin: () => ipcRenderer.invoke('gateway:start-cursor-login'),

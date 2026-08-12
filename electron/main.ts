@@ -2609,6 +2609,146 @@ app.whenReady().then(() => {
     })
   })
 
+  // ── GitHub App connect ──────────────────────────────────────────────────
+  //
+  // The OAuth redirect deliberately lands on THIS machine, not on the VM. One
+  // GitHub App is shared by every Cosmic user, and a GitHub App exact-matches
+  // its registered callback URL - so a per-user VM hostname could never be
+  // registered. Loopback plus a relay is the same shape Google uses: the
+  // browser comes back to localhost, and we hand the code to whichever gateway
+  // this desktop is paired with. Tokens only ever live on the user's own VM.
+  //
+  // Port is fixed at 8086 because GitHub matches the callback exactly (Google
+  // allows any loopback port; GitHub does not), and separate from Google's
+  // 8085 so the two listeners can never collide.
+  ipcMain.handle('gateway:github-accounts', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/internal/credentials/accounts?provider=github', {
+      timeoutMs: 20000,
+    })
+  })
+
+  ipcMain.handle('gateway:github-connect', async (_, payload: { accountLabel?: string } = {}) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+
+    const start = (await callGatewayJson(config, '/auth/connect/github', {
+      method: 'POST',
+      body: { account_label: payload?.accountLabel ?? null },
+      timeoutMs: 20000,
+    })) as { authorize_url?: string; state?: string; flow?: string }
+
+    const authorizeUrl = String(start?.authorize_url || '').trim()
+    if (!authorizeUrl) {
+      throw new Error('Gateway did not return a GitHub authorize URL.')
+    }
+
+    let settle: (value: { ok: boolean; error?: string }) => void = () => {}
+    const outcome = new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      settle = resolve
+    })
+    let settled = false
+    const finish = (result: { ok: boolean; error?: string }) => {
+      if (settled) return
+      settled = true
+      settle(result)
+    }
+
+    const server = createServer((req, res) => {
+      const requestUrl = new URL(req.url || '/', 'http://127.0.0.1:8086')
+      const code = requestUrl.searchParams.get('code') || ''
+      const state = requestUrl.searchParams.get('state') || ''
+      const error = requestUrl.searchParams.get('error') || ''
+      const installationId = requestUrl.searchParams.get('installation_id') || ''
+      const setupAction = requestUrl.searchParams.get('setup_action') || ''
+
+      const relay = async () => {
+        const params = new URLSearchParams({ code, state, error })
+        if (installationId) params.set('installation_id', installationId)
+        if (setupAction) params.set('setup_action', setupAction)
+        try {
+          // The gateway renders the success/failure page; pass it straight
+          // through so the user sees one consistent screen.
+          const baseUrl = normalizeGatewayBaseUrl(config.baseUrl || '')
+          const relayUrl = `${baseUrl}/auth/callback/github?${params.toString()}`
+          const response = await fetch(relayUrl, {
+            headers: { Authorization: `Bearer ${String(config.apiToken || '').trim()}` },
+          })
+          const body = await response.text()
+          res.writeHead(response.status, {
+            'Content-Type': response.headers.get('content-type') || 'text/html; charset=utf-8',
+          })
+          res.end(body)
+          finish(
+            response.ok
+              ? { ok: true }
+              : { ok: false, error: `Gateway HTTP ${response.status}` },
+          )
+        } catch (e: any) {
+          res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' })
+          res.end('Could not complete GitHub sign-in with the COSMIC Gateway.')
+          finish({ ok: false, error: e?.message || 'relay_failed' })
+        }
+      }
+      void relay()
+    })
+
+    const closeServer = async () => {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once('error', rejectListen)
+        server.listen(8086, '127.0.0.1', () => resolveListen())
+      })
+    } catch (e: any) {
+      // Fixed port means "already in use" is a real, reportable state rather
+      // than something to silently work around.
+      const detail = e?.code === 'EADDRINUSE'
+        ? 'Port 8086 is already in use on this machine. Close whatever is using it and try again.'
+        : e?.message || 'Could not start the local GitHub sign-in listener.'
+      return { success: false, error: 'listener_failed', message: detail }
+    }
+
+    const timeout = setTimeout(() => finish({ ok: false, error: 'timeout' }), 300_000)
+    try {
+      await openExternalAndAnnounce(authorizeUrl)
+      const result = await outcome
+      if (!result.ok) {
+        return {
+          success: false,
+          error: result.error === 'timeout' ? 'oauth_timeout' : 'oauth_failed',
+          message:
+            result.error === 'timeout'
+              ? 'GitHub sign-in did not finish before the timeout window closed.'
+              : result.error || 'GitHub sign-in failed.',
+        }
+      }
+      return { success: true, flow: start?.flow || 'authorize' }
+    } finally {
+      clearTimeout(timeout)
+      await closeServer()
+    }
+  })
+
+  ipcMain.handle('gateway:github-disconnect', async (_, accountId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(
+      config,
+      `/internal/credentials/accounts/${encodeURIComponent(String(accountId || ''))}`,
+      { method: 'DELETE', timeoutMs: 25000 },
+    )
+  })
+
   ipcMain.handle('gateway:get-cursor-status', async () => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

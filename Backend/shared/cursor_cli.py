@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 CURSOR_AGENT_NAMES = (
@@ -108,4 +109,37 @@ def cursor_cli_env(
     if existing:
         path_parts.append(existing)
     env["PATH"] = os.pathsep.join(path_parts)
+    return apply_git_credentials(env)
+
+
+def apply_git_credentials(env: dict[str, str]) -> dict[str, str]:
+    """Teach git in this environment to get GitHub tokens from the Gateway.
+
+    Injected through GIT_CONFIG_* rather than written into a gitconfig file, so
+    it applies only to processes this runner starts and leaves the user's own
+    git configuration completely untouched.
+
+    GIT_TERMINAL_PROMPT=0 matters as much as the helper: without it, a headless
+    agent whose credentials fail does not error - it blocks forever waiting for
+    a password nobody will type.
+    """
+    helper_script = (
+        Path(__file__).resolve().parents[1]
+        / "agents"
+        / "alpha_agent"
+        / "git_credentials.py"
+    )
+    if not helper_script.exists():
+        return env
+
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    # Append to any GIT_CONFIG_* entries already present instead of assuming
+    # index 0 is free; clobbering an existing entry would silently drop it.
+    try:
+        start = int(env.get("GIT_CONFIG_COUNT", "0") or "0")
+    except ValueError:
+        start = 0
+    env[f"GIT_CONFIG_KEY_{start}"] = "credential.helper"
+    env[f"GIT_CONFIG_VALUE_{start}"] = f'!"{sys.executable}" "{helper_script}"'
+    env["GIT_CONFIG_COUNT"] = str(start + 1)
     return env

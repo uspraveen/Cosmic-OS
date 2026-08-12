@@ -220,6 +220,14 @@ interface Window {
     }) => Promise<any>
     startGatewayCodexLogin: () => Promise<any>
     logoutGatewayCodex: () => Promise<any>
+    getGitHubAccounts: () => Promise<{ accounts?: any[] }>
+    connectGitHubAccount: (payload?: { accountLabel?: string }) => Promise<{
+      success: boolean
+      error?: string
+      message?: string
+      flow?: string
+    }>
+    disconnectGitHubAccount: (accountId: string) => Promise<any>
     getGatewayCursorStatus: () => Promise<any>
     saveGatewayCursorConfig: (payload: {
       preferredModel?: string

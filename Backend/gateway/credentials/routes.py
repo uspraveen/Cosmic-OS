@@ -43,6 +43,11 @@ class ConnectGoogleRequest(BaseModel):
     platform_key: str | None = None
 
 
+class ConnectGitHubRequest(BaseModel):
+    account_label: str | None = None
+    is_primary: bool | None = None
+
+
 class ResolveRequest(BaseModel):
     provider: str = "google"
     required_scopes: list[str] = Field(default_factory=list)
@@ -242,6 +247,134 @@ async def google_oauth_callback(
   </body>
 </html>"""
     return HTMLResponse(content=html, status_code=200)
+
+
+@router.post("/auth/connect/github")
+async def start_github_connect(body: ConnectGitHubRequest, request: Request):
+    """Start GitHub App user authorization. Returns a URL for the desktop to open.
+
+    First-time connects go to the App's install page rather than straight to
+    the authorize endpoint. That page is where the user chooses which
+    repositories Cosmic may touch, and with "Request user authorization during
+    installation" enabled it returns an authorization code in the same pass -
+    so one trip gets both the installation and the token. Going straight to
+    authorize would produce a token scoped to no repositories at all.
+
+    Once at least one account is connected we use the plain authorize URL,
+    because a reconnect should not drag the user back through the repo picker.
+    """
+    _check_local_token(request)
+    mgr = _get_manager(request)
+    if not mgr.github_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub OAuth client credentials are not configured on the Gateway.",
+        )
+    result = mgr.start_oauth_flow(
+        provider="github",
+        metadata={
+            "account_label": body.account_label,
+            "is_primary": body.is_primary,
+        },
+    )
+    runtime = getattr(request.app.state, "gateway_runtime", None)
+    app_slug = ""
+    if runtime is not None:
+        app_slug = str(getattr(runtime.config, "github_app_slug", "") or "").strip()
+    already_connected = bool(mgr.list_accounts("github"))
+    if app_slug and not already_connected:
+        result["authorize_url"] = (
+            f"https://github.com/apps/{app_slug}/installations/new"
+            f"?state={result['state']}"
+        )
+        result["flow"] = "install"
+    else:
+        result["flow"] = "authorize"
+    return result
+
+
+@router.get("/auth/callback/github")
+async def github_oauth_callback(
+    request: Request,
+    code: str = Query(""),
+    state: str = Query(""),
+    error: str = Query(""),
+    installation_id: str = Query(""),
+    setup_action: str = Query(""),
+):
+    """Handle the GitHub callback relayed by the desktop's loopback listener."""
+    if error:
+        raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
+    if not code or not state:
+        # GitHub sends setup_action=install with no code when the user changes
+        # an existing installation's repositories. Nothing to exchange, and it
+        # is not a failure worth showing as one.
+        if setup_action and installation_id:
+            return HTMLResponse(
+                content=_github_result_page(
+                    "Repositories Updated",
+                    "Cosmic's repository access has been updated.",
+                ),
+                status_code=200,
+            )
+        raise HTTPException(status_code=400, detail="Missing code or state.")
+    mgr = _get_manager(request)
+    try:
+        account = await mgr.handle_oauth_callback(code=code, state=state)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("GitHub OAuth callback failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+    if installation_id:
+        account_id = str(account.get("account_id") or "")
+        if account_id:
+            try:
+                mgr.update_account_metadata(
+                    account_id, {"github_installation_id": installation_id}
+                )
+            except Exception:
+                # The token is already stored; a missing installation id is
+                # cosmetic and must not fail a successful connect.
+                logger.exception(
+                    "Failed to record GitHub installation id for %s", account_id
+                )
+    subtitle = (
+        str(account.get("display_name") or account.get("account_label") or "").strip()
+        or "Your GitHub account"
+    )
+    return HTMLResponse(
+        content=_github_result_page(
+            "GitHub Connected",
+            f"{subtitle} is now available in COSMIC. You can return to the app.",
+        ),
+        status_code=200,
+    )
+
+
+def _github_result_page(title: str, subtitle: str) -> str:
+    return f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>{title}</title>
+    <style>
+      body {{ background: #050607; color: #f5f7fb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; }}
+      .card {{ width: min(92vw, 520px); padding: 32px 28px; border-radius: 24px; background: linear-gradient(180deg, rgba(22,26,34,.96), rgba(10,12,16,.98)); border: 1px solid rgba(255,255,255,.08); box-shadow: 0 24px 80px rgba(0,0,0,.45); }}
+      h1 {{ margin: 0 0 8px; font-size: 28px; }}
+      p {{ margin: 0; color: rgba(235,240,248,.74); line-height: 1.6; }}
+      .badge {{ display: inline-block; margin-bottom: 16px; padding: 6px 10px; border-radius: 999px; background: rgba(84, 173, 88, .16); color: #9ce1a0; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }}
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="badge">Connected</div>
+      <h1>{title}</h1>
+      <p>{subtitle}</p>
+    </div>
+  </body>
+</html>"""
 
 
 # ── Account management routes ────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import ApiConfiguration from './ApiConfiguration'
 import GoogleIntegrationsSettings from './GoogleIntegrationsSettings'
 import WhatsAppIntegrationSettings from './WhatsAppIntegrationSettings'
 import TelegramIntegrationSettings from './TelegramIntegrationSettings'
+import GitHubIntegrationSettings from './GitHubIntegrationSettings'
 import MobileDevicesSettings from './MobileDevicesSettings'
 import GatewayPreferencesSettings from './GatewayPreferencesSettings'
 import CodexAgentSettings from './CodexAgentSettings'
@@ -59,6 +60,7 @@ export type SettingsView =
   | 'integrations-google'
   | 'integrations-whatsapp'
   | 'integrations-telegram'
+  | 'integrations-github'
 
 export default function Settings({
   isOpen,
@@ -155,13 +157,16 @@ export default function Settings({
                 ? 'WhatsApp'
                 : currentView === 'integrations-telegram'
                   ? 'Telegram'
+                : currentView === 'integrations-github'
+                  ? 'GitHub'
                 : 'Google'
 
   const handleBack = () => {
     if (
       currentView === 'integrations-google' ||
       currentView === 'integrations-whatsapp' ||
-      currentView === 'integrations-telegram'
+      currentView === 'integrations-telegram' ||
+      currentView === 'integrations-github'
     ) {
       setCurrentView('integrations')
       return
@@ -408,6 +413,21 @@ export default function Settings({
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
                   </div>
                 </button>
+
+                <button className="prx-provider-card" onClick={() => setCurrentView('integrations-github')} style={{ marginTop: '12px' }}>
+                  <div className="prx-provider-icon" style={{ background: '#24292f' }}>
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M12 .5C5.73.5.5 5.73.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.88-1.54-3.88-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.25.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.12 3.05.74.8 1.18 1.83 1.18 3.08 0 4.41-2.69 5.38-5.25 5.67.41.35.78 1.05.78 2.12 0 1.53-.01 2.77-.01 3.15 0 .31.21.68.8.56A11.51 11.51 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5z" />
+                    </svg>
+                  </div>
+                  <div className="prx-provider-info">
+                    <strong>GitHub</strong>
+                    <span>Let Alpha work in the repositories you choose — commit, push, open PRs.</span>
+                  </div>
+                  <div className="prx-provider-arrow">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
+                  </div>
+                </button>
               </div>
             )}
 
@@ -541,6 +561,10 @@ export default function Settings({
                 active={currentView === 'integrations-telegram'}
                 cosmicAuth={authData ? { gatewayUrl: authData.gatewayUrl || '', gatewayApiToken: authData.gatewayApiToken || '' } : undefined}
               />
+            )}
+
+            {currentView === 'integrations-github' && (
+              <GitHubIntegrationSettings active={currentView === 'integrations-github'} />
             )}
 
             {currentView === 'devices' && (
