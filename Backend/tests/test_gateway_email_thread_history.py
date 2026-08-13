@@ -149,3 +149,48 @@ def test_model_context_history_is_left_alone(store) -> None:
     _seed(store, THREAD, "user", "thread reply", "2026-08-05T11:00:00Z")
 
     assert [m["content"] for m in _runtime(store).get_session_history(DAY)] == ["day message"]
+
+
+def test_daily_rollover_transcript_includes_email_thread_turns(store) -> None:
+    _seed(store, DAY, "assistant", "Heads up — coprlab.com just failed DNS", "2026-08-05T19:01:00Z")
+    _seed(
+        store,
+        THREAD,
+        "user",
+        "It's not coprlab.com but copprlab.com",
+        "2026-08-05T19:21:00Z",
+        {"subject": "Re: Heads up"},
+    )
+    _seed(store, THREAD, "assistant", "You're right — copprlab.com is live.", "2026-08-05T19:22:00Z")
+
+    markdown = _runtime(store)._render_session_transcript_markdown(
+        {
+            "session_id": DAY,
+            "created_at": "2026-08-05T09:00:00Z",
+            "updated_at": "2026-08-05T20:00:00Z",
+        },
+        store.get_history(DAY),
+    )
+
+    assert "Heads up — coprlab.com just failed DNS" in markdown
+    assert "Email threads from this calendar day" in markdown
+    assert "It's not coprlab.com but copprlab.com" in markdown
+    assert "You're right — copprlab.com is live." in markdown
+
+
+def test_email_thread_sessions_are_not_themselves_rolled_over(store) -> None:
+    _seed(store, THREAD, "user", "It's not coprlab.com but copprlab.com", "2026-08-05T19:21:00Z")
+    store.update_session_metadata(
+        THREAD, {"session_scope": "email_thread", "rollover_exempt": True}
+    )
+    markdown = _runtime(store)._render_session_transcript_markdown(
+        {
+            "session_id": THREAD,
+            "created_at": "2026-08-05T19:21:00Z",
+            "updated_at": "2026-08-05T19:22:00Z",
+        },
+        store.get_history(THREAD),
+    )
+    assert "Email threads from this calendar day" not in markdown
+    candidates = store.list_rollover_candidates(current_session_id="sess_20260806")
+    assert THREAD not in [item["session_id"] for item in candidates]

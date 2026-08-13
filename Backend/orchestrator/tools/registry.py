@@ -1864,6 +1864,19 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "object",
                         "description": "Optional structured metadata to store alongside the memory.",
                     },
+                    "invalidates": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "When the user corrects a fact or hostname, the exact phrases or hosts this "
+                            "write retracts from heartbeat watchpoints (for example coprlab.com). "
+                            "Gateway applies this without waiting for the next heartbeat. Not a core fact."
+                        ),
+                    },
+                    "canonical": {
+                        "type": "string",
+                        "description": "Replacement fact or hostname that should be watched instead.",
+                    },
                 },
                 "required": ["content"],
             },
@@ -1879,7 +1892,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "heartbeat_notes",
             "description": (
                 "Read or maintain COSMIC's private heartbeat notes markdown file. Use this during heartbeat turns as a compact self-scratchpad "
-                "for watchpoints, future checks, project improvement ideas, and stale notes to remove. Keep notes short and do not expose them verbatim."
+                "for watchpoints, future checks, project improvement ideas, and stale notes to remove. Also use it on any turn — including email — "
+                "when the user corrects a watchpoint so the stale line cannot survive to the next beat. Keep notes short and do not expose them verbatim."
             ),
             "input_schema": {
                 "type": "object",
@@ -1902,7 +1916,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="memory",
-        prompt_summary="Private heartbeat self-notes markdown. Use during heartbeat turns to read, append, replace, or remove compact watchpoints across beats without polluting chat history.",
+        prompt_summary="Private heartbeat self-notes markdown. Use during heartbeat turns, and on any turn when the user corrects a watchpoint, to read, append, replace, or remove compact watchpoints without polluting chat history.",
         progress_builder=_heartbeat_notes_progress,
         handler_method="_heartbeat_notes",
     ),

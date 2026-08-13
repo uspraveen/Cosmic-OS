@@ -443,6 +443,42 @@ class SessionStore:
             )
         return messages
 
+    def list_recent_user_message_excerpts(
+        self,
+        *,
+        since: str,
+        limit: int = 150,
+        max_chars: int = 2000,
+    ) -> list[str]:
+        """Recent user text for lexical correction harvest.
+
+        Bounded on purpose: heartbeat uses this to notice 'not host-a but
+        host-b' corrections that landed in email-thread sessions the daily
+        conversation tail never sees.
+        """
+        limit = max(1, min(int(limit or 150), 300))
+        max_chars = max(32, min(int(max_chars or 2000), 4000))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT substr(content, 1, ?) AS excerpt
+                FROM messages
+                WHERE role = 'user'
+                  AND created_at >= ?
+                  AND content IS NOT NULL
+                  AND trim(content) != ''
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (max_chars, since, limit),
+            ).fetchall()
+        excerpts: list[str] = []
+        for row in rows:
+            text = str(row["excerpt"] or "").strip()
+            if text:
+                excerpts.append(text)
+        return excerpts
+
     def next_session_started_at(self, session_id: str) -> str | None:
         """When the session after this one began, or None if it is the latest.
 

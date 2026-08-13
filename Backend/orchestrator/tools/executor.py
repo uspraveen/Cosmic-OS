@@ -1672,6 +1672,14 @@ class ToolExecutor:
         tags = self._normalize_string_list(tool_input.get("tags"))
         if tags:
             payload["tags"] = tags
+        invalidates = tool_input.get("invalidates")
+        canonical = str(tool_input.get("canonical") or "").strip()
+        if invalidates not in (None, "", [], ()):
+            payload["invalidates"] = invalidates
+            metadata = {**metadata, "correction": True, "invalidates": invalidates}
+        if canonical:
+            payload["canonical"] = canonical
+            metadata = {**metadata, "canonical": canonical}
         merged_metadata = self._merge_dicts(
             self._build_memory_metadata(context),
             metadata,

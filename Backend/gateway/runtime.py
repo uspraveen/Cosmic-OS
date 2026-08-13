@@ -89,7 +89,19 @@ except (
     UnidentifiedImageError = Exception
 
 from shared.cursor_cli import cursor_cli_env, find_cursor_agent_binary
-from shared.scratchpad import derive_reconciliation_query, excerpt_head_and_tail
+from shared.scratchpad import (
+    derive_reconciliation_query,
+    excerpt_head_and_tail,
+    truncate_keeping_newest,
+)
+from shared.watchpoint_corrections import (
+    apply_retractions_to_notes,
+    load_retractions,
+    retraction_from_memory_payload,
+    retractions_from_user_text,
+    save_retractions,
+    upsert_retraction,
+)
 from shared import (
     AgentEmailIntegrationStore,
     CosmicMailClient,
@@ -172,6 +184,12 @@ HEARTBEAT_NOTES_CHAR_LIMIT = 6000
 HEARTBEAT_MEMORY_RECONCILIATION_QUERY_CHARS = 900
 HEARTBEAT_MEMORY_RECONCILIATION_MAX_ITEMS = 5
 HEARTBEAT_MEMORY_RECONCILIATION_ITEM_CHARS = 320
+HEARTBEAT_NOTES_WRITE_CHAR_LIMIT = 32000
+HEARTBEAT_CORRECTION_HARVEST_DAYS = 14
+HEARTBEAT_CORRECTION_HARVEST_LIMIT = 150
+EMAIL_ROLLOVER_MAX_MESSAGES = 40
+EMAIL_ROLLOVER_ITEM_CHARS = 800
+EMAIL_ROLLOVER_TOTAL_CHARS = 8000
 HEARTBEAT_RECENT_DELIVERY_WINDOW_SEC = 36 * 60 * 60
 HEARTBEAT_RECENT_DELIVERY_LIMIT = 8
 # If chat has been silent and no heartbeat note was successfully delivered for this
@@ -2818,19 +2836,123 @@ class GatewayRuntime:
         return items
 
     def _read_heartbeat_notes_excerpt(self) -> str:
-        path = self.config.heartbeat_notes_path
+        return excerpt_head_and_tail(
+            self._read_heartbeat_notes_document(),
+            limit=HEARTBEAT_NOTES_CHAR_LIMIT,
+        )
+
+    def _read_heartbeat_notes_document(self) -> str:
+        path = getattr(getattr(self, "config", None), "heartbeat_notes_path", None)
+        if path is None:
+            return ""
         try:
             if not path.exists():
                 return ""
-            text = path.read_text(encoding="utf-8", errors="replace")
+            return path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             logger.exception("gateway.heartbeat_notes_read_failed path=%s", path)
             return ""
-        # Deliberately not _bounded_excerpt: that keeps the head and collapses
-        # whitespace, which on an append-only Markdown log shows the oldest
-        # notes as a flattened blob and hides every recent one. See
-        # shared/scratchpad.py for what that cost in production.
-        return excerpt_head_and_tail(text, limit=HEARTBEAT_NOTES_CHAR_LIMIT)
+
+    def _watchpoint_corrections_path(self) -> Path | None:
+        notes_path = getattr(getattr(self, "config", None), "heartbeat_notes_path", None)
+        if notes_path is None:
+            return None
+        return Path(notes_path).with_name("watchpoint_corrections.json")
+
+    def _load_watchpoint_retractions(self) -> list[dict[str, Any]]:
+        path = self._watchpoint_corrections_path()
+        if path is None:
+            return []
+        try:
+            return load_retractions(path)
+        except Exception:
+            logger.exception("gateway.watchpoint_corrections_load_failed")
+            return []
+
+    def _remember_watchpoint_retraction(self, retraction: dict[str, Any]) -> None:
+        path = self._watchpoint_corrections_path()
+        if path is None:
+            return
+        existing = self._load_watchpoint_retractions()
+        save_retractions(path, upsert_retraction(existing, retraction))
+
+    def _capture_watchpoint_corrections_from_user_text(self, content: str) -> None:
+        items = retractions_from_user_text(content)
+        if not items:
+            return
+        for item in items:
+            self._remember_watchpoint_retraction(item)
+        self._persist_applied_watchpoint_retractions()
+
+    def _capture_watchpoint_correction_from_memory_payload(
+        self, payload: dict[str, Any]
+    ) -> None:
+        parsed = retraction_from_memory_payload(payload)
+        if not parsed:
+            return
+        self._remember_watchpoint_retraction(parsed)
+        self._persist_applied_watchpoint_retractions()
+
+    def _harvest_recent_watchpoint_corrections(self) -> None:
+        store = getattr(self, "session_store", None)
+        if store is None or not hasattr(store, "list_recent_user_message_excerpts"):
+            return
+        since = (
+            datetime.now(timezone.utc)
+            - timedelta(days=HEARTBEAT_CORRECTION_HARVEST_DAYS)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            excerpts = store.list_recent_user_message_excerpts(
+                since=since,
+                limit=HEARTBEAT_CORRECTION_HARVEST_LIMIT,
+            )
+        except Exception:
+            logger.exception("gateway.watchpoint_correction_harvest_failed")
+            return
+        for excerpt in excerpts:
+            for item in retractions_from_user_text(excerpt):
+                self._remember_watchpoint_retraction(item)
+
+    def _persist_applied_watchpoint_retractions(self) -> None:
+        path = getattr(getattr(self, "config", None), "heartbeat_notes_path", None)
+        if path is None:
+            return
+        current = self._read_heartbeat_notes_document()
+        new_text, changed, _applied = apply_retractions_to_notes(
+            current, self._load_watchpoint_retractions()
+        )
+        if not changed:
+            return
+        try:
+            text = truncate_keeping_newest(new_text, limit=HEARTBEAT_NOTES_WRITE_CHAR_LIMIT)
+            if not text.endswith("\n"):
+                text += "\n"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        except OSError:
+            logger.exception(
+                "gateway.heartbeat_notes_retraction_persist_failed path=%s", path
+            )
+
+    def _enforce_heartbeat_notes_retractions(
+        self, notes_text: str
+    ) -> tuple[str, list[dict[str, str]]]:
+        """Strike invalidated watchpoints before the heartbeat prompt is built.
+
+        Persist when possible, but always return the struck text so a disk
+        failure cannot put the stale claim back in front of the model.
+        """
+        try:
+            self._harvest_recent_watchpoint_corrections()
+        except Exception:
+            logger.exception("gateway.watchpoint_correction_harvest_failed")
+        retractions = self._load_watchpoint_retractions()
+        applied_notes, changed, applied = apply_retractions_to_notes(
+            notes_text, retractions
+        )
+        if changed:
+            self._persist_applied_watchpoint_retractions()
+        return applied_notes, applied
 
     def _build_recent_user_visible_deliveries(
         self,
@@ -7106,7 +7228,17 @@ class GatewayRuntime:
                 ],
             },
         }
-        heartbeat_notes = self._read_heartbeat_notes_excerpt()
+        heartbeat_notes = self._read_heartbeat_notes_document()
+        applied_retractions: list[dict[str, str]] = []
+        if heartbeat_notes:
+            heartbeat_notes, applied_retractions = (
+                self._enforce_heartbeat_notes_retractions(heartbeat_notes)
+            )
+            heartbeat_notes = excerpt_head_and_tail(
+                heartbeat_notes, limit=HEARTBEAT_NOTES_CHAR_LIMIT
+            )
+        if applied_retractions:
+            packet["heartbeat_note_retractions"] = applied_retractions
         if heartbeat_notes:
             packet["heartbeat_notes"] = heartbeat_notes
             reconciliation = await self._build_heartbeat_notes_reconciliation(
@@ -7317,6 +7449,32 @@ class GatewayRuntime:
                     line += f"; summary={summary}"
                 lines.append(line)
         heartbeat_notes = self._safe_text(context_packet.get("heartbeat_notes"))
+        retractions = (
+            context_packet.get("heartbeat_note_retractions")
+            if isinstance(context_packet.get("heartbeat_note_retractions"), list)
+            else []
+        )
+        if retractions:
+            lines.extend(
+                [
+                    "",
+                    "### Gateway-Enforced Watchpoint Corrections",
+                    "Gateway already applied these user corrections to the notes below. "
+                    "Do not resurrect the invalidated claims. Do not probe, scrape, or "
+                    "alert on an invalidated host or name.",
+                ]
+            )
+            for item in retractions:
+                if not isinstance(item, dict):
+                    continue
+                invalid = self._safe_text(item.get("invalidates"))
+                canonical = self._safe_text(item.get("canonical"))
+                if not invalid:
+                    continue
+                if canonical:
+                    lines.append(f"- {invalid} → {canonical}")
+                else:
+                    lines.append(f"- do not watch {invalid}")
         if heartbeat_notes:
             lines.extend(
                 [
@@ -10870,7 +11028,7 @@ class GatewayRuntime:
             content = ""
         if not content and role != "assistant":
             return None
-        return self.session_store.append_message(
+        message_id = self.session_store.append_message(
             session_id,
             role=role,
             content=content,
@@ -10880,6 +11038,12 @@ class GatewayRuntime:
             metadata=metadata,
             in_reply_to_request_id=in_reply_to_request_id,
         )
+        if role == "user" and content:
+            try:
+                self._capture_watchpoint_corrections_from_user_text(content)
+            except Exception:
+                logger.exception("gateway.watchpoint_correction_user_ingest_failed")
+        return message_id
 
     def _track_forwarded_foreground_event(self, event: dict[str, Any]) -> None:
         request_id = self._safe_text(event.get("request_id"))
@@ -11720,21 +11884,31 @@ class GatewayRuntime:
         normalized_payload, audit_event = self._normalize_tool_memory_write_payload(
             payload
         )
-        return await self._write_memory_record(
+        response = await self._write_memory_record(
             payload=normalized_payload,
             audit_event=audit_event,
             writer_id=audit_event.writer_id,
         )
+        try:
+            self._capture_watchpoint_correction_from_memory_payload(normalized_payload)
+        except Exception:
+            logger.exception("gateway.watchpoint_correction_memory_write_ingest_failed")
+        return response
 
     async def memory_write_core_fact(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized_payload, audit_event = self._normalize_tool_core_fact_payload(
             payload
         )
-        return await self._write_core_fact_record(
+        response = await self._write_core_fact_record(
             payload=normalized_payload,
             audit_event=audit_event,
             writer_id=audit_event.writer_id,
         )
+        try:
+            self._capture_watchpoint_correction_from_memory_payload(normalized_payload)
+        except Exception:
+            logger.exception("gateway.watchpoint_correction_core_fact_ingest_failed")
+        return response
 
     async def memory_ingest_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized_payload, audit_event = self._normalize_episode_write_payload(
@@ -22038,7 +22212,77 @@ class GatewayRuntime:
             lines.append(str(item.get("content") or "").strip() or "[empty]")
             lines.append("")
 
+        email_block = self._render_email_thread_rollover_excerpt(
+            session_id, created_at
+        )
+        if email_block:
+            lines.extend(["", email_block])
+
         return "\n".join(lines).strip() + "\n"
+
+    def _render_email_thread_rollover_excerpt(
+        self, session_id: str, started_at: str
+    ) -> str:
+        """Include this day's email-thread turns in the daily 4AM summary.
+
+        Email-thread sessions stay rollover_exempt so live threads are not
+        chopped. The daily summary still needs those user corrections.
+        """
+        if not session_id.startswith("sess_") or self._is_email_thread_session(session_id):
+            return ""
+        if not started_at or not hasattr(self, "session_store"):
+            return ""
+        try:
+            messages = self.session_store.list_email_thread_messages_in_window(
+                started_at=started_at,
+                ended_at=self.session_store.next_session_started_at(session_id),
+            )
+        except Exception:
+            logger.exception(
+                "gateway.session_rollover.email_thread_merge_failed session_id=%s",
+                session_id,
+            )
+            return ""
+        if not messages:
+            return ""
+
+        lines = [
+            "# Email threads from this calendar day",
+            "",
+            "These turns ran in email-thread sessions and are not part of the daily chat session. "
+            "User corrections here are durable facts for tomorrow.",
+            "",
+        ]
+        used = 0
+        included = 0
+        for item in messages:
+            if included >= EMAIL_ROLLOVER_MAX_MESSAGES:
+                break
+            if used >= EMAIL_ROLLOVER_TOTAL_CHARS:
+                break
+            role = str(item.get("role") or "unknown").strip().capitalize()
+            content = self._bounded_excerpt(
+                item.get("content"), limit=EMAIL_ROLLOVER_ITEM_CHARS
+            ) or "[empty]"
+            thread_id = self._safe_text(item.get("session_id"))
+            created = self._safe_text(item.get("created_at"))
+            meta_parts: list[str] = []
+            if thread_id:
+                meta_parts.append(f"thread `{thread_id}`")
+            if created:
+                meta_parts.append(created)
+            block = f"## {role}\n"
+            if meta_parts:
+                block += "_" + " | ".join(meta_parts) + "_\n"
+            block += f"\n{content}\n"
+            if used + len(block) > EMAIL_ROLLOVER_TOTAL_CHARS and included:
+                break
+            lines.append(block)
+            used += len(block)
+            included += 1
+        if included == 0:
+            return ""
+        return "\n".join(lines).strip()
 
     def _write_session_transcript(
         self, session_id: str, transcript_markdown: str
@@ -22258,6 +22502,18 @@ class GatewayRuntime:
             if isinstance(payload.get("metadata"), dict)
             else {}
         )
+        invalidates = payload.get("invalidates")
+        if invalidates in (None, "", [], ()):
+            invalidates = metadata.get("invalidates")
+        canonical = self._safe_text(payload.get("canonical")) or self._safe_text(
+            metadata.get("canonical")
+        )
+        if invalidates not in (None, "", [], ()):
+            metadata["correction"] = True
+            metadata["invalidates"] = invalidates
+            tags = self._normalize_string_list([*tags, "correction"], limit=24)
+        if canonical:
+            metadata["canonical"] = canonical
         provenance = (
             dict(payload.get("provenance"))
             if isinstance(payload.get("provenance"), dict)

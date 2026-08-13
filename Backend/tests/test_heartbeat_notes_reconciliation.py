@@ -153,6 +153,30 @@ class TestRender:
         )
         assert "Durable Memory On These Same Subjects" not in block
 
+    def test_enforced_retractions_are_rendered_before_the_notes(self) -> None:
+        block = self._render(
+            {
+                "heartbeat_notes": NOTES,
+                "heartbeat_note_retractions": [
+                    {"invalidates": "coprlab.com", "canonical": "copprlab.com"}
+                ],
+            }
+        )
+        assert "Gateway-Enforced Watchpoint Corrections" in block
+        assert block.index("coprlab.com → copprlab.com") < block.index(
+            "Waters at Chenal lease ends TODAY"
+        )
+        assert "Do not probe, scrape, or alert" in block
+
+    def test_unstructured_reconciliation_does_not_claim_gateway_enforcement(self) -> None:
+        """Related memory beside the notes is still advisory. Only structured retractions strike."""
+        block = self._render(
+            {"heartbeat_notes": NOTES, "heartbeat_notes_reconciliation": [CORRECTION]}
+        )
+        assert "Gateway-Enforced Watchpoint Corrections" not in block
+        assert "Waters at Chenal lease ends TODAY" in block
+        assert "the memory wins" in block
+
     def test_a_malformed_reconciliation_entry_cannot_break_the_render(self) -> None:
         block = self._render(
             {
