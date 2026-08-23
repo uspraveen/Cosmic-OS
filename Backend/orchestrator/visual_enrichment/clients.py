@@ -329,7 +329,11 @@ class FireworksVisualClient:
                     },
                 ],
                 "temperature": 0.1,
-                "max_tokens": 350,
+                # The vision model reasons before it answers, and 350 tokens was
+                # not enough for both: it spent the budget thinking and got cut
+                # off mid-sentence, so the JSON never arrived and the verifier
+                # silently dropped out of the decision.
+                "max_tokens": 1400,
                 "response_format": {"type": "json_object"},
                 "reasoning_effort": self.config.reasoning_effort,
                 "stream": False,

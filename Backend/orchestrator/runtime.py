@@ -872,6 +872,11 @@ class OrchestratorRuntime:
                 if visual_coordinator is not None and collected_sources:
                     for visual_event in visual_coordinator.note_sources(collected_sources):
                         yield {**ev, **visual_event}
+                if visual_coordinator is not None and supporting_artifacts:
+                    # Screenshots this run captured are candidates for the inline
+                    # image slot, not just attachments listed under the answer.
+                    for visual_event in visual_coordinator.note_run_images(supporting_artifacts):
+                        yield {**ev, **visual_event}
 
                 turn_text = "".join(turn_text_parts)
                 turn_reasoning = "".join(turn_reasoning_parts)
@@ -1005,6 +1010,11 @@ class OrchestratorRuntime:
                         })
                     if visual_coordinator is not None and collected_sources:
                         for visual_event in visual_coordinator.note_sources(collected_sources):
+                            yield {**ev, **visual_event}
+                    if visual_coordinator is not None and supporting_artifacts:
+                        # Screenshots this run captured are candidates for the
+                        # inline image slot, not just attachments under the answer.
+                        for visual_event in visual_coordinator.note_run_images(supporting_artifacts):
                             yield {**ev, **visual_event}
 
                     followup_blocks = (
@@ -1619,6 +1629,11 @@ class OrchestratorRuntime:
                         )
                     if visual_coordinator is not None and collected_sources:
                         for visual_event in visual_coordinator.note_sources(collected_sources):
+                            yield {**ev, **visual_event}
+                    if visual_coordinator is not None and supporting_artifacts:
+                        # Screenshots this run captured are candidates for the
+                        # inline image slot, not just attachments under the answer.
+                        for visual_event in visual_coordinator.note_run_images(supporting_artifacts):
                             yield {**ev, **visual_event}
 
                     followup_content = (

@@ -94,6 +94,10 @@ _FAILED_INLINE_CHART_LABEL = "Couldn't generate a clear inline chart for this an
 _TIMED_OUT_INLINE_IMAGE_LABEL = "This inline image took too long to finish."
 _TIMED_OUT_INLINE_CHART_LABEL = "This inline chart took too long to finish."
 _IMPLICIT_IMAGE_SLOT_TIMEOUT_CAP_MS = 6000
+# Images the run itself captured are addressed by this scheme so they travel the
+# same candidate/download/artifact path as anything pulled off the web.
+_RUN_CAPTURE_SCHEME = "cosmic-run://"
+_RUN_CAPTURE_MIMES = ("image/png", "image/jpeg", "image/jpg", "image/webp")
 
 
 def _utcnow_iso() -> str:
@@ -108,6 +112,14 @@ def _slugify_filename(value: str, *, fallback: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
     cleaned = cleaned.strip("._")
     return cleaned or fallback
+
+
+def _parse_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _parse_float(value: Any, default: float = 0.0) -> float:
@@ -130,6 +142,64 @@ def _clip_text(value: Any, *, limit: int = 800) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
+
+
+# Function words carry no topical signal, but the old scorer counted them, so any
+# two English sentences overlapped enough to saturate the relevance term. A forum
+# post titled "If I haven't heard back from Bain consultant interview..." scored a
+# perfect 1.0 against "We still haven't heard back!" on `heard/back/they/that/the`
+# alone, and shipped inline under an answer about YC's Fall 2026 batch.
+_STOPWORDS = frozenset(
+    """
+    about above after again against all also am an and any are aren as at be because been
+    before being below between both but by can cant could couldnt did didnt do does doesnt
+    doing dont down during each few for from further had hadnt has hasnt have havent having
+    he her here hers herself him himself his how however i if in into is isnt it its itself
+    just me might more most must my myself no nor not now of off on once only or other ought
+    our ours ourselves out over own same shall she should shouldnt so some such than that
+    the their theirs them themselves then there these they this those through to too under
+    until up very was wasnt we were werent what when where which while who whom why will
+    with wont would wouldnt you your yours yourself yourselves
+    already back get got heard hear know let like make new one still take tell thing things
+    want way well
+    """.split()
+)
+
+
+def _content_tokens(value: Any) -> set[str]:
+    """Topical tokens only: stopwords stripped, single characters dropped."""
+    return {token for token in _tokenize(value) if token not in _STOPWORDS and len(token) >= 2}
+
+
+def _distinctiveness(token: str) -> float:
+    """Cheap standin for IDF.
+
+    No corpus is available here, but the tokens that actually identify a subject
+    are the long ones and the ones carrying digits ("ycombinator", "2026"),
+    while short generic words match almost anything.
+    """
+    if any(ch.isdigit() for ch in token):
+        return 1.5
+    if len(token) >= 9:
+        return 1.5
+    if len(token) >= 6:
+        return 1.2
+    return 1.0
+
+
+def _weighted_coverage(topic_tokens: set[str], candidate_tokens: set[str]) -> float:
+    """Share of the topic's distinctiveness mass that the candidate actually matches.
+
+    Unlike the old `overlap / min(len(query), 6)`, the denominator is the whole
+    topic, so matching a couple of incidental words cannot look like a match.
+    """
+    if not topic_tokens:
+        return 0.0
+    total = sum(_distinctiveness(token) for token in topic_tokens)
+    if total <= 0:
+        return 0.0
+    matched = sum(_distinctiveness(token) for token in topic_tokens & candidate_tokens)
+    return max(0.0, min(1.0, matched / total))
 
 
 def _tokenize(value: Any) -> set[str]:
@@ -380,6 +450,11 @@ class ImageCandidate:
     width: int | None = None
     height: int | None = None
     score: float = 0.0
+    # Ordering score and topical relevance are deliberately separate. They used to
+    # be summed, which let a big, well-ranked, well-captioned image clear the bar
+    # on structural quality alone: base + rank + search bonus = 0.59 against a
+    # 0.58 threshold, before topicality was consulted at all.
+    relevance: float = 0.0
     retrieval_kind: str = "source_page"
 
 
@@ -650,6 +725,10 @@ class VisualEnrichmentCoordinator:
         self._snapshot_seq = 0
         self._supporting_artifacts: list[dict[str, Any]] = []
         self._supporting_artifact_ids: set[str] = set()
+        # Screenshots and images produced by this run's own tools. The answer was
+        # frequently written *from* one of these, which makes it a better
+        # illustration than anything an open-web image search can find.
+        self._run_images: dict[str, dict[str, Any]] = {}
         self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._active_sidecars: dict[str, asyncio.Task[None]] = {}
         self._waiting_for_sources: set[str] = set()
@@ -738,6 +817,142 @@ class VisualEnrichmentCoordinator:
         if changed:
             self._schedule_waiting_image_slots()
         return self._drain_ready_updates()
+
+    def note_run_images(self, artifacts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """Register images this run's tools captured, so they can be used inline.
+
+        Called with the same artifact payloads the runtime already collects for
+        the response. Previously these were only ever carried through to the
+        client as attachments: a screenshot the answer was written from was never
+        a candidate for the inline image slot sitting directly above it.
+        """
+        changed = False
+        for item in artifacts or []:
+            if not isinstance(item, dict):
+                continue
+            mime = _safe_text(item.get("mime_type") or item.get("mime")).lower()
+            path = _safe_text(item.get("path"))
+            if not path or not mime.startswith("image/"):
+                continue
+            if mime not in _RUN_CAPTURE_MIMES:
+                continue
+            artifact_id = _safe_text(item.get("artifact_id")) or hashlib.sha1(
+                path.encode("utf-8")
+            ).hexdigest()[:16]
+            if artifact_id in self._run_images:
+                continue
+            self._run_images[artifact_id] = dict(item)
+            changed = True
+        if changed:
+            self._schedule_waiting_image_slots()
+        return self._drain_ready_updates()
+
+    def _resolve_run_capture_path(self, artifact: dict[str, Any]) -> Path | None:
+        """Resolve a tool-reported artifact path, refusing anything outside the store.
+
+        These paths arrive in tool output, and whatever comes back here is read
+        off disk and published inline. Resolution is therefore constrained to the
+        artifacts root: a payload naming some other file on the box does not get
+        to become an image in the answer.
+        """
+        raw = _safe_text(artifact.get("path"))
+        if not raw:
+            return None
+        try:
+            root = Path(self.config.artifacts_root).resolve()
+        except OSError:
+            return None
+
+        raw_path = Path(raw)
+        attempts: list[Path] = []
+        if raw_path.is_absolute():
+            attempts.append(raw_path)
+        else:
+            parts = raw_path.parts
+            # Tools report either "runs/artifacts/<task>/..." relative to the
+            # backend root, or a path already relative to the artifacts root.
+            if len(parts) >= 2 and parts[0] == "runs" and parts[1] == "artifacts":
+                attempts.append(root.joinpath(*parts[2:]))
+            attempts.append(root / raw_path)
+            attempts.append(root.parent.parent / raw_path)
+
+        for attempt in attempts:
+            try:
+                resolved = attempt.resolve()
+            except OSError:
+                continue
+            if not resolved.is_file():
+                continue
+            if not resolved.is_relative_to(root):
+                logger.warning(
+                    "visual_enrichment.run_capture_outside_artifacts_root path=%s",
+                    resolved,
+                )
+                continue
+            return resolved
+        return None
+
+    def _collect_run_capture_candidates(self, slot: VisualSlotDirective) -> list[ImageCandidate]:
+        """Run captures of pages the answer actually cites.
+
+        Citation is required: a screenshot of some page the run visited but did
+        not draw on is no more relevant than a web result. Matching a cited page
+        is what earns these candidates their provenance relevance.
+        """
+        if not self._run_images:
+            return []
+        cited_urls = {
+            _safe_text(source.get("url")): source
+            for source in self._candidate_source_infos(slot)
+            if _safe_text(source.get("url"))
+        }
+        cited_domains: dict[str, dict[str, str]] = {}
+        for url, source in cited_urls.items():
+            domain = _safe_text(source.get("domain")) or _safe_text(urlparse(url).netloc)
+            if domain:
+                cited_domains.setdefault(domain.lower(), source)
+
+        candidates: list[ImageCandidate] = []
+        for rank, (artifact_id, artifact) in enumerate(self._run_images.items(), start=1):
+            source_url = _safe_text(artifact.get("source_url"))
+            if not source_url:
+                continue
+            source = cited_urls.get(source_url)
+            if source is None:
+                domain = _safe_text(urlparse(source_url).netloc).lower()
+                source = cited_domains.get(domain)
+            if source is None:
+                continue
+            if self._resolve_run_capture_path(artifact) is None:
+                continue
+            source_title = _safe_text(source.get("title")) or _safe_text(urlparse(source_url).netloc)
+            candidate = ImageCandidate(
+                image_url=f"{_RUN_CAPTURE_SCHEME}{artifact_id}",
+                source_url=source_url,
+                source_title=source_title,
+                source_domain=_safe_text(source.get("domain")) or _safe_text(urlparse(source_url).netloc),
+                source_rank=rank,
+                alt_text=f"Screenshot of {source_title}",
+                title=source_title,
+                filename=_safe_text(artifact.get("filename")),
+                width=_parse_int(artifact.get("width")),
+                height=_parse_int(artifact.get("height")),
+                retrieval_kind="run_capture",
+            )
+            # Each gatherer scores what it produces; ranking assumes it is done.
+            candidate.score = self._score_candidate(
+                slot,
+                candidate,
+                " ".join(filter(None, [candidate.alt_text, candidate.title])),
+            )
+            candidates.append(candidate)
+        if candidates:
+            logger.info(
+                "visual_enrichment.run_capture_candidates slot_id=%s count=%s",
+                slot.id,
+                len(candidates),
+            )
+        return candidates
 
     def _slot_timeout_ms(self, slot: VisualSlotDirective | None) -> int:
         if slot is None:
@@ -1075,6 +1290,11 @@ class VisualEnrichmentCoordinator:
         candidate: ImageCandidate,
         explicit_fallback: bool,
     ) -> str:
+        if candidate.retrieval_kind == "run_capture":
+            return (
+                f"Screenshot this run captured from {candidate.source_domain or 'a cited source'}, "
+                "which the answer was written from."
+            )
         if candidate.retrieval_kind == "image_search":
             if explicit_fallback:
                 return (
@@ -1097,9 +1317,11 @@ class VisualEnrichmentCoordinator:
         slot: VisualSlotDirective,
         candidates: list[ImageCandidate],
     ) -> list[tuple[ImageCandidate, dict[str, Any]]]:
+        # Scores clamp at 1.0, so ties are common. Provenance, not list order,
+        # decides them: a first-party capture outranks a web result it ties with.
         ranked = sorted(
             candidates,
-            key=lambda item: item.score,
+            key=lambda item: (item.score, self._provenance_relevance(item)),
             reverse=True,
         )[: self.config.visual_image_candidate_limit]
         if not ranked:
@@ -1109,6 +1331,9 @@ class VisualEnrichmentCoordinator:
         attempt_candidates: list[tuple[ImageCandidate, dict[str, Any]]] = []
         planned_urls: set[str] = set()
         verifier_rejected_urls: set[str] = set()
+        # A verifier that said "no" and a verifier that fell over are different
+        # facts and must not share a bucket.
+        verifier_errored_urls: set[str] = set()
 
         def add_attempt(candidate: ImageCandidate, verdict: dict[str, Any]) -> None:
             if candidate.image_url in planned_urls:
@@ -1127,6 +1352,15 @@ class VisualEnrichmentCoordinator:
         )
         if self._fireworks.available and top_k > 0:
             for candidate in ranked[:top_k]:
+                if candidate.retrieval_kind == "run_capture":
+                    # The verifier fetches candidate_image_url itself, and a run
+                    # capture lives on local disk, not a URL it could fetch. Its
+                    # topicality is already settled by the cited source it was
+                    # taken from, so it is not shipped to a third party to be
+                    # re-judged.
+                    continue
+                verdict: dict[str, Any] = {}
+                verifier_error = False
                 try:
                     verdict = await self._fireworks.verify_image_candidate(
                         slot_query=_safe_text(slot.query) or self.user_query,
@@ -1143,6 +1377,7 @@ class VisualEnrichmentCoordinator:
                 except Exception as exc:
                     logger.warning("visual_enrichment.image_verify_failed slot_id=%s error=%s", slot.id, exc)
                     verdict = {}
+                    verifier_error = True
                 confidence = max(
                     candidate.score,
                     _parse_float(verdict.get("confidence"), default=candidate.score),
@@ -1150,19 +1385,55 @@ class VisualEnrichmentCoordinator:
                 if bool(verdict.get("accept")) and confidence >= self.config.visual_image_min_confidence:
                     enriched_verdict = dict(verdict)
                     enriched_verdict["confidence"] = confidence
+                    enriched_verdict["verified"] = True
+                    enriched_verdict["relevance"] = round(candidate.relevance, 4)
+                    enriched_verdict["retrieval_kind"] = candidate.retrieval_kind
                     add_attempt(candidate, enriched_verdict)
-                elif verdict and not explicit_image_request:
-                    verifier_rejected_urls.add(candidate.image_url)
+                elif not explicit_image_request:
+                    # Fail closed. This previously read `elif verdict and ...`, so a
+                    # verifier crash left `verdict` as an empty dict, which is falsy,
+                    # which meant the candidate was never marked rejected and fell
+                    # through to the lexical-score path below completely unvetted.
+                    # That is exactly how the Bain forum screenshot shipped.
+                    if verifier_error or not verdict:
+                        verifier_errored_urls.add(candidate.image_url)
+                    else:
+                        verifier_rejected_urls.add(candidate.image_url)
 
         relaxed_fallback_logged = False
+        relevance_reject_logged = False
+        min_relevance = self.config.visual_image_min_relevance
         for candidate in ranked:
             if candidate.image_url in verifier_rejected_urls and not explicit_image_request:
+                continue
+            if (
+                candidate.image_url in verifier_errored_urls
+                and not explicit_image_request
+                and self._provenance_relevance(candidate) < 1.0
+            ):
+                # An unreachable verifier must not promote an unvetted web image.
+                # It also must not discard a first-party capture, whose relevance
+                # never depended on the verifier's opinion.
+                continue
+            if not explicit_image_request and candidate.relevance < min_relevance:
+                if not relevance_reject_logged:
+                    logger.info(
+                        "visual_enrichment.image_relevance_rejected slot_id=%s relevance=%.3f score=%.3f source=%s",
+                        slot.id,
+                        candidate.relevance,
+                        candidate.score,
+                        candidate.source_url,
+                    )
+                    relevance_reject_logged = True
                 continue
             if candidate.score >= self.config.visual_image_min_confidence:
                 add_attempt(
                     candidate,
                     {
                         "confidence": candidate.score,
+                        "relevance": round(candidate.relevance, 4),
+                        "retrieval_kind": candidate.retrieval_kind,
+                        "verified": False,
                         "selection_reason": self._selection_reason_for_candidate(
                             candidate=candidate,
                             explicit_fallback=False,
@@ -1186,6 +1457,9 @@ class VisualEnrichmentCoordinator:
                     candidate,
                     {
                         "confidence": candidate.score,
+                        "relevance": round(candidate.relevance, 4),
+                        "retrieval_kind": candidate.retrieval_kind,
+                        "verified": False,
                         "selection_reason": self._selection_reason_for_candidate(
                             candidate=candidate,
                             explicit_fallback=True,
@@ -1211,6 +1485,9 @@ class VisualEnrichmentCoordinator:
                     candidate,
                     {
                         "confidence": candidate.score,
+                        "relevance": round(candidate.relevance, 4),
+                        "retrieval_kind": candidate.retrieval_kind,
+                        "verified": False,
                         "selection_reason": self._selection_reason_for_candidate(
                             candidate=candidate,
                             explicit_fallback=True,
@@ -1500,15 +1777,18 @@ class VisualEnrichmentCoordinator:
 
     async def _run_image_sidecar(self, slot: VisualSlotDirective) -> None:
         try:
+            # Gathered first and cheaply: these are local files, and having one
+            # means the slot can be filled even with no scraper and no search.
+            run_candidates = self._collect_run_capture_candidates(slot)
             image_search_allowed = self._image_search.available and bool(
                 self._build_image_search_queries(slot)
             )
-            if not self._firecrawl.available and not image_search_allowed:
+            if not run_candidates and not self._firecrawl.available and not image_search_allowed:
                 raise ValueError(
                     "Image enrichment is unavailable because neither trusted-source scraping nor direct image search is configured."
                 )
             source_infos = self._candidate_source_infos(slot)
-            if not source_infos and not image_search_allowed:
+            if not run_candidates and not source_infos and not image_search_allowed:
                 raise ValueError("No trusted source URLs were available for this image slot.")
 
             explicit_image_request = self._slot_explicitly_requests_image(slot)
@@ -1578,13 +1858,15 @@ class VisualEnrichmentCoordinator:
                     except Exception as exc:
                         logger.warning("visual_enrichment.image_search_failed slot_id=%s error=%s", slot.id, exc)
 
-            trusted_urls = {item.image_url for item in trusted_candidates}
-            all_candidates = list(trusted_candidates)
-            all_candidates.extend(
-                candidate
-                for candidate in search_candidates
-                if candidate.image_url not in trusted_urls
-            )
+            # First-party captures lead: when the answer was written off a
+            # screenshot this run took, that screenshot is the illustration.
+            seen_image_urls = {item.image_url for item in run_candidates}
+            all_candidates = list(run_candidates)
+            for candidate in (*trusted_candidates, *search_candidates):
+                if candidate.image_url in seen_image_urls:
+                    continue
+                seen_image_urls.add(candidate.image_url)
+                all_candidates.append(candidate)
 
             if not all_candidates:
                 raise ValueError(
@@ -1653,6 +1935,7 @@ class VisualEnrichmentCoordinator:
                 width=width,
                 height=height,
             )
+            is_run_capture = selected_candidate.retrieval_kind == "run_capture"
             block = self._build_image_artifact_block(
                 slot=slot,
                 artifact=artifact,
@@ -1662,14 +1945,31 @@ class VisualEnrichmentCoordinator:
                     "source_url": selected_candidate.source_url,
                     "source_title": selected_candidate.source_title,
                     "source_domain": selected_candidate.source_domain,
-                    "source_image_url": selected_candidate.image_url,
-                    "attribution_label": f"Image from {selected_candidate.source_title or selected_candidate.source_domain}",
+                    # A run capture's image_url is an internal artifact handle, not
+                    # something a client could resolve.
+                    "source_image_url": (
+                        ""
+                        if is_run_capture
+                        else selected_candidate.image_url
+                    ),
+                    "attribution_label": (
+                        f"Screenshot of {selected_candidate.source_title or selected_candidate.source_domain}"
+                        if is_run_capture
+                        else f"Image from {selected_candidate.source_title or selected_candidate.source_domain}"
+                    ),
                     "selection_reason": _safe_text(selected_verdict.get("selection_reason"))
                     or "Best match from a trusted source page.",
                     "confidence": max(
                         selected_candidate.score,
                         _parse_float(selected_verdict.get("confidence"), default=selected_candidate.score),
                     ),
+                    # The numbers the choice was actually made on. The old payload
+                    # reported confidence 1.0 for an image with no topical overlap
+                    # at all, because the score had clamped, which left the field
+                    # useless for working out why anything was picked.
+                    "relevance": round(selected_candidate.relevance, 4),
+                    "retrieval_kind": selected_candidate.retrieval_kind,
+                    "verified": bool(selected_verdict.get("verified")),
                     "alt_text": _safe_text(selected_verdict.get("alt_text")) or selected_candidate.alt_text,
                 },
             )
@@ -1776,20 +2076,41 @@ class VisualEnrichmentCoordinator:
             candidates.append(candidate)
         return candidates
 
+    def _topic_tokens(self, slot: VisualSlotDirective) -> set[str]:
+        """What the answer is about, rather than how the user phrased the question.
+
+        Auto-injected slots search on the user's own sentence, so judging against
+        that same sentence just re-confirms the phrasing. The answer text and the
+        pages it actually cites are what the image has to match.
+        """
+        # Subject matter only. Source titles and domains are deliberately absent:
+        # a candidate carries its own source metadata, so scoring it against a
+        # topic built from that same metadata is circular — the domain matches
+        # the domain and the image looks relevant to a page it merely came from.
+        # Provenance is credited separately, in _provenance_relevance.
+        parts = [
+            _safe_text(slot.query),
+            _clip_text(slot.context_excerpt, limit=1200),
+            self.user_query,
+        ]
+        return _content_tokens(" ".join(part for part in parts if part))
+
+    def _provenance_relevance(self, candidate: ImageCandidate) -> float:
+        """Relevance a candidate inherits from where it came from.
+
+        An image lifted off a page the answer cites is on-topic by construction,
+        however thin its alt text. An open-web image-search hit has no such
+        standing and has to earn its relevance lexically.
+        """
+        if candidate.retrieval_kind == "run_capture":
+            return 1.0
+        if candidate.retrieval_kind == "source_page":
+            return 0.55
+        return 0.0
+
     def _score_candidate(self, slot: VisualSlotDirective, candidate: ImageCandidate, corpus: str) -> float:
-        query_tokens = _tokenize(
-            " ".join(
-                filter(
-                    None,
-                    [
-                        self.user_query,
-                        slot.query,
-                        _clip_text(slot.context_excerpt, limit=500),
-                    ],
-                )
-            )
-        )
-        candidate_tokens = _tokenize(
+        topic_tokens = self._topic_tokens(slot)
+        candidate_tokens = _content_tokens(
             " ".join(
                 filter(
                     None,
@@ -1802,7 +2123,7 @@ class VisualEnrichmentCoordinator:
                 )
             )
         )
-        source_tokens = _tokenize(
+        source_tokens = _content_tokens(
             " ".join(
                 filter(
                     None,
@@ -1813,16 +2134,25 @@ class VisualEnrichmentCoordinator:
                 )
             )
         )
-        candidate_overlap = len(query_tokens & candidate_tokens)
-        source_overlap = len(query_tokens & source_tokens)
+        lexical_relevance = _weighted_coverage(topic_tokens, candidate_tokens | source_tokens)
+        # Two different questions, deliberately answered separately:
+        #   score     - how well does this candidate actually match? (ordering)
+        #   relevance - is it topical enough to be eligible at all?   (gate)
+        # Provenance answers only the second. Letting it raise the score would
+        # inflate every trusted-source candidate and relax the strict threshold.
+        candidate.relevance = max(lexical_relevance, self._provenance_relevance(candidate))
+        candidate_overlap = len(topic_tokens & candidate_tokens)
         score = 0.16
         rank_step = 0.06 if candidate.retrieval_kind == "image_search" else 0.08
         rank_cap = 0.38 if candidate.retrieval_kind == "image_search" else 0.42
         score += max(0.0, rank_cap - ((candidate.source_rank - 1) * rank_step))
-        if query_tokens:
-            token_window = max(min(len(query_tokens), 6), 1)
-            score += min(0.48, candidate_overlap / token_window)
-            score += min(0.18, source_overlap / token_window)
+        # One relevance term on a real scale, replacing two terms whose shared
+        # denominator was capped at 6 and therefore saturated on ~6 shared words.
+        score += 0.66 * lexical_relevance
+        if candidate.retrieval_kind == "run_capture":
+            # First-party evidence: this is a picture of a page the answer cites,
+            # taken by this run, not something matched by keyword.
+            score += 0.30
         if candidate.retrieval_kind == "image_search":
             score += 0.05
         if candidate.width and candidate.height:
@@ -1834,7 +2164,7 @@ class VisualEnrichmentCoordinator:
         if candidate.alt_text and len(candidate.alt_text.split()) >= 3:
             score += 0.1
         score -= _dimension_quality_penalty(candidate.width, candidate.height)
-        if query_tokens and source_overlap > 0 and candidate_overlap == 0:
+        if topic_tokens and candidate_overlap == 0:
             score -= 0.24
         if _is_probably_text_art(
             candidate.image_url,
@@ -1898,6 +2228,8 @@ class VisualEnrichmentCoordinator:
         self,
         image_url: str,
     ) -> tuple[bytes, str | None, int | None, int | None]:
+        if image_url.startswith(_RUN_CAPTURE_SCHEME):
+            return await asyncio.to_thread(self._read_run_capture_bytes, image_url)
         response = await self._http_client.get(
             image_url,
             headers={"User-Agent": "COSMIC-OS/1.0"},
@@ -1915,6 +2247,34 @@ class VisualEnrichmentCoordinator:
         if len(data) > self.config.visual_image_max_bytes:
             raise ValueError("Image download exceeded the byte budget.")
         mime_type = _safe_text(response.headers.get("content-type")).split(";")[0] or None
+        width: int | None = None
+        height: int | None = None
+        try:
+            with Image.open(BytesIO(data)) as image:
+                width, height = image.size
+                if not mime_type:
+                    mime_type = Image.MIME.get(image.format or "", None)
+        except Exception:
+            pass
+        return data, mime_type, width, height
+
+    def _read_run_capture_bytes(
+        self,
+        image_url: str,
+    ) -> tuple[bytes, str | None, int | None, int | None]:
+        artifact_id = image_url[len(_RUN_CAPTURE_SCHEME) :]
+        artifact = self._run_images.get(artifact_id)
+        if artifact is None:
+            raise ValueError(f"Run capture {artifact_id} is no longer registered.")
+        path = self._resolve_run_capture_path(artifact)
+        if path is None:
+            raise ValueError(f"Run capture {artifact_id} is missing on disk.")
+        data = path.read_bytes()
+        if not data:
+            raise ValueError("Run capture file was empty.")
+        if len(data) > self.config.visual_image_max_bytes:
+            raise ValueError("Run capture exceeded the byte budget.")
+        mime_type = _safe_text(artifact.get("mime_type") or artifact.get("mime")) or None
         width: int | None = None
         height: int | None = None
         try:

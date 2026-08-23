@@ -17,7 +17,10 @@ from orchestrator.visual_enrichment.clients import (
     DirectImageSearchClient,
     DirectImageSearchConfig,
 )
-from orchestrator.visual_enrichment.coordinator import _is_probably_text_art
+from orchestrator.visual_enrichment.coordinator import (
+    VisualSlotDirective,
+    _is_probably_text_art,
+)
 from orchestrator.visual_enrichment import VisualEnrichmentCoordinator
 from PIL import Image
 
@@ -1600,3 +1603,433 @@ def test_render_chart_png_uses_high_resolution_dark_theme() -> None:
     assert len(image_bytes) > 10_000
     with Image.open(BytesIO(image_bytes)) as image:
         assert image.size == (1600, 900)
+
+
+# ── Regression cover for the "irrelevant inline image" defect ────────────────
+#
+# A YC Fall 2026 answer shipped with a screenshot of a Fishbowl forum post about
+# a Bain consulting interview. The post's title was a lexical twin of the user's
+# sentence ("if I haven't heard back...") and a topical stranger, and every layer
+# that should have stopped it failed in the same direction: the scorer saturated
+# on shared function words, structural bonuses alone cleared the threshold, and
+# the semantic verifier crashed and fell open. These tests hold each layer shut.
+
+
+_YC_ANSWER_EXCERPT = (
+    "There it is: 18 companies officially listed on the Y Combinator directory for the "
+    "Fall 2026 batch. The published cohort includes antimattr, Covera, Vorelios, Hemlock, "
+    "Antropi Robotics, Lantern, Forward, Capveon and Qokedas, weighted heavily toward "
+    "robotics, infrastructure and developer tooling startups."
+)
+
+_YC_SOURCE_URL = "https://www.ycombinator.test/companies?batch=Fall+2026"
+
+
+def _build_lexically_similar_offtopic_search_transport() -> httpx.MockTransport:
+    forum_bytes = _solid_png_bytes(1200, 630)
+    forum_url = "https://cdn.fishbowl.test/if-i-havent-heard-back-from-bain-consultant-interview.png"
+    entry = {
+        "murl": forum_url,
+        "purl": "https://www.fishbowlapp.test/post/if-i-havent-heard-back-from-bain-consultant-interview",
+        "t": "If I haven't heard back from Bain consultant interview | Fishbowl",
+        "desc": (
+            "If I haven't heard back from Bain consultant interview for experienced "
+            "hires does that mean it's a no I know they communicated the"
+        ),
+        "imgw": 1200,
+        "imgh": 630,
+    }
+    bing_html = (
+        "<html><body><a class=\"iusc\" m='"
+        + json.dumps(entry).replace("'", "&#39;")
+        + "'></a></body></html>"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/v2/scrape"):
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {"images": [], "metadata": {"title": "Y Combinator companies"}},
+                },
+            )
+        if request.method == "GET" and str(request.url).startswith("https://www.bing.com/images/search"):
+            return httpx.Response(200, text=bing_html, headers={"Content-Type": "text/html"})
+        if request.method == "GET" and str(request.url) == forum_url:
+            return httpx.Response(200, content=forum_bytes, headers={"Content-Type": "image/png"})
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    return httpx.MockTransport(handler)
+
+
+def _build_verifier_crash_transport() -> httpx.MockTransport:
+    shot_bytes = _solid_png_bytes(1600, 900)
+    image_url = "https://cdn.example.test/fall-2026-directory-screenshot.png"
+    entry = {
+        "murl": image_url,
+        "purl": _YC_SOURCE_URL,
+        "t": "Y Combinator Fall 2026 companies directory batch published cohort",
+        "desc": (
+            "Directory of Fall 2026 batch companies including antimattr Covera Vorelios "
+            "Hemlock robotics infrastructure startups"
+        ),
+        "imgw": 1600,
+        "imgh": 900,
+    }
+    bing_html = (
+        "<html><body><a class=\"iusc\" m='" + json.dumps(entry) + "'></a></body></html>"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and "chat/completions" in request.url.path:
+            # Exactly what production returned: the reasoning model spent its token
+            # budget thinking and was cut off before it emitted any JSON.
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    "The user wants me to validate whether an image is "
+                                    "appropriate to place inline inside an assistant "
+                                    "response. Let me analyze the image and con"
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith("/v2/scrape"):
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"images": [], "metadata": {"title": "YC"}}},
+            )
+        if request.method == "GET" and str(request.url).startswith("https://www.bing.com/images/search"):
+            return httpx.Response(200, text=bing_html, headers={"Content-Type": "text/html"})
+        if request.method == "GET" and str(request.url) == image_url:
+            return httpx.Response(200, content=shot_bytes, headers={"Content-Type": "image/png"})
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    return httpx.MockTransport(handler)
+
+
+def _note_ycombinator_source(coordinator: VisualEnrichmentCoordinator) -> None:
+    coordinator.note_sources(
+        [
+            {
+                "url": _YC_SOURCE_URL,
+                "title": "Y Combinator Fall 2026 companies directory",
+                "domain": "www.ycombinator.test",
+            }
+        ]
+    )
+
+
+def _yc_config(root: Path, **overrides) -> OrchestratorConfig:
+    defaults = dict(
+        artifacts_root=root / "artifacts",
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=root / "task_ledger.db",
+        visual_enhancement_enabled=True,
+        visual_finalization_grace_ms=1200,
+        visual_max_concurrent_sidecars=1,
+        visual_max_image_slots_per_turn=1,
+        visual_firecrawl_api_key="firecrawl-key",
+        visual_image_search_enabled=True,
+        visual_image_search_base_url="https://www.bing.com/images/search",
+    )
+    defaults.update(overrides)
+    return OrchestratorConfig(**defaults)
+
+
+def _slot_text(query: str, tail: str) -> str:
+    directive = json.dumps({"id": "img_1", "kind": "image", "query": query})
+    return f"{_YC_ANSWER_EXCERPT}\n\n[[visual_slot {directive}]]\n\n{tail}"
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_rejects_lexically_similar_but_offtopic_image() -> None:
+    """The exact defect: matching the user's phrasing is not matching the subject."""
+    root = _make_test_dir("visual-offtopic-lexical-")
+    try:
+        async with httpx.AsyncClient(
+            transport=_build_lexically_similar_offtopic_search_transport()
+        ) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=_yc_config(root),
+                task_id="tsk_offtopic_1",
+                request_id="req_offtopic_1",
+                session_id="sess_offtopic_1",
+                channel="desktop:desk_offtopic_1",
+                user_query=(
+                    "We still haven't heard back! They published the 18 companies "
+                    "that are already in!"
+                ),
+                http_client=client,
+            )
+            _note_ycombinator_source(coordinator)
+            coordinator.consume_text(
+                _slot_text(
+                    "We still haven't heard back They published the 18 companies",
+                    "The official decision deadline for on-time applicants is still August 28.",
+                )
+            )
+            final_payload = await coordinator.finalize()
+
+        assert not any(
+            block["type"] == "image_artifact" for block in final_payload["response_blocks"]
+        ), "a forum post about a Bain interview does not illustrate YC's Fall 2026 batch"
+        failed_slot = next(
+            block for block in final_payload["response_blocks"] if block["type"] == "image_slot"
+        )
+        assert failed_slot["status"] == "failed"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_verifier_crash_does_not_publish_unvetted_image() -> None:
+    """A verifier that falls over must not hand the decision back to the lexical score."""
+    root = _make_test_dir("visual-verifier-crash-")
+    try:
+        config = _yc_config(root, visual_fireworks_api_key="fireworks-key")
+        async with httpx.AsyncClient(transport=_build_verifier_crash_transport()) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_verifier_crash_1",
+                request_id="req_verifier_crash_1",
+                session_id="sess_verifier_crash_1",
+                channel="desktop:desk_verifier_crash_1",
+                user_query="What happened with the Fall 2026 batch?",
+                http_client=client,
+            )
+            _note_ycombinator_source(coordinator)
+            coordinator.consume_text(
+                _slot_text(
+                    "Y Combinator Fall 2026 batch companies directory",
+                    "More detail follows below for the published cohort.",
+                )
+            )
+            final_payload = await coordinator.finalize()
+
+        assert not any(
+            block["type"] == "image_artifact" for block in final_payload["response_blocks"]
+        ), "an unparseable verifier verdict must fail closed, not fall through to the score"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_prefers_run_captured_screenshot_of_cited_source() -> None:
+    """The screenshot the answer was written from beats anything on the open web."""
+    root = _make_test_dir("visual-run-capture-")
+    try:
+        # Real captures live under the artifacts root; anything else is refused.
+        capture_path = root / "artifacts" / "tsk_run_capture_1" / "screenshot.png"
+        capture_path.parent.mkdir(parents=True, exist_ok=True)
+        capture_path.write_bytes(_solid_png_bytes(1440, 900))
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError(
+                f"no network call expected once a run capture is available: {request.url!s}"
+            )
+
+        config = _yc_config(root, visual_firecrawl_api_key="", visual_image_search_enabled=False)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_run_capture_1",
+                request_id="req_run_capture_1",
+                session_id="sess_run_capture_1",
+                channel="desktop:desk_run_capture_1",
+                user_query=(
+                    "We still haven't heard back! They published the 18 companies "
+                    "that are already in!"
+                ),
+                http_client=client,
+            )
+            _note_ycombinator_source(coordinator)
+            coordinator.note_run_images(
+                [
+                    {
+                        "artifact_id": "art_run_shot_1",
+                        "mime_type": "image/png",
+                        "path": str(capture_path),
+                        "filename": "screenshot.png",
+                        "source_url": _YC_SOURCE_URL,
+                        "audience": "supporting",
+                    }
+                ]
+            )
+            coordinator.consume_text(
+                _slot_text(
+                    "We still haven't heard back They published the 18 companies",
+                    "The official decision deadline is still August 28.",
+                )
+            )
+            final_payload = await coordinator.finalize()
+
+        image_block = next(
+            block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
+        )
+        provenance = image_block["provenance"]
+        assert provenance["retrieval_kind"] == "run_capture"
+        assert provenance["source_url"] == _YC_SOURCE_URL
+        assert "captured" in provenance["selection_reason"].lower()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_ignores_run_capture_of_uncited_page() -> None:
+    """Being captured by this run is not on its own a claim to relevance."""
+    root = _make_test_dir("visual-run-capture-uncited-")
+    try:
+        capture_path = root / "artifacts" / "tsk_run_capture_2" / "unrelated.png"
+        capture_path.parent.mkdir(parents=True, exist_ok=True)
+        capture_path.write_bytes(_solid_png_bytes(1440, 900))
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError(f"unexpected request {request.url!s}")
+
+        config = _yc_config(root, visual_firecrawl_api_key="", visual_image_search_enabled=False)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_run_capture_2",
+                request_id="req_run_capture_2",
+                session_id="sess_run_capture_2",
+                channel="desktop:desk_run_capture_2",
+                user_query="What happened with the Fall 2026 batch?",
+                http_client=client,
+            )
+            _note_ycombinator_source(coordinator)
+            coordinator.note_run_images(
+                [
+                    {
+                        "artifact_id": "art_run_shot_2",
+                        "mime_type": "image/png",
+                        "path": str(capture_path),
+                        "filename": "unrelated.png",
+                        "source_url": "https://unrelated.test/some-other-page",
+                        "audience": "supporting",
+                    }
+                ]
+            )
+            coordinator.consume_text(
+                _slot_text(
+                    "Y Combinator Fall 2026 batch companies",
+                    "More detail follows below.",
+                )
+            )
+            final_payload = await coordinator.finalize()
+
+        assert not any(
+            block["type"] == "image_artifact" for block in final_payload["response_blocks"]
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_visual_relevance_ignores_function_words() -> None:
+    from orchestrator.visual_enrichment.coordinator import _content_tokens, _weighted_coverage
+
+    topic = _content_tokens(
+        "18 companies officially listed on the Y Combinator directory for the Fall 2026 batch"
+    )
+    offtopic = _content_tokens(
+        "If I haven't heard back from Bain consultant interview for experienced hires "
+        "does that mean it's a no I know they communicated the"
+    )
+    ontopic = _content_tokens("Y Combinator Fall 2026 batch companies directory listing")
+
+    # The old scorer counted `the/that/they/from/does/for` and saturated on them.
+    assert _weighted_coverage(topic, offtopic) < 0.10
+    assert _weighted_coverage(topic, ontopic) > 0.45
+
+
+def test_visual_relevance_denominator_is_not_capped() -> None:
+    from orchestrator.visual_enrichment.coordinator import _content_tokens, _weighted_coverage
+
+    topic = _content_tokens(
+        "quarterly revenue growth margins guidance segment reporting datacenter "
+        "networking automotive gaming visualization backlog inventory"
+    )
+    sliver = _content_tokens("gaming")
+    # `min(len(query_tokens), 6)` used to make one or two shared words look like a
+    # complete match; coverage is now measured against the whole topic.
+    assert _weighted_coverage(topic, sliver) < 0.15
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_run_capture_path_must_stay_inside_artifacts_root() -> None:
+    """Artifact paths come from tool output, and whatever resolves here gets published."""
+    root = _make_test_dir("visual-run-capture-escape-")
+    try:
+        artifacts_root = root / "artifacts"
+        artifacts_root.mkdir(parents=True, exist_ok=True)
+        outside = root / "outside-the-store.png"
+        outside.write_bytes(_solid_png_bytes(1440, 900))
+
+        inside = artifacts_root / "tsk_x" / "shot.png"
+        inside.parent.mkdir(parents=True, exist_ok=True)
+        inside.write_bytes(_solid_png_bytes(1440, 900))
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError(f"unexpected request {request.url!s}")
+
+        config = _yc_config(root, visual_firecrawl_api_key="", visual_image_search_enabled=False)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_run_capture_escape",
+                request_id="req_run_capture_escape",
+                session_id="sess_run_capture_escape",
+                channel="desktop:desk_run_capture_escape",
+                user_query="What happened with the Fall 2026 batch?",
+                http_client=client,
+            )
+            _note_ycombinator_source(coordinator)
+            slot = VisualSlotDirective(
+                id="img_1",
+                kind="image",
+                query="Y Combinator Fall 2026 batch companies",
+                context_excerpt=_YC_ANSWER_EXCERPT,
+            )
+
+            escaping = {
+                "artifact_id": "art_escape",
+                "mime_type": "image/png",
+                "path": str(outside),
+                "filename": "outside-the-store.png",
+                "source_url": _YC_SOURCE_URL,
+            }
+            contained = {
+                "artifact_id": "art_contained",
+                "mime_type": "image/png",
+                "path": str(inside),
+                "filename": "shot.png",
+                "source_url": _YC_SOURCE_URL,
+            }
+            traversal = {
+                "artifact_id": "art_traversal",
+                "mime_type": "image/png",
+                "path": "tsk_x/../../outside-the-store.png",
+                "filename": "outside-the-store.png",
+                "source_url": _YC_SOURCE_URL,
+            }
+
+            assert coordinator._resolve_run_capture_path(escaping) is None
+            assert coordinator._resolve_run_capture_path(traversal) is None
+            assert coordinator._resolve_run_capture_path(contained) == inside.resolve()
+
+            coordinator.note_run_images([escaping, traversal, contained])
+            candidates = coordinator._collect_run_capture_candidates(slot)
+            assert [item.image_url for item in candidates] == ["cosmic-run://art_contained"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

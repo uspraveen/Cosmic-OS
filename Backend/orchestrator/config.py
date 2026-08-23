@@ -166,6 +166,10 @@ class OrchestratorConfig:
     visual_image_max_bytes: int = 8 * 1024 * 1024
     visual_image_verify_top_k: int = 3
     visual_image_min_confidence: float = 0.58
+    # Independent, necessary condition. The confidence score above ranks candidates
+    # and is reachable on structural quality alone, so topicality is enforced here
+    # rather than as one more addend inside it.
+    visual_image_min_relevance: float = 0.18
     visual_chart_max_points: int = 200
     visual_chart_max_bytes: int = 4 * 1024 * 1024
     visual_download_timeout_sec: float = 6.0
@@ -407,6 +411,10 @@ class OrchestratorConfig:
                 or "accounts/fireworks/models/kimi-k2p6"
             ).strip()
             or "accounts/fireworks/models/kimi-k2p6",
+            visual_image_min_relevance=max(
+                0.0,
+                min(1.0, float(os.getenv("VISUAL_ENHANCEMENT_IMAGE_MIN_RELEVANCE", "0.18") or 0.18)),
+            ),
             visual_fireworks_reasoning_effort=(
                 os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT")
                 or "low"
