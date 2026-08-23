@@ -1520,6 +1520,11 @@ function startSettingsBridge(window: BrowserWindow) {
         else if (tag === 'INTEGRATIONS') window.webContents.send('integrations:all', json)
         else if (tag === 'CALENDAR_AGENDA') window.webContents.send('calendar:agenda', json)
         else if (tag === 'INTEGRATION_EVENT') window.webContents.send('integration:event', json)
+        // The Google OAuth flow opens the browser from inside the bridge, so it is
+        // the one hand-off main never performed itself. Re-broadcast it anyway:
+        // `external-opened` is the signal panels step aside on, and consumers care
+        // that a hand-off happened, not who called shell.openExternal.
+        else if (tag === 'EXTERNAL_OPENED') window.webContents.send('external-opened', json)
         else if (tag === 'KEY_STATUS') window.webContents.send('key-status', json)
         else if (tag === 'COSMIC_MAIL_DB_REPLY') {
           const rid = typeof json?.requestId === 'string' ? json.requestId : ''
@@ -2136,6 +2141,12 @@ app.whenReady().then(() => {
 
   ipcMain.on('integrations:connect-google', (_, payload) => {
     settingsProcess?.stdin.write(`CONNECT_GOOGLE_ACCOUNT:${JSON.stringify(payload || {})}\n`)
+  })
+
+  // Ends a Google sign-in that is still waiting on the browser, so the island
+  // reports a real outcome instead of sitting on "In Progress" until the timeout.
+  ipcMain.on('integrations:cancel-google', () => {
+    settingsProcess?.stdin.write('CANCEL_GOOGLE_CONNECT\n')
   })
 
   ipcMain.on('integrations:disconnect-google', (_, accountId: string) => {

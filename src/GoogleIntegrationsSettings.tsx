@@ -73,8 +73,13 @@ export default function GoogleIntegrationsSettings({ active }: GoogleIntegration
 
       if (event.type === 'auth_started') {
         setConnectingAccountId(event.account_id)
-      } else if (event.type === 'auth_success' || event.type === 'auth_error') {
+      } else if (event.type === 'auth_success' || event.type === 'auth_error' || event.type === 'auth_cancelled') {
         setConnectingAccountId(null)
+        if (event.type !== 'auth_success') {
+          // A draft only exists to carry an in-flight "Add account"; once that
+          // flow is over without connecting, it is just a stale empty card.
+          setAccounts((prev) => prev.filter((account) => !account.account_id.startsWith('draft-')))
+        }
       } else if (event.type === 'disconnect_started') {
         setDisconnectingAccountId(event.account_id)
       } else if (event.type === 'disconnect_success' || event.type === 'disconnect_error') {

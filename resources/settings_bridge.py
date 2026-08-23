@@ -21,6 +21,16 @@ DEFAULT_GATEWAY_URL = "http://127.0.0.1:8080"
 DEFAULT_GOOGLE_CONNECT_TIMEOUT_SECONDS = 120
 DEFAULT_GOOGLE_REDIRECT_URI = "http://localhost:8085/"
 
+# The system browser never tells us "the user closed the sign-in tab", so a
+# connect flow that the user walks away from would otherwise sit on the island
+# as "In Progress" until the timeout. CANCEL_GOOGLE_CONNECT sets this so the
+# waiting flow can end immediately and report a real outcome.
+GOOGLE_AUTH_CANCEL = threading.Event()
+
+
+class GoogleConnectCancelled(Exception):
+    """Raised inside run_google_connect when the desktop cancels the flow."""
+
 
 def emit(tag, payload):
     with PRINT_LOCK:
@@ -438,6 +448,9 @@ def run_google_connect(payload):
         )
         return
 
+    # A cancel that arrived while no flow was running must not kill this one.
+    GOOGLE_AUTH_CANCEL.clear()
+
     try:
         callback_done = None
         callback_result = None
@@ -482,19 +495,34 @@ def run_google_connect(payload):
         callback_done, callback_result, callback_shutdown = _start_google_callback_bridge()
 
         emit_integrations()
+        connect_timeout_seconds = int(max(30, DEFAULT_GOOGLE_CONNECT_TIMEOUT_SECONDS))
         emit_event(
             "auth_started",
             account_id=account_id,
             message="Opening Google sign-in in your browser.",
-            extra=account_event_details(payload),
+            extra={
+                **account_event_details(payload),
+                # The island renders a live countdown and a working Cancel
+                # button off these instead of an open-ended progress bar.
+                "cancelable": True,
+                "timeout_seconds": connect_timeout_seconds,
+            },
         )
+        # Announce the hand-off through main so every surface that steps aside
+        # when Cosmic sends the user to the browser treats Google the same way
+        # it already treats Codex / Cursor / Telegram.
+        emit("EXTERNAL_OPENED", {"url": authorize_url, "reason": "google_oauth"})
         webbrowser.open(authorize_url, new=1, autoraise=True)
 
-        deadline = time.time() + max(30, DEFAULT_GOOGLE_CONNECT_TIMEOUT_SECONDS)
+        deadline = time.time() + connect_timeout_seconds
         connected_account = None
         callback_completed = False
         while time.time() < deadline:
             if callback_done is None or not callback_done.is_set():
+                # Checked only while the callback is still outstanding: a cancel
+                # that races a completed sign-in loses to the sign-in.
+                if GOOGLE_AUTH_CANCEL.is_set():
+                    raise GoogleConnectCancelled()
                 time.sleep(0.5)
                 continue
             callback_completed = True
@@ -530,6 +558,14 @@ def run_google_connect(payload):
         )
         emit_integrations()
         threading.Thread(target=run_calendar_agenda_fetch, daemon=True).start()
+    except GoogleConnectCancelled:
+        emit_event(
+            "auth_cancelled",
+            account_id=account_id,
+            message="Google sign-in cancelled.",
+            extra=account_event_details(payload),
+        )
+        emit_integrations()
     except Exception as exc:
         emit_event(
             "auth_error",
@@ -539,6 +575,7 @@ def run_google_connect(payload):
         )
         emit_integrations()
     finally:
+        GOOGLE_AUTH_CANCEL.clear()
         callback_shutdown = locals().get("callback_shutdown")
         if callable(callback_shutdown):
             callback_shutdown()
@@ -701,6 +738,11 @@ def main():
             elif line.startswith("CONNECT_GOOGLE_ACCOUNT:"):
                 payload = json.loads(line.split(":", 1)[1])
                 threading.Thread(target=run_google_connect, args=(payload,), daemon=True).start()
+
+            elif line == "CANCEL_GOOGLE_CONNECT":
+                # Cheap and idempotent: a waiting flow ends within one poll,
+                # and a stale flag is cleared by the next flow that starts.
+                GOOGLE_AUTH_CANCEL.set()
 
             elif line.startswith("DISCONNECT_GOOGLE_ACCOUNT:"):
                 account_id = line.split(":", 1)[1]

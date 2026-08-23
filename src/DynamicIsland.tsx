@@ -24,6 +24,16 @@ import {
 } from './authAttention'
 import type { IntegrationsSnapshot } from './integrations'
 import {
+  getWeatherAlertInfo,
+  loadWeatherAlertLog,
+  noteWeatherAlertObserved,
+  recordWeatherAlertShown,
+  saveWeatherAlertLog,
+  shouldPeekWeatherAlert,
+  type WeatherAlertCategory,
+  type WeatherAlertLog,
+} from './weatherAlerts'
+import {
   EMPTY_CALENDAR_AGENDA,
   formatCalendarTime,
   getCalendarEventEnd,
@@ -198,6 +208,10 @@ interface IntegrationToastState {
   title: string
   message: string
   statusLabel: string
+  /** Only a Google sign-in can be cancelled: it is the one flow that waits on the browser. */
+  cancelable?: boolean
+  /** Epoch ms the bridge stops waiting. Drives the countdown and the stale-toast guard. */
+  expiresAt?: number
 }
 
 interface IntegrationToastEvent {
@@ -208,6 +222,8 @@ interface IntegrationToastEvent {
   account_label?: string
   email?: string
   display_name?: string
+  cancelable?: boolean
+  timeout_seconds?: number
 }
 
 interface IslandNotificationDetail {
@@ -241,6 +257,17 @@ const AUTH_ATTENTION_AUTO_DISMISS_MS = 10 * 1000
 // after the user was just told the account connected successfully.
 const RECENT_RECONNECT_GRACE_MS = 90 * 1000
 
+// A Google sign-in runs in the system browser, which never reports back that the
+// user closed the tab. The island therefore refuses to show an open-ended wait:
+// the progress panel carries the bridge's own deadline, a working Cancel, and a
+// last-resort self-dismiss for the case where the bridge itself stops answering.
+const INTEGRATION_PROGRESS_STALE_GRACE_MS = 8 * 1000
+const INTEGRATION_CANCEL_FALLBACK_MS = 4 * 1000
+/** Long enough for the success burst to land before the panel slides back in. */
+const SETTINGS_REOPEN_AFTER_AUTH_MS = 1200
+/** A settings close this soon after a hand-off is the hand-off, not the user. */
+const SETTINGS_AUTH_HANDOFF_CLOSE_WINDOW_MS = 1500
+
 /** Severe + advisory island alerts; used by weather slide and auto-peek scheduling. */
 const WEATHER_ALERT_PEEK_MS = 5000
 const WEATHER_SLIDE_INDEX = 2
@@ -248,43 +275,6 @@ const WEATHER_SLIDE_INDEX = 2
 const WEATHER_PEEK_HOVER_SUPPRESS_MS = 450
 /** Ignore hover-based peek cancel until this long after peek starts (avoids killing the timer when the island expands under the cursor). */
 const WEATHER_PEEK_USER_CANCEL_ARM_MS = 420
-
-/** Open-Meteo / bridge payload is always °C. */
-const HEAT_ADVISORY_CURRENT_C = 30
-const HEAT_ADVISORY_HIGH_C = 32
-
-type WeatherAlertTier = 'severe' | 'advisory'
-
-interface WeatherAlertInfo {
-  tier: WeatherAlertTier | null
-  alertMessage: string
-}
-
-function getWeatherAlertInfo(weather: Pick<WeatherState, 'wmo' | 'temp' | 'high'>): WeatherAlertInfo {
-  const wmo = weather.wmo ?? 0
-  const t = Number(weather.temp)
-  const hi = weather.high !== undefined && weather.high !== null ? Number(weather.high) : Number.NaN
-
-  if ([95, 96, 99].includes(wmo)) return { tier: 'severe', alertMessage: 'Thunderstorm Alert' }
-  if ([71, 73, 75, 85, 86].includes(wmo)) return { tier: 'severe', alertMessage: 'Heavy Snow Alert' }
-
-  if ([80, 81, 82].includes(wmo)) return { tier: 'advisory', alertMessage: 'Shower activity' }
-  if (wmo === 65) return { tier: 'advisory', alertMessage: 'Heavy rain' }
-  if ([61, 63].includes(wmo)) return { tier: 'advisory', alertMessage: 'Rain expected' }
-  if ([53, 55].includes(wmo)) return { tier: 'advisory', alertMessage: 'Steady drizzle' }
-  if ([66, 67].includes(wmo)) return { tier: 'advisory', alertMessage: 'Icy / freezing rain' }
-  if ([56, 57].includes(wmo)) return { tier: 'advisory', alertMessage: 'Freezing drizzle' }
-  if ([45, 48].includes(wmo)) return { tier: 'advisory', alertMessage: 'Low visibility (fog)' }
-
-  if (Number.isFinite(t) && t >= HEAT_ADVISORY_CURRENT_C) {
-    return { tier: 'advisory', alertMessage: 'Hot conditions' }
-  }
-  if (Number.isFinite(hi) && hi >= HEAT_ADVISORY_HIGH_C) {
-    return { tier: 'advisory', alertMessage: 'Hot day ahead' }
-  }
-
-  return { tier: null, alertMessage: '' }
-}
 
 function getEventDurationLabel(event: CalendarAgendaEvent) {
   if (event.isAllDay) return 'All day'
@@ -303,6 +293,13 @@ function getIntegrationAccountName(event: IntegrationToastEvent | IslandNotifica
   if ('display_name' in event && event.display_name) return String(event.display_name).trim()
   if ('email' in event && event.email) return String(event.email).trim()
   return ''
+}
+
+function formatCountdown(msRemaining: number) {
+  const totalSeconds = Math.max(0, Math.ceil(msRemaining / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
 }
 
 function compactToastMessage(message: string, fallback: string) {
@@ -423,6 +420,13 @@ export default function DynamicIsland({
   const [internalHover, setInternalHover] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [settingsInitialView, setSettingsInitialView] = useState<SettingsView>('main')
+  // A connect/reauth button hands the user to the browser, so the panel steps
+  // aside for it and comes back once the flow has an outcome.
+  const showSettingsRef = useRef(showSettings)
+  showSettingsRef.current = showSettings
+  const reopenSettingsAfterAuthRef = useRef(false)
+  const reopenSettingsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const authHandoffAtRef = useRef(0)
   const [isAnchored, setIsAnchored] = useState(false)
 
   // Voice State
@@ -469,7 +473,10 @@ export default function DynamicIsland({
   const previousIntegrationToastToneRef = useRef<IntegrationToastTone | null>(null)
   const integrationToastId = integrationToast?.id ?? null
   const integrationToastTone = integrationToast?.tone ?? null
+  const integrationToastExpiresAt = integrationToast?.expiresAt ?? null
   const [integrationDotsTransitionToastId, setIntegrationDotsTransitionToastId] = useState<number | null>(null)
+  const integrationCancelFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [integrationCountdownNow, setIntegrationCountdownNow] = useState(() => Date.now())
   const [calendarData, setCalendarData] = useState<CalendarAgendaSnapshot>(EMPTY_CALENDAR_AGENDA)
   const [calendarRefreshing, setCalendarRefreshing] = useState(false)
   const [showMonthView, setShowMonthView] = useState(false)
@@ -533,14 +540,33 @@ export default function DynamicIsland({
   const weatherAlertPeekRef = useRef(false)
   const weatherAlertPeekTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const peekHoverSuppressClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastCompletedWeatherAlertSignatureRef = useRef<string | null>(null)
   const prevHadWeatherAlertRef = useRef(false)
-  /** Signature for the in-flight auto-peek (used when user cancels via hover so we do not immediately re-peek). */
-  const peekActiveSignatureRef = useRef<string | null>(null)
+  /** Category of the in-flight auto-peek, so every teardown path can record it. */
+  const peekActiveCategoryRef = useRef<WeatherAlertCategory | null>(null)
   const peekUserCancelArmTimestampRef = useRef(0)
   const prevHoveredDuringPeekRef = useRef(false)
+  // Survives remounts and restarts, so a reload or a quick relaunch cannot
+  // re-announce a standing advisory. A gap longer than EPISODE_GAP_MS is treated
+  // as a genuinely new episode and does announce again.
+  const weatherAlertLogRef = useRef<WeatherAlertLog | null>(null)
+  if (weatherAlertLogRef.current === null) {
+    weatherAlertLogRef.current = loadWeatherAlertLog()
+  }
 
   weatherAlertPeekRef.current = weatherAlertPeek
+
+  /**
+   * Closes out the in-flight peek. `completed` false means it was cut short and
+   * the user never really saw it, which earns a much shorter retry.
+   */
+  const recordPeekEnded = useCallback((completed: boolean) => {
+    const category = peekActiveCategoryRef.current
+    if (!category) return
+    peekActiveCategoryRef.current = null
+    const next = recordWeatherAlertShown(weatherAlertLogRef.current ?? {}, category, completed, Date.now())
+    weatherAlertLogRef.current = next
+    saveWeatherAlertLog(next)
+  }, [])
 
   const clearWeatherAlertPeekTimer = useCallback(() => {
     if (weatherAlertPeekTimerRef.current) {
@@ -570,13 +596,10 @@ export default function DynamicIsland({
     clearWeatherAlertPeekTimer()
     weatherAlertPeekRef.current = false
     setWeatherAlertPeek(false)
-    const sig = peekActiveSignatureRef.current
-    if (sig) {
-      lastCompletedWeatherAlertSignatureRef.current = sig
-      peekActiveSignatureRef.current = null
-    }
+    // The user engaged with the island while it was up: that counts as seen.
+    recordPeekEnded(true)
     peekUserCancelArmTimestampRef.current = Number.MAX_SAFE_INTEGER
-  }, [clearWeatherAlertPeekTimer])
+  }, [clearWeatherAlertPeekTimer, recordPeekEnded])
 
   const weatherAlertPeekBlocked = useMemo(
     () =>
@@ -658,13 +681,13 @@ export default function DynamicIsland({
       clearWeatherAlertPeekTimer()
       setWeatherAlertPeek(false)
       weatherAlertPeekRef.current = false
-      peekActiveSignatureRef.current = null
+      recordPeekEnded(false)
       peekUserCancelArmTimestampRef.current = Number.MAX_SAFE_INTEGER
       clearPeekHoverSuppressTimer()
       setSuppressIslandHoverExpand(false)
     }
     wasExpanded.current = expanded
-  }, [expanded, clearWeatherAlertPeekTimer, clearPeekHoverSuppressTimer])
+  }, [expanded, clearWeatherAlertPeekTimer, clearPeekHoverSuppressTimer, recordPeekEnded])
 
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
@@ -868,16 +891,31 @@ export default function DynamicIsland({
     clearWeatherAlertPeekTimer()
     weatherAlertPeekRef.current = false
     setWeatherAlertPeek(false)
-    peekActiveSignatureRef.current = null
+    // Cut short by higher-priority island UI. This used to return without
+    // recording anything, leaving the alert eligible to fire again on the very
+    // next render — which, with `hovered` in the deps below, meant the next
+    // mouse move.
+    recordPeekEnded(false)
     setInternalHover(false)
     setSuppressIslandHoverExpand(true)
     schedulePeekHoverSuppressRelease()
-  }, [weatherAlertPeek, weatherAlertPeekBlocked, clearWeatherAlertPeekTimer, schedulePeekHoverSuppressRelease])
+  }, [
+    weatherAlertPeek,
+    weatherAlertPeekBlocked,
+    clearWeatherAlertPeekTimer,
+    schedulePeekHoverSuppressRelease,
+    recordPeekEnded,
+  ])
 
   /**
    * Severe or advisory weather → expand island on the weather slide for WEATHER_ALERT_PEEK_MS.
    * Waits while mail / approvals / calendar notify / Google integration / settings / voice / search / month view / event detail are active.
-   * Dedupes repeated refreshes: only re-shows after the alert clears, or the message changes (e.g. heat vs showers).
+   *
+   * Repeats are governed by the persisted ledger in `weatherAlerts.ts`, keyed on
+   * the condition category rather than the display string, so the same standing
+   * condition does not re-announce itself every time its wording shifts.
+   * Deliberately not keyed on `hovered`: this used to re-run on every cursor
+   * move over the island, which turned any missed bookkeeping into a peek storm.
    */
   useEffect(() => {
     if (!weather) {
@@ -885,31 +923,37 @@ export default function DynamicIsland({
       return
     }
 
-    const { alertMessage } = getWeatherAlertInfo({
+    const { tier, category } = getWeatherAlertInfo({
       wmo: weather.wmo,
       temp: weather.temp,
       high: weather.high,
     })
-    const signature = alertMessage || null
 
     const hadAlert = prevHadWeatherAlertRef.current
-    if (hadAlert && !signature) {
-      lastCompletedWeatherAlertSignatureRef.current = null
-      if (weatherAlertPeekRef.current) {
-        clearWeatherAlertPeekTimer()
-        weatherAlertPeekRef.current = false
-        setWeatherAlertPeek(false)
-        peekActiveSignatureRef.current = null
-        setInternalHover(false)
-        setSuppressIslandHoverExpand(true)
-        schedulePeekHoverSuppressRelease()
-      }
+    if (hadAlert && !category && weatherAlertPeekRef.current) {
+      // The condition ended mid-peek. Nothing to re-announce until it returns,
+      // and the ledger keeps its cooldown so a momentary dip below a threshold
+      // cannot re-arm the alert.
+      clearWeatherAlertPeekTimer()
+      weatherAlertPeekRef.current = false
+      setWeatherAlertPeek(false)
+      recordPeekEnded(false)
+      setInternalHover(false)
+      setSuppressIslandHoverExpand(true)
+      schedulePeekHoverSuppressRelease()
     }
-    prevHadWeatherAlertRef.current = !!signature
+    prevHadWeatherAlertRef.current = !!category
 
-    if (!signature) return
+    if (!category || !tier) return
 
-    if (signature === lastCompletedWeatherAlertSignatureRef.current) return
+    const now = Date.now()
+    const observedLog = noteWeatherAlertObserved(weatherAlertLogRef.current ?? {}, category, now)
+    if (observedLog !== weatherAlertLogRef.current) {
+      weatherAlertLogRef.current = observedLog
+      saveWeatherAlertLog(observedLog)
+    }
+
+    if (!shouldPeekWeatherAlert(observedLog, category, tier, now)) return
 
     if (weatherAlertPeekBlocked) return
 
@@ -918,19 +962,18 @@ export default function DynamicIsland({
     clearWeatherAlertPeekTimer()
     clearPeekHoverSuppressTimer()
     setSuppressIslandHoverExpand(false)
-    peekActiveSignatureRef.current = signature
-    peekUserCancelArmTimestampRef.current = Date.now() + WEATHER_PEEK_USER_CANCEL_ARM_MS
-    prevHoveredDuringPeekRef.current = hovered
+    peekActiveCategoryRef.current = category
+    peekUserCancelArmTimestampRef.current = now + WEATHER_PEEK_USER_CANCEL_ARM_MS
+    prevHoveredDuringPeekRef.current = hoverGateRef.current.hovered
     weatherAlertPeekRef.current = true
     setWeatherAlertPeek(true)
     setActiveSlide(WEATHER_SLIDE_INDEX)
 
     weatherAlertPeekTimerRef.current = setTimeout(() => {
       weatherAlertPeekTimerRef.current = null
-      lastCompletedWeatherAlertSignatureRef.current = signature
-      peekActiveSignatureRef.current = null
       weatherAlertPeekRef.current = false
       setWeatherAlertPeek(false)
+      recordPeekEnded(true)
       setInternalHover(false)
       setSuppressIslandHoverExpand(true)
       schedulePeekHoverSuppressRelease()
@@ -939,10 +982,10 @@ export default function DynamicIsland({
   }, [
     weather,
     weatherAlertPeekBlocked,
-    hovered,
     clearWeatherAlertPeekTimer,
     clearPeekHoverSuppressTimer,
     schedulePeekHoverSuppressRelease,
+    recordPeekEnded,
   ])
 
   /** Parent hover becomes true during auto-peek (after arm): user took over — kill peek timer. */
@@ -1112,7 +1155,12 @@ export default function DynamicIsland({
       message: string,
       statusLabel: string,
       provider = 'Google',
+      extra: Pick<IntegrationToastState, 'cancelable' | 'expiresAt'> = {},
     ) => {
+      if (integrationCancelFallbackTimerRef.current) {
+        clearTimeout(integrationCancelFallbackTimerRef.current)
+        integrationCancelFallbackTimerRef.current = null
+      }
       const nextToast: IntegrationToastState = {
         id: ++integrationToastIdRef.current,
         tone,
@@ -1120,8 +1168,20 @@ export default function DynamicIsland({
         title,
         message,
         statusLabel,
+        ...extra,
       }
       setIntegrationToast(nextToast)
+    }
+
+    const scheduleSettingsReopen = () => {
+      if (!reopenSettingsAfterAuthRef.current) return
+      reopenSettingsAfterAuthRef.current = false
+      if (reopenSettingsTimerRef.current) clearTimeout(reopenSettingsTimerRef.current)
+      reopenSettingsTimerRef.current = setTimeout(() => {
+        reopenSettingsTimerRef.current = null
+        setSettingsInitialView('integrations-google')
+        setShowSettings(true)
+      }, SETTINGS_REOPEN_AFTER_AUTH_MS)
     }
 
     const off = window.cosmic?.onIntegrationEvent((event: IntegrationToastEvent) => {
@@ -1130,13 +1190,26 @@ export default function DynamicIsland({
       const provider = 'Google'
       const t = event.type
       if (t === 'auth_started') {
+        const timeoutSeconds = Number(event.timeout_seconds)
         showToast(
           'progress',
           accountName ? `Connecting ${accountName}` : 'Connecting Google',
           compactToastMessage(event.message || 'Finish the Google sign-in flow in your browser.', 'Finish the Google sign-in flow in your browser.'),
           'In Progress',
           provider,
+          {
+            cancelable: event.cancelable !== false,
+            expiresAt:
+              Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+                ? Date.now() + timeoutSeconds * 1000
+                : undefined,
+          },
         )
+        authHandoffAtRef.current = Date.now()
+        if (showSettingsRef.current) {
+          reopenSettingsAfterAuthRef.current = true
+          setShowSettings(false)
+        }
       } else if (t === 'auth_success') {
         if (event.account_id) {
           recentlyReconnectedRef.current.set(event.account_id, Date.now())
@@ -1151,6 +1224,16 @@ export default function DynamicIsland({
           'Connected',
           provider,
         )
+        scheduleSettingsReopen()
+      } else if (t === 'auth_cancelled') {
+        showToast(
+          'error',
+          accountName ? `Cancelled ${accountName}` : 'Google sign-in cancelled',
+          compactToastMessage(event.message || 'Google sign-in cancelled.', 'Google sign-in cancelled.'),
+          'Cancelled',
+          provider,
+        )
+        scheduleSettingsReopen()
       } else if (t === 'auth_error') {
         showToast(
           'error',
@@ -1159,6 +1242,7 @@ export default function DynamicIsland({
           'Action Needed',
           provider,
         )
+        scheduleSettingsReopen()
       } else if (t === 'disconnect_started') {
         showToast(
           'progress',
@@ -1285,6 +1369,37 @@ export default function DynamicIsland({
       }
     }
   }, [integrationToastId, integrationToastTone])
+
+  // Live countdown on the progress panel. A wait the user can watch wind down
+  // reads as a wait; an unmoving bar reads as a hang.
+  useEffect(() => {
+    if (integrationToastTone !== 'progress' || !integrationToastExpiresAt) return
+    setIntegrationCountdownNow(Date.now())
+    const interval = setInterval(() => setIntegrationCountdownNow(Date.now()), 1000)
+    return () => clearInterval(interval)
+  }, [integrationToastId, integrationToastTone, integrationToastExpiresAt])
+
+  // Last resort. The bridge sends its own verdict when the deadline passes, so
+  // this only fires if the bridge stopped answering mid-flow — the one case that
+  // could still strand the island on "In Progress" indefinitely.
+  useEffect(() => {
+    if (integrationToastTone !== 'progress' || !integrationToastExpiresAt) return
+    const timer = setTimeout(
+      () => {
+        setIntegrationToast((current) => (current?.id === integrationToastId ? null : current))
+      },
+      Math.max(0, integrationToastExpiresAt - Date.now()) + INTEGRATION_PROGRESS_STALE_GRACE_MS,
+    )
+    return () => clearTimeout(timer)
+  }, [integrationToastId, integrationToastTone, integrationToastExpiresAt])
+
+  useEffect(
+    () => () => {
+      if (reopenSettingsTimerRef.current) clearTimeout(reopenSettingsTimerRef.current)
+      if (integrationCancelFallbackTimerRef.current) clearTimeout(integrationCancelFallbackTimerRef.current)
+    },
+    [],
+  )
 
   useEffect(() => {
     if (authAttentionTimerRef.current) {
@@ -2195,8 +2310,32 @@ export default function DynamicIsland({
     )
   }
 
+  // The system browser never tells us the sign-in tab was closed, so this is the
+  // user saying it on its behalf — and it really does end the bridge's wait.
+  const cancelIntegrationAuth = useCallback(() => {
+    window.cosmic?.cancelGoogleAccountConnect?.()
+    setIntegrationToast((current) =>
+      current && current.tone === 'progress'
+        ? { ...current, statusLabel: 'Cancelling', cancelable: false, expiresAt: undefined }
+        : current,
+    )
+    if (integrationCancelFallbackTimerRef.current) {
+      clearTimeout(integrationCancelFallbackTimerRef.current)
+    }
+    // The bridge answers within one poll. If it cannot, the panel still leaves.
+    integrationCancelFallbackTimerRef.current = setTimeout(() => {
+      integrationCancelFallbackTimerRef.current = null
+      setIntegrationToast((current) => (current?.tone === 'progress' ? null : current))
+    }, INTEGRATION_CANCEL_FALLBACK_MS)
+  }, [])
+
   const renderIntegrationToast = () => {
     if (!integrationToast) return null
+    const remainingMs =
+      integrationToast.tone === 'progress' && integrationToast.expiresAt
+        ? integrationToast.expiresAt - integrationCountdownNow
+        : 0
+    const countdownLabel = remainingMs > 0 ? formatCountdown(remainingMs) : ''
     const dotsAreTransitioningToSuccess =
       integrationToast.tone === 'success' && integrationDotsTransitionToastId === integrationToast.id
     // Keep dot grid in DOM during burst so canvas can measure its position
@@ -2246,9 +2385,17 @@ export default function DynamicIsland({
             </div>
           </div>
 
-          <span className={`it-status tone-${integrationToast.tone}`}>
-            {integrationToast.statusLabel}
-          </span>
+          <div className="it-actions">
+            <span className={`it-status tone-${integrationToast.tone}`}>
+              {integrationToast.statusLabel}
+              {countdownLabel && <span className="it-countdown">{countdownLabel}</span>}
+            </span>
+            {integrationToast.tone === 'progress' && integrationToast.cancelable && (
+              <button type="button" className="it-cancel" onClick={cancelIntegrationAuth}>
+                Cancel
+              </button>
+            )}
+          </div>
         </div>
 
         {showDotProgress && (
@@ -2666,6 +2813,13 @@ export default function DynamicIsland({
                     aria-label={authAttentionCount > 0 ? 'Open settings. Integrations need attention.' : 'Open settings'}
                     onClick={(e) => {
                       e.stopPropagation()
+                      // Driving the panel by hand outranks any pending
+                      // auto-restore from an auth hand-off.
+                      reopenSettingsAfterAuthRef.current = false
+                      if (reopenSettingsTimerRef.current) {
+                        clearTimeout(reopenSettingsTimerRef.current)
+                        reopenSettingsTimerRef.current = null
+                      }
                       if (showSettings) {
                         setShowSettings(false)
                       } else {
@@ -2697,7 +2851,14 @@ export default function DynamicIsland({
           onPositionChange={onPositionChange}
           staybackTime={staybackTime}
           onStaybackChange={onStaybackChange}
-          onClose={() => setShowSettings(false)}
+          onClose={() => {
+            // The hand-off closes this panel too. Only a close the user drove
+            // themselves — well after the browser opened — cancels the restore.
+            if (Date.now() - authHandoffAtRef.current > SETTINGS_AUTH_HANDOFF_CLOSE_WINDOW_MS) {
+              reopenSettingsAfterAuthRef.current = false
+            }
+            setShowSettings(false)
+          }}
           keyStatus={keyStatus}
           islandOpacity={islandOpacity}
           onOpacityChange={onOpacityChange}

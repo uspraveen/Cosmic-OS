@@ -257,6 +257,8 @@ contextBridge.exposeInMainWorld('cosmic', {
   deleteIntegrationAccount: (accountId: string) => ipcRenderer.send('integrations:delete-account', accountId),
   connectGoogleAccount: (payload: any) => ipcRenderer.send('integrations:connect-google', payload),
   disconnectGoogleAccount: (accountId: string) => ipcRenderer.send('integrations:disconnect-google', accountId),
+  // Ends a Google sign-in that is still waiting on the browser.
+  cancelGoogleAccountConnect: () => ipcRenderer.send('integrations:cancel-google'),
   getWhatsAppStatus: (payload: any) => ipcRenderer.invoke('whatsapp:get-status', payload),
   getWhatsAppConfig: (payload: any) => ipcRenderer.invoke('whatsapp:get-config', payload),
   requestWhatsAppPairingQr: (payload: any) => ipcRenderer.invoke('whatsapp:request-pairing-qr', payload),

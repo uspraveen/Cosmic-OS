@@ -66,6 +66,7 @@ interface Window {
     deleteIntegrationAccount: (accountId: string) => void
     connectGoogleAccount: (payload: any) => void
     disconnectGoogleAccount: (accountId: string) => void
+    cancelGoogleAccountConnect: () => void
     getWhatsAppStatus: (payload: GatewayConnectionPayload) => Promise<any>
     getWhatsAppConfig: (payload: GatewayConnectionPayload) => Promise<any>
     requestWhatsAppPairingQr: (payload: GatewayConnectionPayload & { refresh?: boolean; waitTimeoutMs?: number }) => Promise<any>
