@@ -2066,3 +2066,159 @@ async def test_email_agent_reason_resolves_attachment_by_type_and_parses_on_dema
             ("att_pdf_2",),
         ).fetchone()
     assert tuple(row) == ("parsed", "bundle_att_2")
+
+
+# ── A missing draft must be terminal, not something to work around ───────────
+#
+# On 2026-08-24 an `email.reason` task arrived carrying draft_id
+# "draft_following_content" -- an id Cosmic Mail never issued. The send 404'd,
+# surfaced as a generic INTERNAL_ERROR, and the caller retried "another way" by
+# composing fresh mail and sending that. Three cycles, two minutes apart, put
+# six emails the user never asked for into their inbox.
+
+
+@pytest.mark.asyncio
+async def test_send_of_unknown_draft_id_is_terminal_and_forbids_composing_a_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from shared.cosmic_mail_client import CosmicMailClientError
+
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+        ),
+    )
+    monkeypatch.setattr(agent, "_refresh_mail_client_from_store", AsyncMock(return_value=None))
+
+    composed: list[dict[str, Any]] = []
+
+    class FakeMailClient:
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            return {"id": "mbx_primary", "address": "assistant@example.com"}
+
+        async def send_draft(self, draft_id):
+            raise CosmicMailClientError(status_code=404, message="Draft not found")
+
+        async def create_draft(self, payload):
+            composed.append(payload)
+            return {"id": "draft_replacement"}
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    task = _make_task(
+        intent="email.reason",
+        task_id="tsk_missing_draft",
+        input_payload={
+            "goal": "Send that draft.",
+            "mailbox_address": "assistant@example.com",
+            "draft_id": "draft_following_content",
+            "send": True,
+        },
+    )
+
+    result = await agent.execute(task)
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.code == "DRAFT_NOT_FOUND"
+    # Terminal: a retry cannot succeed, so the caller must not be invited to try.
+    assert result.error.retryable is False
+    assert result.error.next_action == "ask_user"
+    # The id is named, so the failure is diagnosable rather than generic.
+    assert "draft_following_content" in result.error.message
+    # And the specific wrong move is ruled out in words the caller will read.
+    assert "replacement" in result.error.message.lower()
+    # Above all: nothing was sent in its place.
+    assert composed == []
+
+
+@pytest.mark.asyncio
+async def test_send_with_no_draft_id_does_not_invent_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+        ),
+    )
+    monkeypatch.setattr(agent, "_refresh_mail_client_from_store", AsyncMock(return_value=None))
+
+    sent: list[str] = []
+
+    class FakeMailClient:
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            return {"id": "mbx_primary", "address": "assistant@example.com"}
+
+        async def send_draft(self, draft_id):
+            sent.append(draft_id)
+            return {"id": draft_id, "sent": True}
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    with pytest.raises(Exception):
+        await agent._send_draft_checked("", origin="test")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_non_404_send_failures_still_propagate_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 503 is transient and must not be rewritten into a terminal verdict."""
+    from shared.cosmic_mail_client import CosmicMailClientError
+
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+        ),
+    )
+    monkeypatch.setattr(agent, "_refresh_mail_client_from_store", AsyncMock(return_value=None))
+
+    class FakeMailClient:
+        async def send_draft(self, draft_id):
+            raise CosmicMailClientError(status_code=503, message="upstream unavailable")
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    with pytest.raises(CosmicMailClientError) as excinfo:
+        await agent._send_draft_checked("d97efdd8-58a4-47b8-a482-897c89df7375", origin="test")
+    assert excinfo.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_valid_draft_send_is_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+        ),
+    )
+    monkeypatch.setattr(agent, "_refresh_mail_client_from_store", AsyncMock(return_value=None))
+
+    class FakeMailClient:
+        async def send_draft(self, draft_id):
+            return {"id": draft_id, "sent": True}
+
+    agent.mail_client = FakeMailClient()  # type: ignore[assignment]
+
+    payload = await agent._send_draft_checked(
+        "d97efdd8-58a4-47b8-a482-897c89df7375", origin="test"
+    )
+    assert payload["sent"] is True

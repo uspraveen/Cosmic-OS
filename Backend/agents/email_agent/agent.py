@@ -128,6 +128,9 @@ class EmailAgentError(RuntimeError):
 
 class EmailAgent(AgentRuntime):
     PROCESS_INBOUND = "email.process_inbound"
+    # Sending is the one thing this agent does that cannot be taken back, so a
+    # send that fails has to fail loudly and specifically rather than looking
+    # like a generic error somebody might reasonably work around.
     HANDLE = "email.handle"
     REASON = "email.reason"
     MANAGE_INSTRUCTION = "email.manage_instruction"
@@ -551,7 +554,7 @@ class EmailAgent(AgentRuntime):
             return AgentResult(status="completed", output=output, artifacts=artifacts, error=None)
 
         if draft_id and send and not read_like_goal:
-            sent_payload = await self.mail_client.send_draft(draft_id)
+            sent_payload = await self._send_draft_checked(draft_id, origin="supplied in task input")
             delivery = self._normalize_mail_delivery_result(sent_payload, draft_id=draft_id)
             artifacts.append(
                 self._write_json_artifact(
@@ -666,7 +669,9 @@ class EmailAgent(AgentRuntime):
                                 "uploaded": raw_upload_summary.get("uploaded") if isinstance(raw_upload_summary.get("uploaded"), list) else [],
                                 "failed": raw_upload_summary.get("failed") if isinstance(raw_upload_summary.get("failed"), list) else [],
                             }
-                        sent_payload = await self.mail_client.send_draft(reply_draft_id)
+                        sent_payload = await self._send_draft_checked(
+                            reply_draft_id, origin="created by this reply"
+                        )
                         delivery = self._normalize_mail_delivery_result(sent_payload, draft_id=reply_draft_id, thread_id=thread_id)
                     else:
                         reply_payload: dict[str, Any] = {
@@ -791,7 +796,9 @@ class EmailAgent(AgentRuntime):
             sent_payload = None
             delivery = None
             if send and draft_id:
-                sent_payload = await self.mail_client.send_draft(draft_id)
+                sent_payload = await self._send_draft_checked(
+                    draft_id, origin="created by this compose"
+                )
                 delivery = self._normalize_mail_delivery_result(sent_payload, draft_id=draft_id)
             artifacts.append(
                 self._write_json_artifact(
@@ -2851,6 +2858,49 @@ class EmailAgent(AgentRuntime):
                 retryable=exc.status_code is None or exc.status_code >= 500,
                 next_action="retry" if exc.status_code is None or exc.status_code >= 500 else "escalate",
             ) from exc
+
+    async def _send_draft_checked(self, draft_id: str, *, origin: str) -> dict[str, Any]:
+        """Send a draft, and make a missing draft a terminal, explicit outcome.
+
+        A `draft_id` can arrive from task input, which means it can be a value a
+        model produced rather than an id Cosmic Mail ever issued. When that id
+        does not exist the send 404s, and the failure used to surface as a
+        generic INTERNAL_ERROR -- indistinguishable from a transient fault, and
+        therefore something a caller would sensibly retry "another way". The way
+        it retried was to compose a brand new email and send that instead, so a
+        request to send one specific draft turned into several unrelated emails
+        arriving in the user's inbox.
+
+        Nothing here can stop a caller trying again, but it can refuse to be
+        ambiguous about what went wrong and what the acceptable next step is.
+        """
+        normalized = self._safe_text(draft_id)
+        if not normalized:
+            raise EmailAgentError(
+                code="DRAFT_NOT_FOUND",
+                message=(
+                    "No draft id was supplied, so there is nothing to send. Do not compose "
+                    "and send a replacement email: ask the user which draft they meant."
+                ),
+                retryable=False,
+                next_action="ask_user",
+            )
+        try:
+            return await self.mail_client.send_draft(normalized)
+        except CosmicMailClientError as exc:
+            if exc.status_code == 404:
+                raise EmailAgentError(
+                    code="DRAFT_NOT_FOUND",
+                    message=(
+                        f"Cosmic Mail has no draft {normalized!r} ({origin}), so nothing was sent. "
+                        "This id was never issued by Cosmic Mail. Do NOT compose and send a "
+                        "replacement email as a fallback -- that delivers mail the user never "
+                        "asked for. Either send an existing draft by its real id, or ask the user."
+                    ),
+                    retryable=False,
+                    next_action="ask_user",
+                ) from exc
+            raise
 
     async def _upload_input_artifacts_to_draft(self, task: TaskEnvelope, *, draft_id: str) -> dict[str, Any]:
         uploaded: list[dict[str, Any]] = []
