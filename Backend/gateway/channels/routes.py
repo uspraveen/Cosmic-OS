@@ -508,13 +508,20 @@ async def _stage_realtime_uploads(
     if not uploads:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid documents were uploaded")
 
-    manifests = await runtime.stage_desktop_uploads(
-        request_id=normalized_request_id,
-        session_id=normalized_session_id,
-        channel=channel,
-        uploads=uploads,
-        source_platform=platform,
-    )
+    try:
+        manifests = await runtime.stage_desktop_uploads(
+            request_id=normalized_request_id,
+            session_id=normalized_session_id,
+            channel=channel,
+            uploads=uploads,
+            source_platform=platform,
+        )
+    except ValueError as exc:
+        # A refused archive is the user's problem to fix, not a server fault:
+        # tell them which file and why rather than returning a bare 500.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
     if platform == "mobile":
         runtime.record_mobile_device_session(
             normalized_device_id,

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 import shutil
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from shared.agent_runtime import AgentRuntime
+from shared.archive_safety import ArchiveRejected, safe_extract_zip
+from shared.bundle_artifacts import is_supported_bundle_artifact
 from shared.contracts import AgentError, AgentResult, TaskEnvelope
 
 from .artifact_promoter import promote_alpha_artifacts
@@ -220,7 +223,11 @@ class AlphaAgent(AgentRuntime):
                 next_action="ask_user",
             )
 
-        staged_inputs = self._stage_input_artifacts(task, workspace=paths.workspace)
+        # Off the event loop: this now unpacks archives, not just copies files,
+        # and the size ceiling is measured in hundreds of megabytes.
+        staged_inputs = await asyncio.to_thread(
+            self._stage_input_artifacts, task, workspace=paths.workspace
+        )
         base_prompt = self._build_cli_prompt(
             task=task,
             project=project,
@@ -1145,11 +1152,15 @@ class AlphaAgent(AgentRuntime):
                     "## Input Artifacts",
                     "The orchestrator passed files and large context by reference. Inspect these staged files directly instead of asking for pasted content.",
                     "Parsed document bundles are staged as concrete files such as document.md, chunk_index.json, document.json, and manifest.json when available.",
+                    "Uploaded archives are already unpacked: an entry marked staged_kind=directory is a real directory tree, not a zip to extract. Its mime describes the original upload.",
                 ]
             )
             for index, item in enumerate(staged_inputs, 1):
                 details = [
                     f"path={item.get('staged_path') or item.get('path') or ''}",
+                    f"staged_kind={item.get('staged_kind') or ''}",
+                    f"file_count={item.get('file_count') or ''}",
+                    f"staging_error={item.get('staging_error') or ''}",
                     f"mime={item.get('mime') or ''}",
                     f"artifact_id={item.get('artifact_id') or ''}",
                     f"parse_bundle_id={item.get('parse_bundle_id') or ''}",
@@ -1202,14 +1213,34 @@ class AlphaAgent(AgentRuntime):
             }
             source_path = self._artifact_source_path(artifact)
             if source_path is not None and source_path.is_file():
-                try:
-                    input_dir.mkdir(parents=True, exist_ok=True)
-                    target = input_dir / f"{index:02d}_{filename}"
-                    if source_path.resolve() != target.resolve():
-                        shutil.copy2(source_path, target)
-                    summary["staged_path"] = str(target)
-                except OSError:
-                    summary["staged_path"] = ""
+                if is_supported_bundle_artifact(artifact):
+                    # An archive is only useful here once it is a tree. Unpacked
+                    # at the moment of staging, in the process that owns the
+                    # workspace, through the shared extractor that re-validates
+                    # every entry -- the harness never sees a zip to unpack, and
+                    # never has to be trusted to unpack one safely.
+                    stem = Path(filename).stem or f"bundle_{index}"
+                    target_dir = input_dir / f"{index:02d}_{self._safe_filename(stem)}"
+                    try:
+                        input_dir.mkdir(parents=True, exist_ok=True)
+                        written = safe_extract_zip(source_path, target_dir)
+                        summary["staged_path"] = str(target_dir)
+                        summary["staged_kind"] = "directory"
+                        summary["file_count"] = str(len(written))
+                    except (ArchiveRejected, OSError) as exc:
+                        shutil.rmtree(target_dir, ignore_errors=True)
+                        summary["staged_path"] = ""
+                        summary["staging_error"] = str(exc)
+                else:
+                    try:
+                        input_dir.mkdir(parents=True, exist_ok=True)
+                        target = input_dir / f"{index:02d}_{filename}"
+                        if source_path.resolve() != target.resolve():
+                            shutil.copy2(source_path, target)
+                        summary["staged_path"] = str(target)
+                        summary["staged_kind"] = "file"
+                    except OSError:
+                        summary["staged_path"] = ""
             summaries.append(summary)
         return summaries
 

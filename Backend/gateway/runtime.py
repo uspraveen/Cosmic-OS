@@ -121,13 +121,18 @@ from shared import (
     estimate_text_tokens,
     ensure_stream_group,
     generate_task_id,
+    infer_bundle_mime_from_extension,
     infer_document_mime_from_extension,
     infer_image_mime_from_extension,
     infer_tabular_mime_from_extension,
+    infer_web_asset_mime_from_extension,
+    inspect_zip,
+    is_supported_bundle_artifact,
     is_supported_document_artifact,
     is_supported_image_artifact,
     is_supported_map_artifact,
     is_supported_tabular_artifact,
+    is_supported_web_asset_artifact,
     lookup_model_spec,
     normalize_cosmic_mail_base_url,
     parse_event_envelope,
@@ -16946,6 +16951,14 @@ class GatewayRuntime:
                     effective_mime = infer_tabular_mime_from_extension(
                         Path(filename).suffix
                     )
+                elif effective_kind == "bundle":
+                    effective_mime = infer_bundle_mime_from_extension(
+                        Path(filename).suffix
+                    )
+                elif effective_kind == "web_asset":
+                    effective_mime = infer_web_asset_mime_from_extension(
+                        Path(filename).suffix
+                    )
                 else:
                     effective_mime = infer_image_mime_from_extension(
                         Path(filename).suffix
@@ -16969,6 +16982,29 @@ class GatewayRuntime:
             original_root.mkdir(parents=True, exist_ok=True)
             source_path = original_root / filename
             source_path.write_bytes(content)
+
+            archive_manifest: dict[str, Any] | None = None
+            if effective_kind == "bundle":
+                # Inspected here, at the edge, so a hostile archive is refused
+                # while it is still just bytes on disk. Inspection reads the
+                # central directory only -- it never decompresses, which is what
+                # makes it safe to run on something built to explode.
+                try:
+                    # Off the event loop: reading a central directory is quick,
+                    # but it is still file I/O on attacker-sized input.
+                    probe = await asyncio.to_thread(inspect_zip, source_path)
+                except Exception:
+                    logger.exception(
+                        "gateway.archive_inspect_failed filename=%s", filename
+                    )
+                    source_path.unlink(missing_ok=True)
+                    raise ValueError(f"{filename}: archive could not be inspected.")
+                if not probe.ok:
+                    source_path.unlink(missing_ok=True)
+                    raise ValueError(
+                        f"{filename}: {probe.rejection or 'archive was refused.'}"
+                    )
+                archive_manifest = probe.as_dict()
 
             sha256 = hashlib.sha256(content).hexdigest()
             logical_path = self._logical_artifact_path(source_path)
@@ -16998,7 +17034,7 @@ class GatewayRuntime:
                 "parsed_summary": None,
                 "task_id": None,
                 "index": index,
-                "metadata": None,
+                "metadata": {"archive": archive_manifest} if archive_manifest else None,
             }
             staged_manifest_path = source_path.parent.parent / "manifest.json"
             staged_manifest_path.write_text(
@@ -17181,6 +17217,9 @@ class GatewayRuntime:
     def _supported_artifact_kind(self, artifact: dict[str, Any] | None) -> str | None:
         if not isinstance(artifact, dict):
             return None
+        # Order is load-bearing. .docx/.xlsx/.pptx are zip containers, so the
+        # document and spreadsheet predicates must get first refusal before the
+        # bundle predicate ever sees them.
         if is_supported_document_artifact(artifact):
             return "document"
         if is_supported_tabular_artifact(artifact):
@@ -17189,6 +17228,10 @@ class GatewayRuntime:
             return "image"
         if is_supported_map_artifact(artifact):
             return "map"
+        if is_supported_bundle_artifact(artifact):
+            return "bundle"
+        if is_supported_web_asset_artifact(artifact):
+            return "web_asset"
         return None
 
     def _default_artifact_filename(

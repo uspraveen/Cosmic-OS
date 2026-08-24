@@ -55,6 +55,7 @@ from shared import (
     post_usage_event,
     sign_task_envelope,
     verify_task_envelope,
+    describe_claims,
     is_supported_image_artifact,
     lookup_model_spec,
 )
@@ -4522,6 +4523,14 @@ class OrchestratorRuntime:
             if not any(dedupe_key) or dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
+            routing_note = self._describe_routable_artifact(artifact)
+            if routing_note is not None:
+                blocks.append(routing_note)
+                if str(artifact.get("kind") or "").strip().lower() == "bundle":
+                    # An archive's bytes are never worth a context slot. The
+                    # manifest above says what is in it; the files themselves
+                    # belong in a workspace, not in the conversation.
+                    continue
             payload = await self._load_artifact_payload(artifact)
             if payload is None:
                 continue
@@ -4546,6 +4555,73 @@ class OrchestratorRuntime:
             blocks.append({"type": "container_upload", "file_id": file_id})
             staged_uploads += 1
         return blocks
+
+    @staticmethod
+    def _artifact_archive_manifest(artifact: dict[str, Any]) -> dict[str, Any]:
+        """Find the archive manifest wherever the ingest path left it.
+
+        The gateway attaches it under `metadata.archive`, but artifacts that pass
+        through persist_inbound_attachments get their whole dict swept into a
+        passthrough `metadata` bag -- and that bag does not exclude the key
+        `metadata`, so a round trip nests it one level deeper. Rather than depend
+        on which branch a given upload took, look through a couple of levels.
+        """
+        node: Any = artifact.get("metadata")
+        for _ in range(3):
+            if not isinstance(node, dict):
+                return {}
+            archive = node.get("archive")
+            if isinstance(archive, dict):
+                return archive
+            node = node.get("metadata")
+        return {}
+
+    def _describe_routable_artifact(self, artifact: dict[str, Any]) -> dict[str, Any] | None:
+        """Describe an upload that has somewhere to go other than this conversation.
+
+        Returns a text block stating what the file is and which handlers can take
+        it -- options, not a decision. Choosing is the orchestrator's job: it is
+        the only place that can see the file, the conversation, and what the user
+        actually asked for at the same time.
+        """
+        claims = describe_claims(artifact)
+        if not claims:
+            return None
+        kind = str(artifact.get("kind") or "").strip().lower()
+        filename = str(artifact.get("filename") or "").strip() or "attachment"
+
+        lines = [f"Uploaded file: {filename} (kind: {kind})"]
+
+        archive = self._artifact_archive_manifest(artifact)
+        if archive:
+            summary_bits = [
+                f"{archive.get('file_count', 0)} files",
+                f"looks like: {archive.get('project_kind', 'unknown')}",
+            ]
+            if archive.get("common_root"):
+                summary_bits.append(f"root directory: {archive['common_root']}/")
+            if archive.get("signals"):
+                summary_bits.append("markers: " + ", ".join(str(x) for x in archive["signals"][:6]))
+            lines.append("Archive contents: " + "; ".join(summary_bits) + ".")
+            top_level = archive.get("top_level")
+            if isinstance(top_level, list) and top_level:
+                lines.append("Top level: " + ", ".join(str(x) for x in top_level[:20]))
+            lines.append(
+                "The archive itself has not been read into this conversation. "
+                "Staging it with a specialist unpacks it into that agent's workspace."
+            )
+
+        lines.append("Ways this file can be used:")
+        for option in claims.get("options", []):
+            intent = option.get("intent")
+            target = f" (via {intent})" if intent else ""
+            lines.append(f"  - {option['label']}{target}: {option['summary']}")
+        if claims.get("ambiguous"):
+            lines.append(
+                "More than one of these applies. If the user's message does not make the "
+                "intent clear, ask which they want before acting."
+            )
+        return {"type": "text", "text": "\n".join(lines)}
 
     async def _load_artifact_payload(self, artifact: dict[str, Any]) -> InputArtifactPayload | None:
         filename = self._sanitize_generated_filename(

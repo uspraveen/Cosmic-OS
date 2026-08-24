@@ -76,6 +76,28 @@ from .image_artifacts import (
     infer_image_mime_from_extension,
     is_supported_image_artifact,
 )
+from .bundle_artifacts import (
+    SUPPORTED_BUNDLE_EXTENSIONS,
+    SUPPORTED_BUNDLE_MIME_TYPES,
+    SUPPORTED_WEB_ASSET_EXTENSIONS,
+    SUPPORTED_WEB_ASSET_MIME_TYPES,
+    infer_bundle_mime_from_extension,
+    infer_web_asset_mime_from_extension,
+    is_supported_bundle_artifact,
+    is_supported_web_asset_artifact,
+)
+from .archive_safety import (
+    ArchiveManifest,
+    ArchiveRejected,
+    inspect_zip,
+    safe_extract_zip,
+)
+from .artifact_handlers import (
+    ARTIFACT_HANDLERS,
+    ArtifactHandler,
+    claims_for_artifact,
+    describe_claims,
+)
 from .map_artifacts import (
     COSMIC_MAP_EXTENSION,
     COSMIC_MAP_MIME_TYPE,
@@ -105,6 +127,22 @@ from .agent_email_integration_store import (
 )
 
 __all__ = [
+    "ARTIFACT_HANDLERS",
+    "ArchiveManifest",
+    "ArchiveRejected",
+    "ArtifactHandler",
+    "SUPPORTED_BUNDLE_EXTENSIONS",
+    "SUPPORTED_BUNDLE_MIME_TYPES",
+    "SUPPORTED_WEB_ASSET_EXTENSIONS",
+    "SUPPORTED_WEB_ASSET_MIME_TYPES",
+    "claims_for_artifact",
+    "describe_claims",
+    "infer_bundle_mime_from_extension",
+    "infer_web_asset_mime_from_extension",
+    "inspect_zip",
+    "is_supported_bundle_artifact",
+    "is_supported_web_asset_artifact",
+    "safe_extract_zip",
     "ACCEPTED_READ_VERSIONS",
     "AgentError",
     "AgentResult",

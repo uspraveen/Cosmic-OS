@@ -265,6 +265,10 @@ function inferDesktopAttachmentMimeType(filename: string) {
   if (extension === '.md') return 'text/markdown'
   if (extension === '.json') return 'application/json'
   if (extension === '.zip') return 'application/zip'
+  if (extension === '.html' || extension === '.htm') return 'text/html'
+  if (extension === '.css') return 'text/css'
+  if (extension === '.js' || extension === '.mjs' || extension === '.cjs' || extension === '.jsx') return 'text/javascript'
+  if (extension === '.ts' || extension === '.tsx' || extension === '.vue' || extension === '.svelte') return 'text/plain'
   if (extension === '.svg') return 'image/svg+xml'
   if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg'
   if (extension === '.png') return 'image/png'
@@ -353,6 +357,11 @@ async function pickGatewayDocuments() {
       {
         name: 'Images',
         extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+      },
+      {
+        // Handed to a builder agent rather than read into the conversation.
+        name: 'Web files & projects',
+        extensions: ['zip', 'html', 'htm', 'css', 'js', 'mjs', 'jsx', 'ts', 'tsx', 'vue', 'svelte'],
       },
     ],
   })
