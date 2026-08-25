@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -46,6 +47,25 @@ def _make_task(
 
 
 def _build_agent(tmp_path: Path, *, config: EmailAgentConfig) -> EmailAgent:
+    # EmailAgentConfig defaults agent_email_integrations_db_path to an absolute
+    # path inside the deployed tree, so an agent built here reads the *real*
+    # integration record. _refresh_mail_client_from_store then sees a configured
+    # integration, throws away the FakeMailClient a test just installed, and
+    # rebuilds a live client against production Cosmic Mail -- which is how a
+    # test fixture's draft id ("draft_following_content") ended up in production
+    # logs, and how running this suite on the VM sent real email to the user.
+    #
+    # Every agent built for a test gets its own empty integration store. An
+    # unconfigured store leaves the injected client alone, which is what the
+    # tests have always assumed.
+    # Only redirect the default. Tests that deliberately point at their own
+    # integration database are exercising store-driven behaviour and must keep
+    # the path they chose.
+    if config.agent_email_integrations_db_path == EmailAgentConfig().agent_email_integrations_db_path:
+        config = replace(
+            config,
+            agent_email_integrations_db_path=tmp_path / "agent_email_integrations.db",
+        )
     agent = EmailAgent(
         redis_client=_FakeRedis(),
         config=config,
@@ -2222,3 +2242,57 @@ async def test_valid_draft_send_is_unchanged(
         "d97efdd8-58a4-47b8-a482-897c89df7375", origin="test"
     )
     assert payload["sent"] is True
+
+
+def test_test_agents_never_read_the_deployed_integration_database(tmp_path: Path) -> None:
+    """A test agent must not be able to reach production Cosmic Mail.
+
+    EmailAgentConfig defaults agent_email_integrations_db_path to an absolute
+    path inside the deployed tree. An agent that reads it finds a configured
+    integration and _refresh_mail_client_from_store replaces whatever
+    FakeMailClient a test installed with a live client pointed at production.
+    Running this suite on the VM sent real email to the user that way.
+
+    The guard is that every agent built here gets its own empty store.
+    """
+    from agents.email_agent.config import EmailAgentConfig as _Config
+
+    default_path = _Config().agent_email_integrations_db_path
+
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+        ),
+    )
+
+    store_path = Path(agent.integration_store.db_path).resolve()
+    assert store_path != Path(default_path).resolve(), (
+        "test agent is reading the deployed integration database"
+    )
+    assert tmp_path.resolve() in store_path.parents, "integration store escaped the tmp dir"
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_store_leaves_the_injected_client_alone(tmp_path: Path) -> None:
+    """With an empty store the refresh must not swap in a real client."""
+    agent = _build_agent(
+        tmp_path,
+        config=EmailAgentConfig(
+            cosmic_mail_base_url="http://cosmic-mail.local",
+            cosmic_mail_api_token="mail-token",
+            gateway_internal_token="",
+        ),
+    )
+
+    class _Sentinel:
+        base_url = "http://cosmic-mail.local"
+        api_token = "mail-token"
+
+    agent.mail_client = _Sentinel()  # type: ignore[assignment]
+    await agent._refresh_mail_client_from_store()
+    assert isinstance(agent.mail_client, _Sentinel), (
+        "refresh replaced the injected client from store state"
+    )
