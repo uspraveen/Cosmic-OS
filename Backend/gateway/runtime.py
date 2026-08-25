@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.utils import parseaddr
 import hmac
 import hashlib
 import httpx
@@ -5562,6 +5563,93 @@ class GatewayRuntime:
             poll_interval_sec=self.config.gmail_process_inbound_poll_interval_sec,
         )
 
+    @staticmethod
+    def _normalize_email_address(value: Any) -> str:
+        """Bare lowercase address from either "Name <a@b>" or "a@b"."""
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        if isinstance(value, dict):
+            raw = str(value.get("email") or value.get("address") or "").strip()
+        _, address = parseaddr(raw)
+        return address.strip().casefold()
+
+    def _owner_email_addresses(self) -> set[str]:
+        """The addresses the user has declared as their own.
+
+        This is the same list that makes an inbound message `sender_role=owner`
+        on the agent-email channel. It is read from the store on each call rather
+        than passed in, so a model cannot influence which addresses count as the
+        owner's.
+        """
+        try:
+            record = self.agent_email_integration_store.get_primary()
+        except Exception:
+            logger.exception("gateway.gmail_approval.owner_lookup_failed")
+            return set()
+        if record is None:
+            return set()
+        addresses = {
+            self._normalize_email_address(item)
+            for item in (getattr(record, "trusted_senders", None) or [])
+        }
+        return {item for item in addresses if item}
+
+    def _gmail_approval_targets_owner_only(self, approval: dict[str, Any]) -> bool:
+        """True when every recipient is one of the user's own addresses.
+
+        The approval gate exists so Cosmic cannot correspond with *other people*
+        unreviewed -- that is the irreversible, reputational risk. A message whose
+        only recipients are the user's own addresses carries none of it: the
+        reviewer and the recipient are the same person, so the gate asks them to
+        approve delivery to themselves.
+
+        Deliberately strict. Every recipient across to/cc/bcc must be an owner
+        address (one outside contact anywhere means a human should look), there
+        must be at least one recipient, and an empty or unreadable owner list
+        means no auto-approval at all.
+        """
+        owner = self._owner_email_addresses()
+        if not owner:
+            return False
+        recipients: list[str] = []
+        for field_name in ("to", "cc", "bcc"):
+            values = approval.get(field_name)
+            if isinstance(values, list):
+                recipients.extend(values)
+            elif values:
+                recipients.append(values)
+        normalized = [self._normalize_email_address(item) for item in recipients]
+        normalized = [item for item in normalized if item]
+        if not normalized:
+            return False
+        return all(item in owner for item in normalized)
+
+    async def _maybe_auto_approve_owner_gmail_draft(self, approval: dict[str, Any]) -> bool:
+        """Send a draft addressed only to the user, without asking them to approve it.
+
+        Mirrors the sandbox-permission path: a server-side condition the user
+        already established (there, a prior session grant; here, their own
+        declared addresses) clears the gate, and everything else still goes to a
+        human. Failures leave the approval pending so the manual path is intact.
+        """
+        approval_id = self._safe_text(approval.get("approval_id"))
+        if not approval_id or not self._gmail_approval_targets_owner_only(approval):
+            return False
+        logger.info(
+            "gateway.gmail_approval.auto_approved_owner_only approval_id=%s subject=%s",
+            approval_id,
+            self._bounded_excerpt(approval.get("subject"), limit=80),
+        )
+        try:
+            await self.approve_gmail_approval(approval_id)
+        except Exception:
+            logger.exception(
+                "gateway.gmail_approval.auto_approve_failed approval_id=%s", approval_id
+            )
+            return False
+        return True
+
     async def _persist_gmail_approval_receipts(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         receipts = self._normalize_specialist_receipts(event.get("specialist_receipts"))
         persisted: list[dict[str, Any]] = []
@@ -5587,6 +5675,13 @@ class GatewayRuntime:
                 continue
             persisted.append(row)
             if was_created:
+                if await self._maybe_auto_approve_owner_gmail_draft(row):
+                    refreshed = self.gmail_approval_store.get(
+                        self._safe_text(row.get("approval_id"))
+                    )
+                    if refreshed is not None:
+                        persisted[-1] = refreshed
+                    continue
                 await self._publish_gmail_approval_notification(row)
         return persisted
 

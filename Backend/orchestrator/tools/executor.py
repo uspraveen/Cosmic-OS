@@ -2253,6 +2253,23 @@ class ToolExecutor:
         )
         if presentation_contract:
             response["_cosmic_ui"] = presentation_contract
+        elif response.get("approval_required") is True:
+            # The approval card only renders on desktop and mobile. On any other
+            # channel the block is correctly withheld -- but nothing used to tell
+            # the model that, so it still wrote "approve it when you get a chance"
+            # into an email, pointing the reader at a button that is not in front
+            # of them. Suppressing the UI and not saying so is what made the reply
+            # unactionable in the channel it arrived in.
+            response["_cosmic_ui_unavailable"] = {
+                "reason": "approval_ui_not_available_on_this_channel",
+                "channel": str(context.channel if context else "") or "unknown",
+                "guidance": (
+                    "This channel cannot render the approval card, so the user has no button "
+                    "to press. Do not tell them to approve, tap, or click anything. Say plainly "
+                    "that the message is waiting for approval and can be actioned from the "
+                    "desktop or mobile app, or give them the answer directly here instead."
+                ),
+            }
         return response
 
     @staticmethod

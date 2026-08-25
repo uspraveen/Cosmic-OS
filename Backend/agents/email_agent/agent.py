@@ -117,6 +117,109 @@ ON email_attachment_parse_runs (parse_task_id, updated_at DESC);
 """
 
 
+# Instruction scaffolding that says what to *do*, never what to look *for*. A
+# mail index scores these as ordinary words, so leaving them in buries the two
+# or three terms that actually identify the thread.
+_SEARCH_INSTRUCTION_PREFIXES = (
+    "draft a reply to",
+    "draft a reply",
+    "draft an email to",
+    "draft an email",
+    "draft a response to",
+    "write a reply to",
+    "write an email to",
+    "reply to",
+    "respond to",
+    "send an email to",
+    "send an email",
+    "look up",
+    "look for",
+    "search for",
+    "search",
+    "find me",
+    "find",
+    "check",
+    "read",
+    "tell me about",
+    "tell me",
+    "show me",
+    "get me",
+    "pull up",
+)
+
+_SEARCH_NOISE_PHRASES = (
+    "in the inbox",
+    "in my inbox",
+    "in the thread",
+    "in this thread",
+    "latest email",
+    "most recent email",
+    "the correct link is",
+    "i just verified",
+    "acknowledging my mistake",
+    "please",
+)
+
+# Long enough for a real subject line or a couple of proper nouns; short enough
+# that a paragraph of instructions cannot masquerade as a query.
+_MAX_SEARCH_QUERY_WORDS = 12
+
+
+def _normalize_mail_search_query(value: str, *, max_words: int = _MAX_SEARCH_QUERY_WORDS) -> str:
+    """Reduce a goal sentence to something worth sending to a mail index.
+
+    The agent used to pass the entire goal through verbatim, so a paragraph of
+    instructions ("Draft a reply to Praveen's latest email in the 'Site Link'
+    thread. He corrected me - ...") became the full-text query. That is not a
+    search, it is a prompt, and the index scores it as one: every instruction
+    word competes with the handful of terms that identify the thread.
+
+    A quoted phrase is the strongest signal a caller can give -- it is almost
+    always the subject or the exact string being looked for -- so it wins
+    outright. Otherwise the instruction scaffolding is stripped and what remains
+    is capped.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    # An explicitly quoted phrase is a deliberate, high-signal term.
+    # Quote handling has to tell a quoted phrase from an apostrophe: a naive
+    # character class treats the ' in "Praveen's" as an opening quote and
+    # captures the rest of the sentence. Double and typographic quotes are
+    # unambiguous; a single-quoted span only counts when neither delimiter sits
+    # against a letter.
+    quoted: list[str] = []
+    for pattern in (
+        r'"([^"]{3,80})"',
+        "“([^”]{3,80})”",
+        "‘([^’]{3,80})’",
+        r"(?<![A-Za-z])'([^']{3,60})'(?![A-Za-z])",
+    ):
+        quoted.extend(re.findall(pattern, text))
+    if quoted:
+        best = max((item.strip() for item in quoted), key=len)
+        if best:
+            return " ".join(best.split()[:max_words])
+
+    # Only the first sentence can be about the target; later ones are commentary.
+    first = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0]
+    lowered = first.casefold().strip()
+    for prefix in _SEARCH_INSTRUCTION_PREFIXES:
+        if lowered.startswith(prefix):
+            first = first[len(prefix):]
+            break
+    cleaned = first
+    for phrase in _SEARCH_NOISE_PHRASES:
+        cleaned = re.sub(re.escape(phrase), " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"https?://\S+", " ", cleaned)
+    cleaned = re.sub(r"[^\w\s@.'-]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:|'\"")
+    if not cleaned:
+        return " ".join(text.split()[:max_words])
+    return " ".join(cleaned.split()[:max_words])
+
+
 class EmailAgentError(RuntimeError):
     def __init__(self, *, code: str, message: str, retryable: bool, next_action: str) -> None:
         super().__init__(message)
@@ -2989,7 +3092,13 @@ class EmailAgent(AgentRuntime):
         query: str | None,
         mailbox_address: str | None,
     ) -> list[dict[str, Any]]:
-        search_query = self._rewrite_search_query_for_sender_reference(query=query or goal, goal=goal)
+        # Normalise before the sender rewrite, not after: the rewrite appends
+        # trusted addresses and those must survive, while the instruction text
+        # around them must not reach the index as though it were a search term.
+        search_query = self._rewrite_search_query_for_sender_reference(
+            query=_normalize_mail_search_query(query or goal),
+            goal=goal,
+        )
         mailbox = await self._resolve_mailbox(
             mailbox_address=mailbox_address,
             mailbox_id=self._optional_text(task.input, "mailbox_id"),
