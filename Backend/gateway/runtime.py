@@ -1202,7 +1202,11 @@ class GatewayRuntime:
             )
 
     def _is_email_thread_session(self, session_id: str | None) -> bool:
-        normalized = self._safe_text(session_id)
+        # _safe_text returns None for an empty string, so the unguarded
+        # startswith raised AttributeError on a blank session id rather than
+        # answering the question. An absent session id is simply not an email
+        # thread; every caller already treats False as "carry on normally".
+        normalized = self._safe_text(session_id) or ""
         return normalized.startswith("email-thread:")
 
     def _agent_email_message_identifiers(
@@ -11017,6 +11021,86 @@ class GatewayRuntime:
             return requested
         return current_session_id
 
+    # Enough to catch "I asked you this a few minutes ago on desktop", short
+    # enough that a stale request cannot be mistaken for a live one.
+    CROSS_CHANNEL_BRIEF_WINDOW_MINUTES = 90
+    CROSS_CHANNEL_BRIEF_MAX_ITEMS = 6
+    CROSS_CHANNEL_BRIEF_EXCERPT_CHARS = 220
+
+    def _recent_cross_channel_brief(self, session_id: str) -> dict[str, str] | None:
+        """What the user was doing elsewhere, for a thread-scoped email turn.
+
+        An inbound email deliberately runs in its own `email-thread:` session so
+        the reply is scoped to the thread rather than the day's mixed history.
+        That isolation is worth keeping -- but it also meant an email arriving
+        eight minutes after "email me the link" on desktop was answered by an
+        agent that could not see the request, so it guessed, and guessed wrong.
+
+        This does not merge the sessions. It attaches one short, clearly labelled
+        note about recent activity on other channels, so the turn knows a request
+        exists without inheriting the whole day's conversation as if it were part
+        of this thread.
+        """
+        if not self._is_email_thread_session(session_id):
+            return None
+        try:
+            day_session_id = self._current_session_id()
+            if not day_session_id or day_session_id == session_id:
+                return None
+            history = self.session_store.get_history_tail(
+                day_session_id, limit=self.CROSS_CHANNEL_BRIEF_MAX_ITEMS * 3
+            )
+        except Exception:
+            logger.exception("gateway.cross_channel_brief_failed session_id=%s", session_id)
+            return None
+        if not history:
+            return None
+
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            minutes=self.CROSS_CHANNEL_BRIEF_WINDOW_MINUTES
+        )
+        lines: list[str] = []
+        for item in history:
+            created_raw = self._safe_text(item.get("created_at"))
+            if not created_raw:
+                continue
+            try:
+                created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if created < cutoff:
+                continue
+            channel = self._safe_text(item.get("channel"))
+            # Only other channels are news here; email turns are already in the
+            # thread history this brief is being attached to.
+            if not channel or self._channel_platform(channel) == "agent-email":
+                continue
+            excerpt = self._bounded_excerpt(
+                item.get("content"), limit=self.CROSS_CHANNEL_BRIEF_EXCERPT_CHARS
+            )
+            if not excerpt:
+                continue
+            speaker = "User" if self._safe_text(item.get("role")) == "user" else "Cosmic"
+            lines.append(
+                f"- [{created.strftime('%H:%M')} UTC, {self._channel_platform(channel)}] {speaker}: {excerpt}"
+            )
+        if not lines:
+            return None
+        lines = lines[-self.CROSS_CHANNEL_BRIEF_MAX_ITEMS :]
+        return {
+            "role": "assistant",
+            "content": (
+                "[Recent activity on the user's other channels, for context only. This is not "
+                "part of this email thread and must not be quoted back as if it were. Use it to "
+                "recognise when this email follows up on something already asked elsewhere, "
+                "rather than treating the request as new.]"
+                + chr(10)
+                + chr(10).join(lines)
+            ),
+        }
+
     def _build_conversation_context(
         self,
         session_id: str,
@@ -11050,11 +11134,20 @@ class GatewayRuntime:
                             ),
                         }
                     )
+            brief = self._recent_cross_channel_brief(session_id)
+            if brief is not None:
+                # Front of the context: it is background the turn should already
+                # know, not the most recent thing said in the thread.
+                context.insert(0, brief)
             return context
 
         if not fallback_context:
             return []
-        return self._normalize_conversation_context(fallback_context)[:limit]
+        normalized = self._normalize_conversation_context(fallback_context)[:limit]
+        brief = self._recent_cross_channel_brief(session_id)
+        if brief is not None:
+            normalized.insert(0, brief)
+        return normalized
 
     def _backgrounded_active_request_ids(self, session_id: str) -> set[str]:
         normalized_session_id = self._safe_text(session_id)
