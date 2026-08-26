@@ -18,7 +18,7 @@ from urllib.parse import quote
 
 import httpx
 
-from shared import begin_metered_call, build_model_key, build_usage_event, post_usage_event, validate_safe_sheet_id
+from shared import BackpressureError, begin_metered_call, build_model_key, build_usage_event, post_usage_event, validate_safe_sheet_id
 from shared.contracts import AgentResult, TaskEnvelope, TaskInProgress
 from shared.scratchpad import truncate_keeping_newest
 
@@ -2185,14 +2185,48 @@ class ToolExecutor:
         if context is None or context.parent_task is None:
             return {"error": True, "message": f"{intent} requires the active parent task context."}
 
-        result = await self._agent_dispatcher(
-            parent_task=context.parent_task,
-            intent=intent,
-            input_payload=payload,
-            input_artifacts=input_artifacts,
-            agent_id=agent_id,
-            wait_timeout_sec=wait_timeout_sec,
-        )
+        try:
+            result = await self._agent_dispatcher(
+                parent_task=context.parent_task,
+                intent=intent,
+                input_payload=payload,
+                input_artifacts=input_artifacts,
+                agent_id=agent_id,
+                wait_timeout_sec=wait_timeout_sec,
+            )
+        except Exception as exc:
+            # A dispatch that never reaches an agent -- unknown intent, no healthy
+            # instance, a payload the specialist will not take -- fails before any
+            # child task exists, so nothing marks it failed and nothing records it.
+            # It used to raise straight past the tool loop, leaving no ledger row,
+            # no receipt and no trace event. The model would quietly reroute to a
+            # different specialist and the only surviving account of the switch was
+            # prose in a response that was never delivered. Returning a structured
+            # error keeps the reroute visible in the request trace.
+            logger.warning(
+                "orchestrator.delegate_dispatch_failed intent=%s agent_id=%s error=%s",
+                intent,
+                agent_id or "-",
+                exc,
+            )
+            # Backpressure is the one dispatch failure that is worth trying again:
+            # the agent exists and is willing, the bus is simply full right now.
+            # It arrives re-raised as a plain RuntimeError, so check the cause too.
+            overloaded = isinstance(exc, BackpressureError) or isinstance(
+                exc.__cause__, BackpressureError
+            )
+            return {
+                "error": True,
+                "code": "AGENT_BUSY" if overloaded else "DISPATCH_FAILED",
+                "retryable": overloaded,
+                "next_action": "retry" if overloaded else "escalate",
+                "message": f"{intent} could not be dispatched: {exc}",
+                "delegation": {
+                    "intent": intent,
+                    "agent_id": agent_id,
+                    "dispatched": False,
+                },
+            }
         if isinstance(result, TaskInProgress):
             return {
                 "error": True,

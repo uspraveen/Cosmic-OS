@@ -695,3 +695,290 @@ async def test_heartbeat_digest_uses_cached_triage_without_live_llm() -> None:
             await agent.stop()
         if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+# Draft provenance: who wrote the body, and who chose the recipient.
+#
+# On 2026-08-25 a follow-up that COSMIC had already written -- addressed to the
+# account owner and signed "COSMIC" -- was delegated with a body and a thread_id
+# but no `to`. The verbatim path required both, so the finished email fell
+# through to the drafting model as a *prompt*, alongside the Chase alert thread
+# that happened to be in context. The model read the email as the incoming
+# message, answered it in the owner's voice, and addressed the reply to
+# no.reply.alerts@chase.com. These tests pin both halves of that failure.
+# ---------------------------------------------------------------------------
+
+
+class _DraftProbeClient:
+    """Minimal Gmail client that records the draft it was asked to create."""
+
+    def __init__(self, thread: dict) -> None:
+        self._thread = thread
+        self.created: dict | None = None
+
+    async def get_thread(self, thread_id: str) -> dict:
+        return self._thread
+
+    async def create_draft(self, **kwargs) -> dict:
+        if not kwargs.get("to") and not kwargs.get("cc") and not kwargs.get("bcc"):
+            raise AssertionError("create_draft called with no recipient")
+        self.created = dict(kwargs)
+        return {"id": "draft_probe", "message": {"id": "msg_probe", "threadId": kwargs.get("thread_id")}}
+
+
+def _thread_from(sender: str, *, thread_id: str = "thr_probe") -> dict:
+    return {
+        "thread_id": thread_id,
+        "message_count": 1,
+        "messages": [
+            {
+                "message_id": "msg_inbound",
+                "thread_id": thread_id,
+                "from": sender,
+                "to": "user@example.com",
+                "subject": "Your available balance is below your limit",
+                "snippet": "Balance alert",
+                "body": "Your account balance is low.",
+                "message_id_header": "<alert@bank.example>",
+                "references": "",
+            }
+        ],
+    }
+
+
+def _draft_task(task_input: dict, *, task_id: str) -> TaskEnvelope:
+    return TaskEnvelope(
+        task_id=task_id,
+        task_list_id="sess_draft_provenance",
+        parent_task_id=None,
+        session_id="sess_draft_provenance",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/gmail-agent:1.0.0",
+        intent="gmail.draft_reply",
+        input=task_input,
+        input_artifacts=[],
+        idempotency_key=f"idem_{task_id}",
+        priority="normal",
+        signature="sig",
+        created_at=utcnow(),
+        source="cron",
+        source_id="cron_probe",
+        channel="desktop",
+    )
+
+
+async def _run_draft(task_input: dict, *, thread: dict, task_id: str, llm=None):
+    """Build an agent, run gmail.draft_reply, and hand back the client + result."""
+    from agents.gmail_agent.agent import GmailAgent
+
+    temp_dir = Path(__file__).resolve().parent / f".tmp_{uuid.uuid4().hex}"
+    agent = None
+    try:
+        temp_dir.mkdir(parents=True, exist_ok=False)
+        agent = GmailAgent(redis_client=MagicMock(), store_root=temp_dir / "store")
+        agent.auth = {
+            "access_token": "token",
+            "account_id": "acct_gmail_1",
+            "account_email": "user@example.com",
+        }
+        await agent.on_startup()
+        agent.memory_read = None
+        client = _DraftProbeClient(thread)
+        agent._client = MagicMock(return_value=client)
+        task = _draft_task(task_input, task_id=task_id)
+
+        llm_mock = AsyncMock(side_effect=llm) if callable(llm) else AsyncMock(return_value=llm)
+        with patch("agents.gmail_agent.agent.invoke_gmail_draft_llm", llm_mock) as patched:
+            try:
+                result = await agent.handle_gmail_draft_reply(task)
+                error = None
+            except Exception as exc:  # surfaced to the caller for assertion
+                result = None
+                error = exc
+        return client, result, error, patched
+    finally:
+        if agent is not None:
+            await agent.stop()
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_explicit_body_is_never_handed_to_the_drafting_model() -> None:
+    """A finished body is content, not a prompt -- even with no recipient attached."""
+    client, result, error, llm = await _run_draft(
+        {
+            "thread_id": "thr_probe",
+            "subject": "Follow-up: still overdrawn",
+            "body": "Praveen -- following up on my earlier note.\n\n-- Cosmic",
+        },
+        thread=_thread_from("Priya <priya@example.com>"),
+        task_id="tsk_explicit_body_no_to",
+    )
+
+    assert error is None, error
+    assert result is not None and result.status == "completed"
+    llm.assert_not_awaited()
+    assert client.created is not None
+    # The words the caller wrote survive byte for byte, in the caller's voice.
+    assert client.created["body"] == "Praveen -- following up on my earlier note.\n\n-- Cosmic"
+    # With no recipient given, replying to the thread's correspondent is correct.
+    assert client.created["to"] == ["priya@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_draft_is_refused_when_the_inferred_recipient_is_send_only() -> None:
+    """The actual 2026-08-25 failure: the thread in context belonged to a bank alert."""
+    client, result, error, llm = await _run_draft(
+        {
+            "thread_id": "1a0385eeea7db766",
+            "subject": "Follow-up: Chase 8807 still overdrawn",
+            "body": "Praveen -- the account is still overdrawn.\n\n-- Cosmic",
+        },
+        thread=_thread_from("Chase <no.reply.alerts@chase.com>", thread_id="1a0385eeea7db766"),
+        task_id="tsk_inferred_send_only",
+    )
+
+    assert isinstance(error, ValueError), error
+    assert "no.reply.alerts@chase.com" in str(error)
+    assert "send-only" in str(error)
+    # Nothing reached Gmail: a loud failure beats a plausible wrong draft.
+    assert client.created is None
+    llm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_recipient_is_not_re_addressed_by_the_drafting_model() -> None:
+    """The model may improve the words; it does not get to change who they go to."""
+    client, result, error, _ = await _run_draft(
+        {
+            "thread_id": "thr_probe",
+            "request": "Reply confirming receipt.",
+            "to": ["uspraveenraj@gmail.com"],
+        },
+        thread=_thread_from("Chase <no.reply.alerts@chase.com>"),
+        task_id="tsk_explicit_to_wins",
+        llm={
+            "subject": "Re: alert",
+            "body": "Confirmed.",
+            "to": ["no.reply.alerts@chase.com"],
+            "notes": "Replying to the thread sender.",
+        },
+    )
+
+    assert error is None, error
+    assert result is not None and result.status == "completed"
+    assert client.created is not None
+    assert client.created["to"] == ["uspraveenraj@gmail.com"]
+
+
+@pytest.mark.asyncio
+async def test_model_invented_send_only_recipient_is_refused() -> None:
+    """A recipient the model chose is a guess, and this guess is never right."""
+    client, result, error, _ = await _run_draft(
+        {
+            "thread_id": "thr_probe",
+            "request": "Reply to this alert.",
+        },
+        thread=_thread_from("Chase <no.reply.alerts@chase.com>"),
+        task_id="tsk_model_send_only",
+        llm={
+            "subject": "Re: alert",
+            "body": "Got it.",
+            "to": ["no-reply@chase.com"],
+            "notes": "No recipient email was provided, so 'to' is left empty.",
+        },
+    )
+
+    assert isinstance(error, ValueError), error
+    assert "send-only" in str(error)
+    assert client.created is None
+
+
+@pytest.mark.asyncio
+async def test_a_trusted_to_does_not_launder_a_model_invented_cc() -> None:
+    """Trust is per field. Naming the `to` says nothing about a cc the model added."""
+    client, result, error, _ = await _run_draft(
+        {
+            "thread_id": "thr_probe",
+            "request": "Reply confirming receipt.",
+            "to": ["uspraveenraj@gmail.com"],
+        },
+        thread=_thread_from("Priya <priya@example.com>"),
+        task_id="tsk_model_cc_send_only",
+        llm={
+            "subject": "Re: alert",
+            "body": "Confirmed.",
+            "to": ["uspraveenraj@gmail.com"],
+            "cc": ["no-reply@chase.com"],
+            "notes": "Copied the alert sender.",
+        },
+    )
+
+    assert isinstance(error, ValueError), error
+    assert "'cc'" in str(error)
+    assert client.created is None
+
+
+@pytest.mark.asyncio
+async def test_caller_may_still_address_a_send_only_mailbox_deliberately() -> None:
+    """The guard is about guesses. An explicit recipient is the caller's call."""
+    client, result, error, _ = await _run_draft(
+        {
+            "thread_id": "thr_probe",
+            "to": ["no-reply@chase.com"],
+            "subject": "Unsubscribe",
+            "body": "Please stop sending these.",
+        },
+        thread=_thread_from("Chase <no.reply.alerts@chase.com>"),
+        task_id="tsk_explicit_send_only_allowed",
+    )
+
+    assert error is None, error
+    assert client.created is not None
+    assert client.created["to"] == ["no-reply@chase.com"]
+
+
+@pytest.mark.asyncio
+async def test_body_with_no_recipient_and_no_thread_fails_clearly() -> None:
+    """Refusing to guess is the point; the message has to say what to pass."""
+    client, result, error, llm = await _run_draft(
+        {"subject": "Hello", "body": "A message with nowhere to go."},
+        thread={"thread_id": "thr_probe", "messages": []},
+        task_id="tsk_body_no_recipient_no_thread",
+    )
+
+    assert isinstance(error, ValueError), error
+    assert "Pass 'to' explicitly" in str(error)
+    assert client.created is None
+    llm.assert_not_awaited()
+
+
+def test_send_only_mailbox_detection_covers_punctuation_variants() -> None:
+    from agents.gmail_agent.agent import GmailAgent
+
+    send_only = [
+        "no.reply.alerts@chase.com",
+        "no-reply@github.com",
+        "noreply@google.com",
+        "do-not-reply@amazon.com",
+        "DoNotReply@Contoso.com",
+        "Chase <no.reply.alerts@chase.com>",
+        "mailer-daemon@googlemail.com",
+        "postmaster@example.com",
+    ]
+    for address in send_only:
+        assert GmailAgent._is_send_only_mailbox(address) is True, address
+
+    # Real people and real support desks must keep working.
+    addressable = [
+        "uspraveenraj@gmail.com",
+        "support@jlcpcb.com",
+        "finn@jlcpcb.com",
+        "notifications@github.com",
+        "reply@intercom.io",
+        "Praveen Raj <uspraveenraj@gmail.com>",
+        "",
+    ]
+    for address in addressable:
+        assert GmailAgent._is_send_only_mailbox(address) is False, address

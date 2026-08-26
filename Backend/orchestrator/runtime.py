@@ -5307,6 +5307,25 @@ class OrchestratorRuntime:
             "agent_label": self._activity_agent_label(agent_id),
             "activity": activity,
         }
+        if data.get("error") is True:
+            # A delegation that failed is part of the story of a request. Recording
+            # only the successful ones is what made a specialist reroute invisible
+            # in the trace even though the model had explained it out loud.
+            receipt["failed"] = True
+            error_detail: dict[str, Any] = {}
+            code = self._activity_excerpt(data.get("code"), limit=48)
+            message = self._activity_excerpt(data.get("message"), limit=240)
+            if code:
+                error_detail["code"] = code
+            if message:
+                error_detail["message"] = message
+            if data.get("in_progress") is True:
+                error_detail["in_progress"] = True
+            delegation_dispatched = delegation.get("dispatched")
+            if delegation_dispatched is False:
+                error_detail["dispatched"] = False
+            if error_detail:
+                receipt["error"] = error_detail
         provider = self._activity_excerpt(data.get("provider"), limit=48)
         model = self._activity_excerpt(data.get("model"), limit=96)
         if provider:
@@ -5525,8 +5544,7 @@ class OrchestratorRuntime:
         if dedupe_key in existing_keys:
             return
         specialist_receipts.append({key: value for key, value in receipt.items() if value not in (None, "", [], {})})
-        if len(specialist_receipts) > 4:
-            del specialist_receipts[:-4]
+        self._trim_specialist_receipts(specialist_receipts)
 
     def _collect_sandbox_permission_receipt(
         self,
@@ -5554,8 +5572,55 @@ class OrchestratorRuntime:
         if permission_id in existing_ids:
             return
         specialist_receipts.append({"sandbox_permission": permission})
-        if len(specialist_receipts) > 4:
-            del specialist_receipts[:-4]
+        self._trim_specialist_receipts(specialist_receipts)
+
+    # Receipts are a narrative summary, so the list is capped. Some of them are not
+    # summaries at all: the gateway persists a pending Gmail approval FROM the
+    # receipt that carries it, so trimming one away means the draft exists in the
+    # user's mailbox but never reaches the approval queue. Those are kept.
+    _RECEIPT_SOFT_CAP = 4
+    _RECEIPT_HARD_CAP = 8
+    _CONSEQUENTIAL_RECEIPT_KEYS = (
+        "gmail_approval",
+        "sandbox_permission",
+        "calendar_event",
+        "alpha_project",
+    )
+
+    @classmethod
+    def _receipt_is_consequential(cls, receipt: Any) -> bool:
+        if not isinstance(receipt, dict):
+            return False
+        return any(
+            isinstance(receipt.get(key), dict) for key in cls._CONSEQUENTIAL_RECEIPT_KEYS
+        )
+
+    @classmethod
+    def _trim_specialist_receipts(cls, specialist_receipts: list[dict[str, Any]]) -> None:
+        """Cap the receipt list without discarding the receipts that carry state.
+
+        Newest wins within each group. Receipts that create something the user can
+        act on are kept up to a hard ceiling even when that exceeds the soft cap --
+        an oversized payload is a smaller problem than an approval card that never
+        appears for a draft that already exists.
+        """
+        if len(specialist_receipts) <= cls._RECEIPT_SOFT_CAP:
+            return
+        consequential = [
+            index
+            for index, item in enumerate(specialist_receipts)
+            if cls._receipt_is_consequential(item)
+        ]
+        keep = set(consequential[-cls._RECEIPT_HARD_CAP:])
+        remaining = cls._RECEIPT_SOFT_CAP - len(keep)
+        if remaining > 0:
+            narrative = [
+                index for index in range(len(specialist_receipts)) if index not in keep
+            ]
+            keep.update(narrative[-remaining:])
+        specialist_receipts[:] = [
+            item for index, item in enumerate(specialist_receipts) if index in keep
+        ]
 
     def _collect_specialist_artifacts(
         self,

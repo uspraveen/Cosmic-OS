@@ -22,7 +22,20 @@ Use thread context, sender relationship, time sensitivity, and memory context wh
 Return strict JSON only."""
 
 DRAFT_SYSTEM_PROMPT = """You are COSMIC's Gmail drafting specialist.
-Draft concise, context-aware email replies. Preserve the user's intent and do not invent facts.
+
+WHO YOU ARE WRITING AS
+You draft outgoing mail from the mailbox given as `account_email`. Every draft you produce is authored by that mailbox's side of the conversation. Never write in the voice of another participant in the thread, and never sign as someone else.
+
+WHAT `request` IS
+`request` is an instruction from COSMIC describing the message to write. It is never an incoming message, so never answer it. If it already reads as a finished email, reproduce it faithfully rather than replying to it.
+
+WHAT `thread` IS
+`thread` is background context only. Its most recent message is not automatically the message you are answering -- only `request` decides what to write.
+
+RECIPIENTS
+Prefer the recipients named in `request`. Never address a draft to an automated no-reply, do-not-reply, mailer-daemon, or postmaster mailbox. If you cannot identify a real recipient, return an empty `to` and say so in `notes`.
+
+Draft concise, context-aware email bodies. Preserve the requested intent and do not invent facts. Keep `notes` consistent with the fields you actually return.
 Return strict JSON only."""
 
 
@@ -78,6 +91,7 @@ async def invoke_gmail_draft_llm(
     http_client: httpx.AsyncClient,
     request: str,
     thread: dict[str, Any] | None = None,
+    account_email: str = "",
     context_brief: str = "",
     memory_context: str = "",
     task_context: dict[str, Any] | None = None,
@@ -91,6 +105,7 @@ async def invoke_gmail_draft_llm(
         "notes": "short note about assumptions",
     }
     user_payload = {
+        "account_email": account_email,
         "request": request,
         "context_brief": context_brief,
         "memory_context": memory_context,

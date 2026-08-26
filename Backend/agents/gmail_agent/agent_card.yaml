@@ -57,9 +57,13 @@ intents:
       - A user request to compose, draft, reply, redraft, revise, or rewrite is an instruction to create or update the reversible Gmail draft now, unless the user explicitly asks only for preview text or essential account/thread ambiguity remains.
       - Creating a draft is allowed; actual sending requires explicit user approval through the Gmail approval surface.
       - Include thread_id or message_id when replying to an existing Gmail thread.
+      - Omit thread_id when composing a NEW message. thread_id means "this draft belongs in that conversation, addressed to the people in it" -- it is not a way to attach context. Threading a new notice onto an unrelated alert buries it in that sender's conversation.
+      - Whenever you already know the exact words to send, pass BOTH body and to. A body without a recipient is not treated as finished text, and the recipient cannot be inferred safely from thread context.
+      - Pass `request` (not `body`) when you want the agent to write the words for you. `body` means "send exactly this"; `request` means "write something like this".
       - Preserve the resolved account_id for every compose/reply/redraft because users may connect multiple Gmail accounts.
       - For redraft/revise/rewrite requests, pass the known draft_id when available. Otherwise pass thread_id with update_existing_draft=true so the agent updates the sole existing draft in that thread and refuses to guess if multiple drafts exist.
-      - When Gateway prompt context includes a Recent Surfaced Gmail Item, use its account_id plus thread_id/message_id for "reply to this" style follow-ups.
+      - When Gateway prompt context includes a Recent Surfaced Gmail Item, use its account_id, and use its thread_id/message_id only when the draft genuinely answers that correspondent. To write to the user about a surfaced item, compose a new message with to set to the user and no thread_id.
+      - The agent refuses to address a draft to a no-reply, do-not-reply, mailer-daemon, or postmaster mailbox unless you named that address in `to` yourself. If that refusal fires, the thread_id you passed almost certainly belongs to an automated sender rather than to the person you meant to write to.
 
   - name: gmail.send_draft
     description: Send a Gmail draft after the user approves it through COSMIC's Gmail approval surface.

@@ -31,6 +31,11 @@ from .sender_prefilter import SenderPrefilter
 
 logger = logging.getLogger(__name__)
 
+# Local-part markers for mailboxes that exist to send and never to receive. Matched
+# against the local part with punctuation stripped, so "no.reply.alerts@chase.com"
+# and "do-not-reply@..." both land on the same marker.
+_SEND_ONLY_LOCAL_MARKERS = ("noreply", "donotreply", "mailerdaemon", "postmaster")
+
 _GMAIL_SESSIONS_SQL = """
 CREATE TABLE IF NOT EXISTS gmail_session_runs (
     task_id TEXT PRIMARY KEY,
@@ -892,49 +897,132 @@ class GmailAgent(AgentRuntime):
     ) -> dict[str, Any]:
         explicit_body = str(task.input.get("body") or "").strip()
         explicit_to = self._string_list(task.input.get("to"))
-        if explicit_body and explicit_to:
-            return {
+        explicit_cc = self._string_list(task.input.get("cc"))
+        explicit_bcc = self._string_list(task.input.get("bcc"))
+
+        if explicit_body:
+            # A body the caller already wrote is content, not a prompt. It used to
+            # reach the drafting model whenever no recipient came with it, and a
+            # model handed a finished email plus a thread reads the email as the
+            # incoming message and answers it -- which is how a follow-up meant for
+            # the account owner came back written in his voice and addressed to the
+            # bank whose alert thread happened to be in context.
+            plan: dict[str, Any] = {
                 "subject": str(task.input.get("subject") or self._reply_subject(thread)).strip(),
                 "body": explicit_body,
                 "to": explicit_to,
-                "cc": self._string_list(task.input.get("cc")),
-                "bcc": self._string_list(task.input.get("bcc")),
+                "cc": explicit_cc,
+                "bcc": explicit_bcc,
                 "notes": "Used explicit draft fields from task input.",
             }
-        memory_context = await self._memory_context_for_thread(thread)
-        plan = await invoke_gmail_draft_llm(
-            cfg=self.config,
-            http_client=self._http_client,
-            request=request,
-            thread=self._compact_thread(thread),
-            context_brief=str(task.input.get("context_brief") or ""),
-            memory_context=memory_context,
-            task_context=self._task_context(task),
-        )
-        if not self._string_list(plan.get("to")) and thread:
-            messages = [
-                item
-                for item in (thread.get("messages") or [])
-                if isinstance(item, dict)
-            ]
-            latest = next(
-                (
-                    item
-                    for item in reversed(messages)
-                    if not bool(item.get("is_existing_draft"))
-                ),
-                messages[-1] if messages else {},
+        else:
+            memory_context = await self._memory_context_for_thread(thread)
+            plan = await invoke_gmail_draft_llm(
+                cfg=self.config,
+                http_client=self._http_client,
+                request=request,
+                thread=self._compact_thread(thread),
+                account_email=str(self._account_info().get("account_email") or ""),
+                context_brief=str(task.input.get("context_brief") or ""),
+                memory_context=memory_context,
+                task_context=self._task_context(task),
             )
-            sender = extract_email_address(str(latest.get("from") or ""))
-            if sender:
-                plan["to"] = [sender]
+            if not isinstance(plan, dict):
+                raise ValueError("Gmail draft plan was not a JSON object.")
+            # The drafting model may improve the words. It does not get to
+            # re-address a message whose recipients the caller already named.
+            if explicit_to:
+                plan["to"] = explicit_to
+            if explicit_cc:
+                plan["cc"] = explicit_cc
+            if explicit_bcc:
+                plan["bcc"] = explicit_bcc
+
+        # Trust is per field, not per draft: a caller-supplied `to` says nothing
+        # about a `cc` the model added on its own.
+        caller_supplied = {
+            field
+            for field, value in (("to", explicit_to), ("cc", explicit_cc), ("bcc", explicit_bcc))
+            if value
+        }
+
+        if not self._string_list(plan.get("to")):
+            derived = self._thread_reply_recipients(thread)
+            if derived:
+                plan["to"] = derived
+                caller_supplied.discard("to")
+                plan["notes"] = self._append_note(
+                    plan.get("notes"),
+                    "No recipient was supplied, so the thread's latest correspondent was used.",
+                )
+
         if not str(plan.get("subject") or "").strip():
             plan["subject"] = self._reply_subject(thread) or str(task.input.get("subject") or "").strip()
         if not str(plan.get("body") or "").strip():
             raise ValueError("Gmail draft body could not be generated.")
         if not self._string_list(plan.get("to")):
-            raise ValueError("Gmail draft recipients could not be determined.")
+            raise ValueError(
+                "Gmail draft recipients could not be determined. Pass 'to' explicitly when "
+                "the draft is not a reply to an existing correspondent."
+            )
+        self._assert_recipients_are_addressable(plan, trusted_fields=caller_supplied)
         return plan
+
+    def _thread_reply_recipients(self, thread: dict[str, Any] | None) -> list[str]:
+        """The recipient implied by replying to a thread: its latest real correspondent."""
+        messages = [
+            item
+            for item in ((thread or {}).get("messages") or [])
+            if isinstance(item, dict)
+        ]
+        if not messages:
+            return []
+        latest = next(
+            (item for item in reversed(messages) if not bool(item.get("is_existing_draft"))),
+            messages[-1],
+        )
+        sender = extract_email_address(str(latest.get("from") or ""))
+        return [sender] if sender else []
+
+    def _assert_recipients_are_addressable(
+        self,
+        plan: dict[str, Any],
+        *,
+        trusted_fields: set[str],
+    ) -> None:
+        """Refuse a recipient that nobody chose deliberately.
+
+        A recipient inferred from thread context or invented by the drafting model is
+        a guess. When the guess lands on a send-only mailbox the draft is not merely
+        undeliverable -- it is addressed to the wrong party, and it looks plausible
+        enough to approve. Fields the caller filled in themselves are their call and
+        are never second-guessed; the others are checked.
+        """
+        for field in ("to", "cc", "bcc"):
+            if field in trusted_fields:
+                continue
+            for address in self._string_list(plan.get(field)):
+                if self._is_send_only_mailbox(address):
+                    raise ValueError(
+                        f"Refusing to put {address!r} in the {field!r} field of a Gmail draft: "
+                        "it is a send-only mailbox and was inferred rather than requested. "
+                        f"Pass {field!r} explicitly with the intended recipient."
+                    )
+
+    @staticmethod
+    def _is_send_only_mailbox(address: str) -> bool:
+        """True for mailboxes that exist to send and never to receive."""
+        email = extract_email_address(str(address or "")) or str(address or "").strip()
+        local_part = email.split("@", 1)[0]
+        normalized = re.sub(r"[^a-z0-9]+", "", local_part.lower())
+        if not normalized:
+            return False
+        return any(marker in normalized for marker in _SEND_ONLY_LOCAL_MARKERS)
+
+    @staticmethod
+    def _append_note(existing: Any, addition: str) -> str:
+        note = str(existing or "").strip()
+        return f"{note} {addition}" if note else addition
 
     def _build_query(self, raw: dict[str, Any], *, default_query: str = "newer_than:30d -in:trash") -> str:
         query = str(raw.get("query") or raw.get("q") or "").strip()

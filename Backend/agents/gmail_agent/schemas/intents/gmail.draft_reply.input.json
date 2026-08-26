@@ -1,18 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Create or update a Gmail draft. Pass body+to together to send exact words; pass request to have the agent write them. Omit thread_id when composing a new message.",
   "type": "object",
   "properties": {
-    "request": { "type": "string", "description": "Natural-language drafting request." },
+    "request": { "type": "string", "description": "Natural-language drafting instruction. Use this when the agent should write the words. Never put a finished email here." },
     "query": { "type": "string" },
-    "thread_id": { "type": "string" },
+    "thread_id": { "type": "string", "description": "Reply into this conversation, addressed to the people in it. Omit for a new message; do not use it to supply background context." },
     "message_id": { "type": "string" },
     "draft_id": { "type": "string", "description": "Exact existing Gmail draft to update instead of creating another draft." },
     "update_existing_draft": { "type": "boolean", "description": "When true and thread_id is present, safely update the sole existing draft in that thread; fail rather than guess when multiple drafts exist." },
-    "to": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+    "to": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Recipients. Always pass this alongside body. An explicit recipient is honoured as given and is never overridden by the drafting model." },
     "cc": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
     "bcc": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
     "subject": { "type": "string" },
-    "body": { "type": "string" },
+    "body": { "type": "string", "description": "Exact message text, used verbatim. Pair it with to. Without to the recipient falls back to the thread's last correspondent, which is only correct when you meant to reply to that person." },
     "context_brief": { "type": "string" },
     "account_id": { "type": "string" },
     "account_hint": { "type": "string" }
