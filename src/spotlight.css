@@ -106,6 +106,20 @@ body,
   will-change: transform, opacity;
 }
 
+/* Floating panels do not grow without bound. Spotlight and Siri are the same
+   width on a 13-inch laptop and on a Pro Display; a response overlay is a panel,
+   not a document window. Keeping 44vw meant the glass kept widening long after
+   its content had stopped, which is what made a 640px column look marooned in a
+   1126px sheet rather than deliberately set.
+
+   So the panel still adapts to the display -- 520px up to 880px -- and then
+   stops, at the point where the column plus its margins fill it. Chat only:
+   Meeting and Spaces share .response-container and size themselves. */
+.response-container.chat-response-container {
+  width: min(max(520px, 44vw), 800px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+  max-width: min(max(520px, 44vw), 800px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+}
+
 .response-container.visible {
   opacity: 1;
   transform: translateY(0) scale(1);
@@ -274,6 +288,85 @@ body,
   -webkit-mask-image: linear-gradient(to bottom, transparent, black 15px, black calc(100% - 15px), transparent);
 }
 
+/* Chat response surface.
+
+   The panel tracks the display. The CONTENT does not scale with it: the type
+   ramp is fixed and the reading column is a fixed measure. What responds to a
+   wider display is the layout margin -- which is simply the space left over
+   when a fixed column is centred.
+
+   This is the macOS rule. Widening a window reflows layout; it never grows the
+   text. Physical legibility on a high-DPI display is already handled upstream
+   by the OS scale factor, which Electron honours, and text size is a user
+   preference rather than a function of geometry. Growing type with panel width
+   also put this surface at odds with the composer sitting directly beneath it
+   (a near-fixed 17-18px): the two scales crossed over at different displays.
+
+   The query container is kept -- the console below uses a real layout query --
+   as is the single shared column that puts every block on the same two edges. */
+.chat-response-content {
+  container: response / inline-size;
+
+  /* Type ramp: fixed sizes, each with the leading and tracking it wants.
+     Tracking tightens as size grows and opens back up at caption sizes, the
+     way SF is optically corrected across its range. */
+  --response-font-h1: 24px;
+  --response-font-h2: 19px;
+  --response-font-h3: 17px;
+  --response-font-body: 15px;
+  --response-font-table: 14px;
+  --response-font-code: 13px;
+  --response-font-xs: 12px;
+  --response-font-2xs: 11px;
+
+  --response-tracking-h1: -0.021em;
+  --response-tracking-h2: -0.017em;
+  --response-tracking-h3: -0.012em;
+  --response-tracking-body: -0.003em;
+
+  /* One measure for everything, so every block shares both edges. Measured
+     against real mixed-case text at 15px this is ~86 characters: past the 45-75
+     of print prose on purpose, because the surface also carries console output
+     and absolute paths, which suffer more from wrapping than short chat
+     paragraphs suffer from length. The old 960px prose cap ran to ~142. */
+  --response-column: min(100%, 580px);
+
+  /* Fill ramp. On a vibrant surface, layers separate with translucent fills
+     and strokes are reserved for true separators. The old stack put a visible
+     border on every card, so four nested rectangles each announced themselves
+     instead of the response reading as one thing. */
+  --response-fill-tertiary: rgba(255, 255, 255, 0.055);
+  --response-separator: rgba(255, 255, 255, 0.10);
+  --response-hairline: 1px;
+
+  /* One radius family instead of the 8 / 12 / 14 / 18 / 26 grab bag. */
+  --response-radius-card: 12px;
+  --response-radius-inner: 9px;
+}
+
+/* Real hairlines wherever the display can resolve them. */
+@media (min-resolution: 2dppx) {
+  .chat-response-content {
+    --response-hairline: 0.5px;
+  }
+}
+
+/* The column lives on the row, not on each block, so fit-content children —
+   heartbeat badge, copy button, user pill — share its edges for free. */
+.chat-response-content > .message-row,
+.chat-response-content > .chat-unread-divider,
+.chat-response-content > .streaming-indicator {
+  width: var(--response-column, 100%);
+  margin-inline: auto;
+}
+
+/* Inside a chat row every block is the full column. Outside one (task hub,
+   Spaces transcript) --response-block-width is undefined and each block falls
+   back to the literal cap it has today. */
+.chat-response-content .message-row {
+  --response-block-width: 100%;
+}
+
 .response-content::-webkit-scrollbar {
   width: 4px;
 }
@@ -294,11 +387,11 @@ body,
 /* Typography */
 .response-content p {
   color: var(--text-dim);
-  font-size: 15px;
-  line-height: 1.6;
+  font-size: var(--response-font-body, 15px);
+  line-height: 1.5;
   margin-bottom: 16px;
   font-weight: 400;
-  letter-spacing: 0.01em;
+  letter-spacing: var(--response-tracking-body, 0.01em);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
@@ -318,7 +411,9 @@ body,
 }
 
 .response-content h1 {
-  font-size: 24px;
+  font-size: var(--response-font-h1, 24px);
+  line-height: 1.2;
+  letter-spacing: var(--response-tracking-h1, -0.01em);
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   background: linear-gradient(135deg, #fff 0%, #b3d9ff 100%);
@@ -327,12 +422,16 @@ body,
 }
 
 .response-content h2 {
-  font-size: 19px;
+  font-size: var(--response-font-h2, 19px);
+  line-height: 1.26;
+  letter-spacing: var(--response-tracking-h2, -0.01em);
   color: #fff;
 }
 
 .response-content h3 {
-  font-size: 17px;
+  font-size: var(--response-font-h3, 17px);
+  line-height: 1.29;
+  letter-spacing: var(--response-tracking-h3, -0.01em);
   color: #e0e0e0;
 }
 
@@ -379,7 +478,7 @@ body,
 .response-content table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
+  font-size: var(--response-font-table, 14px);
   text-align: left;
 }
 
@@ -391,7 +490,7 @@ body,
   padding: 12px 16px;
   border-bottom: 1px solid var(--table-border);
   text-transform: uppercase;
-  font-size: 12px;
+  font-size: var(--response-font-xs, 12px);
   letter-spacing: 0.05em;
 }
 
@@ -400,6 +499,7 @@ body,
   color: var(--text-dim);
   border-bottom: 1px solid var(--table-border);
   line-height: 1.5;
+  font-variant-numeric: tabular-nums;
 }
 
 .response-content tr:last-child td {
@@ -413,17 +513,17 @@ body,
 /* Code Blocks */
 .response-content .code-block {
   background: var(--code-bg);
-  border-radius: 12px;
+  border-radius: var(--response-radius-inner, 12px);
   padding: 16px;
   margin: 20px 0;
   overflow-x: auto;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: var(--response-hairline, 1px) solid var(--response-separator, rgba(255, 255, 255, 0.08));
   white-space: pre;
 }
 
 .response-content code {
   font-family: 'SF Mono', 'Menlo', monospace;
-  font-size: 13px;
+  font-size: var(--response-font-code, 13px);
   color: #E0E0E0 !important;
   line-height: 1.5;
 }
@@ -501,19 +601,61 @@ body,
   align-items: flex-start;
   gap: 8px;
   padding: 20px 0 0;
-  opacity: 0.8;
 }
 
+/* What is happening right now, at the foot of the transcript: the mark of the
+   agent doing it, the sentence, and the sites it touched. The dimming that used
+   to sit on the whole indicator moved onto the dot row, so the live line reads
+   at full strength while the dots look exactly as they did. */
+.streaming-now {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* The sweep across the text is the "still working" signal, which is why this
+   row drops the five dots instead of saying it twice. */
 .streaming-status {
-  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--response-font-xs, 12px);
+  line-height: 1.4;
   color: rgba(255, 255, 255, 0.82);
-  opacity: 0.85;
+  background:
+    linear-gradient(90deg,
+      rgba(255, 255, 255, 0.42) 0%,
+      rgba(255, 255, 255, 0.42) 38%,
+      rgba(255, 255, 255, 0.97) 50%,
+      rgba(255, 255, 255, 0.42) 62%,
+      rgba(255, 255, 255, 0.42) 100%);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: streaming-status-sweep 2.6s cubic-bezier(0.55, 0, 0.45, 1) infinite;
+}
+
+/* The gradient is three times the width of the text, so walking the viewport
+   from its right end to its left end draws the highlight across once. */
+@keyframes streaming-status-sweep {
+  from {
+    background-position: 100% 0;
+  }
+
+  to {
+    background-position: 0% 0;
+  }
 }
 
 .streaming-dots {
   display: flex;
   gap: 7px;
   align-items: center;
+  opacity: 0.8;
 }
 
 .streaming-dots .streaming-dot-pix {
@@ -2415,8 +2557,8 @@ kbd {
 }
 
 .assistant-response-blocks {
-  --assistant-inline-visual-max-width: 860px;
-  width: min(100%, 960px);
+  --assistant-inline-visual-max-width: var(--response-block-width, 860px);
+  width: var(--response-block-width, min(100%, 960px));
   margin-inline: auto;
   display: flex;
   flex-direction: column;
@@ -2428,7 +2570,7 @@ kbd {
 }
 
 .assistant-action-card {
-  width: min(100%, 760px);
+  width: var(--response-block-width, min(100%, 760px));
   margin-inline: auto;
   padding: 16px;
   border: 1px solid rgba(255, 255, 255, 0.105);
@@ -3015,7 +3157,7 @@ kbd {
 }
 
 .assistant-inline-file-card {
-  width: min(100%, 520px);
+  width: min(100%, calc(var(--response-font-body, 15px) * 34.6667));
   display: flex;
   align-items: center;
   gap: 12px;
@@ -3871,7 +4013,7 @@ kbd {
 }
 
 .chat-unread-divider {
-  width: min(100%, 720px);
+  width: var(--response-block-width, min(100%, 720px));
   display: grid;
   grid-template-columns: minmax(24px, 1fr) auto minmax(24px, 1fr);
   align-items: center;
@@ -3905,7 +4047,7 @@ kbd {
 
 .assistant-heartbeat-badge {
   width: fit-content;
-  max-width: min(100%, 720px);
+  max-width: var(--response-block-width, min(100%, 720px));
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -3922,30 +4064,60 @@ kbd {
 }
 
 .assistant-collapsible {
-  width: min(100%, 720px);
+  width: var(--response-block-width, min(100%, 720px));
   margin-bottom: 12px;
 }
 
+/* Thinking and Flow are closed while they stream now, so this row is no longer
+   just a label on a lid -- for most of a response it is the only thing standing
+   in for the section. It has to answer "who is working, how much of it is there,
+   and is it still going" without being opened.
+
+   The header spans the column so the whole row is the hit target, and the type
+   sizing moved down onto .title: the summary parts that follow it are sentence
+   case, and they were inheriting the label's uppercase tracking. */
 .assistant-collapsible-header {
-  width: fit-content;
-  display: inline-flex;
+  width: 100%;
+  max-width: 100%;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  min-height: 24px;
+  gap: 8px;
+  min-height: 26px;
   padding: 0;
   border: 0;
   background: transparent;
   color: rgba(255, 255, 255, 0.62);
   font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.assistant-collapsible-chevron {
+  flex: 0 0 auto;
+  opacity: 0.72;
+  transition: transform 220ms cubic-bezier(0.32, 0.72, 0, 1), opacity 160ms ease;
+}
+
+/* Rotating one chevron reads as the same object turning; swapping two icons
+   reads as a flicker. */
+.assistant-collapsible.open>.assistant-collapsible-header .assistant-collapsible-chevron {
+  transform: rotate(90deg);
+}
+
+.assistant-collapsible-title {
+  flex: 0 0 auto;
   font-size: 11px;
   font-weight: 760;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  cursor: pointer;
 }
 
 .assistant-collapsible-header:hover {
   color: rgba(255, 255, 255, 0.86);
+}
+
+.assistant-collapsible-header:hover .assistant-collapsible-chevron {
+  opacity: 1;
 }
 
 .assistant-collapsible-header.thinking {
@@ -3956,14 +4128,53 @@ kbd {
   color: rgba(122, 202, 255, 0.8);
 }
 
+/* The marks of every agent that took part, de-duplicated. This is the part
+   that makes a closed Flow section still worth having on the screen. */
+.assistant-collapsible-signals {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.assistant-collapsible-count {
+  flex: 0 0 auto;
+  font-size: var(--response-font-2xs, 11px);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+/* One live line of the reasoning, for a section whose content is prose and so
+   has no marks to show. It keeps moving while the model thinks, which is the
+   whole reason closing the section by default is not a loss. */
+.assistant-collapsible-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--response-font-2xs, 11px);
+  font-weight: 450;
+  letter-spacing: 0;
+  text-transform: none;
+  color: rgba(255, 255, 255, 0.38);
+}
+
 .assistant-collapsible-live {
+  flex: 0 0 auto;
+  margin-left: auto;
   padding: 2px 6px;
   border-radius: 999px;
   border: 1px solid rgba(80, 255, 164, 0.24);
   background: rgba(80, 255, 164, 0.09);
   color: rgba(190, 255, 221, 0.92);
   font-size: 9px;
+  font-weight: 760;
   letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .assistant-collapsible-body {
@@ -3977,17 +4188,17 @@ kbd {
 }
 
 .thinking-block {
-  width: min(100%, 720px);
+  width: var(--response-block-width, min(100%, 720px));
   margin-bottom: 12px;
   padding: 12px 14px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-radius: var(--response-radius-card, 14px);
+  background: var(--response-fill-tertiary, rgba(255, 255, 255, 0.06));
+  border: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
 }
 
 .thinking-label {
-  font-size: 11px;
+  font-size: var(--response-font-2xs, 11px);
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3996,37 +4207,52 @@ kbd {
 }
 
 .thinking-text {
-  font-size: 13px;
+  font-size: var(--response-font-code, 13px);
   line-height: 1.55;
   color: rgba(255, 255, 255, 0.78);
   white-space: pre-wrap;
 }
 
+/* A transient status line is chrome, not content. It was a full-width blue
+   stroked box competing with every card beneath it; a labelled dot says the
+   same thing and lets the response hold the eye. */
 .assistant-activity {
-  width: min(100%, 720px);
-  margin-bottom: 8px;
-  padding: 8px 12px;
-  border-radius: 12px;
-  font-size: 12px;
-  line-height: 1.3;
-  color: rgba(122, 202, 255, 0.96);
-  border: 1px solid rgba(122, 202, 255, 0.24);
-  background: rgba(122, 202, 255, 0.08);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  width: var(--response-block-width, min(100%, 720px));
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 10px;
+  padding: 2px 0 4px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: var(--response-font-xs, 12px);
+  line-height: 1.35;
+  color: rgba(122, 202, 255, 0.92);
+}
+
+.assistant-activity::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: currentColor;
 }
 
 .assistant-flow {
-  width: min(100%, 720px);
+  width: var(--response-block-width, min(100%, 720px));
   margin-bottom: 12px;
   padding: 12px 14px;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.05);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-radius: var(--response-radius-card, 14px);
+  border: 0;
+  background: var(--response-fill-tertiary, rgba(255, 255, 255, 0.05));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
 }
 
 .assistant-flow-label {
-  font-size: 11px;
+  font-size: var(--response-font-2xs, 11px);
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -4037,82 +4263,94 @@ kbd {
 .assistant-flow-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 3px;
 }
 
 .assistant-flow-node {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 3px;
 }
 
+/* A step is now a mark and a sentence. The number that used to lead the row
+   said only where the row already was -- fourth from the top -- while the thing
+   a reader wants is what ran, and a Gmail red or a bracketed terminal answers
+   that before the sentence has been read.
+
+   The negative margin lets the running step's fill reach the card's padding
+   edge, so the highlight looks like a row and not a floating pill. */
 .assistant-flow-item {
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  padding: 4px 6px;
+  margin: 0 -6px;
+  border-radius: var(--response-radius-inner, 9px);
+  transition: background 200ms ease;
 }
 
 .assistant-flow-item.child {
   gap: 8px;
+  padding: 3px 6px;
 }
 
-.assistant-flow-marker {
-  width: 20px;
-  height: 20px;
-  border-radius: 999px;
-  flex: 0 0 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 700;
-  color: rgba(122, 202, 255, 0.98);
-  background: rgba(122, 202, 255, 0.12);
-  border: 1px solid rgba(122, 202, 255, 0.3);
-}
-
-.assistant-flow-marker.child {
-  width: auto;
-  min-width: 34px;
-  padding: 0 8px;
-  color: rgba(214, 231, 255, 0.92);
-  background: rgba(214, 231, 255, 0.08);
-  border-color: rgba(214, 231, 255, 0.18);
+/* Exactly one row is the work in progress, and it is the only tinted thing in
+   the list -- no pulse, no motion, just the accent sitting where you are. */
+.assistant-flow-item.is-active {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
 }
 
 .assistant-flow-copy {
   min-width: 0;
   flex: 1;
+  padding-top: 2px;
+}
+
+.assistant-flow-item.child .assistant-flow-copy {
+  padding-top: 1px;
 }
 
 .assistant-flow-children {
-  margin-left: 28px;
+  margin-left: 17px;
   padding-left: 14px;
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: var(--response-hairline, 1px) solid rgba(255, 255, 255, 0.08);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 3px;
 }
 
+/* A row, so the site cluster can sit at the end of the sentence and wrap with
+   it rather than claiming a line of its own. */
 .assistant-flow-title {
-  font-size: 13px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: var(--response-font-code, 13px);
   line-height: 1.45;
   color: rgba(255, 255, 255, 0.9);
 }
 
+.assistant-flow-title>span {
+  min-width: 0;
+}
+
+.assistant-flow-item.is-active .assistant-flow-title {
+  color: rgba(255, 255, 255, 0.98);
+}
+
 .assistant-flow-detail {
   margin-top: 3px;
-  font-size: 12px;
+  font-size: var(--response-font-xs, 12px);
   line-height: 1.4;
   color: rgba(255, 255, 255, 0.58);
 }
 
 .alpha-agent-console {
-  width: min(100%, 720px);
+  width: var(--response-block-width, min(100%, 720px));
   margin-bottom: 12px;
   overflow: hidden;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: var(--response-radius-inner, 8px);
+  border: var(--response-hairline, 1px) solid var(--response-separator, rgba(255, 255, 255, 0.13));
   background:
     linear-gradient(180deg, rgba(18, 18, 20, 0.48), rgba(4, 4, 6, 0.38)),
     rgba(0, 0, 0, 0.12);
@@ -4242,12 +4480,12 @@ kbd {
 }
 
 .alpha-agent-console-task {
-  max-width: 124px;
+  max-width: calc(var(--response-font-body, 15px) * 8.2667);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: rgba(255, 255, 255, 0.42);
-  font-size: 10px;
+  font-size: calc(var(--response-font-body, 15px) * 0.6667);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
@@ -4256,7 +4494,9 @@ kbd {
 }
 
 .alpha-agent-terminal {
-  max-height: 220px;
+  /* Was a flat 220px, so on a tall display the log stayed a slit inside a panel
+     with room to spare. Track the window height, still bounded at both ends. */
+  max-height: clamp(200px, 26vh, 420px);
   overflow: auto;
   padding: 9px 10px 10px;
   background:
@@ -4296,17 +4536,34 @@ kbd {
 .alpha-agent-terminal-line {
   min-height: 19px;
   display: grid;
-  grid-template-columns: 66px 12px minmax(0, 1fr);
+  grid-template-columns:
+    calc(var(--response-font-2xs, 11px) * 6)
+    calc(var(--response-font-2xs, 11px) * 1.0909)
+    minmax(0, 1fr);
   gap: 7px;
   align-items: start;
   color: rgba(226, 239, 251, 0.88);
-  font-size: 11px;
+  font-size: var(--response-font-2xs, 11px);
   line-height: 1.42;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 .alpha-agent-terminal-line + .alpha-agent-terminal-line {
   margin-top: 3px;
+}
+
+/* The timestamp track is fixed width, so a stream that carries no createdAt
+   still reserved ~78px and shoved every line of output right into a narrow
+   gutter — which is what a wide console actually looked like. Collapse the
+   track whenever no real timestamp exists. The trailing "live" line is excluded
+   from that test (it is a status word, not a time) and its label is hidden in
+   the collapsed state; the blinking caret already marks the tail. */
+.alpha-agent-terminal:not(:has(.alpha-agent-terminal-line:not(.is-live) .alpha-agent-terminal-time:not(:empty))) .alpha-agent-terminal-line {
+  grid-template-columns: calc(var(--response-font-2xs, 11px) * 1.0909) minmax(0, 1fr);
+}
+
+.alpha-agent-terminal:not(:has(.alpha-agent-terminal-line:not(.is-live) .alpha-agent-terminal-time:not(:empty))) .alpha-agent-terminal-time {
+  display: none;
 }
 
 .alpha-agent-terminal-line.is-stderr .alpha-agent-terminal-copy {
@@ -4331,6 +4588,7 @@ kbd {
 .alpha-agent-terminal-time {
   color: rgba(255, 255, 255, 0.34);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .alpha-agent-terminal-prompt {
@@ -4354,7 +4612,7 @@ kbd {
   }
 }
 
-@media (max-width: 620px) {
+@container response (max-width: 620px) {
   .alpha-agent-console-head {
     grid-template-columns: 28px minmax(0, 1fr) 30px;
   }
@@ -4372,18 +4630,21 @@ kbd {
   }
 
   .alpha-agent-terminal-line {
-    grid-template-columns: 58px 14px minmax(0, 1fr);
+    grid-template-columns:
+      calc(var(--response-font-2xs, 11px) * 5.2727)
+      calc(var(--response-font-2xs, 11px) * 1.2727)
+      minmax(0, 1fr);
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--response-font-2xs, 11px);
   }
 }
 
 .docs-progress-card {
-  width: min(100%, 720px);
+  width: var(--response-block-width, min(100%, 720px));
   margin-bottom: 12px;
   padding: 14px 15px 12px;
-  border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--response-radius-card, 18px);
+  border: var(--response-hairline, 1px) solid var(--response-separator, rgba(255, 255, 255, 0.08));
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.028)),
     rgba(11, 14, 19, 0.5);
@@ -4763,5 +5024,127 @@ kbd {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+
+/* ── Agent marks ────────────────────────────────────────────────────────────
+   The tile a flow step, a collapsed header, or the live footer leads with.
+
+   The tile itself is always neutral. Colour comes only from a mark that really
+   is a colour -- Gmail's red, YouTube's red, a site's own favicon -- so a run
+   that touched four services reads as four services, while a run of ordinary
+   local tools stays monochrome instead of turning into confetti. */
+.agent-glyph {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  color: rgba(255, 255, 255, 0.66);
+  background: var(--response-fill-tertiary, rgba(255, 255, 255, 0.055));
+  box-shadow: inset 0 0 0 var(--response-hairline, 1px) rgba(255, 255, 255, 0.07);
+  transition: color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+
+.agent-glyph svg {
+  display: block;
+}
+
+/* A brand mark supplies its own colour through the inline style; the tile stays
+   out of its way. */
+.agent-glyph.is-brand {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* The running step, and the mark in the live footer. */
+.agent-glyph.is-active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow:
+    inset 0 0 0 var(--response-hairline, 1px) color-mix(in srgb, var(--accent) 34%, transparent),
+    0 0 12px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* Overlapping favicons: "these places", in the width of a few characters,
+   instead of a line of hostnames. */
+.agent-domain-cluster {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: 7px;
+  vertical-align: middle;
+}
+
+.agent-domain-chip {
+  flex: 0 0 auto;
+  margin-left: -5px;
+  border-radius: 999px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.09);
+  /* The ring is the panel reappearing between the discs, so a stack of similar
+     favicons stays countable. */
+  box-shadow: 0 0 0 1.5px rgba(9, 11, 15, 0.86);
+}
+
+.agent-domain-chip:first-child {
+  margin-left: 0;
+}
+
+/* Intranet hosts and anything behind a login have no favicon to serve; a globe
+   is a better answer than a broken-image gap. */
+.agent-domain-chip.is-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.agent-domain-more {
+  margin-left: 6px;
+  font-size: var(--response-font-2xs, 11px);
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.46);
+}
+
+
+/* Honour the system Reduce Motion setting. Entrance springs become instant and
+   the perpetual animations -- the console caret, the visual-slot shimmer, the
+   stream wave -- simply stop. */
+@media (prefers-reduced-motion: reduce) {
+  .response-container.visible,
+  .response-container.launcher-expand.visible,
+  .cosmic.launcher-expand.visible,
+  .assistant-response-blocks,
+  .sources-section,
+  .assistant-inline-image-card,
+  .assistant-inline-map-card {
+    animation: none !important;
+  }
+
+  .alpha-agent-terminal-line.is-live .alpha-agent-terminal-copy::after,
+  .assistant-inline-visual-slot-shimmer,
+  .streaming-dot-pix {
+    animation: none !important;
+  }
+
+  .alpha-agent-terminal-line.is-live .alpha-agent-terminal-copy::after {
+    opacity: 1;
+  }
+
+  /* The status sweep is decoration over live text, so it stops and the text
+     goes back to a flat fill -- leaving the gradient in place would keep the
+     middle of the sentence brighter than its ends for no reason. */
+  .streaming-status {
+    animation: none !important;
+    background: none;
+    -webkit-text-fill-color: rgba(255, 255, 255, 0.86);
+    color: rgba(255, 255, 255, 0.86);
+  }
+
+  .assistant-collapsible-chevron,
+  .agent-glyph,
+  .assistant-flow-item {
+    transition: none !important;
   }
 }

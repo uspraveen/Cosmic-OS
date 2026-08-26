@@ -1,5 +1,5 @@
 import { ArrowDownToLine, CalendarDays, Check, ChevronDown, ChevronRight, Copy, Mail, Mic, Pencil, Save, Shield, Square, Terminal, X } from 'lucide-react'
-import { Fragment, type ClipboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -29,6 +29,8 @@ import { canAdoptTaskForActiveStream, canClaimActiveStreamSlot, extractEventStre
 import { groupRepliesWithTheirQuery } from './transcriptOrder'
 import { groupEmailThreads, stripEmailEnvelope, type EmailThreadUnit } from './emailThreads'
 import { findPendingApprovals } from './pendingApprovals'
+import { AgentGlyph, DomainCluster } from './AgentGlyph'
+import { resolveAgentSignal, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 
 export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'task' | 'meeting' | 'spaces'
@@ -1743,42 +1745,55 @@ const AssistantCollapsibleSection = ({
   title,
   accent = 'default',
   streaming = false,
+  signalEntries,
+  preview,
   children,
 }: {
   title: string
   accent?: 'thinking' | 'flow' | 'default'
   streaming?: boolean
+  /** Flow rows the collapsed header summarises: which agents, how many steps. */
+  signalEntries?: ActivityLogEntry[]
+  /** One live line for a section whose content is prose rather than steps. */
+  preview?: string
   children: ReactNode
 }) => {
-  const [manualOpen, setManualOpen] = useState<boolean | null>(null)
-  const wasStreamingRef = useRef(streaming)
-  const isOpen = streaming ? manualOpen !== false : manualOpen === true
+  // Closed by default now, streaming or not. A reply that arrives with its own
+  // reasoning already unfurled buries the answer under the working, and the
+  // working is the part almost nobody reads. Opening it stays one click away.
+  //
+  // The choice is sticky on purpose. The old version reset itself whenever
+  // `streaming` flipped, so a section you opened to watch snapped shut at the
+  // exact moment it finished -- right when you were reading it.
+  const [isOpen, setIsOpen] = useState(false)
 
-  useEffect(() => {
-    const wasStreaming = wasStreamingRef.current
-    if (wasStreaming !== streaming) {
-      setManualOpen(null)
-      wasStreamingRef.current = streaming
-    }
-  }, [streaming])
-
-  const handleToggle = () => {
-    setManualOpen((current) => {
-      const currentlyOpen = streaming ? current !== false : current === true
-      return !currentlyOpen
-    })
-  }
+  // `activityLog` keeps its identity across text chunks (the chunk reducer
+  // spreads the message and only replaces `content`), so this recomputes when a
+  // step is actually added, not on every token.
+  const signals = useMemo(() => summarizeAgentSignals(signalEntries), [signalEntries])
+  const stepCount = signalEntries?.length ?? 0
 
   return (
     <div className={`assistant-collapsible ${isOpen ? 'open' : 'collapsed'} ${streaming ? 'streaming' : ''}`}>
       <button
         type="button"
         className={`assistant-collapsible-header ${accent}`}
-        onClick={handleToggle}
+        onClick={() => setIsOpen((current) => !current)}
         aria-expanded={isOpen}
       >
-        {isOpen ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
-        <span>{title}</span>
+        <ChevronRight className="assistant-collapsible-chevron" size={13} aria-hidden />
+        <span className="assistant-collapsible-title">{title}</span>
+        {!isOpen && signals.length > 0 && (
+          <span className="assistant-collapsible-signals">
+            {signals.map((item) => (
+              <AgentGlyph key={`${item.glyph}-${item.label}`} signal={item} size={17} iconSize={10} />
+            ))}
+          </span>
+        )}
+        {!isOpen && stepCount > 0 && (
+          <span className="assistant-collapsible-count">{stepCount} {stepCount === 1 ? 'step' : 'steps'}</span>
+        )}
+        {!isOpen && preview ? <span className="assistant-collapsible-preview">{preview}</span> : null}
         {streaming && <span className="assistant-collapsible-live">Live</span>}
       </button>
       {isOpen && (
@@ -1790,7 +1805,15 @@ const AssistantCollapsibleSection = ({
   )
 }
 
-const AssistantFlowTimeline = ({ entries, showLabel = true }: { entries?: ActivityLogEntry[]; showLabel?: boolean }) => {
+const AssistantFlowTimeline = memo(({
+  entries,
+  showLabel = true,
+  streaming = false,
+}: {
+  entries?: ActivityLogEntry[]
+  showLabel?: boolean
+  streaming?: boolean
+}) => {
   if (!entries || entries.length <= 0) {
     return null
   }
@@ -1818,14 +1841,20 @@ const AssistantFlowTimeline = ({ entries, showLabel = true }: { entries?: Activi
       <div className="assistant-flow-list">
         {rootEntries.map((entry, index) => {
           const children = childEntriesByParent.get(String(entry.delegatedTaskId || '').trim()) || []
+          const signal = resolveAgentSignal(entry)
+          const isLastRoot = index === rootEntries.length - 1
+          // Only one row is the work in progress: the newest one, unless it has
+          // delegated further, in which case its last child is.
+          const isActive = streaming && isLastRoot && children.length === 0
           return (
             <div key={entry.id} className="assistant-flow-node">
-              <div className="assistant-flow-item">
-                <div className="assistant-flow-marker" aria-hidden="true">
-                  <span>{index + 1}</span>
-                </div>
+              <div className={`assistant-flow-item${isActive ? ' is-active' : ''}`}>
+                <AgentGlyph signal={signal} size={22} active={isActive} />
                 <div className="assistant-flow-copy">
-                  <div className="assistant-flow-title">{entry.label}</div>
+                  <div className="assistant-flow-title">
+                    <span>{entry.label}</span>
+                    <DomainCluster domains={signal.domains} />
+                  </div>
                   {entry.detail && entry.detail !== entry.label && (
                     <div className="assistant-flow-detail">{entry.detail}</div>
                   )}
@@ -1833,19 +1862,24 @@ const AssistantFlowTimeline = ({ entries, showLabel = true }: { entries?: Activi
               </div>
               {children.length > 0 && (
                 <div className="assistant-flow-children">
-                  {children.map((child, childIndex) => (
-                    <div key={child.id} className="assistant-flow-item child">
-                      <div className="assistant-flow-marker child" aria-hidden="true">
-                        <span>{`${index + 1}.${childIndex + 1}`}</span>
+                  {children.map((child, childIndex) => {
+                    const childSignal = resolveAgentSignal(child)
+                    const childActive = streaming && isLastRoot && childIndex === children.length - 1
+                    return (
+                      <div key={child.id} className={`assistant-flow-item child${childActive ? ' is-active' : ''}`}>
+                        <AgentGlyph signal={childSignal} size={18} iconSize={10} active={childActive} />
+                        <div className="assistant-flow-copy">
+                          <div className="assistant-flow-title">
+                            <span>{child.label}</span>
+                            <DomainCluster domains={childSignal.domains} size={13} />
+                          </div>
+                          {child.detail && child.detail !== child.label && (
+                            <div className="assistant-flow-detail">{child.detail}</div>
+                          )}
+                        </div>
                       </div>
-                      <div className="assistant-flow-copy">
-                        <div className="assistant-flow-title">{child.label}</div>
-                        {child.detail && child.detail !== child.label && (
-                          <div className="assistant-flow-detail">{child.detail}</div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </div>
@@ -1854,7 +1888,8 @@ const AssistantFlowTimeline = ({ entries, showLabel = true }: { entries?: Activi
       </div>
     </div>
   )
-}
+})
+AssistantFlowTimeline.displayName = 'AssistantFlowTimeline'
 
 type AlphaConsoleStatus = 'running' | 'completed' | 'failed' | 'stopped'
 
@@ -2528,7 +2563,10 @@ const assistantMarkdownComponents = {
   a: AssistantMarkdownLink,
 }
 
-const AssistantMarkdownBlock = ({ content }: { content: string }) => (
+// Memoised because it is the single most expensive thing on the screen during
+// a stream: without this, every chunk re-parses the markdown of every message
+// in the transcript, not just the one that grew.
+const AssistantMarkdownBlock = memo(({ content }: { content: string }) => (
   <ReactMarkdown
     remarkPlugins={[remarkGfm, remarkMath]}
     rehypePlugins={[rehypeKatex]}
@@ -2536,7 +2574,8 @@ const AssistantMarkdownBlock = ({ content }: { content: string }) => (
   >
     {content}
   </ReactMarkdown>
-)
+))
+AssistantMarkdownBlock.displayName = 'AssistantMarkdownBlock'
 
 const formatInlineVisualAttribution = (block: ResponseArtifactBlock) => {
   const attribution = block.provenance?.attributionLabel?.trim()
@@ -3125,7 +3164,7 @@ const SandboxPermissionActionBlock = ({ block }: { block: ResponseActionBlock })
   )
 }
 
-const AssistantResponseBlocks = ({
+const AssistantResponseBlocks = memo(({
   blocks,
 }: {
   blocks?: ResponseBlock[]
@@ -3268,7 +3307,8 @@ const AssistantResponseBlocks = ({
       })}
     </div>
   )
-}
+})
+AssistantResponseBlocks.displayName = 'AssistantResponseBlocks'
 
 const AssistantAlphaStreamBody = ({
   message,
@@ -3517,6 +3557,8 @@ export default function App() {
   const taskInterruptStackRef = useRef<HTMLDivElement>(null)
   const cronResultStackRef = useRef<HTMLDivElement>(null)
   const responseEndRef = useRef<HTMLDivElement>(null)
+  const followScrollFrameRef = useRef<number | null>(null)
+  const followScrollPayloadRef = useRef<{ messages: Message[]; isStreaming: boolean } | null>(null)
   const responseContainerRef = useRef<HTMLDivElement>(null)
   const unreadBoundaryRef = useRef<HTMLDivElement>(null)
   const modelDialSettleTimeoutRef = useRef<number | null>(null)
@@ -7068,17 +7110,40 @@ export default function App() {
       })
       return
     }
-    if (shouldAutoScrollRef.current) {
-      responseEndRef.current?.scrollIntoView({ behavior: isStreaming ? 'auto' : 'smooth' })
-      if (searchStateRef.current === 'visible' && modeRef.current === 'chat') {
-        markChatReadThroughLatest(messages)
-        if (unreadBoundaryMessageIdRef.current) {
-          unreadBoundaryMessageIdRef.current = null
-          setUnreadBoundaryMessageId(null)
+    if (!shouldAutoScrollRef.current) {
+      return
+    }
+    // A streaming reply commits many times a second, and every commit used to
+    // force a synchronous scrollIntoView -- so the browser re-measured layout as
+    // often as the socket delivered text. Coalescing to one animation frame
+    // keeps the follow exact (the pending frame always reads the newest state
+    // through the payload ref) without the per-chunk thrash.
+    followScrollPayloadRef.current = { messages, isStreaming }
+    if (followScrollFrameRef.current === null) {
+      followScrollFrameRef.current = window.requestAnimationFrame(() => {
+        followScrollFrameRef.current = null
+        const payload = followScrollPayloadRef.current
+        if (!payload || !shouldAutoScrollRef.current) {
+          return
         }
-      }
+        responseEndRef.current?.scrollIntoView({ behavior: payload.isStreaming ? 'auto' : 'smooth' })
+        if (searchStateRef.current === 'visible' && modeRef.current === 'chat') {
+          markChatReadThroughLatest(payload.messages)
+          if (unreadBoundaryMessageIdRef.current) {
+            unreadBoundaryMessageIdRef.current = null
+            setUnreadBoundaryMessageId(null)
+          }
+        }
+      })
     }
   }, [messages, isStreaming])
+
+  useEffect(() => () => {
+    if (followScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(followScrollFrameRef.current)
+      followScrollFrameRef.current = null
+    }
+  }, [])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -7120,6 +7185,22 @@ export default function App() {
     ipc.on('cosmic:display-changed', handler)
     return () => { ipc.off?.('cosmic:display-changed', handler) }
   }, [])
+
+  // What the footer status line is about right now. The newest flow row is the
+  // best evidence (it carries an agent id); when there is none, the progress
+  // sentence itself is the same wording the flow rows are matched against.
+  const liveSignal = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const candidate = messages[index]
+      if (candidate.role !== 'assistant') continue
+      const log = candidate.activityLog
+      if (log && log.length > 0) {
+        return resolveAgentSignal(log[log.length - 1])
+      }
+      break
+    }
+    return streamingProgress ? resolveAgentSignal({ label: streamingProgress }) : null
+  }, [messages, streamingProgress])
 
   const activeDocsProgressMessage = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -7622,13 +7703,13 @@ export default function App() {
         {shouldShowResponseSurface && (
           <div
             ref={chatResponseSurfaceRef}
-            className={`response-container ${searchState === 'visible' ? 'visible' : ''} ${responseLaunchClass}`}
+            className={`response-container chat-response-container ${searchState === 'visible' ? 'visible' : ''} ${responseLaunchClass}`}
             style={responseLaunchStyle}
           >
             <LiquidGlass disableTilt={true} cornerRadius={32} style={{ width: '100%', height: '100%' }}>
               <div className="response-wrapper">
                 <div
-                  className="response-content"
+                  className="response-content chat-response-content"
                   style={{ paddingTop: 24 }}
                   ref={responseContainerRef}
                   onScroll={handleScroll}
@@ -7786,6 +7867,7 @@ export default function App() {
                                             title="Thinking"
                                             accent="thinking"
                                             streaming={!task.completed && !task.failed}
+                                            preview={!task.completed && !task.failed ? thinkingPreview(task.partialThinking) : undefined}
                                           >
                                             <div className="thinking-block task-thinking-block">
                                               <div className="thinking-text">{task.partialThinking}</div>
@@ -7797,8 +7879,13 @@ export default function App() {
                                             title="Flow"
                                             accent="flow"
                                             streaming={!task.completed && !task.failed}
+                                            signalEntries={task.activityLog}
                                           >
-                                            <AssistantFlowTimeline entries={task.activityLog} showLabel={false} />
+                                            <AssistantFlowTimeline
+                                              entries={task.activityLog}
+                                              showLabel={false}
+                                              streaming={!task.completed && !task.failed}
+                                            />
                                           </AssistantCollapsibleSection>
                                         )}
                                         {String(task.partialContent || '').trim() ? (
@@ -8238,6 +8325,7 @@ export default function App() {
                               title="Thinking"
                               accent="thinking"
                               streaming={messageIsStreaming}
+                              preview={messageIsStreaming ? thinkingPreview(msg.thinking) : undefined}
                             >
                               <div className="thinking-block">
                                 <div className="thinking-text">{msg.thinking}</div>
@@ -8249,8 +8337,13 @@ export default function App() {
                               title="Flow"
                               accent="flow"
                               streaming={messageIsStreaming}
+                              signalEntries={msg.activityLog}
                             >
-                              <AssistantFlowTimeline entries={msg.activityLog} showLabel={false} />
+                              <AssistantFlowTimeline
+                                entries={msg.activityLog}
+                                showLabel={false}
+                                streaming={messageIsStreaming}
+                              />
                             </AssistantCollapsibleSection>
                           )}
                           <AssistantAlphaStreamBody
@@ -8345,12 +8438,22 @@ export default function App() {
 
                   {mode !== 'task' && isStreaming && !activeDocsProgressMessage && (
                     <div className="streaming-indicator">
-                      {streamingProgress && <div className="streaming-status">{streamingProgress}</div>}
-                      <div className="streaming-dots" aria-hidden>
-                        {[0, 1, 2, 3, 4].map((i) => (
-                          <span key={i} className="streaming-dot-pix" style={{ animationDelay: `${i * 0.09}s` }} />
-                        ))}
-                      </div>
+                      {streamingProgress ? (
+                        // With a sentence to show, the mark plus the sweep across
+                        // the text carry the "still working" signal on their own;
+                        // the dot row would just be saying it a second time.
+                        <div className="streaming-now">
+                          {liveSignal && <AgentGlyph signal={liveSignal} size={22} active />}
+                          <span className="streaming-status">{streamingProgress}</span>
+                          {liveSignal && <DomainCluster domains={liveSignal.domains} size={14} />}
+                        </div>
+                      ) : (
+                        <div className="streaming-dots" aria-hidden>
+                          {[0, 1, 2, 3, 4].map((i) => (
+                            <span key={i} className="streaming-dot-pix" style={{ animationDelay: `${i * 0.09}s` }} />
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                   <div ref={responseEndRef} />
