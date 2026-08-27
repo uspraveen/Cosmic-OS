@@ -132,6 +132,12 @@ class OpenCodeAgentConfigRequest(BaseModel):
     preferred_model: str | None = Field(default=None, max_length=160)
     vm_sync_enabled: bool | None = None
     api_key: str | None = Field(default=None, max_length=4096)
+    variant: str | None = Field(default=None, max_length=32)
+
+
+class OpenCodeProviderConnectRequest(BaseModel):
+    provider_id: str = Field(..., min_length=1, max_length=80)
+    api_key: str = Field(..., min_length=1, max_length=4096)
 
 
 class AlphaAgentConfigRequest(BaseModel):
@@ -1852,6 +1858,47 @@ async def get_desktop_opencode_models(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     return await runtime.get_desktop_opencode_models(force_refresh=refresh)
+
+
+@router.get("/desktop/agents/opencode/catalog")
+async def get_desktop_opencode_catalog(
+    refresh: bool = False,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_opencode_catalog(force_refresh=refresh)
+
+
+@router.get("/desktop/agents/opencode/providers")
+async def get_desktop_opencode_providers(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_opencode_providers()
+
+
+@router.post("/desktop/agents/opencode/providers/connect")
+async def connect_desktop_opencode_provider(
+    body: OpenCodeProviderConnectRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.connect_desktop_opencode_provider(
+            provider_id=body.provider_id,
+            api_key=body.api_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.delete("/desktop/agents/opencode/providers/{provider_id}")
+async def disconnect_desktop_opencode_provider(
+    provider_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.disconnect_desktop_opencode_provider(provider_id=provider_id)
 
 
 @router.get("/desktop/agents/alpha/providers")

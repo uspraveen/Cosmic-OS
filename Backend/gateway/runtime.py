@@ -149,6 +149,28 @@ _AGENT_EMAIL_ORG_API_KEY_NAME = "COSMIC Gateway Agent Email"
 
 OPENCODE_ZEN_MODELS_ENDPOINT = "https://opencode.ai/zen/v1/models"
 OPENCODE_ZEN_MODELS_TTL_SEC = 6 * 3600.0
+OPENCODE_CATALOG_TTL_SEC = 30 * 60.0
+# Canonical display order/labels for providers surfaced in the settings
+# panel. Anything `opencode models` reports beyond this gets appended.
+OPENCODE_PROVIDER_LABELS: dict[str, str] = {
+    "opencode": "OpenCode Zen",
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+    "google": "Google",
+    "xai": "xAI",
+    "groq": "Groq",
+    "openrouter": "OpenRouter",
+    "mistral": "Mistral",
+    "deepseek": "DeepSeek",
+    "together": "Together",
+    "fireworks": "Fireworks",
+    "perplexity": "Perplexity",
+    "amazon-bedrock": "Amazon Bedrock",
+    "azure": "Azure",
+    "github-copilot": "GitHub Copilot",
+    "ollama": "Ollama (local)",
+    "lmstudio": "LM Studio (local)",
+}
 # Fallback when the live Zen catalog is unreachable. Snapshot of the curated
 # list at integration time (2026-08); refreshed by the gateway model loop.
 OPENCODE_ZEN_FALLBACK_MODELS: tuple[str, ...] = (
@@ -581,6 +603,7 @@ class GatewayRuntime:
         self._codex_login_session: dict[str, Any] | None = None
         self._cursor_login_session: dict[str, Any] | None = None
         self._opencode_models_cache: dict[str, Any] | None = None
+        self._opencode_catalog_cache: dict[str, Any] | None = None
         self._opencode_models_lock = asyncio.Lock()
         self._alpha_cli_update_state: dict[str, Any] = {"providers": {}}
         self._alpha_cli_update_in_flight: set[str] = set()
@@ -21223,10 +21246,90 @@ class GatewayRuntime:
             "cli": cli_status,
             "opencode_home": str(self.config.alpha_opencode_home),
         }
-        if not include_secret:
+        if include_secret:
+            # The key map travels only over internal-token transport — this
+            # is what the Alpha agent process reads to inject per-run config.
+            payload["provider_keys"] = dict(updated.get("provider_keys") or {})
+            payload["zen_api_key"] = str(payload["provider_keys"].get("opencode") or "")
+        else:
+            payload.pop("provider_keys", None)
+            payload.pop("connected_providers", None)
             payload.pop("api_key", None)
         payload = self._redact_codex_status(payload)
         return self._apply_alpha_cli_update_maintenance("opencode", payload)
+
+    async def get_desktop_opencode_providers(self) -> dict[str, Any]:
+        """Provider tiles for the settings panel: curated catalog + connection state."""
+        settings = self.agent_auth_store.get_opencode(include_secret=False)
+        cli_status = await self._opencode_cli_status()
+        connected = sorted(str(pid) for pid in settings.get("connected_providers") or [])
+        known_model_ids = set(self._cached_model_ids())
+        tiles: list[dict[str, Any]] = []
+        for pid in sorted(OPENCODE_PROVIDER_LABELS, key=lambda p: OPENCODE_PROVIDER_LABELS[p]):
+            label = OPENCODE_PROVIDER_LABELS[pid]
+            local_free = pid in {"ollama", "lmstudio"}
+            tiles.append({
+                "id": pid,
+                "label": label,
+                "recommended": pid in {"opencode", "anthropic", "openai", "google", "xai"},
+                "needs_key": not local_free,
+                "local_only": local_free,
+                "connected": (
+                    pid in connected
+                    or (local_free and any(mid.startswith(f"{pid}/") for mid in known_model_ids))
+                ),
+            })
+        return {
+            "cli_available": bool(cli_status.get("available", False)),
+            "version": str(cli_status.get("version") or ""),
+            "providers": tiles,
+        }
+
+    async def connect_desktop_opencode_provider(
+        self,
+        *,
+        provider_id: str,
+        api_key: str,
+    ) -> dict[str, Any]:
+        from .agent_auth_store import OpenCodeProviderId
+
+        normalized = OpenCodeProviderId.normalize(provider_id)
+        key = str(api_key or "").strip()
+        if not key:
+            raise ValueError("An API key is required to connect a provider.")
+        self.agent_auth_store.connect_opencode_provider(
+            provider_id=normalized,
+            api_key=key,
+        )
+        # The live model list changes once the new provider can authenticate.
+        overview = await self.get_desktop_opencode_providers()
+        return {**overview, "connected_id": normalized}
+
+    async def disconnect_desktop_opencode_provider(
+        self,
+        *,
+        provider_id: str,
+    ) -> dict[str, Any]:
+        self.agent_auth_store.disconnect_opencode_provider(provider_id=provider_id)
+        return await self.get_desktop_opencode_providers()
+
+    def _cached_model_ids(self) -> list[str]:
+        cache = self._opencode_catalog_cache if isinstance(self._opencode_catalog_cache, dict) else {}
+        groups = cache.get("groups")
+        ids: list[str] = []
+        if isinstance(groups, list):
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                prefix = str(group.get("id") or "")
+                models = group.get("models")
+                if isinstance(models, list):
+                    ids.extend(
+                        f"{prefix}/{m.get('id')}"
+                        for m in models
+                        if isinstance(m, dict) and str(m.get("id") or "")
+                    )
+        return ids
 
     async def save_desktop_opencode_config(
         self,
@@ -21269,8 +21372,11 @@ class GatewayRuntime:
     def _opencode_binary(self) -> str | None:
         return find_opencode_binary(self.config.alpha_opencode_home)
 
-    def _opencode_env(self) -> dict[str, str]:
-        env = opencode_cli_env(self.config.alpha_opencode_home)
+    def _opencode_env(self, *, with_keys: dict[str, str] | None = None) -> dict[str, str]:
+        env = opencode_cli_env(
+            self.config.alpha_opencode_home,
+            provider_keys=with_keys or None,
+        )
         env.setdefault("OPENCODE_DISABLE_AUTOUPDATE", "1")
         return env
 
@@ -21279,6 +21385,7 @@ class GatewayRuntime:
         args: list[str],
         *,
         timeout_sec: float,
+        with_keys: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         binary = self._opencode_binary()
         if not binary:
@@ -21298,7 +21405,7 @@ class GatewayRuntime:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(self.config.alpha_opencode_home),
-            env=self._opencode_env(),
+            env=self._opencode_env(with_keys=with_keys),
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -21539,6 +21646,117 @@ class GatewayRuntime:
             return None
         version = self._safe_text(stdout_bytes.decode("utf-8", errors="replace").strip())
         return version or None
+
+    @staticmethod
+    def _parse_opencode_models_output(text: str) -> dict[str, list[str]]:
+        """Parse `opencode models` output into {provider: [model_id,...]}.
+
+        Lines are `provider/model` (optionally padded). Anything unparseable
+        is ignored — banner/spinner noise must never fabricate entries.
+        """
+        parsed: dict[str, list[str]] = {}
+        line_re = re.compile(r"^([a-zA-Z0-9][a-zA-Z0-9._-]*)/([a-zA-Z0-9._-]+)\s*$")
+        for raw_line in (text or "").splitlines():
+            match = line_re.match(raw_line.strip())
+            if not match:
+                continue
+            provider, model_id = match.group(1).lower(), match.group(2)
+            bucket = parsed.setdefault(provider, [])
+            if model_id not in bucket:
+                bucket.append(model_id)
+        return parsed
+
+    async def get_desktop_opencode_catalog(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Live, GUI-ready model catalog = exactly what Alpha could run.
+
+        Rendered from `opencode models` executed under the real Alpha home
+        with COSMIC-stored provider keys injected — so a model listed here is
+        one a run will actually accept right now. Falls back to cached copy,
+        then to the Zen HTTP catalog, then to a curated seed.
+        """
+        now = time.time()
+        cache = self._opencode_catalog_cache
+        if (
+            not force_refresh
+            and cache
+            and isinstance(cache.get("fetched_at_epoch"), (int, float))
+            and now - float(cache["fetched_at_epoch"]) < OPENCODE_CATALOG_TTL_SEC
+            and cache.get("groups")
+        ):
+            return {**cache, "source": "cache"}
+
+        settings = self.agent_auth_store.get_opencode(include_secret=True)
+        stored_keys: dict[str, str] = dict(settings.get("provider_keys") or {})
+        result = await self._run_opencode_command(
+            ["models"],
+            timeout_sec=45.0,
+            with_keys=stored_keys,
+        )
+        source = "live"
+        grouped = (
+            self._parse_opencode_models_output(result.get("stdout") or "")
+            if result.get("ok")
+            else {}
+        )
+
+        if not grouped:
+            stale_cache = cache if isinstance(cache, dict) else {}
+            if isinstance(stale_cache.get("groups"), list) and stale_cache["groups"]:
+                return {**stale_cache, "source": "cache_stale"}
+            source = "fallback"
+            try:
+                zen = await self.get_desktop_opencode_models(force_refresh=False)
+                grouped = {
+                    "opencode": [str(m["id"]) for m in zen.get("models", [])]
+                } if isinstance(zen, dict) else {}
+            except Exception:
+                logger.exception("gateway.opencode_catalog_zen_fallback_failed")
+            if not grouped:
+                grouped = {"opencode": list(OPENCODE_ZEN_FALLBACK_MODELS)}
+
+        def group_rank(pid: str) -> tuple[int, str]:
+            canonical = list(OPENCODE_PROVIDER_LABELS)
+            return (canonical.index(pid) if pid in canonical else len(canonical), pid)
+
+        def is_free(model_id: str) -> bool:
+            lowered = model_id.lower()
+            return lowered.endswith("-free") or lowered == "big-pickle"
+
+        groups_payload: list[dict[str, Any]] = []
+        for pid in sorted(grouped, key=group_rank):
+            models = grouped[pid]
+            if not models:
+                continue
+            groups_payload.append({
+                "id": pid,
+                "label": OPENCODE_PROVIDER_LABELS.get(pid, pid.replace("-", " ").title()),
+                "keyless_free_tier": pid == "opencode",
+                "models": [
+                    {
+                        "id": model_id,
+                        "label": model_id.replace("-", " ").title(),
+                        "qualified": f"{pid}/{model_id}",
+                        "free": pid == "opencode" and is_free(model_id),
+                    }
+                    for model_id in sorted(models)
+                ],
+            })
+        connected = sorted(
+            {pid for pid, models in grouped.items() if models} | set(stored_keys)
+        )
+        catalog_entry = {
+            "fetched_at": utcnow_iso(),
+            "fetched_at_epoch": now,
+            "total_models": sum(len(g["models"]) for g in groups_payload),
+            "groups": groups_payload,
+            "connected_providers": connected,
+        }
+        self._opencode_catalog_cache = catalog_entry
+        return {**catalog_entry, "source": source}
 
     async def _update_codex_cli(self) -> dict[str, Any]:
         latest = await self._npm_latest_version("@openai/codex")

@@ -2855,6 +2855,7 @@ app.whenReady().then(() => {
     preferredModel?: string
     vmSyncEnabled?: boolean
     apiKey?: string
+    variant?: string
   }) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {
@@ -2866,6 +2867,7 @@ app.whenReady().then(() => {
         preferred_model: payload?.preferredModel,
         vm_sync_enabled: payload?.vmSyncEnabled,
         api_key: payload?.apiKey,
+        variant: payload?.variant,
       },
       timeoutMs: 45000,
     })
@@ -2891,6 +2893,49 @@ app.whenReady().then(() => {
     return callGatewayJson(config, `/desktop/agents/opencode/models${query}`, {
       timeoutMs: 30000,
     })
+  })
+
+  ipcMain.handle('gateway:get-opencode-catalog', async (_, payload: { forceRefresh?: boolean }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const query = payload?.forceRefresh ? '?refresh=true' : ''
+    return callGatewayJson(config, `/desktop/agents/opencode/catalog${query}`, {
+      timeoutMs: 45000,
+    })
+  })
+
+  ipcMain.handle('gateway:get-opencode-providers', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/opencode/providers', { timeoutMs: 30000 })
+  })
+
+  ipcMain.handle('gateway:connect-opencode-provider', async (_, payload: { providerId?: string; apiKey?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/opencode/providers/connect', {
+      method: 'POST',
+      body: { provider_id: payload?.providerId, api_key: payload?.apiKey },
+      timeoutMs: 45000,
+    })
+  })
+
+  ipcMain.handle('gateway:disconnect-opencode-provider', async (_, providerId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(
+      config,
+      `/desktop/agents/opencode/providers/${encodeURIComponent(String(providerId || ''))}`,
+      { method: 'DELETE', timeoutMs: 30000 },
+    )
   })
 
   ipcMain.handle('gateway:get-alpha-providers-overview', async () => {

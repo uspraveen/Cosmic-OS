@@ -249,6 +249,10 @@ interface Window {
     }) => Promise<any>
     logoutGatewayOpenCode: () => Promise<any>
     getGatewayOpenCodeModels: (opts?: { forceRefresh?: boolean }) => Promise<any>
+    getGatewayOpenCodeCatalog: (opts?: { forceRefresh?: boolean }) => Promise<any>
+    getGatewayOpenCodeProviders: () => Promise<any>
+    connectGatewayOpenCodeProvider: (payload: { providerId: string; apiKey: string }) => Promise<any>
+    disconnectGatewayOpenCodeProvider: (providerId: string) => Promise<any>
     getGatewayAlphaProvidersOverview: () => Promise<any>
     pickGatewayDocuments: () => Promise<{ documents: GatewayPendingDocumentAttachment[] }>
     sendGatewayQuery: (payload: {

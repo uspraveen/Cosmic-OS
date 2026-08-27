@@ -51,6 +51,17 @@ def normalize_opencode_model(value: str | None) -> str | None:
     return f"opencode/{normalized}"[:160]
 
 
+VARIANT_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
+
+
+def normalize_opencode_variant(value: str | None) -> str | None:
+    """Reasoning-effort style variants map to `opencode run --variant`."""
+    normalized = str(value or "").strip()
+    if not normalized or normalized.lower() == "auto":
+        return None
+    return normalized if VARIANT_PATTERN.match(normalized) else None
+
+
 @dataclass(frozen=True)
 class OpenCodeRunResult:
     returncode: int | None
@@ -100,19 +111,24 @@ class OpenCodeWorkspaceRunner:
 
     def __init__(self, config: AlphaAgentConfig) -> None:
         self.config = config
-        # Optional: set per-run from the gateway's internal status payload
-        # (internal-token transport) when the user saved a Zen key for paid
-        # models. Free Zen models run keyless — empty means keyless, not
-        # unauthenticated-broken.
-        self.zen_api_key_override: str = ""
+        # Optional per-provider API keys ({provider_id: api_key}), set from
+        # the gateway's internal status payload. Free Zen models run keyless;
+        # an empty map simply means keyless, not broken. A lone legacy Zen
+        # key arrives here under the `opencode` id.
+        self.provider_keys: dict[str, str] = {}
 
     @property
-    def zen_api_key(self) -> str:
-        override = str(self.zen_api_key_override or "").strip()
-        if override:
-            return override
-        raw = getattr(self.config, "zen_api_key", "")
-        return str(raw or "").strip()
+    def effective_provider_keys(self) -> dict[str, str]:
+        keys = {
+            str(pid).strip().lower(): str(key).strip()
+            for pid, key in (self.provider_keys or {}).items()
+            if str(pid or "").strip() and str(key or "").strip()
+        }
+        if not keys:
+            raw = getattr(self.config, "zen_api_key", "")
+            if str(raw or "").strip():
+                keys = {"opencode": str(raw).strip()}
+        return keys
 
     def opencode_binary(self) -> str | None:
         return find_opencode_binary_wrapper(self.config.opencode_home)
@@ -127,6 +143,7 @@ class OpenCodeWorkspaceRunner:
         prompt: str,
         model: str | None = None,
         resume_session_id: str | None = None,
+        variant: str | None = None,
         json_format: bool = False,
         auto_approve: bool = True,
     ) -> list[str]:
@@ -145,6 +162,9 @@ class OpenCodeWorkspaceRunner:
         normalized_model = normalize_opencode_model(model)
         if normalized_model:
             command.extend(["--model", normalized_model])
+        normalized_variant = normalize_opencode_variant(variant)
+        if normalized_variant:
+            command.extend(["--variant", normalized_variant])
         if json_format:
             command.extend(["--format", "json"])
         command.append(prompt)
@@ -157,6 +177,7 @@ class OpenCodeWorkspaceRunner:
         prompt: str,
         model: str | None = None,
         resume_session_id: str | None = None,
+        variant: str | None = None,
         timeout_sec: float | None = None,
         event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         cancel_check: Callable[[], Awaitable[bool]] | None = None,
@@ -177,6 +198,7 @@ class OpenCodeWorkspaceRunner:
             prompt=prompt,
             model=requested_model,
             resume_session_id=resume_session_id,
+            variant=variant,
             json_format=event_callback is not None,
         )
         started_at = asyncio.get_running_loop().time()
@@ -562,7 +584,7 @@ class OpenCodeWorkspaceRunner:
     def _env(self) -> dict[str, str]:
         return opencode_cli_env(
             self.config.opencode_home,
-            zen_api_key=self.zen_api_key or None,
+            provider_keys=self.effective_provider_keys or None,
         )
 
 

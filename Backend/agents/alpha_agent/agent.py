@@ -381,6 +381,7 @@ class AlphaAgent(AgentRuntime):
             native_session: HarnessSessionRecord | None = None
             if active_harness == "opencode":
                 selected_model = self._select_opencode_model(task, provider_status)
+                selected_variant = self._select_opencode_variant(task, provider_status)
                 native_session = await self._prepare_opencode_native_session(
                     task=task,
                     project=project,
@@ -393,6 +394,7 @@ class AlphaAgent(AgentRuntime):
                     prompt=prompt,
                     model=selected_model,
                     resume_session_id=native_session.native_session_id if native_session else None,
+                    variant=selected_variant,
                     timeout_sec=self.config.opencode_timeout_sec,
                     event_callback=emit_alpha_terminal,
                     cancel_check=cancel_check,
@@ -872,10 +874,13 @@ class AlphaAgent(AgentRuntime):
             return await self._fetch_cursor_status()
         if provider == "opencode":
             status = await self._fetch_opencode_status()
-            zen_key = str(status.get("zen_api_key") or "").strip()
-            # Internal-token transport only (see gateway route). Held in
-            # memory for this run and injected via OPENCODE_CONFIG_CONTENT.
-            self.opencode_runner.zen_api_key_override = zen_key
+            # Optional per-provider keys ride the internal-token route; free
+            # Zen models run keyless, so an empty map is a healthy state.
+            keys = status.get("provider_keys")
+            self.opencode_runner.provider_keys = (
+                {str(k): str(v) for k, v in keys.items()}
+                if isinstance(keys, dict) else {}
+            )
             return status
         return await self._fetch_codex_status()
 
@@ -1155,6 +1160,22 @@ class AlphaAgent(AgentRuntime):
             task.input.get("preferred_model"),
             opencode_status.get("preferred_model"),
             self.config.opencode_default_model,
+        ):
+            normalized = self._optional_string(value)
+            if normalized and normalized.lower() != "auto":
+                return normalized
+        return None
+
+    def _select_opencode_variant(self, task: TaskEnvelope, opencode_status: dict[str, Any]) -> str | None:
+        """Reasoning-effort style variant (`opencode run --variant`).
+
+        Auto (the default) defers to the model/provider's own default rather
+        than forcing one.
+        """
+        for value in (
+            task.input.get("variant"),
+            task.input.get("preferred_variant"),
+            opencode_status.get("reasoning_effort"),
         ):
             normalized = self._optional_string(value)
             if normalized and normalized.lower() != "auto":

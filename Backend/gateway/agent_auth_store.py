@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +63,20 @@ _OPENCODE_MODEL_ALIASES = {
 }
 
 
+class OpenCodeProviderId:
+    """Validation/canonicalization for OpenCode provider ids (models.dev ids:
+    lowercase letters, digits, dash, dot, underscore)."""
+
+    PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,60}$")
+
+    @classmethod
+    def normalize(cls, value: str) -> str:
+        pid = str(value or "").strip().lower()
+        if not cls.PATTERN.match(pid):
+            raise ValueError(f"Unsupported OpenCode provider id: {value!r}")
+        return pid
+
+
 def _utcnow_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
@@ -115,34 +130,118 @@ class AgentAuthStore:
             default_preferred_model="cursor-grok-4.5-high",
         )
 
+    def _opencode_keys(self, *, include_secret: bool) -> dict[str, Any]:
+        """Per-provider key map for the OpenCode harness.
+
+        Keys are stored as one encrypted JSON blob ({provider_id: api_key}).
+        Secrets are returned only with include_secret=True (internal-token
+        transport); every other caller sees just the connected ids.
+        """
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT provider_keys_json FROM agent_provider_auth WHERE provider = ?",
+            [PROVIDER_OPENCODE],
+        ).fetchone()
+        blob = row["provider_keys_json"] if row is not None else ""
+        keys: dict[str, str] = {}
+        if blob:
+            try:
+                parsed = json.loads(decrypt_token(blob))
+                if isinstance(parsed, dict):
+                    keys = {
+                        str(pid).strip().lower(): str(key)
+                        for pid, key in parsed.items()
+                        if str(pid or "").strip() and str(key or "").strip()
+                    }
+            except Exception:
+                keys = {}
+        return keys if include_secret else {pid: "" for pid in keys}
+
+    def connect_opencode_provider(
+        self,
+        *,
+        provider_id: str,
+        api_key: str,
+    ) -> dict[str, Any]:
+        pid = OpenCodeProviderId.normalize(provider_id)
+        key = str(api_key or "").strip()
+        current = self._opencode_keys(include_secret=True)
+        if not key:
+            current.pop(pid, None)
+        else:
+            current[pid] = key
+        self._write_opencode_keys(current)
+        return self.get_opencode(include_secret=False)
+
+    def disconnect_opencode_provider(self, *, provider_id: str) -> dict[str, Any]:
+        pid = OpenCodeProviderId.normalize(provider_id)
+        current = self._opencode_keys(include_secret=True)
+        current.pop(pid, None)
+        self._write_opencode_keys(current)
+        return self.get_opencode(include_secret=False)
+
+    def _write_opencode_keys(self, keys: dict[str, str]) -> None:
+        now = _utcnow_iso()
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO agent_provider_auth
+               (provider, auth_mode, preferred_model, reasoning_effort, approval_mode, vm_sync_enabled,
+                encrypted_api_key, has_api_key, status, login_required_reason,
+                last_cli_status_json, provider_keys_json, updated_at)
+               VALUES (?, 'api_key', 'mimo-v2.5-free', 'auto', 'suggest', 1, '', ?, 'stored', '', '{}', ?, ?)
+               ON CONFLICT(provider) DO UPDATE SET
+                 provider_keys_json = excluded.provider_keys_json,
+                 has_api_key = excluded.has_api_key,
+                 updated_at = excluded.updated_at""",
+            [
+                PROVIDER_OPENCODE,
+                1 if keys else 0,
+                encrypt_token_str(json.dumps(keys)),
+                now,
+            ],
+        )
+        conn.commit()
+
     def get_opencode(self, *, include_secret: bool = False) -> dict[str, Any]:
-        return self._get_provider(
+        payload = self._get_provider(
             PROVIDER_OPENCODE,
             include_secret=include_secret,
             default_auth_mode="api_key",
             default_preferred_model="mimo-v2.5-free",
         )
+        keys = self._opencode_keys(include_secret=True)
+        connected = sorted(keys)
+        # With per-provider keys, "has credentials at all" is what the rest of
+        # COSMIC keys off of; free Zen models work even with zero entries.
+        payload["has_api_key"] = bool(connected)
+        payload["connected_providers"] = connected
+        if include_secret:
+            payload["provider_keys"] = dict(keys)
+        else:
+            payload.pop("api_key", None)
+        return payload
 
     def save_opencode(
         self,
         *,
         auth_mode: str | None = None,
         preferred_model: str | None = None,
+        variant: str | None = None,
         vm_sync_enabled: bool | None = None,
         api_key: str | None = None,
         status: str | None = None,
         login_required_reason: str | None = None,
         last_cli_status: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        current = self.get_opencode(include_secret=True)
+        current = self.get_opencode(include_secret=False)
         next_model = _normalize_opencode_model(
             preferred_model,
             fallback=str(current.get("preferred_model") or "mimo-v2.5-free"),
         )
-        next_api_key = (
-            str(api_key).strip()
-            if api_key is not None
-            else str(current.get("api_key") or "")
+        next_variant = _normalize_choice(
+            variant,
+            allowed={"auto", "minimal", "low", "medium", "high", "xhigh"},
+            fallback=str(current.get("reasoning_effort") or "auto"),
         )
         cli_status = (
             last_cli_status
@@ -158,25 +257,21 @@ class AgentAuthStore:
                (provider, auth_mode, preferred_model, reasoning_effort, approval_mode, vm_sync_enabled,
                 encrypted_api_key, has_api_key, status, login_required_reason,
                 last_cli_status_json, updated_at)
-               VALUES (?, ?, ?, 'auto', 'suggest', ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, 'api_key', ?, ?, 'suggest', ?, '', 0, ?, ?, ?, ?)
                ON CONFLICT(provider) DO UPDATE SET
                  preferred_model = excluded.preferred_model,
+                 reasoning_effort = excluded.reasoning_effort,
                  vm_sync_enabled = excluded.vm_sync_enabled,
-                 encrypted_api_key = excluded.encrypted_api_key,
-                 has_api_key = excluded.has_api_key,
-                 status = excluded.status,
                  login_required_reason = excluded.login_required_reason,
                  last_cli_status_json = excluded.last_cli_status_json,
                  updated_at = excluded.updated_at""",
             [
                 PROVIDER_OPENCODE,
-                "api_key",
                 next_model,
+                next_variant,
                 1 if bool(vm_sync_enabled if vm_sync_enabled is not None else current.get("vm_sync_enabled", True)) else 0,
-                encrypt_token_str(next_api_key) if next_api_key else "",
-                1 if bool(next_api_key) else 0,
-                (status or str(current.get("status") or "not_configured")).strip()
-                or "not_configured",
+                (status or str(current.get("status") or "stored")).strip()
+                or "stored",
                 (
                     login_required_reason
                     if login_required_reason is not None
@@ -187,6 +282,12 @@ class AgentAuthStore:
             ],
         )
         conn.commit()
+        # Single-key convenience paths still land in the map under Zen's id.
+        if api_key is not None:
+            self.connect_opencode_provider(
+                provider_id="opencode",
+                api_key=str(api_key).strip(),
+            )
         return self.get_opencode(include_secret=False)
 
     def clear_opencode_api_key(
@@ -196,12 +297,7 @@ class AgentAuthStore:
         login_required_reason: str = "user_logged_out",
         last_cli_status: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self.save_opencode(
-            api_key="",
-            status=status,
-            login_required_reason=login_required_reason,
-            last_cli_status=last_cli_status or {},
-        )
+        return self.disconnect_opencode_provider(provider_id="opencode")
 
     def save_codex(
         self,
@@ -452,6 +548,33 @@ class AgentAuthStore:
                 "ALTER TABLE agent_provider_auth "
                 "ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'auto'"
             )
+        if "provider_keys_json" not in columns:
+            self._conn.execute(
+                "ALTER TABLE agent_provider_auth "
+                "ADD COLUMN provider_keys_json TEXT NOT NULL DEFAULT ''"
+            )
+            # One-time migration: the original OpenCode design stored a single
+            # optional Zen key in encrypted_api_key. Fold it into the
+            # multi-provider map so per-provider connect/disconnect has one
+            # source of truth from here on.
+            row = self._conn.execute(
+                "SELECT provider, encrypted_api_key FROM agent_provider_auth "
+                "WHERE provider = ? AND encrypted_api_key != ''",
+                [PROVIDER_OPENCODE],
+            ).fetchone()
+            if row is not None:
+                legacy = ""
+                try:
+                    legacy = decrypt_token(row["encrypted_api_key"])
+                except Exception:
+                    legacy = ""
+                keys: dict[str, str] = {}
+                if legacy.strip():
+                    keys["opencode"] = legacy.strip()
+                self._conn.execute(
+                    "UPDATE agent_provider_auth SET provider_keys_json = ?, encrypted_api_key = '', has_api_key = ? WHERE provider = ?",
+                    [encrypt_token_str(json.dumps(keys)), 1 if keys else 0, PROVIDER_OPENCODE],
+                )
 
     def _get_provider(
         self,

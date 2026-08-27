@@ -41,6 +41,14 @@
       "type": ["string", "null"],
       "description": "OpenCode-specific native session id to resume."
     },
+    "variant": {
+      "type": ["string", "null"],
+      "description": "Optional OpenCode model variant (provider-specific reasoning effort) passed as opencode run --variant. Omit or use auto to respect the Settings > Agents > OpenCode default."
+    },
+    "preferred_variant": {
+      "type": ["string", "null"],
+      "description": "Alias of variant."
+    },
     "preferred_model": {
       "type": ["string", "null"],
       "description": "Optional CLI model override for this task."

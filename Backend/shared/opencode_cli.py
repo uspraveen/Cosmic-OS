@@ -102,24 +102,40 @@ def find_opencode_binary(opencode_home: str | Path | None = None) -> str | None:
     return None
 
 
-def build_zen_api_key_config_content(api_key: str) -> str:
-    """Inline JSON for OPENCODE_CONFIG_CONTENT that authenticates OpenCode Zen.
+def build_provider_keys_config_content(provider_keys: dict[str, str]) -> str | None:
+    """Inline JSON for OPENCODE_CONFIG_CONTENT authenticating multiple providers.
 
-    Zen is provider id `opencode`; models resolve as `opencode/<model-id>`.
-    Injected per run instead of written to disk, so the key never lands in a
-    file the workspace CLIs could read back into context.
+    Keys are keyed by provider id (`anthropic`, `openai`, `zen-opencode`,
+    …). Injected per run instead of written to disk, so credentials never
+    land in a file the workspace CLIs could read back into context. Returns
+    None when there is nothing to inject.
     """
+    cleaned = {
+        str(pid).strip().lower(): str(key).strip()
+        for pid, key in (provider_keys or {}).items()
+        if str(pid or "").strip() and str(key or "").strip()
+    }
+    if not cleaned:
+        return None
     return json.dumps(
         {
             "$schema": "https://opencode.ai/config.json",
-            "provider": {"opencode": {"options": {"apiKey": api_key}}},
+            "provider": {
+                pid: {"options": {"apiKey": key}} for pid, key in sorted(cleaned.items())
+            },
         }
     )
+
+
+def build_zen_api_key_config_content(api_key: str) -> str | None:
+    """Single-provider convenience wrapper (Zen id is `opencode`)."""
+    return build_provider_keys_config_content({"opencode": api_key})
 
 
 def opencode_cli_env(
     opencode_home: str | Path,
     *,
+    provider_keys: dict[str, str] | None = None,
     zen_api_key: str | None = None,
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
@@ -130,6 +146,8 @@ def opencode_cli_env(
     itself (gateway update loop + bootstrap), so the CLI's interactive
     auto-updater is disabled — a silent mid-task binary swap would be
     indistinguishable from a harness crash.
+
+    `provider_keys` wins over the deprecated single `zen_api_key`.
     """
     env = dict(base_env if base_env is not None else os.environ)
     home = Path(opencode_home).expanduser()
@@ -151,9 +169,12 @@ def opencode_cli_env(
         path_parts.append(existing)
     env["PATH"] = os.pathsep.join(path_parts)
 
-    key = (zen_api_key or "").strip()
-    if key and not env.get("OPENCODE_CONFIG_CONTENT"):
-        # Never leak through to child processes we didn't inject on purpose.
-        env["OPENCODE_CONFIG_CONTENT"] = build_zen_api_key_config_content(key)
+    keys = dict(provider_keys or {})
+    if not keys and (zen_api_key or "").strip():
+        keys = {"opencode": zen_api_key.strip()}
+    content = build_provider_keys_config_content(keys)
+    # Never leak through to child processes we didn't inject on purpose.
+    if content:
+        env.setdefault("OPENCODE_CONFIG_CONTENT", content)
 
     return apply_git_credentials(env)

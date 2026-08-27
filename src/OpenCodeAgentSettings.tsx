@@ -1,5 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bot, CheckCircle2, KeyRound, RefreshCw, ShieldCheck, Sparkles, Trash2 } from 'lucide-react'
+import {
+  Bot,
+  CheckCircle2,
+  ChevronDown,
+  KeyRound,
+  Plug,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  X,
+} from 'lucide-react'
 
 type OpenCodeModel = {
   id: string
@@ -8,17 +20,35 @@ type OpenCodeModel = {
   free: boolean
 }
 
+type OpenCodeModelGroup = {
+  id: string
+  label: string
+  keyless_free_tier?: boolean
+  models: OpenCodeModel[]
+}
+
+type OpenCodeProviderTile = {
+  id: string
+  label: string
+  recommended: boolean
+  needs_key: boolean
+  local_only?: boolean
+  connected: boolean
+}
+
 interface OpenCodeAgentSettingsProps {
   active: boolean
 }
 
 interface OpenCodeGatewayStatus {
   preferred_model?: string
+  reasoning_effort?: string
   vm_sync_enabled?: boolean
   status?: string
   login_required_reason?: string
   opencode_home?: string
   has_api_key?: boolean
+  connected_providers?: string[]
   cli?: {
     available?: boolean
     version?: string
@@ -26,11 +56,21 @@ interface OpenCodeGatewayStatus {
   }
 }
 
+type VariantOption = 'auto' | 'low' | 'medium' | 'high' | 'xhigh'
+
+const VARIANT_OPTIONS: Array<{ value: VariantOption; label: string; note: string }> = [
+  { value: 'auto', label: 'Auto', note: "Model's default" },
+  { value: 'low', label: 'Low', note: 'Faster' },
+  { value: 'medium', label: 'Medium', note: 'Balanced' },
+  { value: 'high', label: 'High', note: 'Deeper' },
+  { value: 'xhigh', label: 'XHigh', note: 'Max' },
+]
+
 function prettyModelLabel(id: string) {
   return id
     .split('-')
     .map((part) =>
-      /^(v?\d)/.test(part) || part === 'pro' || part === 'max' || part === 'mini' || part === 'nano' || part === 'free'
+      /^(v?\d)/.test(part) || ['pro', 'max', 'mini', 'nano', 'free', 'codex', 'api'].includes(part)
         ? part.toUpperCase()
         : part.charAt(0).toUpperCase() + part.slice(1),
     )
@@ -39,14 +79,19 @@ function prettyModelLabel(id: string) {
 
 export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsProps) {
   const [preferredModel, setPreferredModel] = useState('mimo-v2.5-free')
-  const [hasApiKey, setHasApiKey] = useState(false)
-  const [apiKeyDraft, setApiKeyDraft] = useState('')
+  const [variant, setVariant] = useState<VariantOption>('auto')
   const [vmSyncEnabled, setVmSyncEnabled] = useState(true)
   const [gatewayStatus, setGatewayStatus] = useState<OpenCodeGatewayStatus | null>(null)
-  const [models, setModels] = useState<OpenCodeModel[]>([])
-  const [modelsSource, setModelsSource] = useState('')
-  const [modelsFetchedAt, setModelsFetchedAt] = useState('')
-  const [modelsLoading, setModelsLoading] = useState(false)
+  const [groups, setGroups] = useState<OpenCodeModelGroup[]>([])
+  const [providerTiles, setProviderTiles] = useState<OpenCodeProviderTile[]>([])
+  const [connectedProviders, setConnectedProviders] = useState<string[]>([])
+  const [catalogSource, setCatalogSource] = useState('')
+  const [catalogTotal, setCatalogTotal] = useState(0)
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [modelQuery, setModelQuery] = useState('')
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+  const [connectTarget, setConnectTarget] = useState<string | null>(null)
+  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [banner, setBanner] = useState('')
@@ -58,20 +103,39 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
     return () => window.clearTimeout(timer)
   }, [banner])
 
-  const loadModels = async (forceRefresh: boolean) => {
-    setModelsLoading(true)
+  const loadCatalog = async (forceRefresh: boolean) => {
+    setCatalogLoading(true)
     try {
-      const payload = await window.cosmic?.getGatewayOpenCodeModels({ forceRefresh })
-      if (Array.isArray(payload?.models)) {
-        setModels(payload.models)
-        setModelsSource(String(payload.source || ''))
-        setModelsFetchedAt(String(payload.fetched_at || ''))
+      const payload = await window.cosmic?.getGatewayOpenCodeCatalog?.({ forceRefresh })
+      if (!payload) return
+      const nextGroups: OpenCodeModelGroup[] = Array.isArray(payload.groups) ? payload.groups : []
+      setGroups(nextGroups)
+      setConnectedProviders(Array.isArray(payload.connected_providers) ? payload.connected_providers : [])
+      setCatalogSource(String(payload.source || ''))
+      setCatalogTotal(Number(payload.total_models || 0))
+      // Keep the group holding the selected model visible.
+      setExpandedGroups((prev) => {
+        if (prev.size > 0) return prev
+        const owning = nextGroups.find((group) =>
+          group.models.some((model) => model.id === preferredModel),
+        )
+        return new Set(owning ? [owning.id] : nextGroups.slice(0, 1).map((g) => g.id))
+      })
+    } catch {
+      if (forceRefresh) setError('Could not refresh the model catalog from the VM.')
+    } finally {
+      setCatalogLoading(false)
+    }
+  }
+
+  const loadProviders = async () => {
+    try {
+      const payload = await window.cosmic?.getGatewayOpenCodeProviders?.()
+      if (Array.isArray(payload?.providers)) {
+        setProviderTiles(payload.providers)
       }
     } catch {
-      // Keep whatever catalog is already on screen; the banner stays honest.
-      if (forceRefresh) setError('Unable to refresh the Zen model list from the VM.')
-    } finally {
-      setModelsLoading(false)
+      // Tiles are additive; status stays usable without them.
     }
   }
 
@@ -91,7 +155,8 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
       }
     }
     void refresh()
-    void loadModels(false)
+    void loadProviders()
+    void loadCatalog(false)
     return () => {
       cancelled = true
     }
@@ -104,21 +169,24 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
     if (loading) return 'Checking VM status'
     if (cliMissing) return 'OpenCode CLI missing on VM'
     if (gatewayStatus?.status === 'update_in_progress') return 'OpenCode is updating — Alpha routes around it'
-    if (hasApiKey) return 'Ready · Zen key saved for paid models'
+    if (connectedProviders.length > 1) return `Ready · ${connectedProviders.length} providers connected`
     return 'Ready · free Zen models run without a key'
-  }, [cliMissing, gatewayStatus?.status, hasApiKey, loading])
+  }, [cliMissing, connectedProviders.length, gatewayStatus?.status, loading])
 
-  const applyGatewayStatus = (rawStatus: unknown) => {
+  function applyGatewayStatus(rawStatus: unknown) {
     const status = (rawStatus && typeof rawStatus === 'object' ? rawStatus : {}) as OpenCodeGatewayStatus
     const nextModel = String(status.preferred_model ?? 'mimo-v2.5-free').trim() || 'mimo-v2.5-free'
     setGatewayStatus(status)
-    setHasApiKey(Boolean(status.has_api_key))
     setPreferredModel(nextModel.replace(/^opencode\//, ''))
+    const effort = String(status.reasoning_effort ?? 'auto')
+    setVariant(
+      effort === 'minimal' ? 'low' : (['auto', 'low', 'medium', 'high', 'xhigh'].includes(effort) ? effort as VariantOption : 'auto'),
+    )
     setVmSyncEnabled(status.vm_sync_enabled !== false)
   }
 
   const saveRemoteConfig = async (
-    payload: { preferredModel?: string; vmSyncEnabled?: boolean; apiKey?: string },
+    payload: { preferredModel?: string; vmSyncEnabled?: boolean; variant?: string },
     successMessage?: string,
   ) => {
     setSaving(true)
@@ -134,60 +202,97 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
     }
   }
 
-  const savePreferredModel = (modelId: string) => {
-    setPreferredModel(modelId)
-    void saveRemoteConfig({ preferredModel: modelId })
+  const savePreferredModel = (qualifiedId: string) => {
+    const bare = qualifiedId.includes('/') ? qualifiedId.split('/')[1] : qualifiedId
+    setPreferredModel(bare)
+    void saveRemoteConfig({ preferredModel: bare })
   }
 
-  const saveApiKey = () => {
-    const nextKey = apiKeyDraft.trim()
-    if (!nextKey) {
-      setBanner('Paste an OpenCode Zen API key before saving.')
+  const saveVariant = (nextVariant: VariantOption) => {
+    setVariant(nextVariant)
+    void saveRemoteConfig({ variant: nextVariant })
+  }
+
+  const beginConnect = (providerId: string) => {
+    setConnectTarget(providerId)
+    setKeyDrafts((prev) => ({ ...prev, [providerId]: '' }))
+    setError('')
+  }
+
+  const submitConnect = async () => {
+    if (!connectTarget) return
+    const key = (keyDrafts[connectTarget] || '').trim()
+    if (!key) {
+      setBanner('Paste the API key for this provider first.')
       return
     }
-    setApiKeyDraft('')
-    void saveRemoteConfig(
-      { apiKey: nextKey },
-      'Zen API key saved to the VM. OpenCode will use it on the next Alpha run.',
-    )
-  }
-
-  const clearApiKey = async () => {
     setSaving(true)
     setError('')
     try {
-      const status = await window.cosmic?.logoutGatewayOpenCode()
-      applyGatewayStatus(status)
-      setBanner('OpenCode Zen key cleared on the VM.')
+      await window.cosmic?.connectGatewayOpenCodeProvider({ providerId: connectTarget, apiKey: key })
+      setConnectTarget(null)
+      setBanner(`${connectTarget} connected. Its models now appear in the catalog.`)
+      await Promise.all([loadProviders(), loadCatalog(true)])
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to clear the Zen API key on the VM.')
+      setError(err instanceof Error ? err.message : 'Unable to connect the provider on the VM.')
     } finally {
       setSaving(false)
     }
   }
 
-  // Any live model id not present in the current grid still gets a card, so a
-  // saved model that disappears from the catalog remains visible/selectable.
-  const visibleModels = useMemo(() => {
-    const map = new Map(models.map((model) => [model.id, model]))
-    if (preferredModel && !map.has(preferredModel)) {
-      map.set(preferredModel, {
-        id: preferredModel,
-        label: prettyModelLabel(preferredModel),
-        qualified: `opencode/${preferredModel}`,
-        free: preferredModel.endsWith('-free') || preferredModel === 'big-pickle',
-      })
+  const disconnectProvider = async (providerId: string) => {
+    setSaving(true)
+    setError('')
+    try {
+      await window.cosmic?.disconnectGatewayOpenCodeProvider(providerId)
+      setBanner(`${providerId} disconnected.`)
+      await Promise.all([loadProviders(), loadCatalog(true)])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to disconnect the provider.')
+    } finally {
+      setSaving(false)
     }
-    const list = [...map.values()]
-    const knownIds = models.length ? new Set(models.map((m) => m.id)) : new Set<string>()
-    return list.sort((a, b) => {
-      const aUnknown = models.length > 0 && !knownIds.has(a.id) ? 1 : 0
-      const bUnknown = models.length > 0 && !knownIds.has(b.id) ? 1 : 0
-      if (a.free !== b.free) return a.free ? -1 : 1
-      if (aUnknown !== bUnknown) return aUnknown - bUnknown
-      return a.id.localeCompare(b.id)
+  }
+
+  const toggleGroup = (groupId: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(groupId)) next.delete(groupId)
+      else next.add(groupId)
+      return next
     })
-  }, [models, preferredModel])
+  }
+
+  const query = modelQuery.trim().toLowerCase()
+  const visibleGroups = useMemo(() => {
+    if (!query) return groups
+    return groups
+      .map((group) => ({
+        ...group,
+        models: group.models.filter(
+          (model) =>
+            model.id.toLowerCase().includes(query) ||
+            `${group.id}/${model.id}`.toLowerCase().includes(query),
+        ),
+      }))
+      .filter((group) => group.models.length > 0)
+  }, [groups, query])
+
+  const searchHits = useMemo(
+    () => visibleGroups.reduce((sum, group) => sum + group.models.length, 0),
+    [visibleGroups],
+  )
+
+  // While searching, show one flat list instead of N expandable sections.
+  const flatSearchResults = useMemo(
+    () =>
+      query
+        ? visibleGroups.flatMap((group) =>
+            group.models.map((model) => ({ ...model, groupId: group.id, groupLabel: group.label })),
+          )
+        : [],
+    [query, visibleGroups],
+  )
 
   return (
     <div className="cosmic-agents-detail-page">
@@ -199,19 +304,15 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
           <div className="cosmic-agents-detail-hero-text">
             <h3>OpenCode for Alpha</h3>
             <p>{connectionLabel}</p>
-            <span>Runs OpenCode headlessly in per-task workspaces using OpenCode Zen models.</span>
+            <span>The GUI for `/models` and `/connect` — live from your VM's OpenCode.</span>
           </div>
         </div>
-        <div className={`cosmic-agents-detail-status-pill ${gatewayStatus?.status === 'authenticated' ? 'ready' : gatewayStatus?.status === 'update_in_progress' ? 'pending' : 'warn'}`}>
+        <div className={`cosmic-agents-detail-status-pill ${gatewayStatus?.status === 'update_in_progress' ? 'pending' : cliMissing ? 'warn' : 'ready'}`}>
           {cliMissing
             ? 'Setup'
-            : gatewayStatus?.status === 'authenticated'
-              ? 'Ready'
-              : gatewayStatus?.status === 'update_in_progress'
-                ? 'Updating'
-                : hasApiKey
-                  ? 'Ready'
-                  : 'Setup'}
+            : gatewayStatus?.status === 'update_in_progress'
+              ? 'Updating'
+              : 'Ready'}
         </div>
       </div>
 
@@ -228,76 +329,229 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
         </div>
       ) : null}
 
+      {/* ── Connect providers (GUI of /connect) ─────────────────────────── */}
       <div className="cosmic-agents-detail-section">
         <div className="cosmic-agents-detail-section-head">
           <div>
-            <span className="cosmic-agents-detail-kicker">OpenCode Zen</span>
-            <h4>{hasApiKey ? 'Zen key saved (optional)' : 'No key needed — optional Zen key'}</h4>
+            <span className="cosmic-agents-detail-kicker">Providers</span>
+            <h4>Connect a provider to unlock its models</h4>
           </div>
-          {hasApiKey ? (
-            <button type="button" className="cosmic-agents-detail-btn danger icon" onClick={clearApiKey} title="Clear saved Zen API key" disabled={saving}>
-              <Trash2 size={16} />
-            </button>
-          ) : null}
         </div>
         <p className="cosmic-agents-detail-section-copy">
-          OpenCode's free Zen models run without any authentication. Optionally paste a Zen API key
-          (opencode.ai/auth) to unlock paid models and your own providers; keys are stored encrypted on the VM.
+          Free Zen models work out of the box — no keys anywhere. Connect any other provider with its
+          API key and its models appear in the catalog below. Keys are stored encrypted on your VM and
+          never leave it except to the provider itself.
         </p>
-        <div className="cosmic-agents-detail-key-row">
-          <input
-            type="password"
-            value={apiKeyDraft}
-            onChange={(event) => setApiKeyDraft(event.target.value)}
-            placeholder="Optional · sk-zen-..."
-            spellCheck={false}
-            autoComplete="off"
-          />
-          <button type="button" className="cosmic-agents-detail-btn" onClick={saveApiKey} disabled={saving}>
-            Save
-          </button>
+
+        <div className="opencode-provider-grid">
+          {(providerTiles.length ? providerTiles : []).map((tile) => (
+            <div key={tile.id} className={`opencode-provider-tile ${tile.connected ? 'connected' : ''}`}>
+              <div className="opencode-provider-tile-head">
+                <span className="opencode-provider-dot" data-state={tile.connected ? 'on' : 'off'} />
+                <strong>{tile.label}</strong>
+                {tile.recommended ? <span className="opencode-provider-tag">Popular</span> : null}
+                {!tile.needs_key ? <span className="opencode-provider-tag free">No key</span> : null}
+              </div>
+              <small>
+                {tile.connected
+                  ? tile.local_only
+                    ? 'Detected locally'
+                    : 'Connected · key saved on VM'
+                  : tile.local_only
+                    ? 'Not detected yet — start Ollama on the VM'
+                    : 'Connect with an API key'}
+              </small>
+              <div className="opencode-provider-tile-actions">
+                {connectTarget === tile.id ? (
+                  <>
+                    <input
+                      type="password"
+                      autoFocus
+                      value={keyDrafts[tile.id] || ''}
+                      onChange={(event) =>
+                        setKeyDrafts((prev) => ({ ...prev, [tile.id]: event.target.value }))
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') void submitConnect()
+                        if (event.key === 'Escape') setConnectTarget(null)
+                      }}
+                      placeholder={`${tile.label} API key`}
+                      spellCheck={false}
+                      autoComplete="off"
+                      disabled={saving}
+                    />
+                    <button type="button" className="cosmic-agents-detail-btn" onClick={() => void submitConnect()} disabled={saving}>
+                      Save
+                    </button>
+                    <button type="button" className="cosmic-agents-detail-btn ghost icon" onClick={() => setConnectTarget(null)} disabled={saving} title="Cancel">
+                      <X size={14} />
+                    </button>
+                  </>
+                ) : tile.needs_key && !tile.connected ? (
+                  <button type="button" className="cosmic-agents-detail-btn ghost" onClick={() => beginConnect(tile.id)} disabled={saving}>
+                    <Plug size={13} />
+                    Connect
+                  </button>
+                ) : tile.connected ? (
+                  <>
+                    <span className="opencode-provider-connected-note">
+                      <CheckCircle2 size={13} />
+                      Connected
+                    </span>
+                    {tile.local_only ? null : (
+                      <button
+                        type="button"
+                        className="cosmic-agents-detail-btn danger icon"
+                        onClick={() => void disconnectProvider(tile.id)}
+                        disabled={saving}
+                        title={`Disconnect ${tile.label}`}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </>
+                ) : null}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 
+      {/* ── Model catalog (GUI of /models) ──────────────────────────────── */}
       <div className="cosmic-agents-detail-section cosmic-agents-detail-runner">
         <div className="cosmic-agents-detail-section-head">
           <div>
-            <span className="cosmic-agents-detail-kicker">Runner defaults</span>
-            <h4>Zen model catalog</h4>
+            <span className="cosmic-agents-detail-kicker">Models</span>
+            <h4>Pick Alpha&apos;s default model</h4>
           </div>
           <button
             type="button"
             className="cosmic-agents-detail-btn ghost icon"
-            onClick={() => void loadModels(true)}
-            disabled={modelsLoading || saving}
-            title="Refresh the Zen model list now"
+            onClick={() => void loadCatalog(true)}
+            disabled={catalogLoading || saving}
+            title="Refresh the live model catalog now"
           >
-            <RefreshCw size={15} className={modelsLoading ? 'spin' : ''} />
+            <RefreshCw size={15} className={catalogLoading ? 'spin' : ''} />
           </button>
         </div>
 
+        <div className="opencode-model-toolbar">
+          <div className="opencode-model-search">
+            <Search size={14} />
+            <input
+              type="search"
+              value={modelQuery}
+              onChange={(event) => setModelQuery(event.target.value)}
+              placeholder="Search models… e.g. mimo, claude, gpt"
+              spellCheck={false}
+            />
+          </div>
+          <span className="opencode-model-count">
+            {catalogLoading
+              ? 'Refreshing…'
+              : query
+                ? `${searchHits} match${searchHits === 1 ? '' : 'es'}`
+                : `${catalogTotal || groups.reduce((n, g) => n + g.models.length, 0)} models · ${groups.length} providers`}
+          </span>
+        </div>
+
+        {query ? (
+          <div className="opencode-model-list">
+            {flatSearchResults.map((model) => (
+              <button
+                key={`${model.groupId}/${model.id}`}
+                type="button"
+                className={`opencode-model-row ${preferredModel === model.id ? 'active' : ''}`}
+                onClick={() => savePreferredModel(model.qualified)}
+                disabled={saving}
+              >
+                <span className="opencode-model-provider">{model.groupLabel}</span>
+                <span className="opencode-model-name">{prettyModelLabel(model.id)}</span>
+                {model.free ? <span className="opencode-free-pill">Free</span> : null}
+                {preferredModel === model.id ? <CheckCircle2 size={15} /> : null}
+              </button>
+            ))}
+            {!flatSearchResults.length ? (
+              <p className="cosmic-agents-detail-section-copy">
+                No models match “{modelQuery}”. Connect another provider above, or refresh the catalog.
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <div className="opencode-group-list">
+            {groups.map((group) => {
+              const open = expandedGroups.has(group.id)
+              const ownsSelection = group.models.some((model) => model.id === preferredModel)
+              return (
+                <div key={group.id} className={`opencode-model-group ${open ? 'open' : ''}`}>
+                  <button type="button" className="opencode-group-header" onClick={() => toggleGroup(group.id)}>
+                    <ChevronDown size={14} className="opencode-group-chevron" />
+                    <span className="opencode-group-label">{group.label}</span>
+                    {group.keyless_free_tier ? <span className="opencode-provider-tag free">Free tier</span> : null}
+                    {ownsSelection ? <span className="opencode-provider-tag selected">In use</span> : null}
+                    <span className="opencode-group-count">{group.models.length}</span>
+                  </button>
+                  {open ? (
+                    <div className="opencode-model-list">
+                      {group.models.map((model) => (
+                        <button
+                          key={model.id}
+                          type="button"
+                          className={`opencode-model-row ${preferredModel === model.id ? 'active' : ''}`}
+                          onClick={() => savePreferredModel(model.qualified)}
+                          disabled={saving}
+                        >
+                          <span className="opencode-model-name">{prettyModelLabel(model.id)}</span>
+                          {model.free ? <span className="opencode-free-pill">Free</span> : null}
+                          {preferredModel === model.id ? <CheckCircle2 size={15} /> : null}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              )
+            })}
+            {!groups.length ? (
+              <p className="cosmic-agents-detail-section-copy">
+                {catalogLoading ? 'Loading the live catalog…' : 'Catalog unavailable right now.'}
+              </p>
+            ) : null}
+          </div>
+        )}
+        {!query && catalogSource ? (
+          <p className="cosmic-agents-detail-section-copy">
+            {`Live from your VM's OpenCode${catalogSource.startsWith('cache') ? ' (cached)' : ''}${
+              gatewayStatus?.cli?.version ? ` · CLI ${gatewayStatus.cli.version}` : ''
+            } — auto-refreshes every 30 minutes.`}
+          </p>
+        ) : null}
+      </div>
+
+      {/* ── Reasoning effort → --variant ────────────────────────────────── */}
+      <div className="cosmic-agents-detail-section cosmic-agents-detail-runner">
+        <div className="cosmic-agents-detail-section-head">
+          <div>
+            <span className="cosmic-agents-detail-kicker">Runner defaults</span>
+            <h4>Reasoning effort</h4>
+          </div>
+        </div>
+        <span className="cosmic-agents-detail-control-label">Effort level</span>
         <div className="cosmic-agents-detail-model-grid compact">
-          {visibleModels.map((option) => (
+          {VARIANT_OPTIONS.map((option) => (
             <button
-              key={option.id}
+              key={option.value}
               type="button"
-              className={`cosmic-agents-detail-model-card ${preferredModel === option.id ? 'active' : ''}`}
-              onClick={() => savePreferredModel(option.id)}
+              className={`cosmic-agents-detail-model-card ${variant === option.value ? 'active' : ''}`}
+              onClick={() => saveVariant(option.value)}
               disabled={saving}
+              title="Sent to OpenCode as --variant; models without that effort fall back to their default."
             >
-              <span className="cosmic-agents-detail-model-name">{prettyModelLabel(option.id)}</span>
-              <small>{option.free ? 'Free on Zen' : 'Pay-per-token'}</small>
-              {preferredModel === option.id ? <CheckCircle2 size={16} className="cosmic-agents-detail-model-check-icon" /> : null}
+              <span className="cosmic-agents-detail-model-name">{option.label}</span>
+              <small>{option.note}</small>
+              {variant === option.value ? <CheckCircle2 size={16} className="cosmic-agents-detail-model-check-icon" /> : null}
             </button>
           ))}
         </div>
-        <p className="cosmic-agents-detail-section-copy">
-          {modelsLoading
-            ? 'Refreshing OpenCode Zen catalog…'
-            : modelsSource
-              ? `${models.length} models · ${modelsSource === 'live' ? 'live from opencode.ai/zen' : modelsSource.startsWith('cache') ? 'cached catalog' : 'offline fallback'}${modelsFetchedAt ? ` · ${new Date(modelsFetchedAt).toLocaleString()}` : ''}`
-              : 'Auto-refreshes every few hours from the live Zen catalog.'}
-        </p>
       </div>
 
       <div className="cosmic-agents-detail-runtime">

@@ -60,10 +60,10 @@ def test_opencode_runner_builds_headless_auto_run_command(tmp_path: Path) -> Non
     assert resumed[resumed.index("--format") + 1] == "json"
 
 
-def test_opencode_runner_env_scopes_home_and_injects_zen_key(tmp_path: Path) -> None:
+def test_opencode_runner_env_scopes_home_and_injects_provider_keys(tmp_path: Path) -> None:
     config = _config(tmp_path)
     runner = OpenCodeWorkspaceRunner(config)
-    runner.zen_api_key_override = "sk-zen-test-key"
+    runner.provider_keys = {"opencode": "sk-zen-test-key", "xai": "xai-key-1"}
 
     env = runner._env()
     home = str(config.opencode_home)
@@ -71,7 +71,31 @@ def test_opencode_runner_env_scopes_home_and_injects_zen_key(tmp_path: Path) -> 
     assert env["OPENCODE_CONFIG_DIR"] == str(config.opencode_home / ".config" / "opencode")
     assert env["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
     content = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-    assert content["provider"]["opencode"]["options"]["apiKey"] == "sk-zen-test-key"
+    providers = content["provider"]
+    assert providers["opencode"]["options"]["apiKey"] == "sk-zen-test-key"
+    assert providers["xai"]["options"]["apiKey"] == "xai-key-1"
+
+
+def test_opencode_runner_keyless_is_healthy_and_variant_flows_through(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    runner = OpenCodeWorkspaceRunner(config)
+
+    # Keyless is a supported state (free Zen tier): no config content injected.
+    env = runner._env()
+    assert "OPENCODE_CONFIG_CONTENT" not in env
+
+    paths = WorkspaceManager(config.alpha_root).prepare(project_id="prj_v", task_id="tsk_v")
+    command = runner.build_command(
+        paths=paths,
+        prompt="hi",
+        model="mimo-v2.5-free",
+        variant="high",
+    )
+    assert "--variant" in command
+    assert command[command.index("--variant") + 1] == "high"
+    # 'auto' (or garbage) means: omit the flag, defer to provider defaults.
+    auto_command = runner.build_command(paths=paths, prompt="hi", variant="auto")
+    assert "--variant" not in auto_command
 
 
 def test_opencode_global_instructions_render_and_write(tmp_path: Path) -> None:
@@ -105,17 +129,51 @@ def test_agent_auth_store_opencode_roundtrip_and_aliases(tmp_path: Path) -> None
     )
     assert settings["provider"] == "opencode"
     assert settings["has_api_key"] is True
+    assert settings["connected_providers"] == ["opencode"]
     reloaded = store.get_opencode(include_secret=False)
     assert reloaded["preferred_model"] == "mimo-v2.5-free"
 
+    # Multi-provider: connect xai + anthropic, then disconnect one.
+    store.connect_opencode_provider(provider_id="xai", api_key="xai-key-1")
+    store.connect_opencode_provider(provider_id="anthropic", api_key="sk-ant-1")
+    connected = store.get_opencode(include_secret=False)
+    assert connected["connected_providers"] == ["anthropic", "opencode", "xai"]
+
     secret_view = store.get_opencode(include_secret=True)
-    assert secret_view["api_key"] == "sk-zen-roundtrip"
+    assert secret_view["provider_keys"]["xai"] == "xai-key-1"
+    assert secret_view["provider_keys"]["opencode"] == "sk-zen-roundtrip"
+
+    store.disconnect_opencode_provider(provider_id="xai")
+    still_connected = store.get_opencode(include_secret=False)
+    assert still_connected["connected_providers"] == ["anthropic", "opencode"]
+    cleared_all = store.clear_opencode_api_key()
+    assert cleared_all["connected_providers"] == ["anthropic"]
 
     unknown = store.save_opencode(preferred_model="brand-new-model-x")
     assert unknown["preferred_model"] == "brand-new-model-x"
 
-    cleared = store.clear_opencode_api_key()
-    assert cleared["status"] == "logged_out"
+
+def test_gateway_parses_live_opencode_models_output() -> None:
+    text = "\n".join(
+        [
+            "opencode/big-pickle",
+            "opencode/mimo-v2.5-free",
+            "  anthropic/claude-opus-4-8  ",
+            "openai/gpt-5.5",
+            "",
+            "banner noise without a slash",
+            "not-a-pair / spaced",
+            "openai/gpt-5.5",  # duplicate must be dropped
+            "@weird/$format",
+        ]
+    )
+    grouped = GatewayRuntime._parse_opencode_models_output(text)
+    assert grouped == {
+        "opencode": ["big-pickle", "mimo-v2.5-free"],
+        "anthropic": ["claude-opus-4-8"],
+        "openai": ["gpt-5.5"],
+    }
+    assert GatewayRuntime._parse_opencode_models_output("") == {}
 
 
 def test_opencode_is_ready_without_any_zen_key() -> None:
