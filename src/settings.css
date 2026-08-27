@@ -5477,7 +5477,7 @@
   transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
 }
 
-.cosmic-alpha-provider-toggle button:hover:not(:disabled) {
+.cosmic-alpha-provider-toggle button:hover:not(:disabled):not(.active) {
   color: #fff;
 }
 
@@ -5485,6 +5485,10 @@
   background: rgba(255, 255, 255, 0.94);
   color: #0b0f14;
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
+}
+
+.cosmic-alpha-provider-toggle button.active svg {
+  color: #0b0f14;
 }
 
 .cosmic-alpha-provider-toggle button:disabled {

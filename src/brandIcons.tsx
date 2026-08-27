@@ -13,7 +13,17 @@ export function OpenAIMark({ size = 20 }: { size?: number }) {
   )
 }
 
-export function CursorMark({ size = 20 }: { size?: number }) {
+export function CursorMark({ size = 20, mono = false }: { size?: number; mono?: boolean }) {
+  if (mono) {
+    // Official single-path 2D cube (CUBE_2D_LIGHT.svg) recolored via
+    // currentColor — the colored cube's white top face would vanish on the
+    // toggle's white active pill.
+    return (
+      <svg width={size} height={size} viewBox="0 0 466.73 532.09" fill="currentColor" aria-hidden="true">
+        <path d="M457.43,125.94L244.42,2.96c-6.84-3.95-15.28-3.95-22.12,0L9.3,125.94c-5.75,3.32-9.3,9.46-9.3,16.11v247.99c0,6.65,3.55,12.79,9.3,16.11l213.01,122.98c6.84,3.95,15.28,3.95,22.12,0l213.01-122.98c5.75-3.32,9.3-9.46,9.3-16.11v-247.99c0-6.65-3.55-12.79-9.3-16.11h-.01ZM444.05,151.99l-205.63,356.16c-1.39,2.4-5.06,1.42-5.06-1.36v-233.21c0-4.66-2.49-8.97-6.53-11.31L24.87,145.67c-2.4-1.39-1.42-5.06,1.36-5.06h411.26c5.84,0,9.49,6.33,6.57,11.39h-.01Z" />
+      </svg>
+    )
+  }
   return (
     <svg width={size} height={size} viewBox="0 0 466.73 533.32" fill="none" aria-hidden="true">
       <path fill="#72716d" d="M233.37 266.66 464.53 400.12c-1.42 2.46-3.48 4.56-6.03 6.03L242.44 530.89c-5.61 3.24-12.53 3.24-18.14 0L8.24 406.15c-2.55-1.47-4.61-3.57-6.03-6.03L233.37 266.66Z" />

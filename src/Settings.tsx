@@ -489,7 +489,7 @@ export default function Settings({
                       onClick={() => void saveAlphaPreferredHarness('opencode')}
                       disabled={alphaConfigLoading}
                     >
-                      <OpenCodeMark size={13} tone="light" />
+                      <OpenCodeMark size={13} tone={alphaPreferredHarness === 'opencode' ? 'dark' : 'light'} />
                       OpenCode
                     </button>
                     <button
@@ -507,7 +507,7 @@ export default function Settings({
                       onClick={() => void saveAlphaPreferredHarness('cursor')}
                       disabled={alphaConfigLoading}
                     >
-                      <CursorMark size={13} />
+                      <CursorMark size={13} mono={alphaPreferredHarness === 'cursor'} />
                       Cursor
                     </button>
                   </div>
