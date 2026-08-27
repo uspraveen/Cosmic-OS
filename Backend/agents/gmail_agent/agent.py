@@ -318,6 +318,24 @@ class GmailAgent(AgentRuntime):
         if not request:
             raise ValueError("gmail.draft_reply requires request, query, or body.")
         draft_plan = await self._build_draft_plan(task, request=request, thread=draft_context)
+        if not draft_id and self._is_self_notification_in_foreign_thread(draft_plan, draft_context):
+            logger.info(
+                "gmail_agent.detached_self_notification thread_id=%s task_id=%s",
+                thread_id,
+                task.task_id,
+            )
+            if not str(task.input.get("subject") or "").strip():
+                subject = str(draft_plan.get("subject") or "")
+                if subject.lower().startswith("re: "):
+                    draft_plan["subject"] = subject[4:].strip()
+            thread_id = ""
+            reply_in_reply_to = ""
+            reply_references = ""
+            draft_plan["notes"] = self._append_note(
+                draft_plan.get("notes"),
+                "Composed as a new message: this draft is addressed only to the account "
+                "owner, so it does not belong in another correspondent's thread.",
+            )
         await self._maybe_step(2, "completed", "Draft body prepared.")
         draft_args = {
             "to": self._string_list(draft_plan.get("to") or task.input.get("to")),
@@ -967,6 +985,49 @@ class GmailAgent(AgentRuntime):
             )
         self._assert_recipients_are_addressable(plan, trusted_fields=caller_supplied)
         return plan
+
+    def _is_self_notification_in_foreign_thread(
+        self,
+        plan: dict[str, Any],
+        thread: dict[str, Any] | None,
+    ) -> bool:
+        """True when a note to the mailbox owner is about to be filed in someone else's thread.
+
+        COSMIC tells the user things by writing into the user's own inbox. Attaching
+        that note to the alert that prompted it buries a message for the owner inside
+        the sender's conversation, and makes a self-notification read as a reply to
+        them. Nothing addressed solely to the owner is ever a reply to a third party,
+        so the thread association is the part that is wrong, not the message.
+
+        Guidance in the agent card asked callers not to do this. Guidance is not
+        enforcement, and the orchestrator kept passing the triggering alert's
+        thread_id, so the rule lives here now.
+        """
+        owner = self._normalized_address(self._account_info().get("account_email"))
+        if not owner:
+            return False
+        recipients = [
+            normalized
+            for field in ("to", "cc", "bcc")
+            for normalized in (
+                self._normalized_address(address) for address in self._string_list(plan.get(field))
+            )
+            if normalized
+        ]
+        if not recipients or any(address != owner for address in recipients):
+            return False
+        for item in ((thread or {}).get("messages") or []):
+            if not isinstance(item, dict) or item.get("is_existing_draft"):
+                continue
+            sender = self._normalized_address(item.get("from"))
+            if sender and sender != owner:
+                return True
+        return False
+
+    @staticmethod
+    def _normalized_address(value: Any) -> str:
+        email = extract_email_address(str(value or "")) or str(value or "")
+        return email.strip().lower()
 
     def _thread_reply_recipients(self, thread: dict[str, Any] | None) -> list[str]:
         """The recipient implied by replying to a thread: its latest real correspondent."""

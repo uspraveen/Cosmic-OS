@@ -982,3 +982,137 @@ def test_send_only_mailbox_detection_covers_punctuation_variants() -> None:
     ]
     for address in addressable:
         assert GmailAgent._is_send_only_mailbox(address) is False, address
+
+# ---------------------------------------------------------------------------
+# A note to the mailbox owner is never a reply to a third party.
+#
+# 2026-08-27 03:02: a Chase "Insufficient Funds Notice" arrived and a standing
+# automation drafted a correct, correctly-addressed notice to the account owner
+# -- and filed it inside Chase's thread (1a0412949cb9e219), because the caller
+# passed the triggering alert's thread_id. The agent card asked callers not to
+# do that. Guidance is not enforcement, so the rule lives in the agent now.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_notice_to_the_owner_is_detached_from_a_third_party_thread() -> None:
+    client, result, error, _ = await _run_draft(
+        {
+            "thread_id": "1a0412949cb9e219",
+            "to": "user@example.com",
+            "subject": "Chase 8807 overdrawn (-$3.80) + NSF notice posted",
+            "body": "Praveen,\n\nYour Chase checking account is still overdrawn.\n\n- Cosmic",
+        },
+        thread=_thread_from("Chase <no.reply.alerts@chase.com>", thread_id="1a0412949cb9e219"),
+        task_id="tsk_self_notice_detached",
+    )
+
+    assert error is None, error
+    assert result is not None and result.status == "completed"
+    assert client.created is not None
+    # The message itself is untouched -- recipient, subject and body all correct.
+    assert client.created["to"] == ["user@example.com"]
+    assert "still overdrawn" in client.created["body"]
+    # Only its placement changes: it is a new message, not a reply to the bank.
+    assert client.created["thread_id"] is None
+    assert client.created["in_reply_to"] is None
+    assert client.created["references"] is None
+    assert "does not belong in another correspondent's thread" in result.output["notes"]
+
+
+@pytest.mark.asyncio
+async def test_a_real_reply_to_a_correspondent_keeps_its_thread() -> None:
+    """The guard must not touch ordinary replies -- that is most of what this does."""
+    client, result, error, _ = await _run_draft(
+        {
+            "thread_id": "thr_probe",
+            "to": "priya@example.com",
+            "subject": "Re: lunch",
+            "body": "Works for me.",
+        },
+        thread=_thread_from("Priya <priya@example.com>"),
+        task_id="tsk_real_reply_keeps_thread",
+    )
+
+    assert error is None, error
+    assert client.created is not None
+    assert client.created["thread_id"] == "thr_probe"
+    assert client.created["in_reply_to"] == "<alert@bank.example>"
+
+
+@pytest.mark.asyncio
+async def test_owner_copied_alongside_a_third_party_keeps_its_thread() -> None:
+    """Only a message addressed *solely* to the owner is a self-notification."""
+    client, result, error, _ = await _run_draft(
+        {
+            "thread_id": "thr_probe",
+            "to": "priya@example.com",
+            "cc": "user@example.com",
+            "subject": "Re: lunch",
+            "body": "Works for me.",
+        },
+        thread=_thread_from("Priya <priya@example.com>"),
+        task_id="tsk_owner_cc_keeps_thread",
+    )
+
+    assert error is None, error
+    assert client.created is not None
+    assert client.created["thread_id"] == "thr_probe"
+
+
+@pytest.mark.asyncio
+async def test_a_thread_the_owner_is_alone_in_is_left_alone() -> None:
+    """Owner-to-owner inside the owner's own thread is a genuine self-thread."""
+    own_thread = _thread_from("Praveen <user@example.com>", thread_id="thr_self")
+    client, result, error, _ = await _run_draft(
+        {
+            "thread_id": "thr_self",
+            "to": "user@example.com",
+            "subject": "Re: my notes",
+            "body": "One more thought.",
+        },
+        thread=own_thread,
+        task_id="tsk_self_thread_kept",
+    )
+
+    assert error is None, error
+    assert client.created is not None
+    assert client.created["thread_id"] == "thr_self"
+
+
+@pytest.mark.asyncio
+async def test_detaching_drops_a_reply_subject_the_agent_added_itself() -> None:
+    """A detached message should not still be titled as a reply."""
+    client, result, error, _ = await _run_draft(
+        {
+            "thread_id": "1a0412949cb9e219",
+            "to": "user@example.com",
+            "body": "Praveen, heads up.",
+        },
+        thread=_thread_from("Chase <no.reply.alerts@chase.com>", thread_id="1a0412949cb9e219"),
+        task_id="tsk_detach_strips_re",
+    )
+
+    assert error is None, error
+    assert client.created is not None
+    assert client.created["thread_id"] is None
+    assert not client.created["subject"].lower().startswith("re: ")
+    assert client.created["subject"] == "Your available balance is below your limit"
+
+
+@pytest.mark.asyncio
+async def test_a_caller_supplied_subject_is_never_rewritten_when_detaching() -> None:
+    client, result, error, _ = await _run_draft(
+        {
+            "thread_id": "1a0412949cb9e219",
+            "to": "user@example.com",
+            "subject": "Re: something the caller meant literally",
+            "body": "Praveen, heads up.",
+        },
+        thread=_thread_from("Chase <no.reply.alerts@chase.com>", thread_id="1a0412949cb9e219"),
+        task_id="tsk_detach_keeps_explicit_subject",
+    )
+
+    assert error is None, error
+    assert client.created is not None
+    assert client.created["subject"] == "Re: something the caller meant literally"
