@@ -26,7 +26,7 @@ intents:
     timeout_sec: 90
     usage_hints:
       - Use this when the user asks COSMIC to create a Google Doc.
-      - This is an intelligent specialist: it can use its internal LLM to turn a high-level brief into a document title and Markdown-like body before the API executor creates native Google Docs content.
+      - "This is an intelligent specialist: it can use its internal LLM to turn a high-level brief into a document title and Markdown-like body before the API executor creates native Google Docs content."
       - The initial content can be Markdown-like text; the specialist renders headings, bullets, links, basic inline styles, code blocks, and pipe-table blocks as native Docs formatting.
       - Use this for tracker docs, outreach/contact tables, status/priority keys, schedules, and comparison matrices. The specialist should create real Google Docs tables, not literal markdown pipe text.
       - If the user already named or previously selected a Google account, pass it as account_hint exactly enough for routing, preferably the email address.
@@ -49,7 +49,7 @@ intents:
     output_schema: schemas/intents/docs.edit.output.json
     timeout_sec: 120
     usage_hints:
-      - Use this for live Google Docs mutations: overwrite_doc, replace_text, update_block, insert_table, insert_image, add_comment, reply_to_comment, resolve_comment, reopen_comment, share_file, list_permissions, list_comments, get_link.
+      - "Use this for live Google Docs mutations: overwrite_doc, replace_text, update_block, insert_table, insert_image, add_comment, reply_to_comment, resolve_comment, reopen_comment, share_file, list_permissions, list_comments, get_link."
       - For high-level natural-language edits, pass query/user_request/instructions with operation=auto or omit operation; the agent's internal LLM will choose the safest supported operation and parameters.
       - Prefer update_block with a fresh block_id from docs.read for precise edits; include expected_snippet when safety matters.
       - For large document generation, use docs.create or overwrite_doc with Markdown-like content rather than asking the orchestrator to hand-edit Google Docs API requests.
