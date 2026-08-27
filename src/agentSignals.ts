@@ -331,6 +331,25 @@ export const summarizeAgentSignals = (
 }
 
 /**
+ * The sentence, with a lead-in that only names the actor removed.
+ *
+ * The orchestrator writes "X twitter search agent: Searching X for ...". Beside
+ * a mark that is already the X logo, the first four words are the mark said
+ * again in words -- and they cost a third of a footer that only gets one line.
+ * Only stripped when we actually drew a mark for that actor, so a line with the
+ * generic mark keeps whatever context its wording carries.
+ */
+export const stripActorPrefix = (label: unknown, signal: AgentSignal): string => {
+  const value = text(label)
+  if (!value || signal.glyph === 'cosmic') return value
+  const match = /^.{2,44}?\b(?:agent|specialist|subagent)\s*:\s*(\S.*)$/is.exec(value)
+  if (!match) return value
+  const rest = match[1].trim()
+  if (rest.length < 3) return value
+  return rest.charAt(0).toUpperCase() + rest.slice(1)
+}
+
+/**
  * The tail of a reasoning stream, for the header of a collapsed Thinking
  * section. Collapsing that section by default trades a wall of text for one
  * live line, which is the trade only if the line keeps moving -- so this takes

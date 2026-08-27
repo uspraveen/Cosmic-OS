@@ -4,6 +4,7 @@ import {
   extractDomains,
   faviconUrl,
   resolveAgentSignal,
+  stripActorPrefix,
   summarizeAgentSignals,
 } from './agentSignals'
 
@@ -147,6 +148,38 @@ describe('summarizeAgentSignals', () => {
   it('tolerates no entries', () => {
     expect(summarizeAgentSignals(undefined)).toEqual([])
     expect(summarizeAgentSignals([])).toEqual([])
+  })
+})
+
+describe('stripActorPrefix', () => {
+  const x = resolveAgentSignal({ agentId: 'cosmic/x-twitter-search-agent', label: 'searched X' })
+
+  it('drops the lead-in the mark already says', () => {
+    expect(stripActorPrefix('X twitter search agent: Searching X for shipping chatter', x))
+      .toBe('Searching X for shipping chatter')
+  })
+
+  it('capitalises what is left', () => {
+    expect(stripActorPrefix('Gmail agent: reading the thread', x)).toBe('Reading the thread')
+  })
+
+  it('keeps a sentence that merely mentions an agent mid-way', () => {
+    const line = 'Handed the shipping question to a specialist and waited'
+    expect(stripActorPrefix(line, x)).toBe(line)
+  })
+
+  it('leaves the line alone when the mark is the generic one', () => {
+    const generic = resolveAgentSignal({ label: 'Cosmic is writing the response.' })
+    expect(stripActorPrefix('Research agent: looking around', generic)).toBe('Research agent: looking around')
+  })
+
+  it('keeps a prefix that would leave nothing behind', () => {
+    expect(stripActorPrefix('X agent: ok', x)).toBe('X agent: ok')
+  })
+
+  it('tolerates an empty line', () => {
+    expect(stripActorPrefix('', x)).toBe('')
+    expect(stripActorPrefix(undefined, x)).toBe('')
   })
 })
 

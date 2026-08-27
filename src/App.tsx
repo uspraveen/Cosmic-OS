@@ -30,7 +30,7 @@ import { groupRepliesWithTheirQuery } from './transcriptOrder'
 import { groupEmailThreads, stripEmailEnvelope, type EmailThreadUnit } from './emailThreads'
 import { findPendingApprovals } from './pendingApprovals'
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
-import { resolveAgentSignal, summarizeAgentSignals, thinkingPreview } from './agentSignals'
+import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 
 export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'task' | 'meeting' | 'spaces'
@@ -1852,7 +1852,7 @@ const AssistantFlowTimeline = memo(({
                 <AgentGlyph signal={signal} size={22} active={isActive} />
                 <div className="assistant-flow-copy">
                   <div className="assistant-flow-title">
-                    <span>{entry.label}</span>
+                    <span>{stripActorPrefix(entry.label, signal)}</span>
                     <DomainCluster domains={signal.domains} />
                   </div>
                   {entry.detail && entry.detail !== entry.label && (
@@ -1870,7 +1870,7 @@ const AssistantFlowTimeline = memo(({
                         <AgentGlyph signal={childSignal} size={18} iconSize={10} active={childActive} />
                         <div className="assistant-flow-copy">
                           <div className="assistant-flow-title">
-                            <span>{child.label}</span>
+                            <span>{stripActorPrefix(child.label, childSignal)}</span>
                             <DomainCluster domains={childSignal.domains} size={13} />
                           </div>
                           {child.detail && child.detail !== child.label && (
@@ -8318,11 +8318,6 @@ export default function App() {
                           {msg.progress?.kind === 'tabular_parse' && !String(msg.content || '').trim() && (
                             <TabularProgressCard progress={msg.progress} />
                           )}
-                          {msg.activity && msg.progress?.kind !== 'docs_parse' && msg.progress?.kind !== 'tabular_parse' && (
-                            <div className="assistant-activity" title="Live activity from Opus tool orchestration">
-                              {msg.activity}
-                            </div>
-                          )}
                           {msg.thinking && (
                             <AssistantCollapsibleSection
                               title="Thinking"
@@ -8447,7 +8442,9 @@ export default function App() {
                         // the dot row would just be saying it a second time.
                         <div className="streaming-now">
                           {liveSignal && <AgentGlyph signal={liveSignal} size={22} active />}
-                          <span className="streaming-status">{streamingProgress}</span>
+                          <span className="streaming-status">
+                            {liveSignal ? stripActorPrefix(streamingProgress, liveSignal) : streamingProgress}
+                          </span>
                           {liveSignal && <DomainCluster domains={liveSignal.domains} size={14} />}
                         </div>
                       ) : (
