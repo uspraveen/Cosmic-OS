@@ -6727,39 +6727,53 @@
   margin-bottom: 10px;
 }
 
-/* Active-model strip: the one thing returning users look for, first. */
+/* Active-model strip: solid black card with a provider chip — the same
+   "selected item = black pill" language as the rail. */
 .opencode-current {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 11px 13px;
+  gap: 11px;
+  padding: 11px 12px;
   margin-bottom: 12px;
-  border-radius: 13px;
-  border: 1px solid rgba(142, 207, 255, 0.28);
+  border-radius: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
   background:
-    linear-gradient(180deg, rgba(142, 207, 255, 0.08), rgba(142, 207, 255, 0.03)),
-    rgba(10, 14, 20, 0.42);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.0)),
+    rgba(6, 7, 9, 0.92);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 8px 20px rgba(0, 0, 0, 0.35);
 }
 
-.opencode-current-dot {
-  width: 8px;
-  height: 8px;
+.opencode-current-chip {
   flex: none;
-  border-radius: 50%;
-  background: #4caf50;
-  box-shadow: 0 0 7px rgba(76, 175, 80, 0.55);
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #fff;
 }
 
-.opencode-current-dot[data-state='off'] {
-  background: rgba(255, 255, 255, 0.28);
-  box-shadow: none;
+.opencode-current-chip[data-tone='off'] {
+  opacity: 0.45;
+}
+
+.opencode-current-glyph {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
 }
 
 .opencode-current-main {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   min-width: 0;
+  flex: 1;
 }
 
 .opencode-current-label {
@@ -6767,7 +6781,7 @@
   align-items: center;
   gap: 7px;
   color: #fff;
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 700;
   letter-spacing: -0.01em;
   white-space: nowrap;
@@ -6783,18 +6797,12 @@
   text-overflow: ellipsis;
 }
 
-.opencode-current-check {
-  flex: none;
-  margin-left: auto;
-  color: #7ddc84;
-}
-
 .opencode-current-change {
   flex: none;
-  padding: 4px 12px;
+  padding: 5px 13px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.07);
   color: #fff;
   font-size: 11px;
   font-weight: 650;
@@ -6802,32 +6810,39 @@
 }
 
 .opencode-current-change:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.14);
 }
 
-/* Consistent right slot in model rows: [Free pill] [lock/check]. Every row
-   aligns to the same right edge — no more ragged pills. */
+/* Consistent right slot in model rows: [Free pill] [fixed 14px icon column].
+   The icon column is always rendered, so Free pills sit in one straight
+   column whether the row has a lock, a check, or nothing. */
 .opencode-row-right {
   margin-left: auto;
   flex: none;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-width: 34px;
-  justify-content: flex-end;
 }
 
 .opencode-row-right .opencode-free-pill {
   margin-left: 0;
 }
 
-.opencode-row-right svg {
+.opencode-row-icon {
   flex: none;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.opencode-row-icon svg {
   color: #8ecfff;
 }
 
-.opencode-model-row.locked .opencode-row-right svg,
-.opencode-hit.locked .opencode-row-right svg {
+.opencode-model-row.locked .opencode-row-icon svg,
+.opencode-hit.locked .opencode-row-icon svg {
   color: rgba(255, 215, 106, 0.6);
 }
 
@@ -6896,10 +6911,11 @@
 .opencode-group-rail {
   display: flex;
   flex-direction: column;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.02);
-  overflow: hidden;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.025);
 }
 
 .opencode-rail-item {
@@ -6908,25 +6924,34 @@
   gap: 8px;
   width: 100%;
   min-height: 40px;
-  padding: 6px 12px;
-  border: none;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 11px;
   background: transparent;
   color: rgba(255, 255, 255, 0.85);
   cursor: pointer;
   text-align: left;
+  transition: background 0.16s ease, border-color 0.16s ease;
 }
 
-.opencode-rail-item:first-child {
+.opencode-rail-item + .opencode-rail-item {
   border-top: none;
 }
 
 .opencode-rail-item:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.045);
 }
 
+/* Selected item = solid black pill on the glass (the menu pattern). */
 .opencode-rail-item.active {
-  background: rgba(142, 207, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.0)),
+    rgba(5, 6, 8, 0.95);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 6px 16px rgba(0, 0, 0, 0.4);
+  color: #fff;
 }
 
 .opencode-rail-label {

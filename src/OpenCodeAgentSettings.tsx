@@ -11,7 +11,14 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react'
-import { OpenCodeMark } from './brandIcons'
+import { OpenAIMark, OpenCodeMark } from './brandIcons'
+
+function CurrentProviderMark({ providerId }: { providerId?: string | null }) {
+  const pid = (providerId || 'opencode').toLowerCase()
+  if (pid === 'opencode') return <OpenCodeMark size={17} tone="light" />
+  if (pid === 'openai') return <OpenAIMark size={16} />
+  return <span className="opencode-current-glyph">{(providerId || 'O').charAt(0).toUpperCase()}</span>
+}
 
 type OpenCodeModel = {
   id: string
@@ -361,9 +368,11 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
         </div>
       ) : null}
 
-      {/* ── Active model strip: what Alpha runs next, one glance ────────── */}
+      {/* ── Active model strip: solid black card, provider-marked ──────── */}
       <div className="opencode-current">
-        <span className="opencode-current-dot" data-state={currentModel.model.usable ? 'on' : 'off'} />
+        <span className="opencode-current-chip" data-tone={currentModel.model.usable ? 'on' : 'off'}>
+          <CurrentProviderMark providerId={currentModel.group?.id} />
+        </span>
         <div className="opencode-current-main">
           <span className="opencode-current-label">
             {currentModel.model.label}
@@ -373,7 +382,6 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
             {currentModel.group ? currentModel.group.label : 'OpenCode Zen'} · {currentModel.model.qualified}
           </small>
         </div>
-        <CheckCircle2 size={16} className="opencode-current-check" />
         <button
           type="button"
           className="opencode-current-change"
@@ -450,8 +458,13 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
                 </span>
                 <span className="opencode-row-right">
                   {model.free ? <span className="opencode-free-pill">Free</span> : null}
-                  {!model.usable ? <Lock size={12} /> : null}
-                  {preferredModel === model.id && model.usable ? <CheckCircle2 size={15} /> : null}
+                  <span className="opencode-row-icon">
+                    {!model.usable
+                      ? <Lock size={12} />
+                      : preferredModel === model.id
+                        ? <CheckCircle2 size={14} />
+                        : null}
+                  </span>
                 </span>
               </button>
             ))}
@@ -515,8 +528,13 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
                       </span>
                       <span className="opencode-row-right">
                         {model.free ? <span className="opencode-free-pill">Free</span> : null}
-                        {!model.usable ? <Lock size={12} /> : null}
-                        {preferredModel === model.id && model.usable ? <CheckCircle2 size={16} /> : null}
+                        <span className="opencode-row-icon">
+                          {!model.usable
+                            ? <Lock size={12} />
+                            : preferredModel === model.id
+                              ? <CheckCircle2 size={15} />
+                              : null}
+                        </span>
                       </span>
                     </button>
                   ))}
