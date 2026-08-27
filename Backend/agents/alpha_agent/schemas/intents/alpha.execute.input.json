@@ -34,8 +34,12 @@
     "preferred_harness": {
       "type": "string",
       "enum": ["codex", "opencode", "cursor", "auto"],
-      "default": "codex",
-      "description": "Preferred execution harness. Codex, Cursor, and auto are currently executable."
+      "default": "opencode",
+      "description": "Preferred execution harness. OpenCode (Zen models) is the COSMIC default; Codex, Cursor, and auto are also executable. If no harness is supplied here, the VM-level Settings > Agents selection applies."
+    },
+    "opencode_session_id": {
+      "type": ["string", "null"],
+      "description": "OpenCode-specific native session id to resume."
     },
     "preferred_model": {
       "type": ["string", "null"],

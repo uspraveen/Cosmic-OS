@@ -470,7 +470,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "input": {
                         "type": "object",
-                        "description": "Structured payload for the specialist intent. Keep it minimal and match the schema hints returned by agent_catalog_search. For alpha.execute, write a concise high-level goal and pass bulky files or parsed documents by artifact_ids/input_artifacts; if a document has a bundle_id, pass the source artifact reference so parsed bundle files can be staged. Let Alpha use its configured/auto harness unless the user explicitly requires one provider, and do not request cross-provider fallback unless the user has clearly allowed it.",
+                        "description": "Structured payload for the specialist intent. Keep it minimal and match the schema hints returned by agent_catalog_search. For alpha.execute, write a concise high-level goal and pass bulky files or parsed documents by artifact_ids/input_artifacts; if a document has a bundle_id, pass the source artifact reference so parsed bundle files can be staged. Let Alpha use its configured/auto harness (OpenCode is the VM default) unless the user explicitly requires one provider, and do not request cross-provider fallback unless the user has clearly allowed it. Alpha rotates away from providers that are unauthenticated, missing, or mid-update on its own — you do not need to plan for that.",
                     },
                     "agent_id": {
                         "type": "string",

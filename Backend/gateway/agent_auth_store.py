@@ -13,6 +13,7 @@ from .credentials.encryption import decrypt_token, encrypt_token_str
 
 PROVIDER_CODEX = "codex"
 PROVIDER_CURSOR = "cursor"
+PROVIDER_OPENCODE = "opencode"
 _CODEX_MODEL_ALIASES = {
     "gpt-5.1-codex": "gpt-5.4",
     "gpt-5.1-codex-mini": "gpt-5.4",
@@ -45,8 +46,19 @@ _CURSOR_MODEL_ALIASES = {
     "cursor-grok": "cursor-grok-4.5-high",
     "cursor grok 4.5": "cursor-grok-4.5-high",
     "cursor-grok-4.5": "cursor-grok-4.5-high",
-    "cursor-grok-4.5-high": "cursor-grok-4.5-high",
     "cursor grok 4.5 high": "cursor-grok-4.5-high",
+}
+# OpenCode Zen model ids rotate weekly (models.dev + opencode.ai/zen/v1/models
+# feed), so this list is a curated seed for the default picker plus friendly
+# aliases — NOT an allowlist. Anything non-empty and sane is accepted so a
+# fresh Zen drop works before COSMIC ships code changes.
+_OPENCODE_MODEL_ALIASES = {
+    "mimo": "mimo-v2.5-free",
+    "mimo v2.5 pro": "mimo-v2.5-free",
+    "mimo-v2.5-pro": "mimo-v2.5-free",
+    "mimo v2.5": "mimo-v2.5-free",
+    "mimov2.5": "mimo-v2.5-free",
+    "bigpickle": "big-pickle",
 }
 
 
@@ -101,6 +113,94 @@ class AgentAuthStore:
             include_secret=include_secret,
             default_auth_mode="oauth",
             default_preferred_model="cursor-grok-4.5-high",
+        )
+
+    def get_opencode(self, *, include_secret: bool = False) -> dict[str, Any]:
+        return self._get_provider(
+            PROVIDER_OPENCODE,
+            include_secret=include_secret,
+            default_auth_mode="api_key",
+            default_preferred_model="mimo-v2.5-free",
+        )
+
+    def save_opencode(
+        self,
+        *,
+        auth_mode: str | None = None,
+        preferred_model: str | None = None,
+        vm_sync_enabled: bool | None = None,
+        api_key: str | None = None,
+        status: str | None = None,
+        login_required_reason: str | None = None,
+        last_cli_status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_opencode(include_secret=True)
+        next_model = _normalize_opencode_model(
+            preferred_model,
+            fallback=str(current.get("preferred_model") or "mimo-v2.5-free"),
+        )
+        next_api_key = (
+            str(api_key).strip()
+            if api_key is not None
+            else str(current.get("api_key") or "")
+        )
+        cli_status = (
+            last_cli_status
+            if isinstance(last_cli_status, dict)
+            else current.get("last_cli_status")
+            if isinstance(current.get("last_cli_status"), dict)
+            else {}
+        )
+        now = _utcnow_iso()
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO agent_provider_auth
+               (provider, auth_mode, preferred_model, reasoning_effort, approval_mode, vm_sync_enabled,
+                encrypted_api_key, has_api_key, status, login_required_reason,
+                last_cli_status_json, updated_at)
+               VALUES (?, ?, ?, 'auto', 'suggest', ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(provider) DO UPDATE SET
+                 preferred_model = excluded.preferred_model,
+                 vm_sync_enabled = excluded.vm_sync_enabled,
+                 encrypted_api_key = excluded.encrypted_api_key,
+                 has_api_key = excluded.has_api_key,
+                 status = excluded.status,
+                 login_required_reason = excluded.login_required_reason,
+                 last_cli_status_json = excluded.last_cli_status_json,
+                 updated_at = excluded.updated_at""",
+            [
+                PROVIDER_OPENCODE,
+                "api_key",
+                next_model,
+                1 if bool(vm_sync_enabled if vm_sync_enabled is not None else current.get("vm_sync_enabled", True)) else 0,
+                encrypt_token_str(next_api_key) if next_api_key else "",
+                1 if bool(next_api_key) else 0,
+                (status or str(current.get("status") or "not_configured")).strip()
+                or "not_configured",
+                (
+                    login_required_reason
+                    if login_required_reason is not None
+                    else str(current.get("login_required_reason") or "")
+                ),
+                json.dumps(cli_status),
+                now,
+            ],
+        )
+        conn.commit()
+        return self.get_opencode(include_secret=False)
+
+    def clear_opencode_api_key(
+        self,
+        *,
+        status: str = "logged_out",
+        login_required_reason: str = "user_logged_out",
+        last_cli_status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self.save_opencode(
+            api_key="",
+            status=status,
+            login_required_reason=login_required_reason,
+            last_cli_status=last_cli_status or {},
         )
 
     def save_codex(
@@ -410,6 +510,11 @@ class AgentAuthStore:
                 str(payload.get("preferred_model") or ""),
                 fallback=default_preferred_model,
             )
+        if provider == PROVIDER_OPENCODE:
+            payload["preferred_model"] = _normalize_opencode_model(
+                str(payload.get("preferred_model") or ""),
+                fallback=default_preferred_model,
+            )
         if include_secret:
             api_key = ""
             if row["encrypted_api_key"]:
@@ -445,3 +550,24 @@ def _normalize_cursor_model(value: str | None, *, fallback: str) -> str:
         return "auto"
     alias_key = " ".join(normalized.lower().split())
     return _CURSOR_MODEL_ALIASES.get(alias_key, normalized)[:80]
+
+
+def _normalize_opencode_model(value: str | None, *, fallback: str) -> str:
+    """Permissive: unknown-but-sane ids pass through so brand-new Zen models
+    can be selected before COSMIC learns about them. Only emptiness falls
+    back; the alias table just canonicalizes friendly names (e.g. users
+    typing 'mimo v2.5 pro' get today's MiMo id)."""
+    normalized = str(value or "").strip()
+    if not normalized:
+        normalized = (fallback or "").strip() or "mimo-v2.5-free"
+    lowered = normalized.lower()
+    if lowered == "auto":
+        return "auto"
+    bare = lowered.split("/")[-1]
+    aliased = _OPENCODE_MODEL_ALIASES.get(bare) or _OPENCODE_MODEL_ALIASES.get(
+        " ".join(lowered.split())
+    )
+    if aliased:
+        return aliased
+    sanitized = "".join(ch for ch in normalized if ch.isalnum() or ch in "/.-_")[:120]
+    return sanitized or (fallback or "mimo-v2.5-free")

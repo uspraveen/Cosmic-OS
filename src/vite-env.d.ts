@@ -241,6 +241,15 @@ interface Window {
     saveGatewayAlphaAgentConfig: (payload: {
       preferredHarness?: string
     }) => Promise<any>
+    getGatewayOpenCodeStatus: () => Promise<any>
+    saveGatewayOpenCodeConfig: (payload: {
+      preferredModel?: string
+      vmSyncEnabled?: boolean
+      apiKey?: string
+    }) => Promise<any>
+    logoutGatewayOpenCode: () => Promise<any>
+    getGatewayOpenCodeModels: (opts?: { forceRefresh?: boolean }) => Promise<any>
+    getGatewayAlphaProvidersOverview: () => Promise<any>
     pickGatewayDocuments: () => Promise<{ documents: GatewayPendingDocumentAttachment[] }>
     sendGatewayQuery: (payload: {
       content: string

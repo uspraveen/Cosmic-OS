@@ -18,10 +18,16 @@ from .config import AGENT_ROOT, AlphaAgentConfig
 from .cursor_runner import CursorRunResult, CursorWorkspaceRunner
 from .docker_runner import DockerWorkspaceRunner
 from .instructions import seed_workspace_instructions
+from .opencode_runner import OpenCodeRunResult, OpenCodeWorkspaceRunner
 from .project_registry import HarnessSessionRecord, ProjectCandidate, ProjectRecord, ProjectRegistry
 from .workspace_manager import WorkspaceManager, WorkspacePaths
 
 logger = logging.getLogger(__name__)
+
+
+# Canonical provider order: "auto" and cross-provider fallback resolve in
+# this order (OpenCode first — it is the COSMIC default harness).
+ALPHA_HARNESSES: tuple[str, ...] = ("opencode", "codex", "cursor")
 
 
 class AlphaAgent(AgentRuntime):
@@ -39,10 +45,12 @@ class AlphaAgent(AgentRuntime):
             self.config.alpha_root,
             codex_home=self.config.codex_home,
             cursor_home=self.config.cursor_home,
+            opencode_home=self.config.opencode_home,
         )
         self.docker_runner = DockerWorkspaceRunner(self.config)
         self.codex_runner = CodexWorkspaceRunner(self.config)
         self.cursor_runner = CursorWorkspaceRunner(self.config)
+        self.opencode_runner = OpenCodeWorkspaceRunner(self.config)
         super().__init__(
             agent_card_path=AGENT_ROOT / "agent_card.yaml",
             redis_client=redis_client,
@@ -219,7 +227,10 @@ class AlphaAgent(AgentRuntime):
         if not candidate_harnesses:
             return self._fail(
                 code="UNSUPPORTED_OPERATION",
-                message="Alpha currently supports Codex and Cursor CLI execution. OpenCode is planned but not wired.",
+                message=(
+                    "Alpha supports Codex, Cursor CLI and OpenCode execution. "
+                    f"Set preferred_harness to one of: {', '.join(ALPHA_HARNESSES)}."
+                ),
                 next_action="ask_user",
             )
 
@@ -243,18 +254,36 @@ class AlphaAgent(AgentRuntime):
         all_artifacts: list[Any] = []
         attempt_outputs: dict[str, Any] = {}
         fallback_from: dict[str, Any] | None = None
-        last_result: CodexRunResult | CursorRunResult | None = None
+        last_result: CodexRunResult | CursorRunResult | OpenCodeRunResult | None = None
         last_provider = candidate_harnesses[0]
+        # Harnesses beyond the original attempt plan exist only so the
+        # pre-execution auth walk can rotate to a logged-in provider when the
+        # preferred one cannot run (unauthenticated / missing CLI /
+        # mid-update maintenance). They are never executed after a real
+        # failed run — post-failure cross-provider switching stays an
+        # explicit opt-in (allow_cross_harness_fallback).
+        runnable_candidate_count = len(candidate_harnesses)
+        candidate_harnesses.extend(
+            item for item in ALPHA_HARNESSES if item not in candidate_harnesses
+        )
+        first_provider = candidate_harnesses[0]
+        first_provider_status: dict[str, Any] = {}
+        first_provider_label = self._harness_label(first_provider)
         last_provider_status: dict[str, Any] = {}
         last_provider_label = self._harness_label(last_provider)
 
-        for attempt_index, active_harness in enumerate(candidate_harnesses):
+        attempt_index = 0
+        while attempt_index < len(candidate_harnesses):
+            active_harness = candidate_harnesses[attempt_index]
             provider_status = await self._safe_fetch_provider_status(active_harness)
             provider_ready = self._provider_status_is_ready(provider_status)
             provider_label = self._harness_label(active_harness)
             last_provider = active_harness
             last_provider_status = provider_status
             last_provider_label = provider_label
+            if attempt_index == 0:
+                first_provider_status = provider_status
+                first_provider_label = provider_label
 
             if self.step_plan is not None and (attempt_index == 0 or provider_ready):
                 await self.step_plan.update(
@@ -281,40 +310,48 @@ class AlphaAgent(AgentRuntime):
                 )
                 if last_result is not None:
                     break
-                if attempt_index + 1 < len(candidate_harnesses) and candidate_harnesses[attempt_index + 1] != active_harness:
-                    next_harness = candidate_harnesses[attempt_index + 1]
-                    await self._emit_harness_fallback(
-                        task=task,
-                        project_id=project.project_id,
-                        workspace=str(paths.workspace),
-                        from_provider=active_harness,
-                        to_provider=next_harness,
-                        reason=f"{provider_label} is not authenticated.",
+                next_different_index = next(
+                    (
+                        j
+                        for j in range(attempt_index + 1, len(candidate_harnesses))
+                        if candidate_harnesses[j] != active_harness
+                    ),
+                    None,
+                )
+                if next_different_index is None:
+                    project = self.registry.mark_task(
+                        project.project_id,
+                        task_id=task.task_id,
+                        session_id=task.session_id,
+                        local_path=str(paths.workspace),
+                        summary=goal[:500],
+                        status=f"{first_provider}_login_required",
+                        goal=goal[:2000],
+                        context_brief=context_brief,
+                        preferred_harness=first_provider,
+                        repo_url=self._optional_string(task.input.get("repo_url")),
+                        deployment_url=self._optional_string(task.input.get("deployment_url")),
                     )
-                    fallback_from = {
-                        "provider": active_harness,
-                        "reason": "login_required",
-                    }
-                    continue
-
-                project = self.registry.mark_task(
-                    project.project_id,
-                    task_id=task.task_id,
-                    session_id=task.session_id,
-                    local_path=str(paths.workspace),
-                    summary=goal[:500],
-                    status=f"{active_harness}_login_required",
-                    goal=goal[:2000],
-                    context_brief=context_brief,
-                    preferred_harness=active_harness,
-                    repo_url=self._optional_string(task.input.get("repo_url")),
-                    deployment_url=self._optional_string(task.input.get("deployment_url")),
+                    return self._fail(
+                        code=f"{first_provider.upper()}_LOGIN_REQUIRED",
+                        message=self._provider_login_message(first_provider, first_provider_status),
+                        next_action="ask_user",
+                    )
+                next_harness = candidate_harnesses[next_different_index]
+                await self._emit_harness_fallback(
+                    task=task,
+                    project_id=project.project_id,
+                    workspace=str(paths.workspace),
+                    from_provider=active_harness,
+                    to_provider=next_harness,
+                    reason=f"{provider_label} is not authenticated.",
                 )
-                return self._fail(
-                    code=f"{active_harness.upper()}_LOGIN_REQUIRED",
-                    message=self._provider_login_message(active_harness, provider_status),
-                    next_action="ask_user",
-                )
+                fallback_from = {
+                    "provider": active_harness,
+                    "reason": "login_required",
+                }
+                attempt_index = next_different_index
+                continue
 
             await self.emit_event(
                 task.task_id,
@@ -342,7 +379,25 @@ class AlphaAgent(AgentRuntime):
             )
             selected_model: str | None = None
             native_session: HarnessSessionRecord | None = None
-            if active_harness == "cursor":
+            if active_harness == "opencode":
+                selected_model = self._select_opencode_model(task, provider_status)
+                native_session = await self._prepare_opencode_native_session(
+                    task=task,
+                    project=project,
+                    paths=paths,
+                    model=selected_model,
+                    emit=emit_alpha_terminal,
+                )
+                run_result = await self.opencode_runner.run(
+                    paths=paths,
+                    prompt=prompt,
+                    model=selected_model,
+                    resume_session_id=native_session.native_session_id if native_session else None,
+                    timeout_sec=self.config.opencode_timeout_sec,
+                    event_callback=emit_alpha_terminal,
+                    cancel_check=cancel_check,
+                )
+            elif active_harness == "cursor":
                 selected_model = self._select_cursor_model(task, provider_status)
                 native_session = await self._prepare_cursor_native_session(
                     task=task,
@@ -475,7 +530,9 @@ class AlphaAgent(AgentRuntime):
                     error=None,
                 )
 
-            if attempt_index + 1 >= len(candidate_harnesses) or not self._should_try_next_harness(run_result):
+            if attempt_index + 1 >= min(len(candidate_harnesses), runnable_candidate_count):
+                break
+            if not self._should_try_next_harness(run_result):
                 break
 
             next_harness = candidate_harnesses[attempt_index + 1]
@@ -496,6 +553,7 @@ class AlphaAgent(AgentRuntime):
                 "timed_out": run_result.timed_out,
                 "reason": reason,
             }
+            attempt_index += 1
 
         if self.step_plan is not None:
             await self.step_plan.update(5, "failed", f"{last_provider_label} execution failed.")
@@ -507,16 +565,16 @@ class AlphaAgent(AgentRuntime):
                 session_id=task.session_id,
                 local_path=str(paths.workspace),
                 summary=goal[:500],
-                status=f"{last_provider}_login_required",
+                status=f"{first_provider}_login_required",
                 goal=goal[:2000],
                 context_brief=context_brief,
-                preferred_harness=last_provider,
+                preferred_harness=first_provider,
                 repo_url=self._optional_string(task.input.get("repo_url")),
                 deployment_url=self._optional_string(task.input.get("deployment_url")),
             )
             return self._fail(
-                code=f"{last_provider.upper()}_LOGIN_REQUIRED",
-                message=self._provider_login_message(last_provider, last_provider_status),
+                code=f"{first_provider.upper()}_LOGIN_REQUIRED",
+                message=self._provider_login_message(first_provider, first_provider_status),
                 next_action="ask_user",
             )
         failure = self._cli_failure(last_provider, last_result, artifacts=all_artifacts)
@@ -583,18 +641,21 @@ class AlphaAgent(AgentRuntime):
         if explicit:
             return explicit
         settings = await self._fetch_alpha_settings()
-        return str(settings.get("preferred_harness") or "codex").strip().lower() or "codex"
+        return (
+            str(settings.get("preferred_harness") or ALPHA_HARNESSES[0]).strip().lower()
+            or ALPHA_HARNESSES[0]
+        )
 
     def _candidate_harnesses(self, preferred_harness: str, task: TaskEnvelope) -> list[str]:
         normalized = str(preferred_harness or "").strip().lower()
         if normalized == "auto":
-            normalized = "codex" if self._task_prefers_codex_first(task) else "cursor"
-        if normalized not in {"codex", "cursor"}:
+            normalized = "codex" if self._task_prefers_codex_first(task) else ALPHA_HARNESSES[0]
+        if normalized not in ALPHA_HARNESSES:
             return []
         candidates = [normalized] * self._max_same_harness_attempts(task)
         if self._allow_cross_harness_fallback(task):
-            alternate = "codex" if normalized == "cursor" else "cursor"
-            candidates.append(alternate)
+            rotation = [item for item in ALPHA_HARNESSES if item != normalized]
+            candidates.extend(rotation[:1])
         return candidates
 
     def _task_prefers_codex_first(self, task: TaskEnvelope) -> bool:
@@ -728,7 +789,7 @@ class AlphaAgent(AgentRuntime):
         base_prompt: str,
         *,
         fallback_from: dict[str, Any] | None,
-        previous_result: CodexRunResult | CursorRunResult | None,
+        previous_result: CodexRunResult | CursorRunResult | OpenCodeRunResult | None,
     ) -> str:
         if not fallback_from:
             return base_prompt
@@ -753,12 +814,12 @@ class AlphaAgent(AgentRuntime):
                 details.append(f"- previous_last_message_tail: {last_message[-2000:]}")
         return base_prompt + "\n" + "\n".join(details)
 
-    def _should_try_next_harness(self, result: CodexRunResult | CursorRunResult) -> bool:
+    def _should_try_next_harness(self, result: CodexRunResult | CursorRunResult | OpenCodeRunResult) -> bool:
         if getattr(result, "cancelled", False):
             return False
         return not result.ok
 
-    def _failure_reason(self, provider: str, result: CodexRunResult | CursorRunResult) -> str:
+    def _failure_reason(self, provider: str, result: CodexRunResult | CursorRunResult | OpenCodeRunResult) -> str:
         if getattr(result, "cancelled", False):
             return f"{self._harness_label(provider)} was cancelled."
         if getattr(result, "init_timed_out", False):
@@ -793,7 +854,7 @@ class AlphaAgent(AgentRuntime):
 
     async def _fetch_alpha_settings(self) -> dict[str, Any]:
         if not self.gateway_internal_token:
-            return {"preferred_harness": "codex"}
+            return {"preferred_harness": ALPHA_HARNESSES[0]}
         try:
             response = await self._http_client.get(
                 f"{self.gateway_url.rstrip('/')}/internal/agents/alpha/config",
@@ -802,14 +863,37 @@ class AlphaAgent(AgentRuntime):
             )
             response.raise_for_status()
             payload = response.json()
-            return payload if isinstance(payload, dict) else {"preferred_harness": "codex"}
+            return payload if isinstance(payload, dict) else {"preferred_harness": ALPHA_HARNESSES[0]}
         except Exception:
-            return {"preferred_harness": "codex"}
+            return {"preferred_harness": ALPHA_HARNESSES[0]}
 
     async def _fetch_provider_status(self, provider: str) -> dict[str, Any]:
         if provider == "cursor":
             return await self._fetch_cursor_status()
+        if provider == "opencode":
+            status = await self._fetch_opencode_status()
+            zen_key = str(status.get("zen_api_key") or "").strip()
+            # Internal-token transport only (see gateway route). Held in
+            # memory for this run and injected via OPENCODE_CONFIG_CONTENT.
+            self.opencode_runner.zen_api_key_override = zen_key
+            return status
         return await self._fetch_codex_status()
+
+    async def _fetch_opencode_status(self) -> dict[str, Any]:
+        if not self.gateway_internal_token:
+            return {
+                "status": "unknown",
+                "login_required_reason": "gateway_internal_token_missing",
+                "cli": {"authenticated": False},
+            }
+        response = await self._http_client.get(
+            f"{self.gateway_url.rstrip('/')}/internal/agents/opencode/status",
+            headers={"Authorization": f"Bearer {self.gateway_internal_token}"},
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
 
     async def _fetch_codex_status(self) -> dict[str, Any]:
         if not self.gateway_internal_token:
@@ -850,18 +934,28 @@ class AlphaAgent(AgentRuntime):
     def _provider_login_message(self, provider: str, payload: dict[str, Any]) -> str:
         label = self._harness_label(provider)
         reason = self._optional_string(payload.get("login_required_reason")) or f"{provider}_login_required"
-        settings_page = "Codex" if provider == "codex" else "Cursor"
+        settings_page = {
+            "codex": "Codex",
+            "cursor": "Cursor",
+            "opencode": "OpenCode",
+        }.get(provider, provider.title())
         return (
             f"{label} is not ready for Alpha execution. "
-            f"Open Settings > Agents > {settings_page} and complete login. Reason: {reason}."
+            f"Open Settings > Agents > {settings_page} and complete setup. Reason: {reason}."
         )
 
     def _harness_label(self, provider: str) -> str:
-        return "Cursor CLI" if provider == "cursor" else "Codex"
+        if provider == "cursor":
+            return "Cursor CLI"
+        if provider == "opencode":
+            return "OpenCode"
+        return "Codex"
 
     def _harness_start_message(self, provider: str) -> str:
         if provider == "cursor":
             return "cursor-agent --print --force --trust --sandbox disabled --output-format stream-json started"
+        if provider == "opencode":
+            return "opencode run --auto started"
         return "codex exec --json started"
 
     async def _prepare_cursor_native_session(
@@ -979,7 +1073,7 @@ class AlphaAgent(AgentRuntime):
         paths: WorkspacePaths,
         task: TaskEnvelope,
         model: str | None,
-        result: CodexRunResult | CursorRunResult,
+        result: CodexRunResult | CursorRunResult | OpenCodeRunResult,
         existing: HarnessSessionRecord | None,
     ) -> HarnessSessionRecord | None:
         observed = self._optional_string(getattr(result, "native_session_id", None))
@@ -1008,7 +1102,7 @@ class AlphaAgent(AgentRuntime):
         *,
         session: HarnessSessionRecord | None,
         task: TaskEnvelope,
-        result: CodexRunResult | CursorRunResult,
+        result: CodexRunResult | CursorRunResult | OpenCodeRunResult,
         provider: str,
     ) -> HarnessSessionRecord | None:
         if session is None:
@@ -1047,10 +1141,88 @@ class AlphaAgent(AgentRuntime):
             keys.extend(["cursor_chat_id", "chat_id"])
         elif harness == "codex":
             keys.extend(["codex_session_id"])
+        elif harness == "opencode":
+            keys.extend(["opencode_session_id"])
         for key in keys:
             value = self._optional_string(task.input.get(key))
             if value:
                 return value
+        return None
+
+    def _select_opencode_model(self, task: TaskEnvelope, opencode_status: dict[str, Any]) -> str | None:
+        for value in (
+            task.input.get("model"),
+            task.input.get("preferred_model"),
+            opencode_status.get("preferred_model"),
+            self.config.opencode_default_model,
+        ):
+            normalized = self._optional_string(value)
+            if normalized and normalized.lower() != "auto":
+                return normalized
+        return None
+
+    async def _prepare_opencode_native_session(
+        self,
+        *,
+        task: TaskEnvelope,
+        project: ProjectRecord,
+        paths: WorkspacePaths,
+        model: str | None,
+        emit: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> HarnessSessionRecord | None:
+        policy = self._native_resume_policy(task)
+        if policy == "disabled":
+            return None
+
+        forced_native_id = self._forced_native_session_id(task, harness="opencode")
+        if forced_native_id:
+            session = self.registry.record_harness_session(
+                project_id=project.project_id,
+                harness="opencode",
+                native_session_id=forced_native_id,
+                workspace_path=str(paths.workspace),
+                task_id=task.task_id,
+                model=model,
+                status="active",
+                metadata={"source": "task_input", "policy": policy},
+            )
+            await emit(
+                {
+                    "stream": "system",
+                    "event_type": "opencode.native_session.resuming",
+                    "text": f"Resuming OpenCode session {forced_native_id}.",
+                    "detail": f"project_id={project.project_id}; session_id={session.session_id}",
+                }
+            )
+            return session
+
+        if policy != "fresh":
+            existing = self.registry.best_harness_session(
+                project.project_id,
+                harness="opencode",
+                workspace_path=str(paths.workspace),
+                model=model,
+            )
+            if existing is not None:
+                session = self.registry.record_harness_session(
+                    project_id=project.project_id,
+                    harness="opencode",
+                    native_session_id=existing.native_session_id,
+                    workspace_path=str(paths.workspace),
+                    task_id=task.task_id,
+                    model=model or existing.model,
+                    status="active",
+                    metadata={**existing.metadata, "source": "registry_resume", "policy": policy},
+                )
+                await emit(
+                    {
+                        "stream": "system",
+                        "event_type": "opencode.native_session.resuming",
+                        "text": f"Resuming OpenCode session {session.native_session_id}.",
+                        "detail": f"project_id={project.project_id}; session_id={session.session_id}",
+                    }
+                )
+                return session
         return None
 
     def _select_codex_model(self, task: TaskEnvelope, codex_status: dict[str, Any]) -> str | None:
@@ -1283,22 +1455,19 @@ class AlphaAgent(AgentRuntime):
     def _cli_failure(
         self,
         provider: str,
-        result: CodexRunResult | CursorRunResult,
+        result: CodexRunResult | CursorRunResult | OpenCodeRunResult,
         *,
         artifacts: list[Any] | None = None,
     ) -> AgentResult:
         if getattr(result, "cancelled", False):
             code = "CANCELLED"
         elif getattr(result, "init_timed_out", False):
-            code = "CLI_INIT_TIMEOUT"
+            code = {
+                "cursor": "CURSOR_INIT_TIMEOUT",
+                "opencode": "OPENCODE_INIT_TIMEOUT",
+            }.get(provider, "CLI_INIT_TIMEOUT")
         else:
-            code = "TIMEOUT" if result.timed_out else "CODEX_EXECUTION_FAILED"
-        if provider == "cursor" and code != "TIMEOUT":
-            code = "CURSOR_EXECUTION_FAILED"
-        if getattr(result, "cancelled", False):
-            code = "CANCELLED"
-        elif getattr(result, "init_timed_out", False):
-            code = "CURSOR_INIT_TIMEOUT" if provider == "cursor" else "CLI_INIT_TIMEOUT"
+            code = "TIMEOUT" if result.timed_out else f"{provider.upper()}_EXECUTION_FAILED"
         fallback = f"{self._harness_label(provider)} execution failed without output."
         stderr = result.stderr.strip() or result.stdout.strip() or fallback
         return AgentResult(
@@ -1307,7 +1476,7 @@ class AlphaAgent(AgentRuntime):
             artifacts=artifacts or [],
             error=AgentError(
                 code=code,
-                retryable=code in {"TIMEOUT", "CURSOR_INIT_TIMEOUT", "CLI_INIT_TIMEOUT", "DOCKER_UNAVAILABLE", "WORKSPACE_BUSY"},
+                retryable=code in {"TIMEOUT", "OPENCODE_INIT_TIMEOUT", "CURSOR_INIT_TIMEOUT", "CLI_INIT_TIMEOUT", "DOCKER_UNAVAILABLE", "WORKSPACE_BUSY"},
                 message=stderr[-1000:],
                 next_action="skip" if code == "CANCELLED" else "retry" if result.timed_out else "escalate",
             ),

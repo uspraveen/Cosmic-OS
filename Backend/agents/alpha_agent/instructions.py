@@ -69,8 +69,8 @@ def _is_in_docker() -> bool:
 def detect_runtime_mode(*, cli: str, codex_sandbox: str | None = None) -> RuntimeMode:
     """Detect the effective runtime the harness will execute under.
 
-    Codex sandbox flags only apply to the codex CLI. For cursor, sandbox is
-    not applicable — we report DOCKER if containerized, else HOST.
+    Codex sandbox flags only apply to the codex CLI. For cursor and opencode,
+    sandbox is not applicable — we report DOCKER if containerized, else HOST.
     """
     if cli == "codex" and codex_sandbox:
         mapped = _CODEX_SANDBOX_MODE_MAP.get(codex_sandbox.strip())
@@ -412,6 +412,13 @@ def _cli_identity_line(cli: str) -> str:
             "the cursor-grok-4.5-high model (High effort, not Fast) and Cursor's "
             "edit/diff tooling. Make use of patch-style edits where they fit."
         )
+    if cli == "opencode":
+        return (
+            "You are running as the **OpenCode CLI** (`opencode run` in "
+            "headless auto-approve mode). You typically run an OpenCode Zen "
+            "model; tool calls stream as JSON events. Keep going until the "
+            "goal is finished — there is no human to approve anything mid-run."
+        )
     return ""
 
 
@@ -589,6 +596,7 @@ def render_workspace_instructions(
 
 CODEX_GLOBAL_INSTRUCTIONS_RELATIVE = "AGENTS.md"
 CURSOR_GLOBAL_INSTRUCTIONS_RELATIVE = Path(".cursor") / "rules" / "cosmic.md"
+OPENCODE_GLOBAL_INSTRUCTIONS_RELATIVE = Path(".config") / "opencode" / "AGENTS.md"
 WORKSPACE_INSTRUCTIONS_FILENAME = "AGENTS.md"
 
 
@@ -638,10 +646,32 @@ def ensure_cursor_global_instructions(
     return {"path": str(target), "wrote": wrote, "bytes": len(content.encode("utf-8"))}
 
 
+def ensure_opencode_global_instructions(
+    *,
+    opencode_home: Path,
+) -> dict[str, object]:
+    """Idempotently write the Alpha AGENTS.md into the OpenCode config dir.
+
+    The CLI reads global rules from `$HOME/.config/opencode/AGENTS.md`; the
+    Alpha home overrides HOME, so this lives inside the OpenCode home.
+    """
+    content = render_global_instructions(cli="opencode")
+    target = (
+        Path(opencode_home).expanduser() / OPENCODE_GLOBAL_INSTRUCTIONS_RELATIVE
+    )
+    try:
+        wrote = _atomic_write_if_changed(target, content)
+    except OSError:
+        logger.exception("alpha.instructions.opencode_write_failed path=%s", target)
+        return {"path": str(target), "wrote": False, "error": True}
+    return {"path": str(target), "wrote": wrote, "bytes": len(content.encode("utf-8"))}
+
+
 def ensure_alpha_global_instructions(
     *,
     codex_home: Path | None = None,
     cursor_home: Path | None = None,
+    opencode_home: Path | None = None,
     codex_sandbox: str | None = None,
 ) -> dict[str, dict[str, object]]:
     """Write whichever home(s) the caller passes. Idempotent and never raises.
@@ -657,6 +687,10 @@ def ensure_alpha_global_instructions(
         )
     if cursor_home is not None:
         result["cursor"] = ensure_cursor_global_instructions(cursor_home=cursor_home)
+    if opencode_home is not None:
+        result["opencode"] = ensure_opencode_global_instructions(
+            opencode_home=opencode_home
+        )
     return result
 
 

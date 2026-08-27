@@ -2843,6 +2843,64 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:get-opencode-status', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/opencode/status', { timeoutMs: 20000 })
+  })
+
+  ipcMain.handle('gateway:save-opencode-config', async (_, payload: {
+    preferredModel?: string
+    vmSyncEnabled?: boolean
+    apiKey?: string
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/opencode/config', {
+      method: 'POST',
+      body: {
+        preferred_model: payload?.preferredModel,
+        vm_sync_enabled: payload?.vmSyncEnabled,
+        api_key: payload?.apiKey,
+      },
+      timeoutMs: 45000,
+    })
+  })
+
+  ipcMain.handle('gateway:logout-opencode', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/opencode/auth', {
+      method: 'DELETE',
+      timeoutMs: 25000,
+    })
+  })
+
+  ipcMain.handle('gateway:get-opencode-models', async (_, payload: { forceRefresh?: boolean }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const query = payload?.forceRefresh ? '?refresh=true' : ''
+    return callGatewayJson(config, `/desktop/agents/opencode/models${query}`, {
+      timeoutMs: 30000,
+    })
+  })
+
+  ipcMain.handle('gateway:get-alpha-providers-overview', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/alpha/providers', { timeoutMs: 60000 })
+  })
+
   ipcMain.handle('gateway:download-output-artifact', async (_, payload: {
     messageId?: string
     artifactId?: string

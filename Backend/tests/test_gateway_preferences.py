@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from contextlib import asynccontextmanager
 from contextlib import contextmanager
 from pathlib import Path
@@ -241,7 +242,7 @@ def test_alpha_execution_provider_preference_defaults_and_updates() -> None:
         runtime.preference_store.initialize()
 
         initial = runtime.preference_store.get_alpha_execution_provider()
-        assert initial["preferred_harness"] == "codex"
+        assert initial["preferred_harness"] == "opencode"
         assert initial["revision"] == 1
 
         updated = runtime.preference_store.set_alpha_execution_provider(
@@ -254,6 +255,46 @@ def test_alpha_execution_provider_preference_defaults_and_updates() -> None:
         assert updated["revision"] == 2
         assert updated["updated_source"] == "test"
         assert updated["updated_device_id"] == "desk_alpha_1"
+
+        # An explicit user choice survives reads unchanged.
+        reloaded = runtime.preference_store.get_alpha_execution_provider()
+        assert reloaded["preferred_harness"] == "cursor"
+
+
+def test_alpha_execution_provider_migrates_untouched_codex_seed_to_opencode() -> None:
+    """VMs provisioned before OpenCode keep a factory-seeded `codex` row.
+
+    That value was never chosen by anyone: migrate it to the new default on
+    read. A row updated by any non-system source is user intent and stays.
+    """
+    with _runtime_root() as root:
+        runtime = build_runtime(root)
+        runtime.preference_store.initialize()
+        connection = sqlite3.connect(runtime.preference_store.db_path)
+        try:
+            connection.execute(
+                """
+                UPDATE app_preferences
+                SET value_json = '{"preferred_harness": "codex"}',
+                    updated_source = 'system_default'
+                WHERE key = 'alpha_execution_provider'
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        migrated = runtime.preference_store.get_alpha_execution_provider()
+        assert migrated["preferred_harness"] == "opencode"
+
+        # Once the user (or an external system) picks something, it holds.
+        runtime.preference_store.set_alpha_execution_provider(
+            "codex",
+            source="desktop",
+            device_id="desk_migration_1",
+        )
+        pinned = runtime.preference_store.get_alpha_execution_provider()
+        assert pinned["preferred_harness"] == "codex"
 
 
 def test_cosmic_orchestrator_model_preference_defaults_and_updates() -> None:

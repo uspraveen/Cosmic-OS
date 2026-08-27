@@ -6549,3 +6549,12 @@
     font-size: 12px;
   }
 }
+
+/* OpenCode settings: refreshing model catalog indicator */
+.cosmic-agents-detail-btn .spin {
+  animation: cosmic-agents-refresh-spin 1s linear infinite;
+}
+@keyframes cosmic-agents-refresh-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

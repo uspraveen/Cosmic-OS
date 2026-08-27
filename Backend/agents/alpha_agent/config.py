@@ -51,12 +51,16 @@ class AlphaAgentConfig:
     allow_docker_smoke: bool
     codex_home: Path
     cursor_home: Path
+    opencode_home: Path
     codex_sandbox: str
     codex_timeout_sec: float
     codex_default_model: str
     cursor_timeout_sec: float
     cursor_default_model: str
     cursor_init_timeout_sec: float
+    opencode_timeout_sec: float
+    opencode_default_model: str
+    zen_api_key: str
     cli_idle_check_sec: float
 
     @classmethod
@@ -108,6 +112,12 @@ class AlphaAgentConfig:
                 / "homes"
                 / "cursor"
             ),
+            opencode_home=(
+                _optional_path(os.getenv("ALPHA_OPENCODE_HOME"))
+                or alpha_root
+                / "homes"
+                / "opencode"
+            ),
             codex_sandbox=codex_sandbox,
             codex_timeout_sec=max(
                 30.0,
@@ -123,6 +133,14 @@ class AlphaAgentConfig:
                 30.0,
                 float(os.getenv("ALPHA_CURSOR_INIT_TIMEOUT_SEC", "180") or "180"),
             ),
+            opencode_timeout_sec=max(
+                30.0,
+                float(os.getenv("ALPHA_OPENCODE_TIMEOUT_SEC", "14400") or "14400"),
+            ),
+            # Zen model ids move weekly; this is only the pre-settings fallback.
+            opencode_default_model=os.getenv("ALPHA_OPENCODE_MODEL", "mimo-v2.5-free").strip()
+            or "mimo-v2.5-free",
+            zen_api_key=(os.getenv("ALPHA_OPENCODE_ZEN_API_KEY") or "").strip(),
             cli_idle_check_sec=max(
                 30.0,
                 float(os.getenv("ALPHA_CLI_IDLE_CHECK_SEC", "60") or "60"),

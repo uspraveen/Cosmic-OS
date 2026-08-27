@@ -123,6 +123,12 @@ contextBridge.exposeInMainWorld('cosmic', {
   logoutGatewayCursor: () => ipcRenderer.invoke('gateway:logout-cursor'),
   getGatewayAlphaAgentConfig: () => ipcRenderer.invoke('gateway:get-alpha-agent-config'),
   saveGatewayAlphaAgentConfig: (payload: any) => ipcRenderer.invoke('gateway:save-alpha-agent-config', payload),
+  getGatewayOpenCodeStatus: () => ipcRenderer.invoke('gateway:get-opencode-status'),
+  saveGatewayOpenCodeConfig: (payload: any) => ipcRenderer.invoke('gateway:save-opencode-config', payload),
+  logoutGatewayOpenCode: () => ipcRenderer.invoke('gateway:logout-opencode'),
+  getGatewayOpenCodeModels: (opts?: { forceRefresh?: boolean }) =>
+    ipcRenderer.invoke('gateway:get-opencode-models', opts || {}),
+  getGatewayAlphaProvidersOverview: () => ipcRenderer.invoke('gateway:get-alpha-providers-overview'),
   getGatewaySystemMetrics: (
     opts?:
       | boolean

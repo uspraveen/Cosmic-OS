@@ -12,7 +12,7 @@ export const AUTH_ATTENTION_PREFS_KEY = 'cosmic.authAttentionPrefs.v1'
 export const AUTH_ATTENTION_REMINDER_INTERVAL_MS = 2 * 60 * 60 * 1000
 export const AUTH_ATTENTION_SNOOZE_MS = 2 * 60 * 60 * 1000
 
-export type AuthAttentionProvider = 'google' | 'codex' | 'cursor'
+export type AuthAttentionProvider = 'google' | 'codex' | 'cursor' | 'opencode'
 
 export interface AuthAttentionItem {
   key: string
@@ -143,7 +143,7 @@ function agentAttentionDetail(
   status: AgentGatewayStatus | null | undefined,
 ): string {
   const reason = String(status?.login_required_reason || '').trim()
-  if (reason === 'codex_cli_missing' || reason === 'cursor_cli_missing') {
+  if (reason === 'codex_cli_missing' || reason === 'cursor_cli_missing' || reason === 'opencode_cli_missing') {
     return `${providerLabel} CLI is missing on the VM. Open Cosmic Agents settings to reinstall or sign in.`
   }
   if (reason === 'api_key_relogin_required') {
@@ -154,6 +154,9 @@ function agentAttentionDetail(
   }
   if (reason === 'cursor_oauth_login_required') {
     return 'Cursor OAuth sign-in is required for the Alpha runner on the VM.'
+  }
+  if (reason === 'zen_api_key_required') {
+    return 'Paste an OpenCode Zen API key in Cosmic Agents settings so the default runner can execute.'
   }
   const cliReason = String(status?.cli?.reason || '').trim()
   if (cliReason) return cliReason
@@ -198,6 +201,27 @@ export function getCursorAuthAttentionItems(status: AgentGatewayStatus | null | 
     message: 'Sign Cursor back in on the VM so Alpha can run again.',
     detail: agentAttentionDetail('Alpha Cursor', status),
     settingsView: 'agents-cursor',
+  }]
+}
+
+export function getOpenCodeAuthAttentionItems(status: AgentGatewayStatus | null | undefined): AuthAttentionItem[] {
+  if (!agentStatusNeedsAttention(status)) {
+    return []
+  }
+  const reason = String(status?.login_required_reason || '').trim().toLowerCase()
+  const missingCli = reason === 'opencode_cli_missing'
+  return [{
+    key: 'opencode:alpha',
+    provider: 'opencode',
+    accountId: 'opencode',
+    accountLabel: 'Alpha OpenCode',
+    email: '',
+    title: missingCli ? 'OpenCode CLI is missing on the VM' : 'Alpha OpenCode needs setup',
+    message: missingCli
+      ? 'Re-run VM bootstrap so OpenCode installs, or pick another Alpha runner.'
+      : 'Paste an OpenCode Zen API key so the default Alpha runner can execute.',
+    detail: agentAttentionDetail('Alpha OpenCode', status),
+    settingsView: 'agents-opencode',
   }]
 }
 

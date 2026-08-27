@@ -90,6 +90,7 @@ except (
     UnidentifiedImageError = Exception
 
 from shared.cursor_cli import cursor_cli_env, find_cursor_agent_binary
+from shared.opencode_cli import find_opencode_binary, opencode_cli_env
 from shared.scratchpad import (
     derive_reconciliation_query,
     excerpt_head_and_tail,
@@ -145,6 +146,37 @@ from shared import (
 
 logger = logging.getLogger(__name__)
 _AGENT_EMAIL_ORG_API_KEY_NAME = "COSMIC Gateway Agent Email"
+
+OPENCODE_ZEN_MODELS_ENDPOINT = "https://opencode.ai/zen/v1/models"
+OPENCODE_ZEN_MODELS_TTL_SEC = 6 * 3600.0
+# Fallback when the live Zen catalog is unreachable. Snapshot of the curated
+# list at integration time (2026-08); refreshed by the gateway model loop.
+OPENCODE_ZEN_FALLBACK_MODELS: tuple[str, ...] = (
+    "mimo-v2.5-free",
+    "big-pickle",
+    "hy3-free",
+    "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+    "deepseek-v4-flash-free",
+    "laguna-s-2.1-free",
+    "gpt-5.5",
+    "gpt-5.4",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "gemini-3-flash",
+    "grok-4.6",
+    "kimi-k3",
+    "glm-5.2",
+)
+ALPHA_CLI_UPDATE_INTERVAL_SEC = 24 * 3600.0
+ALPHA_CLI_UPDATE_TIMEOUT_SEC = 900.0
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 CHANNEL_WELCOME_MESSAGES = {
     "whatsapp": "COSMIC is connected on WhatsApp. You can message me here anytime.",
@@ -548,6 +580,12 @@ class GatewayRuntime:
         self._recent_google_reauth_broadcasts: dict[str, float] = {}
         self._codex_login_session: dict[str, Any] | None = None
         self._cursor_login_session: dict[str, Any] | None = None
+        self._opencode_models_cache: dict[str, Any] | None = None
+        self._opencode_models_lock = asyncio.Lock()
+        self._alpha_cli_update_state: dict[str, Any] = {"providers": {}}
+        self._alpha_cli_update_in_flight: set[str] = set()
+        self._alpha_cli_update_worker: asyncio.Task[None] | None = None
+        self._opencode_models_worker: asyncio.Task[None] | None = None
         self._heartbeat_outcomes_by_request_id: dict[str, dict[str, str]] = {}
         self._heartbeat_activity_by_request_id: dict[str, list[dict[str, Any]]] = {}
 
@@ -624,6 +662,15 @@ class GatewayRuntime:
             self._gmail_surface_backfill_loop(),
             name="gateway-gmail-surface-backfill",
         )
+        self._opencode_models_worker = asyncio.create_task(
+            self._opencode_models_refresh_loop(),
+            name="gateway-opencode-models-refresh",
+        )
+        if _env_flag("ALPHA_CLI_AUTO_UPDATE", True):
+            self._alpha_cli_update_worker = asyncio.create_task(
+                self._alpha_cli_update_loop(),
+                name="gateway-alpha-cli-update",
+            )
         if self._redis is not None:
             self._task_input_worker = asyncio.create_task(
                 self._task_input_consumer_loop(),
@@ -664,9 +711,18 @@ class GatewayRuntime:
         if self._gmail_surface_backfill_worker is not None:
             self._gmail_surface_backfill_worker.cancel()
             await asyncio.gather(
-                self._gmail_surface_backfill_worker, return_exceptions=True
+                self._gmail_surface_backfill_worker,
+                return_exceptions=True,
             )
             self._gmail_surface_backfill_worker = None
+        if self._opencode_models_worker is not None:
+            self._opencode_models_worker.cancel()
+            await asyncio.gather(self._opencode_models_worker, return_exceptions=True)
+            self._opencode_models_worker = None
+        if self._alpha_cli_update_worker is not None:
+            self._alpha_cli_update_worker.cancel()
+            await asyncio.gather(self._alpha_cli_update_worker, return_exceptions=True)
+            self._alpha_cli_update_worker = None
         if self._task_input_worker is not None:
             self._task_input_worker.cancel()
             await asyncio.gather(self._task_input_worker, return_exceptions=True)
@@ -20816,13 +20872,16 @@ class GatewayRuntime:
             login_required_reason=effective_status["login_required_reason"],
             last_cli_status=cli_status,
         )
-        return self._redact_codex_status(
-            {
-                **updated,
-                "cli": cli_status,
-                "login_session": pending_login,
-                "codex_home": str(self.config.alpha_codex_home),
-            }
+        return self._apply_alpha_cli_update_maintenance(
+            "codex",
+            self._redact_codex_status(
+                {
+                    **updated,
+                    "cli": cli_status,
+                    "login_session": pending_login,
+                    "codex_home": str(self.config.alpha_codex_home),
+                }
+            ),
         )
 
     async def save_desktop_codex_config(
@@ -21002,13 +21061,16 @@ class GatewayRuntime:
             login_required_reason=effective_status["login_required_reason"],
             last_cli_status=cli_status,
         )
-        return self._redact_codex_status(
-            {
-                **updated,
-                "cli": cli_status,
-                "login_session": pending_login,
-                "cursor_home": str(self.config.alpha_cursor_home),
-            }
+        return self._apply_alpha_cli_update_maintenance(
+            "cursor",
+            self._redact_codex_status(
+                {
+                    **updated,
+                    "cli": cli_status,
+                    "login_session": pending_login,
+                    "cursor_home": str(self.config.alpha_cursor_home),
+                }
+            ),
         )
 
     async def save_desktop_cursor_config(
@@ -21140,6 +21202,491 @@ class GatewayRuntime:
             source=source,
             device_id=device_id,
         )
+
+    # ── Alpha OpenCode harness ─────────────────────────────────────────────
+
+    async def get_desktop_opencode_status(
+        self,
+        *,
+        include_secret: bool = False,
+    ) -> dict[str, Any]:
+        settings = self.agent_auth_store.get_opencode(include_secret=include_secret)
+        cli_status = await self._opencode_cli_status()
+        effective = self._effective_opencode_status(settings, cli_status)
+        updated = self.agent_auth_store.save_opencode(
+            status=effective["status"],
+            login_required_reason=effective["login_required_reason"],
+            last_cli_status=cli_status,
+        )
+        payload = {
+            **updated,
+            "cli": cli_status,
+            "opencode_home": str(self.config.alpha_opencode_home),
+        }
+        if not include_secret:
+            payload.pop("api_key", None)
+        payload = self._redact_codex_status(payload)
+        return self._apply_alpha_cli_update_maintenance("opencode", payload)
+
+    async def save_desktop_opencode_config(
+        self,
+        *,
+        preferred_model: str | None = None,
+        vm_sync_enabled: bool | None = None,
+        api_key: str | None = None,
+    ) -> dict[str, Any]:
+        api_key_value = self._safe_text(api_key)
+        next_status: str | None = None
+        next_reason: str | None = None
+        if api_key is not None:
+            next_status = "stored" if api_key_value else "login_required"
+            next_reason = "" if api_key_value else "zen_api_key_required"
+        elif preferred_model is not None or vm_sync_enabled is not None:
+            current = self.agent_auth_store.get_opencode(include_secret=True)
+            has_key = bool(current.get("has_api_key"))
+            next_status = "stored" if has_key else "login_required"
+            next_reason = "" if has_key else "zen_api_key_required"
+        self.agent_auth_store.save_opencode(
+            preferred_model=preferred_model,
+            vm_sync_enabled=vm_sync_enabled,
+            api_key=api_key_value if api_key is not None else None,
+            status=next_status,
+            login_required_reason=next_reason,
+        )
+        return await self.get_desktop_opencode_status()
+
+    async def logout_desktop_opencode(self) -> dict[str, Any]:
+        settings = self.agent_auth_store.clear_opencode_api_key(
+            status="logged_out",
+            login_required_reason="user_logged_out",
+        )
+        cli_status = await self._opencode_cli_status()
+        payload = {**settings, "cli": cli_status, "opencode_home": str(self.config.alpha_opencode_home)}
+        return self._apply_alpha_cli_update_maintenance(
+            "opencode", self._redact_codex_status(payload)
+        )
+
+    def _effective_opencode_status(
+        self,
+        settings: dict[str, Any],
+        cli_status: dict[str, Any],
+    ) -> dict[str, str]:
+        if not cli_status.get("available", True):
+            return {"status": "relogin_required", "login_required_reason": "opencode_cli_missing"}
+        if settings.get("has_api_key"):
+            return {"status": "authenticated", "login_required_reason": ""}
+        if settings.get("status") == "authenticated":
+            # Authenticated through a previously-entered key that was since
+            # cleared elsewhere; treat as re-login instead of lying.
+            return {"status": "relogin_required", "login_required_reason": "zen_api_key_required"}
+        return {"status": "login_required", "login_required_reason": "zen_api_key_required"}
+
+    def _opencode_binary(self) -> str | None:
+        return find_opencode_binary(self.config.alpha_opencode_home)
+
+    def _opencode_env(self) -> dict[str, str]:
+        env = opencode_cli_env(self.config.alpha_opencode_home)
+        env.setdefault("OPENCODE_DISABLE_AUTOUPDATE", "1")
+        return env
+
+    async def _run_opencode_command(
+        self,
+        args: list[str],
+        *,
+        timeout_sec: float,
+    ) -> dict[str, Any]:
+        binary = self._opencode_binary()
+        if not binary:
+            return {
+                "ok": False,
+                "available": False,
+                "returncode": None,
+                "stdout": "",
+                "stderr": "",
+                "reason": "opencode_cli_missing",
+            }
+        self.config.alpha_opencode_home.mkdir(parents=True, exist_ok=True)
+        process = await asyncio.create_subprocess_exec(
+            binary,
+            *args,
+            stdin=subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(self.config.alpha_opencode_home),
+            env=self._opencode_env(),
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout_sec,
+            )
+            return {
+                "ok": process.returncode == 0,
+                "available": True,
+                "returncode": process.returncode,
+                "stdout": stdout_bytes.decode("utf-8", errors="replace").strip(),
+                "stderr": stderr_bytes.decode("utf-8", errors="replace").strip(),
+            }
+        except TimeoutError:
+            process.kill()
+            stdout_bytes, stderr_bytes = await process.communicate()
+            return {
+                "ok": False,
+                "available": True,
+                "returncode": process.returncode,
+                "stdout": stdout_bytes.decode("utf-8", errors="replace").strip(),
+                "stderr": stderr_bytes.decode("utf-8", errors="replace").strip(),
+                "reason": "timeout",
+            }
+
+    async def _opencode_cli_status(self) -> dict[str, Any]:
+        result = await self._run_opencode_command(["--version"], timeout_sec=15.0)
+        version = ""
+        if result.get("ok"):
+            version = self._extract_semver(result.get("stdout") or "")
+        return {
+            **result,
+            "version": version,
+            "authenticated_placeholder": None,
+            "opencode_home": str(self.config.alpha_opencode_home),
+        }
+
+    @staticmethod
+    def _extract_semver(value: str) -> str:
+        match = re.search(r"\d+\.\d+\.\d+[^\s]*", value or "")
+        return match.group(0) if match else ""
+
+    # ── OpenCode Zen model catalog (auto-refresh) ─────────────────────────
+
+    async def get_desktop_opencode_models(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Live OpenCode Zen catalog for the settings panel.
+
+        Fresh models arrive on Zen weekly; the catalog comes straight from
+        the published endpoint (`/zen/v1/models`), cached in memory with a
+        TTL, falling back to the cached copy, then to a curated seed — so the
+        panel always renders something usable even offline.
+        """
+        now = time.time()
+        cache = self._opencode_models_cache
+        if (
+            not force_refresh
+            and cache
+            and isinstance(cache.get("fetched_at_epoch"), (int, float))
+            and now - float(cache["fetched_at_epoch"]) < OPENCODE_ZEN_MODELS_TTL_SEC
+            and cache.get("models")
+        ):
+            return self._shape_opencode_models_payload(cache, "cache")
+
+        fetched_at = utcnow_iso()
+        source = "fallback"
+        ids: list[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                response = await client.get(OPENCODE_ZEN_MODELS_ENDPOINT)
+                response.raise_for_status()
+                body = response.json()
+            data = body.get("data") if isinstance(body, dict) else None
+            if isinstance(data, list):
+                ids = [
+                    str(item.get("id") or "").strip()
+                    for item in data
+                    if isinstance(item, dict) and str(item.get("id") or "").strip()
+                ]
+                if ids:
+                    source = "live"
+        except Exception:
+            logger.exception("gateway.opencode_zen_models_fetch_failed")
+
+        if not ids:
+            stale_cache = cache if isinstance(cache, dict) else {}
+            stale_ids = stale_cache.get("models")
+            if isinstance(stale_ids, list) and stale_ids:
+                cached_entry = {**stale_cache, "models": [str(m) for m in stale_ids]}
+                return self._shape_opencode_models_payload(cached_entry, "cache_stale")
+            ids = list(OPENCODE_ZEN_FALLBACK_MODELS)
+
+        refreshed = {
+            "models": sorted(dict.fromkeys(ids)),
+            "fetched_at": fetched_at,
+            "fetched_at_epoch": now,
+        }
+        self._opencode_models_cache = refreshed
+        return self._shape_opencode_models_payload(refreshed, source)
+
+    @staticmethod
+    def _shape_opencode_models_payload(
+        entry: dict[str, Any],
+        source: str,
+    ) -> dict[str, Any]:
+        raw = entry.get("models")
+        ids = [str(item) for item in raw] if isinstance(raw, list) else []
+
+        def is_free(model_id: str) -> bool:
+            lowered = model_id.lower()
+            return lowered.endswith("-free") or lowered == "big-pickle"
+
+        models = [
+            {
+                "id": model_id,
+                "label": model_id.replace("-", " ").title(),
+                "qualified": f"opencode/{model_id}",
+                "free": is_free(model_id),
+            }
+            for model_id in sorted(ids, key=lambda m: (not is_free(m), m))
+        ]
+        return {
+            "provider": "opencode",
+            "endpoint": OPENCODE_ZEN_MODELS_ENDPOINT,
+            "source": source,
+            "fetched_at": entry.get("fetched_at"),
+            "models": models,
+        }
+
+    async def _opencode_models_refresh_loop(self) -> None:
+        while True:
+            try:
+                await self.get_desktop_opencode_models(force_refresh=False)
+            except Exception:
+                logger.exception("gateway.opencode_models_refresh_failed")
+            await asyncio.sleep(OPENCODE_ZEN_MODELS_TTL_SEC / 2)
+
+    # ── Alpha provider CLI auto-updates ───────────────────────────────────
+
+    async def get_desktop_alpha_providers_overview(self) -> dict[str, Any]:
+        preference = self.preference_store.get_alpha_execution_provider()
+        providers: dict[str, Any] = {}
+        update_outcomes = self._alpha_cli_update_state.get("providers") or {}
+        for provider in ("opencode", "codex", "cursor"):
+            try:
+                if provider == "opencode":
+                    status = await self.get_desktop_opencode_status()
+                elif provider == "cursor":
+                    status = await self.get_desktop_cursor_status()
+                else:
+                    status = await self.get_desktop_codex_status()
+                outcome = update_outcomes.get(provider) or {}
+                known_version = (
+                    str(outcome.get("to_version") or "")
+                    or str(outcome.get("installed") or "")
+                    or str(outcome.get("from_version") or "")
+                )
+                version = (
+                    str((status.get("cli") or {}).get("version") or "")
+                    or known_version
+                )
+                providers[provider] = {
+                    "status": status.get("status"),
+                    "login_required_reason": status.get("login_required_reason"),
+                    "version": version,
+                    "last_update": outcome,
+                    "updating": provider in self._alpha_cli_update_in_flight,
+                }
+            except Exception as exc:
+                providers[provider] = {
+                    "status": "error",
+                    "login_required_reason": f"{provider}_status_lookup_failed",
+                    "error": str(exc)[:200],
+                    "updating": provider in self._alpha_cli_update_in_flight,
+                }
+        return {
+            "preferred_harness": preference.get("preferred_harness"),
+            "providers": providers,
+        }
+
+    def _apply_alpha_cli_update_maintenance(
+        self,
+        provider: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Flag maintenance on a provider mid-CLI-update.
+
+        While a provider's CLI is being upgraded its status reports
+        `update_in_progress` with `cli.authenticated=false`; the Alpha agent's
+        existing pre-execution auth walk treats that exactly like any other
+        not-ready provider and rotates to a healthy one instead of launching
+        a doomed half-updated harness.
+        """
+        if provider not in self._alpha_cli_update_in_flight:
+            return payload
+        flagged = dict(payload)
+        flagged["status"] = "update_in_progress"
+        flagged["login_required_reason"] = "alpha_cli_update_in_progress"
+        flagged["updating"] = True
+        cli = dict(flagged.get("cli") or {})
+        cli["authenticated"] = False
+        cli["updating"] = True
+        flagged["cli"] = cli
+        return flagged
+
+    def _semver_tuple(self, value: str) -> tuple[int, ...]:
+        match = re.search(r"\d+(?:\.\d+)+", value or "")
+        if not match:
+            return ()
+        parts = match.group(0).split(".")
+        numbers: list[int] = []
+        for part in parts:
+            digits = re.match(r"\d+", part)
+            if not digits:
+                break
+            numbers.append(int(digits.group(0)))
+        return tuple(numbers)
+
+    async def _npm_latest_version(self, package: str) -> str | None:
+        process = await asyncio.create_subprocess_exec(
+            "npm",
+            "view",
+            package,
+            "version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_bytes, _ = await asyncio.wait_for(process.communicate(), timeout=60.0)
+        except TimeoutError:
+            process.kill()
+            await process.communicate()
+            return None
+        if process.returncode != 0:
+            return None
+        version = self._safe_text(stdout_bytes.decode("utf-8", errors="replace").strip())
+        return version or None
+
+    async def _update_codex_cli(self) -> dict[str, Any]:
+        latest = await self._npm_latest_version("@openai/codex")
+        if not latest:
+            return {"provider": "codex", "action": "skipped", "reason": "registry_lookup_failed"}
+        binary = shutil.which("codex")
+        installed = ""
+        if binary:
+            probe = subprocess.run(
+                [binary, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            installed = self._extract_semver(probe.stdout or probe.stderr or "")
+        if self._semver_tuple(installed) >= self._semver_tuple(latest):
+            return {
+                "provider": "codex",
+                "action": "already_latest",
+                "installed": installed,
+                "latest": latest,
+                "checked_at": utcnow_iso(),
+            }
+        process = await asyncio.create_subprocess_exec(
+            "npm",
+            "install",
+            "-g",
+            "@openai/codex@latest",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr_bytes = await asyncio.wait_for(
+                process.communicate(),
+                timeout=ALPHA_CLI_UPDATE_TIMEOUT_SEC,
+            )
+        except TimeoutError:
+            process.kill()
+            await process.communicate()
+            return {"provider": "codex", "action": "failed", "reason": "install_timeout"}
+        action = "updated" if process.returncode == 0 else "failed"
+        return {
+            "provider": "codex",
+            "action": action,
+            "from_version": installed,
+            "to_version": latest if process.returncode == 0 else None,
+            "stderr_tail": self._safe_text(stderr_bytes.decode("utf-8", errors="replace"))[-400:] or None,
+            "checked_at": utcnow_iso(),
+        }
+
+    async def _update_opencode_cli(self) -> dict[str, Any]:
+        probe = await self._run_opencode_command(["--version"], timeout_sec=20.0)
+        installed = (
+            self._extract_semver(probe.get("stdout") or "")
+            if probe.get("ok")
+            else ""
+        )
+        if not probe.get("available", False):
+            return {"provider": "opencode", "action": "skipped", "reason": "opencode_cli_missing"}
+        result = await self._run_opencode_command(["upgrade"], timeout_sec=ALPHA_CLI_UPDATE_TIMEOUT_SEC)
+        after = await self._run_opencode_command(["--version"], timeout_sec=20.0)
+        new_version = (
+            self._extract_semver(after.get("stdout") or "")
+            if after.get("ok")
+            else ""
+        )
+        changed = self._semver_tuple(new_version) > self._semver_tuple(installed)
+        return {
+            "provider": "opencode",
+            "action": "updated" if (changed or result.get("ok")) else "failed",
+            "from_version": installed or None,
+            "to_version": new_version or None,
+            "returncode": result.get("returncode"),
+            "checked_at": utcnow_iso(),
+        }
+
+    async def _update_cursor_cli(self) -> dict[str, Any]:
+        # cursor-agent updates itself in place under the Cursor home on every
+        # run; COSMIC deliberately does not race it. Record freshness only.
+        probe = await self._run_cursor_command(["--version"], timeout_sec=20.0)
+        version = (
+            self._extract_semver(probe.get("stdout") or probe.get("stderr") or "")
+            if probe.get("ok")
+            else ""
+        )
+        return {
+            "provider": "cursor",
+            "action": "self_managed",
+            "installed": version or None,
+            "checked_at": utcnow_iso(),
+        }
+
+    async def _alpha_cli_update_loop(self) -> None:
+        # Sleep toward ~04:10 local before the first sweep: the gateway may
+        # boot at any moment of day, and rushing an npm install into a fresh
+        # VM benefits nobody.
+        zone_name = self.config.user_timezone_fallback or "UTC"
+        try:
+            zone = ZoneInfo(zone_name)
+        except ZoneInfoNotFoundError:
+            zone = timezone.utc
+        target_hour = 4
+        now_local = datetime.now(tz=zone)
+        first_run_delay = max(300.0, ((target_hour - now_local.hour) % 24) * 3600.0 - now_local.minute * 60.0)
+        first_run_delay += 600.0
+        await asyncio.sleep(min(first_run_delay, ALPHA_CLI_UPDATE_INTERVAL_SEC))
+        while True:
+            for provider, coroutine in (
+                ("codex", self._update_codex_cli()),
+                ("opencode", self._update_opencode_cli()),
+                ("cursor", self._update_cursor_cli()),
+            ):
+                if provider in self._alpha_cli_update_in_flight:
+                    continue
+                self._alpha_cli_update_in_flight.add(provider)
+                try:
+                    outcome = await coroutine
+                    outcomes = self._alpha_cli_update_state.setdefault("providers", {})
+                    outcomes[provider] = outcome
+                    if outcome.get("action") in {"updated", "failed"}:
+                        logger.info(
+                            "gateway.alpha_cli_update_%s provider=%s detail=%s",
+                            outcome.get("action"),
+                            provider,
+                            json.dumps(outcome)[:400],
+                        )
+                except Exception:
+                    logger.exception("gateway.alpha_cli_update_failed provider=%s", provider)
+                finally:
+                    self._alpha_cli_update_in_flight.discard(provider)
+            await asyncio.sleep(ALPHA_CLI_UPDATE_INTERVAL_SEC)
+
 
     async def _codex_login_with_api_key(self, api_key: str) -> dict[str, Any]:
         return await self._run_codex_command(

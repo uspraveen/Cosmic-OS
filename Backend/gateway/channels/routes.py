@@ -128,6 +128,12 @@ class CursorAgentConfigRequest(BaseModel):
     vm_sync_enabled: bool | None = None
 
 
+class OpenCodeAgentConfigRequest(BaseModel):
+    preferred_model: str | None = Field(default=None, max_length=160)
+    vm_sync_enabled: bool | None = None
+    api_key: str | None = Field(default=None, max_length=4096)
+
+
 class AlphaAgentConfigRequest(BaseModel):
     preferred_harness: str | None = Field(default=None, max_length=32)
 
@@ -1821,6 +1827,49 @@ async def get_internal_cursor_status(
     return await runtime.get_desktop_cursor_status()
 
 
+@router.get("/desktop/agents/opencode/status")
+async def get_desktop_opencode_status(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_opencode_status(include_secret=False)
+
+
+@router.get("/internal/agents/opencode/status")
+async def get_internal_opencode_status(
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    # The Zen API key rides along only on the internal-token route: it is the
+    # transport the Alpha agent process uses to inject OPENCODE_CONFIG_CONTENT.
+    return await runtime.get_desktop_opencode_status(include_secret=True)
+
+
+@router.get("/desktop/agents/opencode/models")
+async def get_desktop_opencode_models(
+    refresh: bool = False,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_opencode_models(force_refresh=refresh)
+
+
+@router.get("/desktop/agents/alpha/providers")
+async def get_desktop_alpha_providers(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_alpha_providers_overview()
+
+
+@router.get("/internal/agents/alpha/providers")
+async def get_internal_alpha_providers(
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_alpha_providers_overview()
+
+
 @router.get("/desktop/agents/alpha/config")
 async def get_desktop_alpha_agent_config(
     _: None = Depends(require_local_api_token),
@@ -1864,6 +1913,27 @@ async def save_desktop_cursor_config(
         approval_mode=body.approval_mode,
         vm_sync_enabled=body.vm_sync_enabled,
     )
+
+
+@router.post("/desktop/agents/opencode/config")
+async def save_desktop_opencode_config(
+    body: OpenCodeAgentConfigRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.save_desktop_opencode_config(
+        preferred_model=body.preferred_model,
+        vm_sync_enabled=body.vm_sync_enabled,
+        api_key=body.api_key,
+    )
+
+
+@router.delete("/desktop/agents/opencode/auth")
+async def logout_desktop_opencode(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.logout_desktop_opencode()
 
 
 @router.post("/desktop/agents/alpha/config")

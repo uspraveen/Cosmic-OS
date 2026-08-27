@@ -70,6 +70,7 @@ DEFAULT_WHATSAPP_AUTH_DIR = Path("/var/lib/cosmic/whatsapp/auth")
 DEFAULT_DIAGRAM_PUPPETEER_CACHE_DIR = Path("/var/lib/cosmic/diagram-agent/puppeteer")
 DEFAULT_MEMORY_DATA_DIR = Path("/var/lib/cosmic/memory")
 DEFAULT_ALPHA_CURSOR_HOME = Path("/var/lib/cosmic/alpha/homes/cursor")
+DEFAULT_ALPHA_OPENCODE_HOME = Path("/var/lib/cosmic/alpha/homes/opencode")
 DEFAULT_NEO4J_APT_KEY_URL = "https://debian.neo4j.com/neotechnology.gpg.key"
 DEFAULT_NEO4J_APT_KEYRING_PATH = Path("/etc/apt/keyrings/neotechnology.gpg")
 DEFAULT_NEO4J_APT_SOURCE_PATH = Path("/etc/apt/sources.list.d/neo4j.list")
@@ -182,6 +183,7 @@ PYTHON_CANDIDATES = [
 MIN_NODE_MAJOR = 20
 MERMAID_CLI_PACKAGE = "@mermaid-js/mermaid-cli"
 OPENAI_CODEX_CLI_PACKAGE = "@openai/codex"
+OPENCODE_CLI_PACKAGE = "opencode-ai"
 CURSOR_CLI_INSTALL_URL = "https://cursor.com/install"
 DEFAULT_RETRY_ATTEMPTS = 4
 DEFAULT_RETRY_INITIAL_DELAY_SEC = 1.5
@@ -3338,13 +3340,21 @@ def build_alpha_agent_env_rendered(
         or "/var/lib/cosmic/alpha/homes/codex",
         "ALPHA_CURSOR_HOME": pick_env("ALPHA_CURSOR_HOME", "/var/lib/cosmic/alpha/homes/cursor")
         or "/var/lib/cosmic/alpha/homes/cursor",
+        "ALPHA_OPENCODE_HOME": pick_env(
+            "ALPHA_OPENCODE_HOME", "/var/lib/cosmic/alpha/homes/opencode"
+        )
+        or "/var/lib/cosmic/alpha/homes/opencode",
         "ALPHA_CODEX_MODEL": pick_env("ALPHA_CODEX_MODEL", "") or "",
         "ALPHA_CURSOR_MODEL": pick_env("ALPHA_CURSOR_MODEL", "cursor-grok-4.5-high")
         or "cursor-grok-4.5-high",
+        "ALPHA_OPENCODE_MODEL": pick_env("ALPHA_OPENCODE_MODEL", "mimo-v2.5-free")
+        or "mimo-v2.5-free",
         "ALPHA_CODEX_SANDBOX": pick_env("ALPHA_CODEX_SANDBOX", "danger-full-access")
         or "danger-full-access",
         "ALPHA_CODEX_TIMEOUT_SEC": pick_env("ALPHA_CODEX_TIMEOUT_SEC", "14400") or "14400",
         "ALPHA_CURSOR_TIMEOUT_SEC": pick_env("ALPHA_CURSOR_TIMEOUT_SEC", "14400") or "14400",
+        "ALPHA_OPENCODE_TIMEOUT_SEC": pick_env("ALPHA_OPENCODE_TIMEOUT_SEC", "14400")
+        or "14400",
         "ALPHA_CURSOR_INIT_TIMEOUT_SEC": pick_env("ALPHA_CURSOR_INIT_TIMEOUT_SEC", "180") or "180",
         "ALPHA_CLI_IDLE_CHECK_SEC": pick_env("ALPHA_CLI_IDLE_CHECK_SEC", "300") or "300",
         "ALPHA_PROJECT_DB_PATH": pick_env("ALPHA_PROJECT_DB_PATH", "") or "",
@@ -4479,6 +4489,53 @@ def ensure_cursor_cli_default_config(cursor_home: Path = DEFAULT_ALPHA_CURSOR_HO
         return
     action = "Updated" if changed else "Verified"
     log("{0} Cursor CLI non-Fast config: {1}".format(action, config_path))
+
+
+def ensure_opencode_cli() -> None:
+    """Install/refresh the OpenCode CLI used by the Alpha agent runner.
+
+    Also runs when the CLI exists: `opencode-ai` ships new Zen-era releases
+    multiple times a week, and bootstrap re-runs (VM fast-forwards, repairs)
+    are the natural refresh point alongside the gateway's 24h update loop.
+    """
+    ensure_node_toolchain()
+    opencode_version = executable_version(["opencode", "--version"])
+    install_result = None
+    if not opencode_version:
+        log("Installing OpenCode CLI globally for Alpha agent execution.")
+        run_with_retry(
+            ["npm", "install", "-g", OPENCODE_CLI_PACKAGE],
+            use_sudo=True,
+        )
+        opencode_version = executable_version(["opencode", "--version"])
+        if not opencode_version:
+            raise BootstrapError("OpenCode CLI is still unavailable after npm install.")
+    else:
+        # Best-effort refresh; never fail a bootstrap run over an upgrade.
+        try:
+            subprocess.run(
+                ["npm", "install", "-g", "{0}@latest".format(OPENCODE_CLI_PACKAGE)],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                check=False,
+            )
+            refreshed = executable_version(["opencode", "--version"])
+            if refreshed:
+                opencode_version = refreshed
+        except (OSError, subprocess.SubprocessError) as exc:
+            install_result = str(exc)
+    ensure_opencode_cli_layout()
+    suffix = " (refresh warning: {0})".format(install_result) if install_result else ""
+    log("OpenCode CLI available: {0}{1}".format(opencode_version, suffix))
+
+
+def ensure_opencode_cli_layout() -> None:
+    """Pre-create the Alpha OpenCode home so Day-1 runs never hit ENOENT."""
+    try:
+        DEFAULT_ALPHA_OPENCODE_HOME.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log("WARNING: unable to create Alpha OpenCode home: {0}".format(exc))
 
 
 def load_package_json(package_json: Path) -> dict:
@@ -6175,6 +6232,11 @@ def doctor(
         )
     )
     print(
+        "  opencode cli       : {0}".format(
+            executable_version(["opencode", "--version"]) or "no"
+        )
+    )
+    print(
         "  bridge dir         : {0}".format(
             bridge_dir if bridge_dir.exists() else "missing"
         )
@@ -7762,6 +7824,7 @@ def bootstrap(
     setup_diagram_renderers()
     ensure_openai_codex_cli()
     ensure_cursor_cli()
+    ensure_opencode_cli()
     if not skip_edge and edge_setup_script is not None and gateway_env_path is not None:
         setup_vm_edge(
             edge_setup_script,
@@ -8198,6 +8261,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install the Cursor CLI used by the Alpha agent runner.",
     )
     subparsers.add_parser(
+        "setup-opencode-cli",
+        help="Install/refresh the OpenCode CLI used by the Alpha agent runner.",
+    )
+    subparsers.add_parser(
         "setup-env",
         help="Create missing env files from committed *.env.example templates.",
     )
@@ -8334,6 +8401,8 @@ def main() -> int:
             ensure_openai_codex_cli()
         elif command == "setup-cursor-cli":
             ensure_cursor_cli()
+        elif command == "setup-opencode-cli":
+            ensure_opencode_cli()
         elif command == "setup-edge":
             setup_vm_edge(
                 edge_setup_script,

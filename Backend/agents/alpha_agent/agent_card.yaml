@@ -3,8 +3,9 @@ display_name: Alpha Agent
 description: >
   Alpha-stage project operator for COSMIC. It prepares isolated project
   workspaces and executes high-level software, deployment, and
-  capability-bootstrap tasks through the selected Codex or Cursor CLI harness
-  when the desktop agent provider settings are authenticated.
+  capability-bootstrap tasks through the configured Alpha CLI harness
+  (OpenCode by default; Codex and Cursor CLI are also wired) when the desktop
+  agent provider settings are authenticated.
 
 intents:
   - name: alpha.execute
@@ -13,7 +14,7 @@ intents:
     output_schema: schemas/intents/alpha.execute.output.json
     timeout_sec: 14400
     usage_hints:
-      - "Treat Alpha as COSMIC's VM project operator: a Codex/Cursor/Claude Code CLI-style agent that can work in a real workspace, edit files, run terminal commands, install dependencies, execute tests, operate repos, produce artifacts, and perform deployment-oriented workflows when the selected CLI provider is authenticated."
+      - "Treat Alpha as COSMIC's VM project operator: an OpenCode/Codex/Cursor/Claude Code CLI-style agent that can work in a real workspace, edit files, run terminal commands, install dependencies, execute tests, operate repos, produce artifacts, and perform deployment-oriented workflows when the selected CLI provider is authenticated."
       - Use this for high-level project work that requires capabilities outside the pre-packaged COSMIC specialists, especially when the task needs arbitrary CLI/tool use, repo-level code changes, dependency setup, filesystem work, long-running engineering loops, or VM-side deployment steps.
       - Good fits include building and hosting a website, cloning a repo and extending it, creating a new app, wiring an unfamiliar toolchain, running a research/code workflow, fine-tuning or training experiments, browser/screenshot automation from the VM, or completing a multi-step engineering task end-to-end.
       - Pass a high-level goal with success criteria, relevant constraints, desired outputs, deployment target, artifact expectations, and any known repo/project/deployment references; do not decompose into tiny shell commands unless the user explicitly requires exact commands.
@@ -22,7 +23,7 @@ intents:
       - Prefer normal COSMIC specialists for narrow packaged capabilities such as email, calendar, slides, docs parsing, tabular analysis, image generation, diagrams, X search, or Firecrawl extraction when those specialists directly satisfy the request.
       - Use Alpha when a packaged specialist is insufficient, when several tools must be combined inside a project workspace, or when the user asks for something a human engineer would normally do through a coding CLI/terminal agent.
       - "Let Alpha use `preferred_harness: auto` or the user's configured provider for normal work. If the selected CLI exits dirty, times out, or cannot initialize, Alpha should retry that same provider in the same workspace with failure context first. Cross-provider continuation must be explicit with `allow_cross_harness_fallback: true` and still requires the alternate provider to be authenticated; set `require_preferred_harness: true` for provider-specific diagnostics."
-      - "Alpha automatically reuses healthy provider-native sessions when safe for the resolved project. Cursor chat ids are stored in the Alpha project registry and resumed with the same workspace; Codex native ids are tracked when observed, while Codex execution remains on the headless `codex exec` path until a safe noninteractive resume mode is available. Use `fresh_native_session: true` or `disable_native_resume: true` only when the user asks for a clean provider thread or diagnostics."
+      - "Alpha automatically reuses healthy provider-native sessions when safe for the resolved project. OpenCode session ids are stored in the Alpha project registry and resumed via `opencode run --session`; Cursor chat ids are stored in the Alpha project registry and resumed with the same workspace; Codex native ids are tracked when observed, while Codex execution remains on the headless `codex exec` path until a safe noninteractive resume mode is available. Use `fresh_native_session: true` or `disable_native_resume: true` only when the user asks for a clean provider thread or diagnostics."
       - Use prepare_only=true only for diagnostics or when the user explicitly asks to create/recall the workspace without execution.
       - Do not delegate destructive production changes, credential changes, or irreversible infrastructure mutations here unless the user goal explicitly asks for them and the target project/context is clear.
       - Pass project_ref when the user is referring to an existing Alpha project, repo URL, deployment URL, local path, prior task, prior artifact, or project alias; call alpha.recall_project first when identity is ambiguous.
@@ -46,6 +47,7 @@ artifact_types:
   - alpha_container_summary
   - alpha_codex_report
   - alpha_cursor_report
+  - alpha_opencode_report
 
 policies:
   network_access: true
@@ -58,6 +60,7 @@ policies:
     - docker_workspace_run
     - codex_exec
     - cursor_agent
+    - opencode_run
   allowed_senders:
     - cosmic/orchestrator:1.0.0
   intent_authorization:
@@ -69,6 +72,7 @@ sandbox:
   workspace_root_env: ALPHA_WORKSPACE_ROOT
   codex_home_env: ALPHA_CODEX_HOME
   cursor_home_env: ALPHA_CURSOR_HOME
+  opencode_home_env: ALPHA_OPENCODE_HOME
   codex_sandbox_default: danger-full-access
   docker_socket_mount_default: false
   host_deployment_broker_required: false

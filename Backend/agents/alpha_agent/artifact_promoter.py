@@ -19,6 +19,7 @@ INTERNAL_ARTIFACT_FILENAMES = frozenset(
     {
         "cursor-last-message.md",
         "codex-last-message.md",
+        "opencode-last-message.md",
         "alpha-full-goal.md",
         "DEPLOYMENT_REPORT.md",
         "replacement-report.txt",

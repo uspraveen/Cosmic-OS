@@ -34,12 +34,16 @@ def _config(tmp_path: Path) -> AlphaAgentConfig:
         allow_docker_smoke=False,
         codex_home=tmp_path / "alpha" / "homes" / "codex",
         cursor_home=tmp_path / "alpha" / "homes" / "cursor",
+        opencode_home=tmp_path / "alpha" / "homes" / "opencode",
         codex_sandbox="workspace-write",
         codex_timeout_sec=14400.0,
         codex_default_model="",
         cursor_timeout_sec=14400.0,
         cursor_default_model="",
         cursor_init_timeout_sec=180.0,
+        opencode_timeout_sec=14400.0,
+        opencode_default_model="mimo-v2.5-free",
+        zen_api_key="",
         cli_idle_check_sec=300.0,
     )
 
@@ -532,7 +536,7 @@ def test_alpha_execute_retries_dirty_cursor_before_any_cross_provider_fallback(t
     assert "pkill -f" in prompts[1]
 
 
-def test_alpha_auto_prefers_codex_for_large_generation_tasks(tmp_path: Path) -> None:
+def test_alpha_auto_prefers_opencode_and_codex_for_large_generation_tasks(tmp_path: Path) -> None:
     agent = AlphaAgent(_FakeRedis(), config=_config(tmp_path))
 
     candidates = agent._candidate_harnesses(
@@ -541,11 +545,18 @@ def test_alpha_auto_prefers_codex_for_large_generation_tasks(tmp_path: Path) -> 
     )
 
     assert candidates == ["codex", "codex"]
+    small = agent._candidate_harnesses(
+        "auto",
+        _task({"goal": "Update the existing site."}),
+    )
+    assert small == ["opencode", "opencode"]
 
 
 def test_alpha_cross_provider_fallback_is_explicit_opt_in(tmp_path: Path) -> None:
     agent = AlphaAgent(_FakeRedis(), config=_config(tmp_path))
 
+    # Cross-provider rotation follows the canonical order opencode > codex >
+    # cursor, so cursor's explicit alternate is OpenCode.
     assert agent._candidate_harnesses(
         "cursor",
         _task({"goal": "Update the existing site."}),
@@ -553,7 +564,15 @@ def test_alpha_cross_provider_fallback_is_explicit_opt_in(tmp_path: Path) -> Non
     assert agent._candidate_harnesses(
         "cursor",
         _task({"goal": "Update the existing site.", "allow_cross_harness_fallback": True}),
-    ) == ["cursor", "cursor", "codex"]
+    ) == ["cursor", "cursor", "opencode"]
+    assert agent._candidate_harnesses(
+        "codex",
+        _task({"goal": "Update the existing site.", "allow_cross_harness_fallback": True}),
+    ) == ["codex", "codex", "opencode"]
+    assert agent._candidate_harnesses(
+        "opencode",
+        _task({"goal": "Update the existing site.", "allow_cross_harness_fallback": True}),
+    ) == ["opencode", "opencode", "codex"]
     assert agent._candidate_harnesses(
         "cursor",
         _task(
@@ -564,6 +583,11 @@ def test_alpha_cross_provider_fallback_is_explicit_opt_in(tmp_path: Path) -> Non
             }
         ),
     ) == ["cursor", "cursor"]
+
+
+def test_alpha_unknown_harness_yields_no_candidates(tmp_path: Path) -> None:
+    agent = AlphaAgent(_FakeRedis(), config=_config(tmp_path))
+    assert agent._candidate_harnesses("claude-code", _task({"goal": "Anything."})) == []
 
 
 def test_alpha_large_goal_is_externalized_for_cli_prompt(tmp_path: Path) -> None:

@@ -2017,6 +2017,8 @@ const buildAlphaConsoleView = (
       stage.includes('alpha.codex.failed') ||
       stage.includes('alpha.cursor.completed') ||
       stage.includes('alpha.cursor.failed') ||
+      stage.includes('alpha.opencode.completed') ||
+      stage.includes('alpha.opencode.failed') ||
       status === 'completed' ||
       status === 'failed' ||
       status === 'cancelled'
@@ -2044,6 +2046,7 @@ const formatAlphaProviderLabel = (provider?: string | null) => {
   const normalized = String(provider || '').trim().toLowerCase()
   if (normalized === 'cursor') return 'Cursor CLI'
   if (normalized === 'codex') return 'Codex CLI'
+  if (normalized === 'opencode') return 'OpenCode CLI'
   return 'Alpha CLI'
 }
 

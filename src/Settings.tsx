@@ -11,9 +11,19 @@ import MobileDevicesSettings from './MobileDevicesSettings'
 import GatewayPreferencesSettings from './GatewayPreferencesSettings'
 import CodexAgentSettings from './CodexAgentSettings'
 import CursorAgentSettings from './CursorAgentSettings'
+import OpenCodeAgentSettings from './OpenCodeAgentSettings'
 import { GOOGLE_TOOL_DEFINITIONS } from './integrations'
 import type { SearchPosition } from './App'
 import './settings.css'
+
+export type AlphaPreferredHarness = 'opencode' | 'codex' | 'cursor'
+
+function normalizeAlphaHarness(value: unknown): AlphaPreferredHarness {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (normalized === 'cursor') return 'cursor'
+  if (normalized === 'codex') return 'codex'
+  return 'opencode'
+}
 
 interface SettingsProps {
   isOpen: boolean
@@ -56,6 +66,7 @@ export type SettingsView =
   | 'agents'
   | 'agents-codex'
   | 'agents-cursor'
+  | 'agents-opencode'
   | 'integrations'
   | 'integrations-google'
   | 'integrations-whatsapp'
@@ -79,7 +90,7 @@ export default function Settings({
   authAttentionCount = 0,
 }: SettingsProps) {
   const [currentView, setCurrentView] = useState<SettingsView>(initialView || 'main')
-  const [alphaPreferredHarness, setAlphaPreferredHarness] = useState<'codex' | 'cursor'>('codex')
+  const [alphaPreferredHarness, setAlphaPreferredHarness] = useState<'opencode' | 'codex' | 'cursor'>('opencode')
   const [alphaConfigLoading, setAlphaConfigLoading] = useState(false)
   const [alphaConfigError, setAlphaConfigError] = useState('')
 
@@ -117,7 +128,7 @@ export default function Settings({
       try {
         const config = await window.cosmic?.getGatewayAlphaAgentConfig()
         const harness = String(config?.preferred_harness || '').trim().toLowerCase()
-        if (!cancelled) setAlphaPreferredHarness(harness === 'cursor' ? 'cursor' : 'codex')
+        if (!cancelled) setAlphaPreferredHarness(normalizeAlphaHarness(harness))
       } catch (err) {
         if (!cancelled) setAlphaConfigError(err instanceof Error ? err.message : 'Unable to load Alpha provider selection.')
       } finally {
@@ -151,6 +162,8 @@ export default function Settings({
               ? 'Codex'
             : currentView === 'agents-cursor'
               ? 'Cursor'
+            : currentView === 'agents-opencode'
+              ? 'OpenCode'
             : currentView === 'integrations'
               ? 'Integrations'
               : currentView === 'integrations-whatsapp'
@@ -171,7 +184,7 @@ export default function Settings({
       setCurrentView('integrations')
       return
     }
-    if (currentView === 'agents-codex' || currentView === 'agents-cursor') {
+    if (currentView === 'agents-codex' || currentView === 'agents-cursor' || currentView === 'agents-opencode') {
       setCurrentView('agents')
       return
     }
@@ -190,14 +203,14 @@ export default function Settings({
       : gatewayConnection?.state === 'error'
         ? 'Gateway unavailable'
         : 'Signed in to VM'
-  const saveAlphaPreferredHarness = async (preferredHarness: 'codex' | 'cursor') => {
+  const saveAlphaPreferredHarness = async (preferredHarness: 'opencode' | 'codex' | 'cursor') => {
     setAlphaPreferredHarness(preferredHarness)
     setAlphaConfigError('')
     setAlphaConfigLoading(true)
     try {
       const config = await window.cosmic?.saveGatewayAlphaAgentConfig({ preferredHarness })
       const harness = String(config?.preferred_harness || preferredHarness).trim().toLowerCase()
-      setAlphaPreferredHarness(harness === 'cursor' ? 'cursor' : 'codex')
+      setAlphaPreferredHarness(normalizeAlphaHarness(harness))
     } catch (err) {
       setAlphaConfigError(err instanceof Error ? err.message : 'Unable to save Alpha provider selection.')
     } finally {
@@ -446,17 +459,38 @@ export default function Settings({
                   </div>
                   <div className="cosmic-agents-hero-status">
                     <span className="cosmic-agents-live-dot on" aria-hidden="true" />
-                    <span className="cosmic-agents-status-text">{alphaPreferredHarness === 'cursor' ? 'Cursor selected' : 'Codex selected'}</span>
+                    <span className="cosmic-agents-status-text">
+                      {alphaPreferredHarness === 'cursor'
+                        ? 'Cursor selected'
+                        : alphaPreferredHarness === 'codex'
+                          ? 'Codex selected'
+                          : 'OpenCode selected'}
+                    </span>
                   </div>
                 </div>
 
                 <div className="cosmic-alpha-provider-switch">
                   <div className="cosmic-alpha-provider-switch-copy">
                     <span className="cosmic-agents-section-label">Default Alpha Runner</span>
-                    <strong>{alphaPreferredHarness === 'cursor' ? 'Cursor CLI' : 'Codex'}</strong>
+                    <strong>
+                      {alphaPreferredHarness === 'cursor'
+                        ? 'Cursor CLI'
+                        : alphaPreferredHarness === 'codex'
+                          ? 'Codex'
+                          : 'OpenCode'}
+                    </strong>
                     <small>Used when the orchestrator delegates `alpha.execute` without an explicit harness.</small>
                   </div>
                   <div className="cosmic-alpha-provider-toggle" role="group" aria-label="Default Alpha runner">
+                    <button
+                      type="button"
+                      className={alphaPreferredHarness === 'opencode' ? 'active' : ''}
+                      onClick={() => void saveAlphaPreferredHarness('opencode')}
+                      disabled={alphaConfigLoading}
+                    >
+                      <Sparkles size={14} />
+                      OpenCode
+                    </button>
                     <button
                       type="button"
                       className={alphaPreferredHarness === 'codex' ? 'active' : ''}
@@ -480,6 +514,27 @@ export default function Settings({
                 {alphaConfigError ? <div className="cosmic-agents-inline-error">{alphaConfigError}</div> : null}
 
                 <div className="cosmic-agents-section-label">Active Providers</div>
+                <button className="cosmic-agents-provider-card" onClick={() => setCurrentView('agents-opencode')}>
+                  <div className="cosmic-agents-provider-icon" aria-hidden="true">
+                    <Sparkles size={22} />
+                  </div>
+                  <div className="cosmic-agents-provider-info">
+                    <div className="cosmic-agents-provider-title">
+                      <strong>OpenCode</strong>
+                      <span className="cosmic-agents-beta-pill">Default</span>
+                    </div>
+                    <span>OpenCode Zen models with an auto-refreshing weekly catalog.</span>
+                  </div>
+                  <div className="cosmic-agents-provider-meta">
+                    <span className={`cosmic-agents-status-pill ${alphaPreferredHarness === 'opencode' ? 'ready' : 'pending'}`}>
+                      {alphaPreferredHarness === 'opencode' ? 'Selected' : 'Available'}
+                    </span>
+                  </div>
+                  <div className="cosmic-agents-provider-arrow" aria-hidden="true">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
+                  </div>
+                </button>
+
                 <button className="cosmic-agents-provider-card" onClick={() => setCurrentView('agents-codex')}>
                   <div className="cosmic-agents-provider-icon" aria-hidden="true">
                     <Code2 size={22} />
@@ -521,19 +576,6 @@ export default function Settings({
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
                   </div>
                 </button>
-
-                <div className="cosmic-agents-section-label">Coming Soon</div>
-                <div className="cosmic-agents-roadmap">
-                  <div className="cosmic-agents-roadmap-card">
-                    <div className="cosmic-agents-roadmap-icon" aria-hidden="true">
-                      <Sparkles size={18} />
-                    </div>
-                    <div>
-                      <strong>OpenCode</strong>
-                      <span>Provider slot reserved for future integration.</span>
-                    </div>
-                  </div>
-                </div>
               </div>
             )}
 
@@ -543,6 +585,10 @@ export default function Settings({
 
             {currentView === 'agents-cursor' && (
               <CursorAgentSettings active={currentView === 'agents-cursor'} />
+            )}
+
+            {currentView === 'agents-opencode' && (
+              <OpenCodeAgentSettings active={currentView === 'agents-opencode'} />
             )}
 
             {currentView === 'integrations-google' && (

@@ -404,7 +404,7 @@ class GatewayPreferenceStore:
         defaults = {
             _VISUAL_RESPONSE_ENHANCEMENT_KEY: {"enabled": True},
             _COSMIC_HEARTBEAT_KEY: {"enabled": True},
-            _ALPHA_EXECUTION_PROVIDER_KEY: {"preferred_harness": "codex"},
+            _ALPHA_EXECUTION_PROVIDER_KEY: {"preferred_harness": "opencode"},
             _COSMIC_ORCHESTRATOR_MODEL_KEY: {
                 "provider": "fireworks_glm",
                 "model": _FIREWORKS_GLM_MODEL,
@@ -492,7 +492,8 @@ class GatewayPreferenceStore:
             value = {}
         return {
             "preferred_harness": self._normalize_alpha_execution_provider(
-                str(value.get("preferred_harness") or "codex")
+                str(value.get("preferred_harness") or "opencode"),
+                updated_source=str(row["updated_source"] or ""),
             ),
             "revision": int(row["revision"]) if row["revision"] is not None else 1,
             "updated_at": str(row["updated_at"] or "").strip() or utcnow_iso(),
@@ -534,9 +535,27 @@ class GatewayPreferenceStore:
             ),
         }
 
-    def _normalize_alpha_execution_provider(self, value: str) -> str:
+    def _normalize_alpha_execution_provider(
+        self,
+        value: str,
+        *,
+        updated_source: str = "",
+    ) -> str:
+        """Normalize the saved harness choice.
+
+        OpenCode is the COSMIC default. A row still carrying the old factory
+        seed (`codex`, never touched by a user or external system) is migrated
+        to OpenCode on read; an explicit user/system-external selection is
+        always honored.
+        """
         normalized = str(value or "").strip().lower()
-        return normalized if normalized in {"codex", "cursor"} else "codex"
+        if (
+            updated_source == "system_default"
+            and normalized == "codex"
+            and normalized not in {"opencode"}
+        ):
+            return "opencode"
+        return normalized if normalized in {"codex", "cursor", "opencode"} else "opencode"
 
     def _normalize_cosmic_orchestrator_provider(self, value: str) -> str:
         normalized = str(value or "").strip().lower().replace("-", "_")

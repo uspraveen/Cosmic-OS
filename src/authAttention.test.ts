@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   getCodexAuthAttentionItems,
   getCursorAuthAttentionItems,
+  getOpenCodeAuthAttentionItems,
   mergeAuthAttentionItems,
 } from './authAttention'
 
@@ -36,6 +37,32 @@ describe('getCursorAuthAttentionItems', () => {
     expect(items).toHaveLength(1)
     expect(items[0]?.key).toBe('cursor:alpha')
     expect(items[0]?.settingsView).toBe('agents-cursor')
+  })
+})
+
+describe('getOpenCodeAuthAttentionItems', () => {
+  it('returns nothing when OpenCode is authenticated', () => {
+    expect(getOpenCodeAuthAttentionItems({ status: 'authenticated' })).toEqual([])
+  })
+
+  it('surfaces missing Zen key for island/settings attention', () => {
+    const items = getOpenCodeAuthAttentionItems({
+      status: 'login_required',
+      login_required_reason: 'zen_api_key_required',
+    })
+    expect(items).toHaveLength(1)
+    expect(items[0]?.key).toBe('opencode:alpha')
+    expect(items[0]?.settingsView).toBe('agents-opencode')
+    expect(items[0]?.detail).toContain('Zen')
+  })
+
+  it('reports a missing CLI distinctly from a missing key', () => {
+    const items = getOpenCodeAuthAttentionItems({
+      status: 'relogin_required',
+      login_required_reason: 'opencode_cli_missing',
+    })
+    expect(items).toHaveLength(1)
+    expect(items[0]?.title).toContain('CLI is missing')
   })
 })
 
