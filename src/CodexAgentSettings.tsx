@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bot, CheckCircle2, Code2, Copy, ExternalLink, KeyRound, LogIn, ShieldCheck, Terminal, Trash2 } from 'lucide-react'
+import { Bot, CheckCircle2, Copy, ExternalLink, KeyRound, LogIn, ShieldCheck, Terminal, Trash2 } from 'lucide-react'
 import { describeLoginReason, loginStartOutcome } from './agentLogin'
+import { OpenAIMark } from './brandIcons'
 
 type CodexAuthMode = 'chatgpt' | 'api_key'
 type CodexApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
@@ -298,7 +299,7 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
       <div className="cosmic-agents-detail-hero">
         <div className="cosmic-agents-detail-hero-top">
           <div className="cosmic-agents-detail-hero-icon" aria-hidden="true">
-            <Code2 size={28} />
+            <OpenAIMark size={26} />
           </div>
           <div className="cosmic-agents-detail-hero-text">
             <h3>Codex for Alpha</h3>

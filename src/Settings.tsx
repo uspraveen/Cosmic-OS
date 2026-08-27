@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Bot, Code2, Sparkles, Terminal } from 'lucide-react'
+import { Bot } from 'lucide-react'
+import { CursorMark, OpenAIMark, OpenCodeMark } from './brandIcons'
 import LiquidGlass from './LiquidGlass'
 import MonitorSelector from './MonitorSelector'
 import ApiConfiguration from './ApiConfiguration'
@@ -488,7 +489,7 @@ export default function Settings({
                       onClick={() => void saveAlphaPreferredHarness('opencode')}
                       disabled={alphaConfigLoading}
                     >
-                      <Sparkles size={14} />
+                      <OpenCodeMark size={13} tone="light" />
                       OpenCode
                     </button>
                     <button
@@ -497,7 +498,7 @@ export default function Settings({
                       onClick={() => void saveAlphaPreferredHarness('codex')}
                       disabled={alphaConfigLoading}
                     >
-                      <Code2 size={14} />
+                      <OpenAIMark size={13} />
                       Codex
                     </button>
                     <button
@@ -506,7 +507,7 @@ export default function Settings({
                       onClick={() => void saveAlphaPreferredHarness('cursor')}
                       disabled={alphaConfigLoading}
                     >
-                      <Terminal size={14} />
+                      <CursorMark size={13} />
                       Cursor
                     </button>
                   </div>
@@ -516,14 +517,14 @@ export default function Settings({
                 <div className="cosmic-agents-section-label">Active Providers</div>
                 <button className="cosmic-agents-provider-card" onClick={() => setCurrentView('agents-opencode')}>
                   <div className="cosmic-agents-provider-icon" aria-hidden="true">
-                    <Sparkles size={22} />
+                    <OpenCodeMark size={22} />
                   </div>
                   <div className="cosmic-agents-provider-info">
                     <div className="cosmic-agents-provider-title">
                       <strong>OpenCode</strong>
                       <span className="cosmic-agents-beta-pill">Default</span>
                     </div>
-                    <span>OpenCode Zen models with an auto-refreshing weekly catalog.</span>
+                    <span>Zen models with a live auto-refreshing catalog.</span>
                   </div>
                   <div className="cosmic-agents-provider-meta">
                     <span className={`cosmic-agents-status-pill ${alphaPreferredHarness === 'opencode' ? 'ready' : 'pending'}`}>
@@ -537,12 +538,11 @@ export default function Settings({
 
                 <button className="cosmic-agents-provider-card" onClick={() => setCurrentView('agents-codex')}>
                   <div className="cosmic-agents-provider-icon" aria-hidden="true">
-                    <Code2 size={22} />
+                    <OpenAIMark size={22} />
                   </div>
                   <div className="cosmic-agents-provider-info">
                     <div className="cosmic-agents-provider-title">
                       <strong>Codex</strong>
-                      <span className="cosmic-agents-beta-pill">Alpha</span>
                     </div>
                     <span>ChatGPT sign-in or OpenAI API key for the Alpha coding runner.</span>
                   </div>
@@ -558,12 +558,11 @@ export default function Settings({
 
                 <button className="cosmic-agents-provider-card" onClick={() => setCurrentView('agents-cursor')}>
                   <div className="cosmic-agents-provider-icon cursor" aria-hidden="true">
-                    <Terminal size={22} />
+                    <CursorMark size={22} />
                   </div>
                   <div className="cosmic-agents-provider-info">
                     <div className="cosmic-agents-provider-title">
                       <strong>Cursor CLI</strong>
-                      <span className="cosmic-agents-beta-pill">OAuth</span>
                     </div>
                     <span>Browser sign-in for the Cursor Agent runner on the VM.</span>
                   </div>

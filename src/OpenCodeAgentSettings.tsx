@@ -9,9 +9,9 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
-  Sparkles,
   X,
 } from 'lucide-react'
+import { OpenCodeMark } from './brandIcons'
 
 type OpenCodeModel = {
   id: string
@@ -326,7 +326,7 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
       <div className="cosmic-agents-detail-hero">
         <div className="cosmic-agents-detail-hero-top">
           <div className="cosmic-agents-detail-hero-icon" aria-hidden="true">
-            <Sparkles size={28} />
+            <OpenCodeMark size={26} />
           </div>
           <div className="cosmic-agents-detail-hero-text">
             <h3>OpenCode for Alpha</h3>
@@ -409,7 +409,7 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
           <div className="opencode-model-search">
             <Search size={14} />
             <input
-              type="search"
+              type="text"
               value={modelQuery}
               onChange={(event) => setModelQuery(event.target.value)}
               placeholder="Search e.g. opus, mimo, gpt…"

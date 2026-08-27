@@ -7,6 +7,7 @@ import {
   loginStartOutcome,
   stripAnsi,
 } from './agentLogin'
+import { CursorMark } from './brandIcons'
 
 type CursorApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
 
@@ -254,7 +255,7 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
       <div className="cosmic-agents-detail-hero provider-cursor">
         <div className="cosmic-agents-detail-hero-top">
           <div className="cosmic-agents-detail-hero-icon cursor" aria-hidden="true">
-            <Terminal size={28} />
+            <CursorMark size={26} />
           </div>
           <div className="cosmic-agents-detail-hero-text">
             <h3>Cursor CLI for Alpha</h3>
