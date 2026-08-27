@@ -6714,7 +6714,7 @@
   border-color: rgba(142, 207, 255, 0.4);
 }
 
-/* ── OpenCode: searchable grouped model catalog (GUI of /models) ────────── */
+/* ── OpenCode: default-model browser (GUI of /models) ── */
 
 .opencode-model-toolbar {
   display: flex;
@@ -6755,6 +6755,21 @@
   color: rgba(255, 255, 255, 0.32);
 }
 
+.opencode-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+}
+
 .opencode-model-count {
   flex: none;
   color: rgba(255, 255, 255, 0.42);
@@ -6762,75 +6777,122 @@
   white-space: nowrap;
 }
 
-.opencode-group-list,
-.opencode-model-list {
+/* Provider rail: one compact row per provider; opening one swaps in its
+   model list below. The page scrolls, never a nested box. */
+.opencode-group-rail {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 320px;
-  overflow-y: auto;
-  padding-right: 2px;
-}
-
-.opencode-model-group {
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.02);
   overflow: hidden;
 }
 
-.opencode-group-header {
+.opencode-rail-item {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 9px 12px;
+  min-height: 40px;
+  padding: 6px 12px;
   border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
   background: transparent;
-  color: #fff;
+  color: rgba(255, 255, 255, 0.85);
   cursor: pointer;
   text-align: left;
 }
 
-.opencode-group-header:hover {
-  background: rgba(255, 255, 255, 0.03);
+.opencode-rail-item:first-child {
+  border-top: none;
 }
 
-.opencode-group-chevron {
-  flex: none;
-  transition: transform 0.18s ease;
-  opacity: 0.55;
+.opencode-rail-item:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
-.opencode-group-list .opencode-model-group.open .opencode-group-chevron,
-.opencode-model-group.open .opencode-group-chevron {
-  transform: rotate(0deg);
+.opencode-rail-item.active {
+  background: rgba(142, 207, 255, 0.08);
 }
 
-.opencode-model-group:not(.open) .opencode-group-chevron {
-  transform: rotate(-90deg);
-}
-
-.opencode-group-label {
-  font-size: 13px;
+.opencode-rail-label {
+  font-size: 12.5px;
   font-weight: 650;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.opencode-group-count {
+.opencode-rail-count {
   margin-left: auto;
   flex: none;
-  color: rgba(255, 255, 255, 0.4);
+  color: rgba(255, 255, 255, 0.38);
   font-size: 11px;
   font-weight: 600;
 }
 
-.opencode-model-group .opencode-model-list {
-  max-height: none;
-  overflow: visible;
-  padding: 2px 8px 10px;
+.opencode-rail-hint {
+  margin-top: 8px;
+}
+
+/* Opened provider: full lineup in the page flow. */
+.opencode-opened-group {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 8px;
+}
+
+.opencode-opened-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px 8px;
+}
+
+.opencode-opened-group-head strong {
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.opencode-opened-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px 3px 4px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.opencode-opened-back:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.opencode-group-chevron.up {
+  transform: rotate(-90deg);
+}
+
+.opencode-locked-note {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #ffd76a;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.opencode-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .opencode-model-row {
@@ -6838,12 +6900,12 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 34px;
+  min-height: 44px;
   padding: 6px 10px;
   border: 1px solid transparent;
   border-radius: 9px;
   background: transparent;
-  color: rgba(255, 255, 255, 0.82);
+  color: rgba(255, 255, 255, 0.88);
   cursor: pointer;
   text-align: left;
   transition: background 0.15s ease, border-color 0.15s ease;
@@ -6859,9 +6921,19 @@
   color: #fff;
 }
 
-.opencode-model-row.active > svg:last-child {
-  margin-left: auto;
-  color: #8ecfff;
+.opencode-model-row.locked {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.opencode-model-row.locked:hover {
+  background: rgba(255, 215, 106, 0.05);
+}
+
+.opencode-model-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
 }
 
 .opencode-model-name {
@@ -6872,19 +6944,122 @@
   text-overflow: ellipsis;
 }
 
-.opencode-model-provider {
-  flex: none;
-  color: rgba(255, 255, 255, 0.38);
+.opencode-model-body small,
+.opencode-hit-body small {
+  color: rgba(255, 255, 255, 0.34);
   font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.opencode-model-lock {
+  margin-left: auto;
+  flex: none;
+  color: rgba(255, 215, 106, 0.55);
+}
+
+.opencode-model-row.active > svg:last-child {
+  margin-left: auto;
+  flex: none;
+  color: #8ecfff;
+}
+
+.opencode-model-row .opencode-free-pill {
+  flex: none;
+  margin-left: auto;
+}
+
+.opencode-model-row.active .opencode-free-pill {
+  margin-left: 0;
+}
+
+.opencode-connect-cta {
+  width: 100%;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+/* Search results: flat, provider-tagged, works across locked providers. */
+.opencode-hit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.opencode-hit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.88);
+  cursor: pointer;
+  text-align: left;
+}
+
+.opencode-hit:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.opencode-hit.locked {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.opencode-hit-provider {
+  flex: none;
+  min-width: 74px;
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  min-width: 68px;
+}
+
+.opencode-hit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.opencode-hit-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.opencode-hit-lock {
+  margin-left: auto;
+  flex: none;
+  color: rgba(255, 215, 106, 0.55);
+}
+
+.opencode-hit .opencode-free-pill {
+  flex: none;
+  margin-left: auto;
+}
+
+.opencode-hit .opencode-hit-check {
+  margin-left: auto;
+  flex: none;
+  color: #8ecfff;
+}
+
+.opencode-hit .opencode-hit-check ~ .opencode-free-pill,
+.opencode-hit.locked .opencode-free-pill,
+.opencode-hit:has(.opencode-hit-lock) .opencode-free-pill {
+  margin-left: 0;
 }
 
 .opencode-free-pill {
-  flex: none;
-  margin-left: auto;
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.05em;
@@ -6894,4 +7069,20 @@
   border: 1px solid rgba(255, 215, 106, 0.3);
   padding: 1px 6px;
   border-radius: 999px;
+}
+
+.cosmic-agents-detail-banner-action {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  background: transparent;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.cosmic-agents-detail-banner-action:hover {
+  background: rgba(255, 255, 255, 0.08);
 }

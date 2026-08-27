@@ -150,6 +150,8 @@ _AGENT_EMAIL_ORG_API_KEY_NAME = "COSMIC Gateway Agent Email"
 OPENCODE_ZEN_MODELS_ENDPOINT = "https://opencode.ai/zen/v1/models"
 OPENCODE_ZEN_MODELS_TTL_SEC = 6 * 3600.0
 OPENCODE_CATALOG_TTL_SEC = 30 * 60.0
+MODELS_DEV_ENDPOINT = "https://models.dev/api.json"
+MODELS_DEV_TTL_SEC = 12 * 3600.0
 # Canonical display order/labels for providers surfaced in the settings
 # panel. Anything `opencode models` reports beyond this gets appended.
 OPENCODE_PROVIDER_LABELS: dict[str, str] = {
@@ -604,6 +606,8 @@ class GatewayRuntime:
         self._cursor_login_session: dict[str, Any] | None = None
         self._opencode_models_cache: dict[str, Any] | None = None
         self._opencode_catalog_cache: dict[str, Any] | None = None
+        self._opencode_registry_cache: dict[str, Any] | None = None
+        self._opencode_usable_ids: set[str] = set()
         self._opencode_models_lock = asyncio.Lock()
         self._alpha_cli_update_state: dict[str, Any] = {"providers": {}}
         self._alpha_cli_update_in_flight: set[str] = set()
@@ -21262,8 +21266,10 @@ class GatewayRuntime:
         """Provider tiles for the settings panel: curated catalog + connection state."""
         settings = self.agent_auth_store.get_opencode(include_secret=False)
         cli_status = await self._opencode_cli_status()
-        connected = sorted(str(pid) for pid in settings.get("connected_providers") or [])
-        known_model_ids = set(self._cached_model_ids())
+        usable_prefixes = {pid.split("/", 1)[0] for pid in self._opencode_usable_ids}
+        stored_ids = set(str(pid) for pid in settings.get("connected_providers") or [])
+        connected = sorted(stored_ids | usable_prefixes)
+        known_model_ids = set(self._opencode_usable_ids)
         tiles: list[dict[str, Any]] = []
         for pid in sorted(OPENCODE_PROVIDER_LABELS, key=lambda p: OPENCODE_PROVIDER_LABELS[p]):
             label = OPENCODE_PROVIDER_LABELS[pid]
@@ -21301,7 +21307,8 @@ class GatewayRuntime:
             provider_id=normalized,
             api_key=key,
         )
-        # The live model list changes once the new provider can authenticate.
+        # Usability changes with the key set — force the next catalog build.
+        self._opencode_catalog_cache = None
         overview = await self.get_desktop_opencode_providers()
         return {**overview, "connected_id": normalized}
 
@@ -21311,25 +21318,12 @@ class GatewayRuntime:
         provider_id: str,
     ) -> dict[str, Any]:
         self.agent_auth_store.disconnect_opencode_provider(provider_id=provider_id)
+        self._opencode_catalog_cache = None
         return await self.get_desktop_opencode_providers()
 
     def _cached_model_ids(self) -> list[str]:
-        cache = self._opencode_catalog_cache if isinstance(self._opencode_catalog_cache, dict) else {}
-        groups = cache.get("groups")
-        ids: list[str] = []
-        if isinstance(groups, list):
-            for group in groups:
-                if not isinstance(group, dict):
-                    continue
-                prefix = str(group.get("id") or "")
-                models = group.get("models")
-                if isinstance(models, list):
-                    ids.extend(
-                        f"{prefix}/{m.get('id')}"
-                        for m in models
-                        if isinstance(m, dict) and str(m.get("id") or "")
-                    )
-        return ids
+        """Model ids a run can use right now (from the last live catalog)."""
+        return sorted(self._opencode_usable_ids)
 
     async def save_desktop_opencode_config(
         self,
@@ -21666,17 +21660,79 @@ class GatewayRuntime:
                 bucket.append(model_id)
         return parsed
 
+    async def _fetch_model_registry(
+        self,
+        *,
+        force_refresh: bool = False,
+        allowed_providers: set[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Trimmed models.dev registry: {provider_id: {label, models: {id: label}}}.
+
+        models.dev is the registry OpenCode itself is powered by, so names
+        here are the canonical human labels ("Claude Opus 4.8"), not ids.
+        Trimmed hard — the raw payload is megabytes across 200 providers.
+        """
+        now = time.time()
+        cache = self._opencode_registry_cache
+        if (
+            not force_refresh
+            and cache
+            and isinstance(cache.get("fetched_at_epoch"), (int, float))
+            and now - float(cache["fetched_at_epoch"]) < MODELS_DEV_TTL_SEC
+            and cache.get("providers")
+        ):
+            return cache["providers"]
+
+        providers: dict[str, dict[str, Any]] = {}
+        try:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                response = await client.get(MODELS_DEV_ENDPOINT)
+                response.raise_for_status()
+                raw = response.json()
+            if isinstance(raw, dict):
+                for pid, entry in raw.items():
+                    pid = str(pid).strip().lower()
+                    if not pid or not isinstance(entry, dict):
+                        continue
+                    if allowed_providers is not None and pid not in allowed_providers:
+                        continue
+                    models_raw = entry.get("models")
+                    models: dict[str, str] = {}
+                    if isinstance(models_raw, dict):
+                        for mid, meta in models_raw.items():
+                            mid = str(mid).strip()
+                            if not mid or not isinstance(meta, dict):
+                                continue
+                            label = str(meta.get("name") or "").strip()
+                            models[mid] = label or mid
+                    if models:
+                        providers[pid] = {
+                            "label": str(entry.get("name") or "").strip() or pid,
+                            "models": models,
+                        }
+        except Exception:
+            logger.exception("gateway.models_dev_registry_fetch_failed")
+            return {}
+
+        self._opencode_registry_cache = {
+            "providers": providers,
+            "fetched_at_epoch": now,
+        }
+        return providers
+
     async def get_desktop_opencode_catalog(
         self,
         *,
         force_refresh: bool = False,
     ) -> dict[str, Any]:
-        """Live, GUI-ready model catalog = exactly what Alpha could run.
+        """Browse-everything catalog with a hard usable/locked split.
 
-        Rendered from `opencode models` executed under the real Alpha home
-        with COSMIC-stored provider keys injected — so a model listed here is
-        one a run will actually accept right now. Falls back to cached copy,
-        then to the Zen HTTP catalog, then to a curated seed.
+        Every provider tile COSMIC knows about lists its real models (labels
+        from models.dev), whether or not it is connected — that is what makes
+        the page browsable before you paste any keys. What a run can execute
+        *right now* comes from `opencode models` under the real Alpha home
+        with stored keys injected; those models are marked usable, everything
+        else is locked until its provider is connected.
         """
         now = time.time()
         cache = self._opencode_catalog_cache
@@ -21696,27 +21752,29 @@ class GatewayRuntime:
             timeout_sec=45.0,
             with_keys=stored_keys,
         )
-        source = "live"
-        grouped = (
+        usable_map = (
             self._parse_opencode_models_output(result.get("stdout") or "")
             if result.get("ok")
             else {}
         )
 
-        if not grouped:
+        if not usable_map:
             stale_cache = cache if isinstance(cache, dict) else {}
             if isinstance(stale_cache.get("groups"), list) and stale_cache["groups"]:
                 return {**stale_cache, "source": "cache_stale"}
-            source = "fallback"
-            try:
-                zen = await self.get_desktop_opencode_models(force_refresh=False)
-                grouped = {
-                    "opencode": [str(m["id"]) for m in zen.get("models", [])]
-                } if isinstance(zen, dict) else {}
-            except Exception:
-                logger.exception("gateway.opencode_catalog_zen_fallback_failed")
-            if not grouped:
-                grouped = {"opencode": list(OPENCODE_ZEN_FALLBACK_MODELS)}
+
+        tile_ids = set(OPENCODE_PROVIDER_LABELS)
+        registry = await self._fetch_model_registry(
+            force_refresh=force_refresh,
+            allowed_providers=tile_ids | set(usable_map.keys()),
+        )
+
+        all_pids: set[str] = set(usable_map.keys()) | set(registry.keys())
+        # Never render the full 200-provider dump — the settings panel exists
+        # for providers COSMIC can actually wire up. Anything usable but not
+        # tiled still shows (union above); everything else is the tile list.
+        if usable_map:
+            all_pids &= tile_ids | set(usable_map.keys())
 
         def group_rank(pid: str) -> tuple[int, str]:
             canonical = list(OPENCODE_PROVIDER_LABELS)
@@ -21726,37 +21784,53 @@ class GatewayRuntime:
             lowered = model_id.lower()
             return lowered.endswith("-free") or lowered == "big-pickle"
 
+        def pretty(model_id: str) -> str:
+            return model_id.replace("-", " ").title()
+
         groups_payload: list[dict[str, Any]] = []
-        for pid in sorted(grouped, key=group_rank):
-            models = grouped[pid]
-            if not models:
+        usable_total = 0
+        for pid in sorted(all_pids, key=group_rank):
+            usable_ids = set(usable_map.get(pid, []))
+            registry_models = (registry.get(pid) or {}).get("models") or {}
+            merged_ids = sorted(set(registry_models) | usable_ids)
+            if not merged_ids:
                 continue
+            models_payload = []
+            for mid in merged_ids:
+                usable = mid in usable_ids
+                if usable:
+                    usable_total += 1
+                models_payload.append({
+                    "id": mid,
+                    "label": registry_models.get(mid) or pretty(mid),
+                    "qualified": f"{pid}/{mid}",
+                    "free": pid == "opencode" and is_free(mid),
+                    "usable": usable,
+                })
             groups_payload.append({
                 "id": pid,
-                "label": OPENCODE_PROVIDER_LABELS.get(pid, pid.replace("-", " ").title()),
+                "label": (registry.get(pid) or {}).get("label")
+                or OPENCODE_PROVIDER_LABELS.get(pid)
+                or pretty(pid),
                 "keyless_free_tier": pid == "opencode",
-                "models": [
-                    {
-                        "id": model_id,
-                        "label": model_id.replace("-", " ").title(),
-                        "qualified": f"{pid}/{model_id}",
-                        "free": pid == "opencode" and is_free(model_id),
-                    }
-                    for model_id in sorted(models)
-                ],
+                "connected": bool(usable_ids) or pid in stored_keys,
+                "models": models_payload,
             })
-        connected = sorted(
-            {pid for pid, models in grouped.items() if models} | set(stored_keys)
-        )
+
+        usable_providers = sorted(pid for pid, ids in usable_map.items() if ids)
+        self._opencode_usable_ids = {
+            f"{pid}/{mid}" for pid, ids in usable_map.items() for mid in ids
+        }
         catalog_entry = {
             "fetched_at": utcnow_iso(),
             "fetched_at_epoch": now,
             "total_models": sum(len(g["models"]) for g in groups_payload),
+            "usable_models": usable_total,
             "groups": groups_payload,
-            "connected_providers": connected,
+            "connected_providers": usable_providers,
         }
         self._opencode_catalog_cache = catalog_entry
-        return {**catalog_entry, "source": source}
+        return {**catalog_entry, "source": "live" if usable_map else "registry"}
 
     async def _update_codex_cli(self) -> dict[str, Any]:
         latest = await self._npm_latest_version("@openai/codex")
