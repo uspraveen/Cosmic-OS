@@ -262,11 +262,6 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
     }
   }
 
-  const toggleGroup = (groupId: string) => {
-    setModelQuery('')
-    setOpenGroupId((prev) => (prev === groupId ? null : groupId))
-  }
-
   const query = modelQuery.trim().toLowerCase()
   const searchHits = useMemo(() => {
     if (!query) return [] as Array<OpenCodeModel & { groupId: string; groupLabel: string; groupConnected: boolean }>
@@ -289,6 +284,42 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
     () => groups.find((group) => group.id === openGroupId) || null,
     [groups, openGroupId],
   )
+
+  // The strip under the hero: what Alpha will actually run next.
+  const currentModel = useMemo(() => {
+    for (const group of groups) {
+      const match = group.models.find((model) => model.id === preferredModel)
+      if (match) return { model: match, group }
+    }
+    return {
+      model: {
+        id: preferredModel,
+        label: preferredModel.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+        qualified: `opencode/${preferredModel}`,
+        free: preferredModel.endsWith("-free") || preferredModel === "big-pickle",
+        usable: true,
+      },
+      group: null as OpenCodeModelGroup | null,
+    }
+  }, [groups, preferredModel])
+
+  const openedGroupRef = useRef<HTMLDivElement | null>(null)
+
+  const openProviderGroup = (groupId: string | null) => {
+    setModelQuery("")
+    setOpenGroupId(groupId)
+    if (groupId) {
+      // Bring the lineup into view: the next step happens down there.
+      window.setTimeout(() => {
+        openedGroupRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" })
+      }, 60)
+    }
+  }
+
+  const toggleGroup = (groupId: string) => {
+    if (openGroupId === groupId) setOpenGroupId(null)
+    else openProviderGroup(groupId)
+  }
 
   return (
     <div className="cosmic-agents-detail-page">
@@ -329,6 +360,32 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
           ) : null}
         </div>
       ) : null}
+
+      {/* ── Active model strip: what Alpha runs next, one glance ────────── */}
+      <div className="opencode-current">
+        <span className="opencode-current-dot" data-state={currentModel.model.usable ? 'on' : 'off'} />
+        <div className="opencode-current-main">
+          <span className="opencode-current-label">
+            {currentModel.model.label}
+            {currentModel.model.free ? <span className="opencode-free-pill">Free</span> : null}
+          </span>
+          <small>
+            {currentModel.group ? currentModel.group.label : 'OpenCode Zen'} · {currentModel.model.qualified}
+          </small>
+        </div>
+        <CheckCircle2 size={16} className="opencode-current-check" />
+        <button
+          type="button"
+          className="opencode-current-change"
+          onClick={() => {
+            if (currentModel.group) openProviderGroup(currentModel.group.id)
+            else openProviderGroup(groups[0]?.id ?? null)
+            modelsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+          }}
+        >
+          Change
+        </button>
+      </div>
 
       {/* ── Default model (GUI of /models): browse everything, pick what's usable ── */}
       <div className="cosmic-agents-detail-section" ref={modelsSectionRef}>
@@ -391,9 +448,11 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
                   <span className="opencode-hit-name">{model.label}</span>
                   <small>{model.qualified}</small>
                 </span>
-                {model.free ? <span className="opencode-free-pill">Free</span> : null}
-                {!model.usable ? <Lock size={12} className="opencode-hit-lock" /> : null}
-                {preferredModel === model.id && model.usable ? <CheckCircle2 size={15} className="opencode-hit-check" /> : null}
+                <span className="opencode-row-right">
+                  {model.free ? <span className="opencode-free-pill">Free</span> : null}
+                  {!model.usable ? <Lock size={12} /> : null}
+                  {preferredModel === model.id && model.usable ? <CheckCircle2 size={15} /> : null}
+                </span>
               </button>
             ))}
             {!searchHits.length ? (
@@ -426,7 +485,7 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
             </div>
 
             {openGroup ? (
-              <div className="opencode-opened-group">
+              <div className="opencode-opened-group" ref={openedGroupRef}>
                 <div className="opencode-opened-group-head">
                   <button type="button" className="opencode-opened-back" onClick={() => setOpenGroupId(null)}>
                     <ChevronDown size={13} className="opencode-group-chevron up" />
@@ -454,9 +513,11 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
                         <span className="opencode-model-name">{model.label}</span>
                         <small>{model.qualified}</small>
                       </span>
-                      {model.free ? <span className="opencode-free-pill">Free</span> : null}
-                      {!model.usable ? <Lock size={12} className="opencode-model-lock" /> : null}
-                      {preferredModel === model.id && model.usable ? <CheckCircle2 size={16} /> : null}
+                      <span className="opencode-row-right">
+                        {model.free ? <span className="opencode-free-pill">Free</span> : null}
+                        {!model.usable ? <Lock size={12} /> : null}
+                        {preferredModel === model.id && model.usable ? <CheckCircle2 size={16} /> : null}
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -491,19 +552,18 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
             <h4>Reasoning effort</h4>
           </div>
         </div>
-        <div className="cosmic-agents-detail-model-grid compact opencode-variant-grid">
+        <div className="opencode-variant-seg" role="group" aria-label="Reasoning effort">
           {VARIANT_OPTIONS.map((option) => (
             <button
               key={option.value}
               type="button"
-              className={`cosmic-agents-detail-model-card ${variant === option.value ? 'active' : ''}`}
+              className={variant === option.value ? 'active' : ''}
               onClick={() => saveVariant(option.value)}
               disabled={saving}
               title="Sent to OpenCode as --variant; models without that effort fall back to their default."
             >
-              <span className="cosmic-agents-detail-model-name">{option.label}</span>
+              <strong>{option.label}</strong>
               <small>{option.note}</small>
-              {variant === option.value ? <CheckCircle2 size={16} className="cosmic-agents-detail-model-check-icon" /> : null}
             </button>
           ))}
         </div>

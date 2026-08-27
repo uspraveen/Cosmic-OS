@@ -21697,14 +21697,23 @@ class GatewayRuntime:
                     if allowed_providers is not None and pid not in allowed_providers:
                         continue
                     models_raw = entry.get("models")
-                    models: dict[str, str] = {}
+                    models: dict[str, dict[str, str]] = {}
                     if isinstance(models_raw, dict):
                         for mid, meta in models_raw.items():
                             mid = str(mid).strip()
                             if not mid or not isinstance(meta, dict):
                                 continue
                             label = str(meta.get("name") or "").strip()
-                            models[mid] = label or mid
+                            models[mid] = {
+                                "label": label or mid,
+                                # Recency ordering uses the registry's own dates;
+                                # last_updated covers refreshed snapshots.
+                                "released": str(
+                                    meta.get("release_date")
+                                    or meta.get("last_updated")
+                                    or ""
+                                ).strip(),
+                            }
                     if models:
                         providers[pid] = {
                             "label": str(entry.get("name") or "").strip() or pid,
@@ -21787,6 +21796,20 @@ class GatewayRuntime:
         def pretty(model_id: str) -> str:
             return model_id.replace("-", " ").title()
 
+        def version_tuple(model_id: str) -> tuple[int, ...]:
+            return tuple(int(part) for part in re.findall(r"\d+", model_id)[:4])
+
+        def sort_models(
+            items: list[dict[str, Any]],
+        ) -> list[dict[str, Any]]:
+            # Newest first by the registry's release date, then by version
+            # numbers in the id for entries without a date, then by id.
+            # Stable passes keep this readable and deterministic.
+            items = sorted(items, key=lambda item: item["id"])
+            items = sorted(items, key=lambda item: version_tuple(item["id"]), reverse=True)
+            items = sorted(items, key=lambda item: item.get("released") or "", reverse=True)
+            return items
+
         groups_payload: list[dict[str, Any]] = []
         usable_total = 0
         for pid in sorted(all_pids, key=group_rank):
@@ -21800,13 +21823,22 @@ class GatewayRuntime:
                 usable = mid in usable_ids
                 if usable:
                     usable_total += 1
+                meta = registry_models.get(mid) or {}
                 models_payload.append({
                     "id": mid,
-                    "label": registry_models.get(mid) or pretty(mid),
+                    "label": meta.get("label") or pretty(mid),
                     "qualified": f"{pid}/{mid}",
                     "free": pid == "opencode" and is_free(mid),
                     "usable": usable,
+                    "released": meta.get("released") or "",
                 })
+            if pid == "opencode":
+                # Zen: free tier first, newest within each tier.
+                free_rows = sort_models([m for m in models_payload if m["free"]])
+                paid_rows = sort_models([m for m in models_payload if not m["free"]])
+                models_payload = free_rows + paid_rows
+            else:
+                models_payload = sort_models(models_payload)
             groups_payload.append({
                 "id": pid,
                 "label": (registry.get(pid) or {}).get("label")
