@@ -9,7 +9,6 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
-  Trash2,
   X,
 } from 'lucide-react'
 
@@ -329,94 +328,6 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
         </div>
       ) : null}
 
-      {/* ── Connect providers (GUI of /connect) ─────────────────────────── */}
-      <div className="cosmic-agents-detail-section">
-        <div className="cosmic-agents-detail-section-head">
-          <div>
-            <span className="cosmic-agents-detail-kicker">Providers</span>
-            <h4>Connect a provider to unlock its models</h4>
-          </div>
-        </div>
-        <p className="cosmic-agents-detail-section-copy">
-          Free Zen models work out of the box — no keys anywhere. Connect any other provider with its
-          API key and its models appear in the catalog below. Keys are stored encrypted on your VM and
-          never leave it except to the provider itself.
-        </p>
-
-        <div className="opencode-provider-grid">
-          {(providerTiles.length ? providerTiles : []).map((tile) => (
-            <div key={tile.id} className={`opencode-provider-tile ${tile.connected ? 'connected' : ''}`}>
-              <div className="opencode-provider-tile-head">
-                <span className="opencode-provider-dot" data-state={tile.connected ? 'on' : 'off'} />
-                <strong>{tile.label}</strong>
-                {tile.recommended ? <span className="opencode-provider-tag">Popular</span> : null}
-                {!tile.needs_key ? <span className="opencode-provider-tag free">No key</span> : null}
-              </div>
-              <small>
-                {tile.connected
-                  ? tile.local_only
-                    ? 'Detected locally'
-                    : 'Connected · key saved on VM'
-                  : tile.local_only
-                    ? 'Not detected yet — start Ollama on the VM'
-                    : 'Connect with an API key'}
-              </small>
-              <div className="opencode-provider-tile-actions">
-                {connectTarget === tile.id ? (
-                  <>
-                    <input
-                      type="password"
-                      autoFocus
-                      value={keyDrafts[tile.id] || ''}
-                      onChange={(event) =>
-                        setKeyDrafts((prev) => ({ ...prev, [tile.id]: event.target.value }))
-                      }
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') void submitConnect()
-                        if (event.key === 'Escape') setConnectTarget(null)
-                      }}
-                      placeholder={`${tile.label} API key`}
-                      spellCheck={false}
-                      autoComplete="off"
-                      disabled={saving}
-                    />
-                    <button type="button" className="cosmic-agents-detail-btn" onClick={() => void submitConnect()} disabled={saving}>
-                      Save
-                    </button>
-                    <button type="button" className="cosmic-agents-detail-btn ghost icon" onClick={() => setConnectTarget(null)} disabled={saving} title="Cancel">
-                      <X size={14} />
-                    </button>
-                  </>
-                ) : tile.needs_key && !tile.connected ? (
-                  <button type="button" className="cosmic-agents-detail-btn ghost" onClick={() => beginConnect(tile.id)} disabled={saving}>
-                    <Plug size={13} />
-                    Connect
-                  </button>
-                ) : tile.connected ? (
-                  <>
-                    <span className="opencode-provider-connected-note">
-                      <CheckCircle2 size={13} />
-                      Connected
-                    </span>
-                    {tile.local_only ? null : (
-                      <button
-                        type="button"
-                        className="cosmic-agents-detail-btn danger icon"
-                        onClick={() => void disconnectProvider(tile.id)}
-                        disabled={saving}
-                        title={`Disconnect ${tile.label}`}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    )}
-                  </>
-                ) : null}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
       {/* ── Model catalog (GUI of /models) ──────────────────────────────── */}
       <div className="cosmic-agents-detail-section cosmic-agents-detail-runner">
         <div className="cosmic-agents-detail-section-head">
@@ -473,7 +384,7 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
             ))}
             {!flatSearchResults.length ? (
               <p className="cosmic-agents-detail-section-copy">
-                No models match “{modelQuery}”. Connect another provider above, or refresh the catalog.
+                No models match “{modelQuery}”. Connect another provider below, or refresh the catalog.
               </p>
             ) : null}
           </div>
@@ -552,6 +463,100 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
             </button>
           ))}
         </div>
+      </div>
+
+      {/* ── Connect providers (GUI of /connect) ─────────────────────────── */}
+      <div className="cosmic-agents-detail-section">
+        <div className="cosmic-agents-detail-section-head">
+          <div>
+            <span className="cosmic-agents-detail-kicker">Providers</span>
+            <h4>More models via API keys</h4>
+          </div>
+        </div>
+        <p className="cosmic-agents-detail-section-copy">
+          Free Zen models above work without any keys. To unlock a provider&apos;s paid models, connect it
+          once — keys stay encrypted on your VM.
+        </p>
+
+        {(() => {
+          const connectedTiles = providerTiles.filter((tile) => tile.connected)
+          const availableTiles = providerTiles.filter((tile) => !tile.connected)
+          return (
+            <>
+              <div className="opencode-connected-chips">
+                {connectedTiles.length ? (
+                  connectedTiles.map((tile) => (
+                    <span key={tile.id} className="opencode-chip">
+                      <span className="opencode-provider-dot" data-state="on" />
+                      {tile.label}
+                      {tile.needs_key ? (
+                        <button
+                          type="button"
+                          onClick={() => void disconnectProvider(tile.id)}
+                          disabled={saving}
+                          title={`Disconnect ${tile.label}`}
+                        >
+                          <X size={11} />
+                        </button>
+                      ) : null}
+                    </span>
+                  ))
+                ) : (
+                  <span className="opencode-chips-empty">Nothing connected — fine for free models.</span>
+                )}
+              </div>
+
+              {availableTiles.length ? (
+                <div className="opencode-provider-list">
+                  {availableTiles.map((tile) => (
+                    <div key={tile.id} className="opencode-provider-row">
+                      <span className="opencode-provider-dot" data-state={tile.local_only ? 'off' : 'off'} />
+                      <strong>{tile.label}</strong>
+                      {tile.local_only ? <span className="opencode-provider-tag">Local</span> : null}
+                      <div className="opencode-provider-row-actions">
+                        {connectTarget === tile.id ? (
+                          <>
+                            <input
+                              autoFocus
+                              type="password"
+                              value={keyDrafts[tile.id] || ''}
+                              onChange={(event) =>
+                                setKeyDrafts((prev) => ({ ...prev, [tile.id]: event.target.value }))
+                              }
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter') void submitConnect()
+                                if (event.key === 'Escape') setConnectTarget(null)
+                              }}
+                              placeholder={`${tile.label} API key`}
+                              spellCheck={false}
+                              autoComplete="off"
+                              disabled={saving}
+                            />
+                            <button type="button" className="cosmic-agents-detail-btn" onClick={() => void submitConnect()} disabled={saving}>
+                              Save
+                            </button>
+                            <button type="button" className="cosmic-agents-detail-btn ghost icon" onClick={() => setConnectTarget(null)} disabled={saving} title="Cancel">
+                              <X size={13} />
+                            </button>
+                          </>
+                        ) : tile.needs_key ? (
+                          <button type="button" className="cosmic-agents-detail-btn ghost" onClick={() => beginConnect(tile.id)} disabled={saving}>
+                            <Plug size={12} />
+                            Connect
+                          </button>
+                        ) : (
+                          <small className="opencode-provider-hint">Auto-detected once running</small>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="cosmic-agents-detail-section-copy">Every known provider is connected.</p>
+              )}
+            </>
+          )
+        })()}
       </div>
 
       <div className="cosmic-agents-detail-runtime">

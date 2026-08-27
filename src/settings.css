@@ -6563,44 +6563,120 @@
   to { transform: rotate(360deg); }
 }
 
-/* ── OpenCode: provider connect tiles (GUI of /connect) ─────────────────── */
+/* ── OpenCode: provider connect (GUI of /connect) ────────────────────────── */
 
-.opencode-provider-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 8px;
-}
-
-.opencode-provider-tile {
+.opencode-connected-chips {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: 6px;
-  padding: 10px 12px;
-  border-radius: 12px;
+  margin-bottom: 10px;
+}
+
+.opencode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 6px 0 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(76, 175, 80, 0.32);
+  background: rgba(76, 175, 80, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.opencode-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.45);
+  cursor: pointer;
+}
+
+.opencode-chip button:hover:not(:disabled) {
+  color: #ff6b6b;
+  background: rgba(255, 107, 107, 0.12);
+}
+
+.opencode-chips-empty {
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 11.5px;
+}
+
+.opencode-provider-list {
   border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.028);
-  transition: border-color 0.18s ease, background 0.18s ease;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
 }
 
-.opencode-provider-tile.connected {
-  border-color: rgba(76, 175, 80, 0.32);
-  background: rgba(76, 175, 80, 0.06);
-}
-
-.opencode-provider-tile-head {
+.opencode-provider-row {
   display: flex;
   align-items: center;
-  gap: 7px;
-  min-width: 0;
+  gap: 8px;
+  min-height: 38px;
+  padding: 4px 10px;
 }
 
-.opencode-provider-tile-head strong {
-  font-size: 12.5px;
-  font-weight: 650;
-  color: #fff;
+.opencode-provider-row + .opencode-provider-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.opencode-provider-row > strong {
+  flex: none;
+  max-width: 40%;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.opencode-provider-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+  min-width: 0;
+  flex: 1;
+}
+
+.opencode-provider-row-actions input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font-size: 11.5px;
+  outline: none;
+}
+
+.opencode-provider-row-actions input:focus {
+  border-color: rgba(142, 207, 255, 0.5);
+}
+
+.opencode-provider-row-actions .cosmic-agents-detail-btn {
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: 11.5px;
+}
+
+.opencode-provider-hint {
+  color: rgba(255, 255, 255, 0.34);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .opencode-provider-dot {
@@ -6617,7 +6693,6 @@
 }
 
 .opencode-provider-tag {
-  margin-left: auto;
   flex: none;
   font-size: 9px;
   font-weight: 700;
@@ -6637,46 +6712,6 @@
 .opencode-provider-tag.selected {
   color: #8ecfff;
   border-color: rgba(142, 207, 255, 0.4);
-}
-
-.opencode-provider-tile > small {
-  color: rgba(255, 255, 255, 0.42);
-  font-size: 11px;
-  line-height: 1.3;
-}
-
-.opencode-provider-tile-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 26px;
-}
-
-.opencode-provider-tile-actions input {
-  flex: 1;
-  min-width: 0;
-  height: 26px;
-  padding: 0 8px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(0, 0, 0, 0.3);
-  color: #fff;
-  font-size: 11.5px;
-  outline: none;
-}
-
-.opencode-provider-tile-actions input:focus {
-  border-color: rgba(142, 207, 255, 0.5);
-}
-
-.opencode-connected-note,
-.opencode-provider-connected-note {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: #7ddc84;
-  font-size: 11.5px;
-  font-weight: 600;
 }
 
 /* ── OpenCode: searchable grouped model catalog (GUI of /models) ────────── */
