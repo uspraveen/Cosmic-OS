@@ -4297,7 +4297,7 @@ kbd {
 /* Exactly one row is the work in progress, and it is the only tinted thing in
    the list -- no pulse, no motion, just the accent sitting where you are. */
 .assistant-flow-item.is-active {
-  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .assistant-flow-copy {
@@ -5036,34 +5036,51 @@ kbd {
    that touched four services reads as four services, while a run of ordinary
    local tools stays monochrome instead of turning into confetti. */
 .agent-glyph {
+  position: relative;
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 7px;
-  color: rgba(255, 255, 255, 0.66);
-  background: var(--response-fill-tertiary, rgba(255, 255, 255, 0.055));
-  box-shadow: inset 0 0 0 var(--response-hairline, 1px) rgba(255, 255, 255, 0.07);
-  transition: color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.74);
+  background: rgba(255, 255, 255, 0.05);
+  transition: color 180ms ease, background 180ms ease;
 }
 
 .agent-glyph svg {
   display: block;
 }
 
-/* A brand mark supplies its own colour through the inline style; the tile stays
-   out of its way. */
+/* A brand mark supplies its own colour through the inline style, in every
+   state. The tile only ever gets out of its way. */
 .agent-glyph.is-brand {
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.06);
 }
 
-/* The running step, and the mark in the live footer. */
+/* The running step, and the mark in the live footer.
+
+   Liveness is the tile's job, never the mark's. Tinting the mark with the app
+   accent turned X -- a black-and-white logo -- into a blue box that no longer
+   read as X, and did the same to every other brand. So the tile brightens by a
+   few percent and sends out one ring, and the logo underneath stays itself. */
 .agent-glyph.is-active {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  box-shadow:
-    inset 0 0 0 var(--response-hairline, 1px) color-mix(in srgb, var(--accent) 34%, transparent),
-    0 0 12px color-mix(in srgb, var(--accent) 18%, transparent);
+  color: rgba(255, 255, 255, 0.96);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.agent-glyph.is-active::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.42);
+  animation: agent-glyph-live 2.4s cubic-bezier(0.32, 0, 0.28, 1) infinite;
+  pointer-events: none;
+}
+
+@keyframes agent-glyph-live {
+  0% { opacity: 0.5; transform: scale(1); }
+  70%, 100% { opacity: 0; transform: scale(1.42); }
 }
 
 /* Overlapping favicons: "these places", in the width of a few characters,
@@ -5072,23 +5089,16 @@ kbd {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  margin-left: 7px;
+  gap: 3px;
+  margin-left: 8px;
   vertical-align: middle;
 }
 
 .agent-domain-chip {
   flex: 0 0 auto;
-  margin-left: -5px;
-  border-radius: 999px;
-  object-fit: cover;
-  background: rgba(255, 255, 255, 0.09);
-  /* The ring is the panel reappearing between the discs, so a stack of similar
-     favicons stays countable. */
-  box-shadow: 0 0 0 1.5px rgba(9, 11, 15, 0.86);
-}
-
-.agent-domain-chip:first-child {
-  margin-left: 0;
+  border-radius: 4px;
+  object-fit: contain;
+  background: rgba(255, 255, 255, 0.07);
 }
 
 /* Intranet hosts and anything behind a login have no favicon to serve; a globe
@@ -5140,6 +5150,14 @@ kbd {
     background: none;
     -webkit-text-fill-color: rgba(255, 255, 255, 0.86);
     color: rgba(255, 255, 255, 0.86);
+  }
+
+  /* The live ring is a perpetual animation; the brightened tile underneath
+     already says which step is running. */
+  .agent-glyph.is-active::after {
+    animation: none !important;
+    opacity: 0.5;
+    transform: none;
   }
 
   .assistant-collapsible-chevron,
