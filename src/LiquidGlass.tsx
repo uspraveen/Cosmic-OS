@@ -7,6 +7,10 @@ interface LiquidGlassProps {
   cornerRadius?: number
   disableTilt?: boolean
   visualTone?: 'default' | 'stealth'
+  /** Override the deep-glass layer's background (see glassTones.ts). */
+  bodyBackground?: string
+  /** Override the deep-glass layer's backdrop filter. */
+  bodyBackdropFilter?: string
 }
 
 export default function LiquidGlass({
@@ -16,6 +20,8 @@ export default function LiquidGlass({
   cornerRadius = 32,
   disableTilt = false,
   visualTone = 'default',
+  bodyBackground,
+  bodyBackdropFilter,
 }: LiquidGlassProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [mouse, setMouse] = useState({ x: 0.5, y: 0.5 })
@@ -62,9 +68,13 @@ export default function LiquidGlass({
           position: 'absolute',
           inset: 0,
           borderRadius: cornerRadius,
-          background: stealth ? 'rgba(10, 10, 12, 0.74)' : 'rgba(20, 20, 22, 0.6)', // Deep dark tint
-          backdropFilter: 'blur(32px) saturate(220%)', // Heavy blur + high saturation for "liquid" feel
-          WebkitBackdropFilter: 'blur(32px) saturate(220%)',
+          background: bodyBackground
+            ? bodyBackground
+            : stealth
+              ? 'rgba(10, 10, 12, 0.74)'
+              : 'rgba(20, 20, 22, 0.6)', // Deep dark tint
+          backdropFilter: bodyBackdropFilter ?? 'blur(32px) saturate(220%)', // Heavy blur + high saturation for "liquid" feel
+          WebkitBackdropFilter: bodyBackdropFilter ?? 'blur(32px) saturate(220%)',
           boxShadow: `
             0 25px 50px -12px rgba(0, 0, 0, 0.6), /* Drop Shadow */
             inset 0 1px 1px 0 ${stealth ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.2)'}, /* Top Inner Highlight */
