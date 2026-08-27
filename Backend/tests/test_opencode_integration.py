@@ -118,6 +118,32 @@ def test_agent_auth_store_opencode_roundtrip_and_aliases(tmp_path: Path) -> None
     assert cleared["status"] == "logged_out"
 
 
+def test_opencode_is_ready_without_any_zen_key() -> None:
+    """Free Zen models run keyless (verified live on a fresh HOME).
+
+    CLI present => authenticated, regardless of key state; missing CLI is
+    the only setup problem. A saved/cleared optional key must never flip
+    OpenCode to login_required.
+    """
+    runtime = object.__new__(GatewayRuntime)
+
+    ready = runtime._effective_opencode_status(
+        {"has_api_key": False}, {"available": True}
+    )
+    assert ready == {"status": "authenticated", "login_required_reason": ""}
+
+    with_key = runtime._effective_opencode_status(
+        {"has_api_key": True}, {"available": True}
+    )
+    assert with_key["status"] == "authenticated"
+
+    missing_cli = runtime._effective_opencode_status(
+        {"has_api_key": False}, {"available": False, "reason": "opencode_cli_missing"}
+    )
+    assert missing_cli["status"] == "relogin_required"
+    assert missing_cli["login_required_reason"] == "opencode_cli_missing"
+
+
 def test_gateway_shapes_zen_catalog_and_semver_compare() -> None:
     payload = GatewayRuntime._shape_opencode_models_payload(
         {

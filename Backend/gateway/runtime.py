@@ -21235,23 +21235,10 @@ class GatewayRuntime:
         vm_sync_enabled: bool | None = None,
         api_key: str | None = None,
     ) -> dict[str, Any]:
-        api_key_value = self._safe_text(api_key)
-        next_status: str | None = None
-        next_reason: str | None = None
-        if api_key is not None:
-            next_status = "stored" if api_key_value else "login_required"
-            next_reason = "" if api_key_value else "zen_api_key_required"
-        elif preferred_model is not None or vm_sync_enabled is not None:
-            current = self.agent_auth_store.get_opencode(include_secret=True)
-            has_key = bool(current.get("has_api_key"))
-            next_status = "stored" if has_key else "login_required"
-            next_reason = "" if has_key else "zen_api_key_required"
         self.agent_auth_store.save_opencode(
             preferred_model=preferred_model,
             vm_sync_enabled=vm_sync_enabled,
-            api_key=api_key_value if api_key is not None else None,
-            status=next_status,
-            login_required_reason=next_reason,
+            api_key=self._safe_text(api_key) if api_key is not None else None,
         )
         return await self.get_desktop_opencode_status()
 
@@ -21273,13 +21260,11 @@ class GatewayRuntime:
     ) -> dict[str, str]:
         if not cli_status.get("available", True):
             return {"status": "relogin_required", "login_required_reason": "opencode_cli_missing"}
-        if settings.get("has_api_key"):
-            return {"status": "authenticated", "login_required_reason": ""}
-        if settings.get("status") == "authenticated":
-            # Authenticated through a previously-entered key that was since
-            # cleared elsewhere; treat as re-login instead of lying.
-            return {"status": "relogin_required", "login_required_reason": "zen_api_key_required"}
-        return {"status": "login_required", "login_required_reason": "zen_api_key_required"}
+        # Zen's free models run keyless (verified live on the VM: fresh home,
+        # zero stored credentials, no ambient keys — mimo-v2.5-free executed
+        # at cost 0). A saved Zen key is an optional upgrade for paid models;
+        # its absence must never read as "not set up".
+        return {"status": "authenticated", "login_required_reason": ""}
 
     def _opencode_binary(self) -> str | None:
         return find_opencode_binary(self.config.alpha_opencode_home)

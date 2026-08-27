@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Bot, CheckCircle2, KeyRound, RefreshCw, ShieldCheck, Sparkles, Trash2 } from 'lucide-react'
-import { describeLoginReason } from './agentLogin'
 
 type OpenCodeModel = {
   id: string
@@ -104,10 +103,9 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
   const connectionLabel = useMemo(() => {
     if (loading) return 'Checking VM status'
     if (cliMissing) return 'OpenCode CLI missing on VM'
-    if (gatewayStatus?.status === 'authenticated') return 'OpenCode ready on VM'
     if (gatewayStatus?.status === 'update_in_progress') return 'OpenCode is updating — Alpha routes around it'
-    if (hasApiKey) return 'Zen API key saved'
-    return 'OpenCode Zen API key needed'
+    if (hasApiKey) return 'Ready · Zen key saved for paid models'
+    return 'Ready · free Zen models run without a key'
   }, [cliMissing, gatewayStatus?.status, hasApiKey, loading])
 
   const applyGatewayStatus = (rawStatus: unknown) => {
@@ -234,7 +232,7 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
         <div className="cosmic-agents-detail-section-head">
           <div>
             <span className="cosmic-agents-detail-kicker">OpenCode Zen</span>
-            <h4>{hasApiKey ? 'API key saved on VM' : 'Paste your Zen API key'}</h4>
+            <h4>{hasApiKey ? 'Zen key saved (optional)' : 'No key needed — optional Zen key'}</h4>
           </div>
           {hasApiKey ? (
             <button type="button" className="cosmic-agents-detail-btn danger icon" onClick={clearApiKey} title="Clear saved Zen API key" disabled={saving}>
@@ -243,15 +241,15 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
           ) : null}
         </div>
         <p className="cosmic-agents-detail-section-copy">
-          Sign in at opencode.ai/auth, copy your Zen API key, and paste it here. Keys are stored encrypted on the VM and
-          injected into OpenCode runs only.
+          OpenCode's free Zen models run without any authentication. Optionally paste a Zen API key
+          (opencode.ai/auth) to unlock paid models and your own providers; keys are stored encrypted on the VM.
         </p>
         <div className="cosmic-agents-detail-key-row">
           <input
             type="password"
             value={apiKeyDraft}
             onChange={(event) => setApiKeyDraft(event.target.value)}
-            placeholder="sk-zen-..."
+            placeholder="Optional · sk-zen-..."
             spellCheck={false}
             autoComplete="off"
           />
@@ -259,9 +257,6 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
             Save
           </button>
         </div>
-        {!hasApiKey ? (
-          <p className="cosmic-agents-detail-section-copy">{describeLoginReason(gatewayStatus)}</p>
-        ) : null}
       </div>
 
       <div className="cosmic-agents-detail-section cosmic-agents-detail-runner">

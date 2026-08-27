@@ -100,9 +100,10 @@ class OpenCodeWorkspaceRunner:
 
     def __init__(self, config: AlphaAgentConfig) -> None:
         self.config = config
-        # Set per-run from the gateway's internal status payload (internal
-        # token transport). Empty default keeps runs unauthenticated rather
-        # than guessing.
+        # Optional: set per-run from the gateway's internal status payload
+        # (internal-token transport) when the user saved a Zen key for paid
+        # models. Free Zen models run keyless — empty means keyless, not
+        # unauthenticated-broken.
         self.zen_api_key_override: str = ""
 
     @property
