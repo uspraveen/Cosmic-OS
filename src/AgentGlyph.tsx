@@ -1,148 +1,291 @@
-import { memo, useState, type ReactElement, type ReactNode } from 'react'
+import { memo, useState, type ReactNode } from 'react'
 import { faviconUrl, type AgentSignal, type GlyphId } from './agentSignals'
 
 /**
  * The marks that lead a flow step, a collapsed section header, and the live
  * footer.
  *
- * Every mark in here is a solid shape, hand-drawn on the same 24x24 grid. That
- * is the whole reason this file exists instead of a line-icon import: at the
- * 12-13px these render at, a 1.9px-stroke wireframe collapses into grey mush --
- * a stroked globe in particular reads as a smudge -- while a filled silhouette
- * stays crisp and reads as a considered mark rather than clip art. It also puts
- * the functional glyphs at the same optical weight as the three real logos
- * (X, YouTube, Gmail), so a column mixing them looks like one set.
+ * Two families, on purpose, because the roster splits cleanly in two.
  *
- * Colour discipline: a mark that really is a colour (a logo, a Google product)
- * draws in that colour. Everything else is monochrome. The tile behind them is
- * always neutral -- it is an alignment anchor, never a status light.
+ * Almost everything Cosmic delegates to is a real product -- Gmail, Google
+ * Docs, Google Sheets, X, Firecrawl -- and a real product gets its real logo,
+ * solid, in its own colours. A hand-drawn "page with a folded corner" standing
+ * in for Google Docs is strictly worse than the mark the reader already knows,
+ * and it is why a column of these looked generic however well each was drawn.
+ *
+ * What is left is Cosmic's own machinery -- a sandbox, a memory lookup, a
+ * delegation -- which has no logo to borrow. Those are monoline: one stroke
+ * weight, round caps, drawn large and lightly. Solid fills at this size turn
+ * into blobs, and six blobs that are all rounded rectangles are six marks a
+ * reader cannot tell apart at a glance.
+ *
+ * There is no tile behind either family. A logo wants the panel behind it, not
+ * a grey chip, and the fixed-width slot does the aligning instead.
  */
 
 type MarkProps = { size: number }
 
-const svg = (size: number, children: ReactNode, evenOdd = true) => (
+/** Cosmic's own machinery. One stroke weight, so the set reads as one hand. */
+const line = (size: number, children: ReactNode) => (
   <svg
     width={size}
     height={size}
     viewBox="0 0 24 24"
-    fill="currentColor"
-    fillRule={evenOdd ? 'evenodd' : 'nonzero'}
-    clipRule={evenOdd ? 'evenodd' : 'nonzero'}
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.7}
+    strokeLinecap="round"
+    strokeLinejoin="round"
     aria-hidden
   >
     {children}
   </svg>
 )
 
-/* -- Real logos ---------------------------------------------------------- */
-
-const MarkX = ({ size }: MarkProps) =>
-  svg(size, <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231Zm-1.161 17.52h1.833L7.084 4.126H5.117Z" />)
-
-const MarkYouTube = ({ size }: MarkProps) =>
-  // evenodd carves the play triangle out of the body, so the mark reads on any
-  // tile colour instead of needing a matching fill behind it.
-  svg(size, <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814ZM9.545 15.568V8.432L15.818 12l-6.273 3.568Z" />)
-
-const MarkGmail = ({ size }: MarkProps) =>
-  svg(size, <path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457Z" />)
-
-/* -- Functional marks ---------------------------------------------------- */
-
-/** Reading a page. A browser window says "a website" at 12px; a globe does not. */
-const MarkWeb = ({ size }: MarkProps) =>
-  svg(size, <path d="M4.6 2.8h14.8a3.3 3.3 0 0 1 3.3 3.3v11.8a3.3 3.3 0 0 1-3.3 3.3H4.6a3.3 3.3 0 0 1-3.3-3.3V6.1a3.3 3.3 0 0 1 3.3-3.3Zm.4 2.5a1.15 1.15 0 1 0 0 2.3 1.15 1.15 0 0 0 0-2.3Zm3.5 0a1.15 1.15 0 1 0 0 2.3 1.15 1.15 0 0 0 0-2.3Zm3.5 0a1.15 1.15 0 1 0 0 2.3 1.15 1.15 0 0 0 0-2.3ZM1.3 9.1h21.4v1.7H1.3Zm3.7 4h14v1.8H5Zm0 3.6h9v1.8H5Z" />)
-
-/** Searching. A solid lens with a carved ring, not a hairline circle. */
-const MarkSearch = ({ size }: MarkProps) =>
-  svg(size, <path d="M10.6 1.6a9 9 0 1 0 5.28 16.29l4.61 4.61a1.6 1.6 0 0 0 2.26-2.26l-4.61-4.61A9 9 0 0 0 10.6 1.6Zm0 3.2a5.8 5.8 0 1 1 0 11.6 5.8 5.8 0 0 1 0-11.6Z" />)
-
-/** The orchestrator's own sandbox: the boxed prompt, as a terminal draws it. */
-const MarkSandbox = ({ size }: MarkProps) =>
-  svg(size, <path d="M4.6 2.6h14.8a3.4 3.4 0 0 1 3.4 3.4v12a3.4 3.4 0 0 1-3.4 3.4H4.6a3.4 3.4 0 0 1-3.4-3.4V6a3.4 3.4 0 0 1 3.4-3.4ZM7.4 8.2 9 6.6l5 5-5 5-1.6-1.6 3.4-3.4Zm5 7h5v2h-5Z" />)
-
-/** A machine we drive rather than own: the same prompt, unboxed. */
-const MarkTerminal = ({ size }: MarkProps) =>
-  svg(
-    size,
-    <>
-      <path d="M4.4 5.6 6.4 3.6l8 8-8 8-2-2 6-6Z" />
-      <path d="M12.6 17.4h8v2.6h-8Z" />
-    </>,
-    false,
-  )
-
-const MarkDoc = ({ size }: MarkProps) =>
-  svg(
-    size,
-    <>
-      <path d="M6.6 1.9h6.5v5.1a1.9 1.9 0 0 0 1.9 1.9h5.1v11.2a2.9 2.9 0 0 1-2.9 2.9H6.6a2.9 2.9 0 0 1-2.9-2.9V4.8a2.9 2.9 0 0 1 2.9-2.9Zm.6 10.5h9.6v1.8H7.2Zm0 3.6h6.4v1.8H7.2Z" />
-      <path d="M14.6 2.3 19.7 7.4h-3.7a1.4 1.4 0 0 1-1.4-1.4Z" opacity={0.5} />
-    </>,
-  )
-
-const MarkTable = ({ size }: MarkProps) =>
-  // A solid header band over a 2x2 body. Three carved gutters each way turned
-  // this into a checkerboard at 13px, which reads as anything but a sheet.
-  svg(size, <path d="M4.6 2.9h14.8a3.3 3.3 0 0 1 3.3 3.3v11.6a3.3 3.3 0 0 1-3.3 3.3H4.6a3.3 3.3 0 0 1-3.3-3.3V6.2a3.3 3.3 0 0 1 3.3-3.3ZM1.3 9.6h21.4v1.6H1.3Zm0 5.6h21.4v1.6H1.3Zm9.9-4.8h1.6v4.8h-1.6Zm0 6.4h1.6v4.5h-1.6Z" />)
-
-const MarkSlides = ({ size }: MarkProps) =>
-  svg(size, <path d="M3.4 3.2h17.2a2.9 2.9 0 0 1 2.9 2.9v8.4a2.9 2.9 0 0 1-2.9 2.9H3.4a2.9 2.9 0 0 1-2.9-2.9V6.1a2.9 2.9 0 0 1 2.9-2.9ZM6 7.2h12v2H6Zm0 3.8h7.5v1.9H6ZM11.1 18.3h1.8v2.2h-1.8ZM7.6 20.2h8.8v2.1H7.6Z" />)
-
-const MarkDiagram = ({ size }: MarkProps) =>
-  svg(size, <path d="M9.1 1.9h5.8a2 2 0 0 1 2 2v3.2a2 2 0 0 1-2 2H9.1a2 2 0 0 1-2-2V3.9a2 2 0 0 1 2-2Zm2.05 7.2h1.7v2.4h-1.7ZM4.7 11.5h14.6v1.7H4.7Zm0 1.1h1.7v2.9H4.7Zm12.9 0h1.7v2.9h-1.7ZM2.6 15.1h5.9a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H2.6a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2Zm12.9 0h5.9a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-5.9a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2Z" />, false)
-
-const MarkMap = ({ size }: MarkProps) =>
-  svg(size, <path d="M12 1.4a8.2 8.2 0 0 0-8.2 8.2c0 5.9 6.9 12.4 7.6 13.05a.9.9 0 0 0 1.2 0c.7-.65 7.6-7.15 7.6-13.05A8.2 8.2 0 0 0 12 1.4Zm0 5.1a3.2 3.2 0 1 1 0 6.4 3.2 3.2 0 0 1 0-6.4Z" />)
-
-const MarkImage = ({ size }: MarkProps) =>
-  svg(size, <path d="M4.6 3.2h14.8a3.3 3.3 0 0 1 3.3 3.3v11a3.3 3.3 0 0 1-3.3 3.3H4.6a3.3 3.3 0 0 1-3.3-3.3v-11a3.3 3.3 0 0 1 3.3-3.3ZM8.3 6.6a2.1 2.1 0 1 0 0 4.2 2.1 2.1 0 0 0 0-4.2Zm-4.7 11L9.7 10.7l3.5 4 2.7-2.6 4.6 5.5Z" />)
-
-const MarkMemory = ({ size }: MarkProps) =>
-  svg(size, <path d="M12 1.6c4.9 0 8.8 1.6 8.8 3.6S16.9 8.8 12 8.8 3.2 7.2 3.2 5.2 7.1 1.6 12 1.6ZM3.2 8c1.9 1.5 5.2 2.3 8.8 2.3s6.9-.8 8.8-2.3v4.3c0 2-3.9 3.6-8.8 3.6S3.2 14.3 3.2 12.3Zm0 7.1c1.9 1.5 5.2 2.3 8.8 2.3s6.9-.8 8.8-2.3v3.6c0 2-3.9 3.6-8.8 3.6s-8.8-1.6-8.8-3.6Z" />, false)
-
-const MarkThink = ({ size }: MarkProps) =>
-  svg(size, <path d="M10 5c.37 3.33 1 5.33 2.2 6.53S15.67 12.63 19 13c-3.33.37-5.33 1-6.53 2.2S10.37 17.67 10 21c-.37-3.33-1-5.33-2.2-6.53S4.33 13.37 1 13c3.33-.37 5.33-1 6.53-2.2S9.63 8.33 10 5Zm8.5-3.6c.17 1.55.47 2.48 1.03 3.04S21.02 5.33 22.57 5.5c-1.55.17-2.48.47-3.04 1.03S18.67 8.02 18.5 9.57c-.17-1.55-.47-2.48-1.03-3.04S15.98 5.67 14.43 5.5c1.55-.17 2.48-.47 3.04-1.03S18.33 2.95 18.5 1.4Z" />, false)
-
-const MarkAgent = ({ size }: MarkProps) =>
-  svg(size, <path d="M12 1.5 22.2 7.1v9.8L12 22.5 1.8 16.9V7.1Zm0 9.55L3.05 6.13l-.82 1.5 8.92 4.87V22h1.7v-9.5l8.92-4.87-.82-1.5Z" />)
-
-const MarkCosmic = ({ size }: MarkProps) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-    <circle cx="12" cy="12" r="3.9" />
-    <ellipse
-      cx="12"
-      cy="12"
-      rx="10.2"
-      ry="4.7"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      transform="rotate(-28 12 12)"
-    />
+/** A real logo, in its real colours. */
+const logo = (size: number, children: ReactNode) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+    {children}
   </svg>
 )
 
-const MarkCalendar = ({ size }: MarkProps) =>
-  svg(
+/* -- Product logos ------------------------------------------------------- */
+
+// X is the one logo whose colour is the surface it sits on, so it follows the
+// tint and flips black-on-light / white-on-dark.
+const MarkX = ({ size }: MarkProps) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231Zm-1.161 17.52h1.833L7.084 4.126H5.117Z" />
+  </svg>
+)
+
+const MarkYouTube = ({ size }: MarkProps) =>
+  logo(
     size,
     <>
-      <path d="M7 1.2h2.1v4.4H7Zm7.9 0H17v4.4h-2.1Z" />
-      <path d="M4.3 3.6h15.4a3.3 3.3 0 0 1 3.3 3.3v13a3.3 3.3 0 0 1-3.3 3.3H4.3A3.3 3.3 0 0 1 1 19.9v-13a3.3 3.3 0 0 1 3.3-3.3ZM1 8.4h22v1.9H1Zm5.2 4.2h2.4V15H6.2Zm4.6 0h2.4V15h-2.4Zm4.6 0h2.4V15h-2.4ZM6.2 16.6h2.4V19H6.2Zm4.6 0h2.4V19h-2.4Z" />
+      <path
+        d="M23.5 6.2a3 3 0 0 0-2.12-2.14C19.5 3.55 12 3.55 12 3.55s-7.5 0-9.38.51A3 3 0 0 0 .5 6.2C0 8.07 0 12 0 12s0 3.93.5 5.81a3 3 0 0 0 2.12 2.14c1.88.5 9.38.5 9.38.5s7.5 0 9.38-.5a3 3 0 0 0 2.12-2.14C24 15.93 24 12 24 12s0-3.93-.5-5.8Z"
+        fill="#FF0033"
+      />
+      <path d="M9.55 15.57V8.43L15.82 12l-6.27 3.57Z" fill="#FFFFFF" />
+    </>,
+  )
+
+// The whole Gmail mark, not a red letter. The white envelope is half of what
+// makes it recognisable this small, and the Google colours are the other half.
+const MarkGmail = ({ size }: MarkProps) =>
+  logo(
+    size,
+    <>
+      <path d="M2.5 19.9h3V11.4L1 8v10.4a1.5 1.5 0 0 0 1.5 1.5Z" fill="#4285F4" />
+      <path d="M18.5 19.9h3a1.5 1.5 0 0 0 1.5-1.5V8l-4.5 3.4Z" fill="#34A853" />
+      <path d="M18.5 5.6v5.8L23 8V6.4c0-1.86-2.12-2.92-3.6-1.8Z" fill="#FBBC04" />
+      <path d="M5.5 11.4V5.6L12 10.5l6.5-4.9v5.8L12 16.3Z" fill="#FFFFFF" />
+      <path d="M1 6.4V8l4.5 3.4V5.6L4.6 4.6C3.12 3.48 1 4.54 1 6.4Z" fill="#C5221F" />
+      <path d="M5.5 5.6 12 10.5l6.5-4.9V4.5L12 9.4 5.5 4.5Z" fill="#EA4335" />
+    </>,
+  )
+
+const GoogleDocPage = ({ body, fold }: { body: string; fold: string }) => (
+  <>
+    <path
+      d="M6 1.6h8.2L19.6 7v14.1a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5V3.1A1.5 1.5 0 0 1 6 1.6Z"
+      fill={body}
+    />
+    <path d="M14.2 1.6 19.6 7h-3.9a1.5 1.5 0 0 1-1.5-1.5Z" fill={fold} />
+  </>
+)
+
+const MarkGoogleDocs = ({ size }: MarkProps) =>
+  logo(
+    size,
+    <>
+      <GoogleDocPage body="#4285F4" fold="#A1C2FA" />
+      <path d="M7.9 11.3h8.2M7.9 14.3h8.2M7.9 17.3h5.6" stroke="#FFFFFF" strokeWidth="1.5" strokeLinecap="round" />
+    </>,
+  )
+
+const MarkGoogleSheets = ({ size }: MarkProps) =>
+  logo(
+    size,
+    <>
+      <GoogleDocPage body="#0F9D58" fold="#8ED1B1" />
+      <path d="M7.5 11h9v8.2h-9Z" fill="#FFFFFF" />
+      <path d="M7.5 15.1h9M12 11v8.2" stroke="#0F9D58" strokeWidth="1.4" />
+    </>,
+  )
+
+// Firecrawl does most of the page reading and had been sharing a generic globe
+// with everything else on the web. Its flame is unmistakable and shares a
+// silhouette with nothing else in the set.
+const MarkFirecrawl = ({ size }: MarkProps) =>
+  logo(
+    size,
+    <>
+      <path
+        d="M12 1.9c.7 2.9 2.3 4.4 3.9 6 1.9 1.9 3.1 3.9 3.1 6.3a7 7 0 1 1-14 0c0-1.8.7-3.5 1.8-4.9.2 1.3.9 2.3 1.9 2.9C7.9 8.6 9 5 12 1.9Z"
+        fill="#FF6A1F"
+      />
+      <path
+        d="M12 22.1a4.3 4.3 0 0 1-4.3-4.3c0-2 1.5-3.4 2.7-4.7.7 1.6 1.7 2.3 2.9 2.8 1.7.8 3 2.1 3 4a4.3 4.3 0 0 1-4.3 2.2Z"
+        fill="#FFC93F"
+      />
+    </>,
+  )
+
+/* -- Cosmic's own machinery ---------------------------------------------- */
+
+const MarkWeb = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <circle cx="12" cy="12" r="8.6" />
+      <path d="M3.4 12h17.2" />
+      <path d="M12 3.4c2.5 2.4 3.8 5.3 3.8 8.6S14.5 18.2 12 20.6c-2.5-2.4-3.8-5.3-3.8-8.6S9.5 5.8 12 3.4Z" />
+    </>,
+  )
+
+const MarkSearch = ({ size }: MarkProps) =>
+  line(size, <><circle cx="10.6" cy="10.6" r="6.9" /><path d="M15.7 15.7 21 21" /></>)
+
+/** The orchestrator's own sandbox: the boxed prompt, the way OpenAI draws it. */
+const MarkSandbox = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <rect x="2.7" y="4" width="18.6" height="16" rx="3.4" />
+      <path d="M7.4 10 10 12.6l-2.6 2.6" />
+      <path d="M13 15.4h4.1" />
+    </>,
+  )
+
+/** A machine we drive rather than own: the same prompt, no box around it. */
+const MarkTerminal = ({ size }: MarkProps) =>
+  line(size, <><path d="M3.8 6.2 9.6 12l-5.8 5.8" /><path d="M12.4 17.8h7.8" /></>)
+
+const MarkDoc = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <path d="M14 2.7H7.6a2.4 2.4 0 0 0-2.4 2.4v13.8a2.4 2.4 0 0 0 2.4 2.4h8.8a2.4 2.4 0 0 0 2.4-2.4V7.4Z" />
+      <path d="M14 2.7v3.2a1.6 1.6 0 0 0 1.6 1.6h3.2" />
+      <path d="M8.6 13.2h6.8M8.6 16.6h4.4" />
+    </>,
+  )
+
+/** Rows under a header, wide -- so it is not one more rounded square. */
+const MarkTable = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <rect x="2.4" y="5" width="19.2" height="14" rx="2.4" />
+      <path d="M2.4 9.6h19.2" />
+      <path d="M2.4 14.3h19.2" />
+      <path d="M9.4 9.6V19" />
+    </>,
+  )
+
+const MarkSlides = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <rect x="2.4" y="3.6" width="19.2" height="12.4" rx="2.4" />
+      <path d="M6.8 7.8h10.4M6.8 11.6h6.2" />
+      <path d="M12 16v3.2" />
+      <path d="M8.6 20.9h6.8" />
+    </>,
+  )
+
+const MarkDiagram = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <rect x="8.8" y="2.6" width="6.4" height="4.8" rx="1.6" />
+      <rect x="2.2" y="16.6" width="6.4" height="4.8" rx="1.6" />
+      <rect x="15.4" y="16.6" width="6.4" height="4.8" rx="1.6" />
+      <path d="M12 7.4v3.4M5.4 16.6v-3.4h13.2v3.4" />
+    </>,
+  )
+
+const MarkMap = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <path d="M12 21.6s7.3-6.1 7.3-11.5a7.3 7.3 0 0 0-14.6 0C4.7 15.5 12 21.6 12 21.6Z" />
+      <circle cx="12" cy="10" r="2.7" />
+    </>,
+  )
+
+const MarkImage = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <rect x="2.6" y="3.8" width="18.8" height="16.4" rx="3" />
+      <circle cx="8.3" cy="9.2" r="2.1" />
+      <path d="M2.9 17.6 8.9 11l4 4.2 2.7-2.6 5.5 5.3" />
+    </>,
+  )
+
+const MarkMemory = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <ellipse cx="12" cy="5.4" rx="8.4" ry="3.4" />
+      <path d="M3.6 5.4v6.4c0 1.9 3.8 3.4 8.4 3.4s8.4-1.5 8.4-3.4V5.4" />
+      <path d="M3.6 11.8v6.4c0 1.9 3.8 3.4 8.4 3.4s8.4-1.5 8.4-3.4v-6.4" />
+    </>,
+  )
+
+const MarkThink = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <path d="M9.4 2.6c.4 3.7 1.1 5.9 2.44 7.24S15.5 12 19.2 12.4c-3.7.4-5.9 1.1-7.36 2.56S9.8 19.5 9.4 23.2c-.4-3.7-1.1-5.9-2.44-7.24S3.6 12.8-.1 12.4c3.7-.4 5.9-1.1 7.36-2.56S9 6.3 9.4 2.6Z" />
+      <path d="M18.4 15.4c.16 1.5.44 2.4.98 2.94s1.44.82 2.94.98c-1.5.16-2.4.44-2.94.98s-.82 1.44-.98 2.94c-.16-1.5-.44-2.4-.98-2.94s-1.44-.82-2.94-.98c1.5-.16 2.4-.44 2.94-.98s.82-1.44.98-2.94Z" />
+    </>,
+  )
+
+const MarkAgent = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <path d="M12 2.4 21.4 7.4v9.2L12 21.6 2.6 16.6V7.4Z" />
+      <path d="M2.6 7.4 12 12.5l9.4-5.1M12 12.5v9.1" />
+    </>,
+  )
+
+const MarkCosmic = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <circle cx="12" cy="12" r="2.7" fill="currentColor" stroke="none" />
+      <path d="M16.4 7.6a6.2 6.2 0 0 1 0 8.8M7.6 16.4a6.2 6.2 0 0 1 0-8.8" />
+      <path d="M19.6 4.4a10.7 10.7 0 0 1 0 15.2M4.4 19.6a10.7 10.7 0 0 1 0-15.2" />
+    </>,
+  )
+
+const MarkCalendar = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <rect x="2.8" y="4.4" width="18.4" height="17" rx="3" />
+      <path d="M2.8 9.6h18.4" />
+      <path d="M7.9 2.4v4M16.1 2.4v4" />
+      <path d="M7.6 13.9h.01M12 13.9h.01M16.4 13.9h.01M7.6 17.6h.01M12 17.6h.01" strokeWidth="2.6" />
     </>,
   )
 
 /** Only for a site whose favicon will not load: an intranet host, or a login wall. */
-const MarkGlobe = ({ size }: MarkProps) =>
-  svg(size, <path d="M12 1.8a10.2 10.2 0 1 0 0 20.4 10.2 10.2 0 0 0 0-20.4ZM2.6 11.1h18.8v1.8H2.6ZM12 1.8c2.35 0 4.25 4.57 4.25 10.2S14.35 22.2 12 22.2 7.75 17.63 7.75 12 9.65 1.8 12 1.8Zm0 1.8c-1.17 0-2.45 3.76-2.45 8.4s1.28 8.4 2.45 8.4 2.45-3.76 2.45-8.4S13.17 3.6 12 3.6Z" />)
+const MarkGlobe = MarkWeb
 
-const MARKS: Record<GlyphId, (props: MarkProps) => ReactElement> = {
+const MARKS: Record<GlyphId, (props: MarkProps) => ReactNode> = {
   x: MarkX,
   youtube: MarkYouTube,
   gmail: MarkGmail,
+  firecrawl: MarkFirecrawl,
+  gdocs: MarkGoogleDocs,
+  gsheets: MarkGoogleSheets,
   calendar: MarkCalendar,
-  gdocs: MarkDoc,
-  gsheets: MarkTable,
   web: MarkWeb,
   search: MarkSearch,
   sandbox: MarkSandbox,
@@ -159,9 +302,27 @@ const MARKS: Record<GlyphId, (props: MarkProps) => ReactElement> = {
   cosmic: MarkCosmic,
 }
 
-export const GlyphMark = ({ glyph, size = 13 }: { glyph: GlyphId; size?: number }) => {
+/** Logos carry their own colours and must not be tinted by the row. */
+const SELF_COLOURED = new Set<GlyphId>(['youtube', 'gmail', 'gdocs', 'gsheets', 'firecrawl'])
+
+/**
+ * Optical size, not measured size. Some marks carry their own margin -- a
+ * document is a narrow portrait shape, a flame is tall and thin -- so drawn to
+ * the same box they sit visibly smaller than a mark that runs edge to edge.
+ * These nudge them back onto the same optical line as X and YouTube.
+ */
+const OPTICAL: Partial<Record<GlyphId, number>> = {
+  gdocs: 1.16,
+  gsheets: 1.16,
+  firecrawl: 1.14,
+  youtube: 1.06,
+  x: 0.94,
+  think: 1.06,
+}
+
+export const GlyphMark = ({ glyph, size = 16 }: { glyph: GlyphId; size?: number }) => {
   const Mark = MARKS[glyph] || MarkCosmic
-  return <Mark size={size} />
+  return <>{Mark({ size })}</>
 }
 
 /**
@@ -174,7 +335,7 @@ const DomainChip = memo(({ domain, size }: { domain: string; size: number }) => 
   if (failed) {
     return (
       <span className="agent-domain-chip is-fallback" title={domain} style={{ width: size, height: size }}>
-        <MarkGlobe size={Math.round(size * 0.66)} />
+        <MarkGlobe size={Math.round(size * 0.86)} />
       </span>
     )
   }
@@ -194,8 +355,8 @@ const DomainChip = memo(({ domain, size }: { domain: string; size: number }) => 
 DomainChip.displayName = 'DomainChip'
 
 /**
- * The overlapping favicon stack. Reads as "these places", at a glance, without
- * spending a line of the flow on a list of hostnames.
+ * The favicon row. Says "these places" in the width of a few characters,
+ * instead of spending a line of the flow on hostnames.
  */
 export const DomainCluster = memo(({
   domains,
@@ -221,16 +382,16 @@ export const DomainCluster = memo(({
 DomainCluster.displayName = 'DomainCluster'
 
 /**
- * The tile a flow step leads with.
+ * The mark a flow step leads with, in a fixed-width slot so a column of them
+ * aligns without a chip drawn behind each one.
  *
- * A brand keeps its own colour in every state, `active` included. Tinting the
- * X mark with the app accent turned a black-and-white logo into a blue box that
- * no longer read as X at all; liveness is the tile's job, not the mark's, so
- * `active` brightens the tile and adds one expanding ring instead.
+ * A logo keeps its own colours in every state. Tinting it with the app accent
+ * -- which is what `active` used to do -- turned every brand into the same blue
+ * square, so liveness is left to the row behind it instead.
  */
 export const AgentGlyph = memo(({
   signal,
-  size = 22,
+  size = 20,
   iconSize,
   active = false,
   title,
@@ -240,14 +401,21 @@ export const AgentGlyph = memo(({
   iconSize?: number
   active?: boolean
   title?: string
-}) => (
-  <span
-    className={`agent-glyph${active ? ' is-active' : ''}${signal.brand ? ' is-brand' : ''}`}
-    style={{ width: size, height: size, ...(signal.brand ? { color: signal.brand } : null) }}
-    title={title ?? signal.label}
-    aria-hidden
-  >
-    <GlyphMark glyph={signal.glyph} size={iconSize ?? Math.round(size * 0.6)} />
-  </span>
-))
+}) => {
+  const selfColoured = SELF_COLOURED.has(signal.glyph)
+  return (
+    <span
+      className={`agent-glyph${active ? ' is-active' : ''}${selfColoured ? ' is-logo' : ''}`}
+      style={{
+        width: size,
+        height: size,
+        ...(signal.brand && !selfColoured ? { color: signal.brand } : null),
+      }}
+      title={title ?? signal.label}
+      aria-hidden
+    >
+      <GlyphMark glyph={signal.glyph} size={iconSize ?? Math.round(size * (OPTICAL[signal.glyph] ?? 1))} />
+    </span>
+  )
+})
 AgentGlyph.displayName = 'AgentGlyph'

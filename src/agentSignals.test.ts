@@ -76,6 +76,18 @@ describe('resolveAgentSignal', () => {
     expect(resolveAgentSignal({ label: 'searched the specialist catalog' }).glyph).toBe('agent')
   })
 
+  it('gives Firecrawl its own mark rather than the generic globe', () => {
+    // It does most of the page reading, so it is the mark seen most often.
+    expect(resolveAgentSignal({ agentId: 'cosmic/firecrawl-web-scrape-agent', label: 'read a page' }).glyph)
+      .toBe('firecrawl')
+    expect(resolveAgentSignal({ intent: 'firecrawl.scrape', label: 'read a page' }).glyph).toBe('firecrawl')
+    expect(resolveAgentSignal({ label: 'Firecrawl pulled the listing' }).glyph).toBe('firecrawl')
+  })
+
+  it('still falls back to the plain globe for web work that is not Firecrawl', () => {
+    expect(resolveAgentSignal({ label: 'opened the vendor portal at example.com' }).glyph).toBe('web')
+  })
+
   it('lets a recognised product domain outrank the agent that fetched it', () => {
     const result = resolveAgentSignal({
       agentId: 'cosmic/firecrawl-web-scrape-agent',

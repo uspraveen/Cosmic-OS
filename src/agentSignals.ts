@@ -17,6 +17,7 @@ export type GlyphId =
   | 'x'
   | 'youtube'
   | 'gmail'
+  | 'firecrawl'
   // Tinted functional marks -- a Google product, but drawn as its own glyph
   // rather than a logo we would only approximate.
   | 'calendar'
@@ -72,9 +73,11 @@ const BRAND = {
   x: '#FFFFFF',
   youtube: '#FF0033',
   gmail: '#EA4335',
+  firecrawl: '#FF6A1F',
   calendar: '#4285F4',
   gdocs: '#4285F4',
   gsheets: '#34A853',
+  map: '#EA4335',
 } as const
 
 const text = (value: unknown) => String(value ?? '').trim()
@@ -196,7 +199,7 @@ const AGENT_GLYPHS: Array<[string, GlyphId, string]> = [
   ['diagram', 'diagram', 'Diagrams'],
   ['map', 'map', 'Maps'],
   ['image-generator', 'image', 'Images'],
-  ['firecrawl', 'web', 'Web'],
+  ['firecrawl', 'firecrawl', 'Firecrawl'],
   ['alpha-agent', 'terminal', 'Alpha agent'],
   ['orchestrator', 'cosmic', 'Cosmic'],
 ]
@@ -212,7 +215,7 @@ const INTENT_GLYPHS: Array<[RegExp, GlyphId, string]> = [
   [/^docs\./, 'doc', 'Documents'],
   [/^sheets\./, 'gsheets', 'Google Sheets'],
   [/^tabular\./, 'table', 'Spreadsheets'],
-  [/^firecrawl\./, 'web', 'Web'],
+  [/^firecrawl\./, 'firecrawl', 'Firecrawl'],
   [/^alpha\./, 'terminal', 'Alpha agent'],
   [/^diagram\./, 'diagram', 'Diagrams'],
   [/^map\./, 'map', 'Maps'],
@@ -228,7 +231,7 @@ const INTENT_GLYPHS: Array<[RegExp, GlyphId, string]> = [
  */
 const LABEL_GLYPHS: Array<[RegExp, GlyphId, string]> = [
   [/\bcode sandbox\b/, 'sandbox', 'Code sandbox'],
-  [/\bfirecrawl\b/, 'web', 'Web'],
+  [/\bfirecrawl\b/, 'firecrawl', 'Firecrawl'],
   [/\bweb search(es)?\b|\bsearched the web\b|\bperplexity\b|\bresearch(ed)?\b/, 'search', 'Research'],
   [/\bsearched memory\b|\bmemory block\b|\bcore fact\b|\bremember(ed)?\b/, 'memory', 'Memory'],
   [/\bspecialist catalog\b|\bspecialist intents\b/, 'agent', 'Specialists'],

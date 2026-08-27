@@ -5041,46 +5041,32 @@ kbd {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
-  color: rgba(255, 255, 255, 0.74);
-  background: rgba(255, 255, 255, 0.05);
-  transition: color 180ms ease, background 180ms ease;
+  color: rgba(255, 255, 255, 0.68);
+  transition: color 180ms ease;
 }
 
 .agent-glyph svg {
   display: block;
 }
 
-/* A brand mark supplies its own colour through the inline style, in every
-   state. The tile only ever gets out of its way. */
-.agent-glyph.is-brand {
-  background: rgba(255, 255, 255, 0.06);
+/* A real logo brings its own colours and must not be dimmed to match the
+   monoline marks -- half of what makes it readable this small is that it looks
+   exactly like the thing it stands for. */
+.agent-glyph.is-logo {
+  opacity: 0.95;
 }
 
-/* The running step, and the mark in the live footer.
-
-   Liveness is the tile's job, never the mark's. Tinting the mark with the app
-   accent turned X -- a black-and-white logo -- into a blue box that no longer
-   read as X, and did the same to every other brand. So the tile brightens by a
-   few percent and sends out one ring, and the logo underneath stays itself. */
+/* The running step. There is no tile to light up any more, so the mark simply
+   comes up to full strength; the row behind it carries the rest. Tinting it
+   with the app accent -- which is what this rule used to do -- turned every
+   brand into the same blue square. */
 .agent-glyph.is-active {
-  color: rgba(255, 255, 255, 0.96);
-  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.94);
 }
 
-.agent-glyph.is-active::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.42);
-  animation: agent-glyph-live 2.4s cubic-bezier(0.32, 0, 0.28, 1) infinite;
-  pointer-events: none;
+.agent-glyph.is-active.is-logo {
+  opacity: 1;
 }
-
-@keyframes agent-glyph-live {
-  0% { opacity: 0.5; transform: scale(1); }
-  70%, 100% { opacity: 0; transform: scale(1.42); }
 }
 
 /* Overlapping favicons: "these places", in the width of a few characters,
@@ -5150,14 +5136,6 @@ kbd {
     background: none;
     -webkit-text-fill-color: rgba(255, 255, 255, 0.86);
     color: rgba(255, 255, 255, 0.86);
-  }
-
-  /* The live ring is a perpetual animation; the brightened tile underneath
-     already says which step is running. */
-  .agent-glyph.is-active::after {
-    animation: none !important;
-    opacity: 0.5;
-    transform: none;
   }
 
   .assistant-collapsible-chevron,
