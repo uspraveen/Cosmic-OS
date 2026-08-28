@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -200,6 +201,55 @@ def test_opencode_is_ready_without_any_zen_key() -> None:
     )
     assert missing_cli["status"] == "relogin_required"
     assert missing_cli["login_required_reason"] == "opencode_cli_missing"
+
+
+def test_opencode_cli_status_surfaces_authenticated_for_alpha_auth_walk(tmp_path: Path) -> None:
+    """Regression: the Alpha pre-execution auth walk gates on cli.authenticated.
+
+    _opencode_cli_status must report authenticated whenever the CLI is
+    available (keyless free tier), otherwise Alpha silently skips OpenCode
+    every run — status says "authenticated" but the cli block fails the ready
+    check, and the task rotates to codex/cursor.
+    """
+    from agents.alpha_agent.agent import AlphaAgent
+
+    runtime = object.__new__(GatewayRuntime)
+
+    class _Cfg:
+        alpha_opencode_home = tmp_path / "opencode-home"
+
+    runtime.config = _Cfg()
+
+    async def _version_ok(args: list[str], *, timeout_sec: float, with_keys: dict[str, str] | None = None):
+        del timeout_sec, with_keys
+        assert args == ["--version"]
+        return {"ok": True, "available": True, "returncode": 0, "stdout": "1.18.23", "stderr": ""}
+
+    async def _missing(args: list[str], *, timeout_sec: float, with_keys: dict[str, str] | None = None):
+        del args, timeout_sec, with_keys
+        return {
+            "ok": False,
+            "available": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": "",
+            "reason": "opencode_cli_missing",
+        }
+
+    runtime._run_opencode_command = _version_ok
+    status = asyncio.run(runtime._opencode_cli_status())
+    assert status["authenticated"] is True
+    assert status["version"] == "1.18.23"
+
+    runtime._run_opencode_command = _missing
+    missing = asyncio.run(runtime._opencode_cli_status())
+    assert missing["authenticated"] is False
+
+    agent = object.__new__(AlphaAgent)
+    ready_payload = {"status": "authenticated", "login_required_reason": "", "cli": status}
+    assert agent._provider_status_is_ready(ready_payload) is True
+    not_ready_payload = {"status": "relogin_required", "login_required_reason": "opencode_cli_missing", "cli": missing}
+    assert agent._provider_status_is_ready(not_ready_payload) is False
 
 
 def test_gateway_shapes_zen_catalog_and_semver_compare() -> None:

@@ -21433,7 +21433,7 @@ class GatewayRuntime:
         return {
             **result,
             "version": version,
-            "authenticated_placeholder": None,
+            "authenticated": bool(result.get("available", False)),
             "opencode_home": str(self.config.alpha_opencode_home),
         }
 
