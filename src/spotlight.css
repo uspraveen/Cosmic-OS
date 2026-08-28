@@ -36,6 +36,12 @@ body,
   justify-content: flex-end;
   align-items: center;
 
+  /* Single source of truth for the chat surface width. The response panel and
+     the composer must never drift apart: the panel is a spotlight-style card
+     (520px up to 800px, then it stops), and the composer inherits that ceiling
+     so it can never end up wider than the answer above it. */
+  --chat-surface-width: min(max(520px, 44vw), 800px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+
   /* Safe Zones */
   padding-top: 200px;
   padding-bottom: 24px;
@@ -112,12 +118,14 @@ body,
    its content had stopped, which is what made a 640px column look marooned in a
    1126px sheet rather than deliberately set.
 
-   So the panel still adapts to the display -- 520px up to 880px -- and then
+   So the panel still adapts to the display -- 520px up to 800px -- and then
    stops, at the point where the column plus its margins fill it. Chat only:
-   Meeting and Spaces share .response-container and size themselves. */
+   Meeting and Spaces share .response-container and size themselves. The width
+   itself lives in --chat-surface-width on .overlay, where the composer reads
+   the same ceiling. */
 .response-container.chat-response-container {
-  width: min(max(520px, 44vw), 800px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
-  max-width: min(max(520px, 44vw), 800px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+  width: var(--chat-surface-width);
+  max-width: var(--chat-surface-width);
 }
 
 .response-container.visible {
@@ -716,10 +724,11 @@ body,
 
 /* ========== SEARCH BAR (Unified Glass) ========== */
 .cosmic {
-  /* Proportional viewport sizing; no hard px cap so the bar keeps the same relative width
-     across displays with different DPI scale factors. */
-  width: min(max(460px, 38vw), calc(100vw - var(--task-rail-reserve, 0px) - 72px));
-  max-width: min(max(460px, 38vw), calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+  /* Proportional viewport sizing with one shared ceiling: the composer grows
+     with the viewport like the response panel does, but never past it — the
+     question box must never sit wider than the answer above it. */
+  width: min(max(460px, 38vw), var(--chat-surface-width));
+  max-width: min(max(460px, 38vw), var(--chat-surface-width));
   display: flex;
   flex-direction: column;
   opacity: 0;
@@ -4760,7 +4769,7 @@ kbd {
 
 .cosmic.history-open {
   transform: scale(1);
-  width: min(clamp(600px, 52vw, 840px), calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+  width: min(clamp(600px, 52vw, 840px), var(--chat-surface-width));
 }
 
 .history-container {
