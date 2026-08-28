@@ -4411,7 +4411,10 @@ kbd {
 
 .alpha-agent-console {
   width: var(--response-block-width, min(100%, 720px));
-  margin-bottom: 12px;
+  /* The console is a heavy card wedged into prose: it needs air on both
+     sides, not just below — otherwise it sits glued to the sentence above. */
+  margin-top: 16px;
+  margin-bottom: 16px;
   overflow: hidden;
   border-radius: var(--response-radius-inner, 8px);
   border: var(--response-hairline, 1px) solid var(--response-separator, rgba(255, 255, 255, 0.13));
