@@ -383,15 +383,15 @@ body,
   --response-block-width: 100%;
 }
 
-/* Wide mode widens prose decisively (580 -> 740px, ~100 characters at 15px —
-   past print measure on purpose, this surface carries console output and
-   absolute paths that suffer more from wrapping than long lines do) and lets
-   structure reach the full glass: code, consoles, tables and images bleed
-   symmetrically past the prose column. The bleed floors at 0 on narrow
-   windows; at the cap, artifacts span the panel's full inner width. */
+/* Wide mode is a density choice: the content column tracks the glass instead
+   of sitting at a fixed cap inside it. Prose takes surface minus a constant
+   240px of breathing room (~120px shoulders at any width), and artifacts —
+   code, consoles, tables, images — bleed the rest of the way to the padding,
+   so structure always spans the full inner width. Proportional on purpose:
+   the border never grows again as the display gets wider. */
 .overlay.chat-wide .chat-response-content {
-  --response-column: min(100%, 740px);
-  --artifact-bleed: clamp(0px, calc((var(--chat-surface-width) - 740px) / 2 - 28px), 250px);
+  --response-column: min(100%, max(580px, calc(var(--chat-surface-width) - 240px)));
+  --artifact-bleed: 88px;
 }
 
 .overlay.chat-wide .chat-response-content .code-block,
