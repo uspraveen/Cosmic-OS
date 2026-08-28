@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 from uuid import uuid4
 
 import httpx
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from shared.response_blocks import build_response_blocks
 
@@ -443,6 +443,7 @@ class ImageCandidate:
     source_title: str
     source_domain: str
     source_rank: int
+    thumbnail_url: str = ""
     alt_text: str = ""
     title: str = ""
     nearby_text: str = ""
@@ -731,6 +732,7 @@ class VisualEnrichmentCoordinator:
         self._run_images: dict[str, dict[str, Any]] = {}
         self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._active_sidecars: dict[str, asyncio.Task[None]] = {}
+        self._slot_deadlines: dict[str, float] = {}
         self._waiting_for_sources: set[str] = set()
         self._queued_slot_ids: list[str] = []
         self._slots: dict[str, VisualSlotDirective] = {}
@@ -787,6 +789,11 @@ class VisualEnrichmentCoordinator:
         visible_delta, new_slots, dirty = self._parser.consume_text(chunk)
         if self._register_slots(new_slots):
             dirty = True
+        # Start the automatic fallback while the answer is still streaming. Its
+        # network and vision work remains an independent sidecar; this only moves
+        # work that used to begin in finalize() into otherwise-idle generation time.
+        if self._maybe_schedule_implicit_image_slot():
+            dirty = True
         events: list[dict[str, Any]] = []
         if dirty:
             events.append(self._build_snapshot_event())
@@ -816,7 +823,11 @@ class VisualEnrichmentCoordinator:
                 changed = True
         if changed:
             self._schedule_waiting_image_slots()
-        return self._drain_ready_updates()
+        events: list[dict[str, Any]] = []
+        if changed and self._maybe_schedule_implicit_image_slot():
+            events.append(self._build_snapshot_event())
+        events.extend(self._drain_ready_updates())
+        return events
 
     def note_run_images(self, artifacts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         """Register images this run's tools captured, so they can be used inline.
@@ -845,7 +856,11 @@ class VisualEnrichmentCoordinator:
             changed = True
         if changed:
             self._schedule_waiting_image_slots()
-        return self._drain_ready_updates()
+        events: list[dict[str, Any]] = []
+        if changed and self._maybe_schedule_implicit_image_slot():
+            events.append(self._build_snapshot_event())
+        events.extend(self._drain_ready_updates())
+        return events
 
     def _resolve_run_capture_path(self, artifact: dict[str, Any]) -> Path | None:
         """Resolve a tool-reported artifact path, refusing anything outside the store.
@@ -970,16 +985,17 @@ class VisualEnrichmentCoordinator:
         )
         if not self._active_sidecars:
             return base_sec
-        max_slot_timeout_ms = max(
+        now = time.monotonic()
+        max_remaining_sec = max(
             (
-                self._slot_timeout_ms(self._slots.get(slot_id))
+                max(0.0, self._slot_deadlines.get(slot_id, now) - now)
                 for slot_id in self._active_sidecars.keys()
             ),
-            default=0,
+            default=0.0,
         )
-        if max_slot_timeout_ms <= 0:
+        if max_remaining_sec <= 0:
             return base_sec
-        return max(base_sec, max_slot_timeout_ms / 1000.0)
+        return max(base_sec, max_remaining_sec)
 
     def _failure_label_for_slot(
         self,
@@ -1099,6 +1115,14 @@ class VisualEnrichmentCoordinator:
         )
 
     def _maybe_schedule_implicit_image_slot(self) -> bool:
+        # This method is probed as text streams, so keep its common path O(1)
+        # until enough context and provenance exist to make a real decision.
+        if self._image_slot_count or self._chart_slot_count:
+            return False
+        if len(_safe_text(self._parser.visible_text)) < 180:
+            return False
+        if not _text_explicitly_requests_image(self.user_query) and not self._sources_by_url:
+            return False
         slot = self._build_implicit_image_slot()
         if slot is None:
             return False
@@ -1151,6 +1175,7 @@ class VisualEnrichmentCoordinator:
         if self._active_sidecars:
             await asyncio.gather(*self._active_sidecars.values(), return_exceptions=True)
         self._active_sidecars.clear()
+        self._slot_deadlines.clear()
         events.extend(self._drain_ready_updates())
 
         if self._parser.fail_all_pending_slots(
@@ -1273,12 +1298,18 @@ class VisualEnrichmentCoordinator:
         self._queued_slot_ids = remaining
 
     def _start_chart_sidecar(self, slot: VisualSlotDirective) -> None:
+        self._slot_deadlines[slot.id] = time.monotonic() + (
+            self._slot_timeout_ms(slot) / 1000.0
+        )
         self._active_sidecars[slot.id] = asyncio.create_task(
             self._run_chart_sidecar(slot),
             name=f"visual-chart-{slot.id}",
         )
 
     def _start_image_sidecar(self, slot: VisualSlotDirective) -> None:
+        self._slot_deadlines[slot.id] = time.monotonic() + (
+            self._slot_timeout_ms(slot) / 1000.0
+        )
         self._active_sidecars[slot.id] = asyncio.create_task(
             self._run_image_sidecar(slot),
             name=f"visual-image-{slot.id}",
@@ -1311,6 +1342,165 @@ class VisualEnrichmentCoordinator:
             )
         return "Best metadata-ranked image from a trusted source page."
 
+    async def _download_contact_sheet_preview(self, image_url: str) -> bytes:
+        """Read only a tightly bounded preview, following ordinary redirects."""
+        byte_budget = self.config.visual_image_contact_sheet_candidate_max_bytes
+        if image_url.startswith(_RUN_CAPTURE_SCHEME):
+            data, _mime, _width, _height = await asyncio.to_thread(
+                self._read_run_capture_bytes, image_url
+            )
+            if len(data) > byte_budget:
+                raise ValueError("Contact-sheet preview exceeded the byte budget.")
+            return data
+
+        # The enclosing sidecar is cancelled at its slot deadline; this per-request
+        # timeout is simply the existing network ceiling.
+        timeout_sec = self.config.visual_download_timeout_sec
+        chunks = bytearray()
+        async with self._http_client.stream(
+            "GET",
+            image_url,
+            headers={"User-Agent": "COSMIC-OS/1.0"},
+            follow_redirects=True,
+            timeout=httpx.Timeout(
+                timeout_sec,
+                connect=min(timeout_sec, 10.0),
+            ),
+        ) as response:
+            if response.status_code >= 400:
+                raise ValueError(
+                    f"Contact-sheet preview failed with status {response.status_code}."
+                )
+            content_length = _parse_int(response.headers.get("content-length"))
+            if content_length is not None and content_length > byte_budget:
+                raise ValueError("Contact-sheet preview exceeded the byte budget.")
+            async for chunk in response.aiter_bytes():
+                chunks.extend(chunk)
+                if len(chunks) > byte_budget:
+                    raise ValueError("Contact-sheet preview exceeded the byte budget.")
+        if not chunks:
+            raise ValueError("Contact-sheet preview returned empty bytes.")
+        return bytes(chunks)
+
+    @staticmethod
+    def _render_contact_sheet_jpeg(
+        prepared: list[tuple[int, ImageCandidate, bytes]],
+    ) -> tuple[bytes, list[tuple[int, ImageCandidate]]]:
+        cell_width = 240
+        image_height = 150
+        label_height = 34
+        gap = 6
+        rendered: list[tuple[int, ImageCandidate, Image.Image]] = []
+        for marker, candidate, raw_bytes in prepared:
+            try:
+                with Image.open(BytesIO(raw_bytes)) as source:
+                    width, height = source.size
+                    if width <= 0 or height <= 0 or width * height > 30_000_000:
+                        continue
+                    source.load()
+                    preview = ImageOps.contain(
+                        source.convert("RGB"),
+                        (cell_width, image_height),
+                        method=getattr(Image, "Resampling", Image).LANCZOS,
+                    )
+            except Exception:
+                continue
+            rendered.append((marker, candidate, preview))
+        if not rendered:
+            raise ValueError("No contact-sheet previews could be decoded.")
+
+        columns = min(5, len(rendered))
+        rows = (len(rendered) + columns - 1) // columns
+        sheet = Image.new(
+            "RGB",
+            (
+                (columns * cell_width) + ((columns - 1) * gap),
+                (rows * (image_height + label_height)) + ((rows - 1) * gap),
+            ),
+            (17, 18, 22),
+        )
+        draw = ImageDraw.Draw(sheet)
+        try:
+            label_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 24)
+        except OSError:
+            label_font = ImageFont.load_default()
+        for index, (marker, _candidate, preview) in enumerate(rendered):
+            column = index % columns
+            row = index // columns
+            x = column * (cell_width + gap)
+            y = row * (image_height + label_height + gap)
+            image_x = x + max(0, (cell_width - preview.width) // 2)
+            image_y = y + max(0, (image_height - preview.height) // 2)
+            sheet.paste(preview, (image_x, image_y))
+            draw.rectangle(
+                (x, y + image_height, x + cell_width - 1, y + image_height + label_height - 1),
+                fill=(23, 27, 35),
+            )
+            draw.text(
+                (x + 10, y + image_height + 3),
+                f"#{marker}",
+                fill=(245, 247, 250),
+                font=label_font,
+            )
+        output = BytesIO()
+        sheet.save(output, format="JPEG", quality=82, optimize=True)
+        return output.getvalue(), [
+            (marker, candidate) for marker, candidate, _preview in rendered
+        ]
+
+    async def _build_contact_sheet(
+        self,
+        ranked: list[ImageCandidate],
+    ) -> tuple[
+        bytes,
+        list[tuple[int, ImageCandidate]],
+        dict[str, bytes],
+    ]:
+        candidates = [
+            candidate
+            for candidate in ranked
+            if candidate.retrieval_kind != "run_capture"
+        ][: self.config.visual_image_contact_sheet_limit]
+        if not candidates:
+            raise ValueError("No remote candidates were available for a contact sheet.")
+
+        semaphore = asyncio.Semaphore(4)
+
+        async def prepare(
+            marker: int,
+            candidate: ImageCandidate,
+        ) -> tuple[int, ImageCandidate, bytes] | None:
+            preview_url = candidate.thumbnail_url or candidate.image_url
+            try:
+                async with semaphore:
+                    preview_bytes = await self._download_contact_sheet_preview(preview_url)
+            except Exception as exc:
+                logger.info(
+                    "visual_enrichment.contact_sheet_preview_skipped marker=%s url=%s error=%s",
+                    marker,
+                    preview_url,
+                    exc,
+                )
+                return None
+            return marker, candidate, preview_bytes
+
+        prepared_results = await asyncio.gather(
+            *(prepare(index, candidate) for index, candidate in enumerate(candidates, start=1))
+        )
+        prepared = [item for item in prepared_results if item is not None]
+        if not prepared:
+            raise ValueError("No candidate previews were available for a contact sheet.")
+        contact_sheet, marked_candidates = await asyncio.to_thread(
+            self._render_contact_sheet_jpeg, prepared
+        )
+        valid_urls = {candidate.image_url for _marker, candidate in marked_candidates}
+        original_byte_cache = {
+            candidate.image_url: preview_bytes
+            for _marker, candidate, preview_bytes in prepared
+            if not candidate.thumbnail_url and candidate.image_url in valid_urls
+        }
+        return contact_sheet, marked_candidates, original_byte_cache
+
     async def _build_attempt_candidates(
         self,
         *,
@@ -1341,6 +1531,118 @@ class VisualEnrichmentCoordinator:
             planned_urls.add(candidate.image_url)
             attempt_candidates.append((candidate, dict(verdict)))
 
+        primary_run_capture = bool(
+            ranked
+            and ranked[0].retrieval_kind == "run_capture"
+            and ranked[0].score >= self.config.visual_image_min_confidence
+            and ranked[0].relevance >= self.config.visual_image_min_relevance
+        )
+        contact_sheet_completed = False
+        if (
+            self._fireworks.available
+            and self.config.visual_image_contact_sheet_enabled
+            and not primary_run_capture
+        ):
+            try:
+                (
+                    contact_sheet,
+                    marked_candidates,
+                    original_byte_cache,
+                ) = await self._build_contact_sheet(ranked)
+                candidate_metadata = [
+                    {
+                        "marker": marker,
+                        "title": candidate.title or candidate.source_title,
+                        "alt_text": candidate.alt_text,
+                        "nearby_text": candidate.nearby_text,
+                        "source_domain": candidate.source_domain,
+                    }
+                    for marker, candidate in marked_candidates
+                ]
+                sheet_verdict = await self._fireworks.rank_image_contact_sheet(
+                    slot_query=_safe_text(slot.query) or self.user_query,
+                    user_query=self.user_query,
+                    context_excerpt=slot.context_excerpt,
+                    contact_sheet_jpeg=contact_sheet,
+                    candidates=candidate_metadata,
+                )
+                contact_sheet_completed = True
+                marker_map = dict(marked_candidates)
+                selected_marker = _parse_int(sheet_verdict.get("selected_marker")) or 0
+                ranked_markers_raw = sheet_verdict.get("ranked_markers")
+                ranked_markers: list[int] = []
+                if isinstance(ranked_markers_raw, list):
+                    for raw_marker in ranked_markers_raw:
+                        marker = _parse_int(raw_marker) or 0
+                        if marker in marker_map and marker not in ranked_markers:
+                            ranked_markers.append(marker)
+                if selected_marker in marker_map:
+                    ranked_markers = [selected_marker] + [
+                        marker for marker in ranked_markers if marker != selected_marker
+                    ]
+                vision_confidence = _parse_float(
+                    sheet_verdict.get("confidence"), default=0.0
+                )
+                accepted_markers = (
+                    ranked_markers
+                    if sheet_verdict.get("accept") is True
+                    and selected_marker in marker_map
+                    and vision_confidence >= self.config.visual_image_min_confidence
+                    else []
+                )
+                for choice_index, marker in enumerate(accepted_markers):
+                    candidate = marker_map[marker]
+                    enriched_verdict = dict(sheet_verdict)
+                    enriched_verdict.update(
+                        {
+                            "confidence": vision_confidence,
+                            "verified": True,
+                            "relevance": round(candidate.relevance, 4),
+                            "retrieval_kind": candidate.retrieval_kind,
+                            "selection_reason": (
+                                _safe_text(sheet_verdict.get("selection_reason"))
+                                if choice_index == 0
+                                else "Vision-ranked alternate from the same contact sheet."
+                            ),
+                            "alt_text": (
+                                _safe_text(sheet_verdict.get("alt_text"))
+                                if choice_index == 0
+                                else candidate.alt_text
+                            ),
+                            "caption": (
+                                _safe_text(sheet_verdict.get("caption"))
+                                if choice_index == 0
+                                else _safe_text(slot.caption)
+                            ),
+                            "_downloaded_image_bytes": original_byte_cache.get(
+                                candidate.image_url
+                            ),
+                        }
+                    )
+                    add_attempt(candidate, enriched_verdict)
+                if not explicit_image_request:
+                    # A successful visual comparison is authoritative. Candidates
+                    # it did not rank as acceptable must not re-enter through the
+                    # metadata-only fallback below.
+                    verifier_rejected_urls.update(
+                        candidate.image_url
+                        for candidate in ranked
+                        if candidate.retrieval_kind != "run_capture"
+                    )
+                logger.info(
+                    "visual_enrichment.contact_sheet_ranked slot_id=%s candidates=%s accepted=%s confidence=%.3f",
+                    slot.id,
+                    len(marked_candidates),
+                    len(accepted_markers),
+                    vision_confidence,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "visual_enrichment.contact_sheet_failed slot_id=%s error=%s",
+                    slot.id,
+                    exc,
+                )
+
         top_k = min(
             max(
                 self.config.visual_image_verify_top_k,
@@ -1350,7 +1652,12 @@ class VisualEnrichmentCoordinator:
             ),
             len(ranked),
         )
-        if self._fireworks.available and top_k > 0:
+        if (
+            self._fireworks.available
+            and top_k > 0
+            and not contact_sheet_completed
+            and not primary_run_capture
+        ):
             for candidate in ranked[:top_k]:
                 if candidate.retrieval_kind == "run_capture":
                     # The verifier fetches candidate_image_url itself, and a run
@@ -1625,6 +1932,7 @@ class VisualEnrichmentCoordinator:
                 height = item.get("height") if isinstance(item.get("height"), int) else None
                 candidate = ImageCandidate(
                     image_url=image_url,
+                    thumbnail_url=_safe_text(item.get("thumbnail_url")),
                     source_url=source_url,
                     source_title=title or source_domain,
                     source_domain=source_domain,
@@ -1773,6 +2081,7 @@ class VisualEnrichmentCoordinator:
             await self._event_queue.put({"action": "fail_slot", "slot_id": slot.id, "error": str(exc)})
         finally:
             self._active_sidecars.pop(slot.id, None)
+            self._slot_deadlines.pop(slot.id, None)
             self._drain_slot_queue()
 
     async def _run_image_sidecar(self, slot: VisualSlotDirective) -> None:
@@ -1894,11 +2203,19 @@ class VisualEnrichmentCoordinator:
             height: int | None = None
             for candidate, verdict in attempt_candidates:
                 try:
-                    image_bytes, detected_mime, width, height = await self._timed_stage(
-                        slot.id,
-                        "image_download",
-                        self._download_image_bytes(candidate.image_url),
-                    )
+                    cached_image_bytes = verdict.get("_downloaded_image_bytes")
+                    if isinstance(cached_image_bytes, bytes):
+                        image_bytes = cached_image_bytes
+                        detected_mime, width, height = await asyncio.to_thread(
+                            self._inspect_image_bytes,
+                            image_bytes,
+                        )
+                    else:
+                        image_bytes, detected_mime, width, height = await self._timed_stage(
+                            slot.id,
+                            "image_download",
+                            self._download_image_bytes(candidate.image_url),
+                        )
                     if _is_low_information_image_size(width, height):
                         raise ValueError(
                             f"Downloaded image was too small to be useful ({width}x{height})."
@@ -1988,6 +2305,7 @@ class VisualEnrichmentCoordinator:
             await self._event_queue.put({"action": "fail_slot", "slot_id": slot.id, "error": str(exc)})
         finally:
             self._active_sidecars.pop(slot.id, None)
+            self._slot_deadlines.pop(slot.id, None)
             self._drain_slot_queue()
 
     def _extract_candidates_from_scrape(
@@ -2257,6 +2575,19 @@ class VisualEnrichmentCoordinator:
         except Exception:
             pass
         return data, mime_type, width, height
+
+    @staticmethod
+    def _inspect_image_bytes(data: bytes) -> tuple[str | None, int | None, int | None]:
+        mime_type: str | None = None
+        width: int | None = None
+        height: int | None = None
+        try:
+            with Image.open(BytesIO(data)) as image:
+                width, height = image.size
+                mime_type = Image.MIME.get(image.format or "", None)
+        except Exception:
+            pass
+        return mime_type, width, height
 
     def _read_run_capture_bytes(
         self,

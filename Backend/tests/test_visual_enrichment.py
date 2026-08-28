@@ -918,10 +918,43 @@ def test_visual_enrichment_default_image_timeout_keeps_inline_images_fast(
     assert config.visual_max_image_slots_per_turn == 5
     assert config.visual_image_candidate_limit == 24
     assert config.visual_image_verify_top_k == 3
+    assert config.visual_image_contact_sheet_enabled is True
+    assert config.visual_image_contact_sheet_limit == 10
+    assert config.visual_image_contact_sheet_candidate_max_bytes == 2 * 1024 * 1024
     assert config.visual_image_search_result_limit == 12
     assert config.visual_image_slot_timeout_ms == 6000
     assert config.visual_image_search_timeout_sec == 5.0
     assert config.visual_download_timeout_sec == 6.0
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_finalization_uses_only_remaining_slot_budget() -> None:
+    config = OrchestratorConfig(
+        visual_finalization_grace_ms=50,
+        visual_image_slot_timeout_ms=6000,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: pytest.fail(f"unexpected request: {request.url!s}")
+        )
+    ) as client:
+        coordinator = VisualEnrichmentCoordinator(
+            config=config,
+            task_id="tsk_remaining_budget_1",
+            request_id="req_remaining_budget_1",
+            session_id="sess_remaining_budget_1",
+            channel="desktop:desk_remaining_budget_1",
+            user_query="test",
+            http_client=client,
+        )
+        sleeper = asyncio.create_task(asyncio.sleep(10))
+        coordinator._active_sidecars["img_1"] = sleeper
+        coordinator._slot_deadlines["img_1"] = time.monotonic() - 1.0
+        try:
+            assert coordinator._finalization_wait_timeout_sec() == pytest.approx(0.05)
+        finally:
+            sleeper.cancel()
+            await asyncio.gather(sleeper, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1255,7 +1288,7 @@ async def test_visual_enrichment_filters_svg_ui_noise_before_ranking() -> None:
 async def test_direct_image_search_client_parses_bing_result_payloads() -> None:
     html_payload = """
     <html><body>
-      <a class="iusc" m='{"murl":"https://cdn.example.test/black-flag-keyart.jpg","purl":"https://news.ubisoft.com/en-us/article/black-flag-resynced","t":"Assassin\\u0027s Creed Black Flag Resynced key art","desc":"Official reveal artwork","imgw":1600,"imgh":900}'></a>
+      <a class="iusc" m='{"murl":"https://cdn.example.test/black-flag-keyart.jpg","turl":"https://thumb.example.test/black-flag-keyart.jpg","purl":"https://news.ubisoft.com/en-us/article/black-flag-resynced","t":"Assassin\\u0027s Creed Black Flag Resynced key art","desc":"Official reveal artwork","imgw":1600,"imgh":900}'></a>
     </body></html>
     """
 
@@ -1279,10 +1312,151 @@ async def test_direct_image_search_client_parses_bing_result_payloads() -> None:
 
     assert len(results) == 1
     assert results[0]["image_url"] == "https://cdn.example.test/black-flag-keyart.jpg"
+    assert results[0]["thumbnail_url"] == "https://thumb.example.test/black-flag-keyart.jpg"
     assert results[0]["source_url"] == "https://news.ubisoft.com/en-us/article/black-flag-resynced"
     assert results[0]["title"] == "Assassin's Creed Black Flag Resynced key art"
     assert results[0]["width"] == 1600
     assert results[0]["height"] == 900
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_contact_sheet_uses_one_vision_call_and_selected_marker() -> None:
+    root = _make_test_dir("visual-contact-sheet-")
+    calls = {
+        "vision": 0,
+        "thumbnail_redirects": 0,
+        "original_one": 0,
+        "original_two": 0,
+    }
+    entries = [
+        {
+            "murl": "https://cdn.example.test/alpha-one.png",
+            "turl": "https://thumb.example.test/alpha-one",
+            "purl": "https://source.example.test/alpha-one",
+            "t": "Alpha Observatory telescope under the night sky",
+            "desc": "Alpha Observatory telescope reference photograph",
+            "imgw": 1600,
+            "imgh": 900,
+        },
+        {
+            "murl": "https://cdn.example.test/alpha-two.png",
+            "turl": "https://thumb.example.test/alpha-two",
+            "purl": "https://source.example.test/alpha-two",
+            "t": "Alpha Observatory telescope under the night sky",
+            "desc": "Alpha Observatory telescope reference photograph",
+            "imgw": 1600,
+            "imgh": 900,
+        },
+    ]
+    bing_html = "<html><body>" + "".join(
+        f"<a class=\"iusc\" m='{json.dumps(entry)}'></a>" for entry in entries
+    ) + "</body></html>"
+    preview_one = _solid_png_bytes(640, 360)
+    preview_two = _solid_png_bytes(640, 360)
+    original_two = _solid_png_bytes(1600, 900)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if request.method == "GET" and url.startswith("https://www.bing.com/images/search"):
+            return httpx.Response(200, text=bing_html, headers={"Content-Type": "text/html"})
+        if request.method == "GET" and url == "https://thumb.example.test/alpha-one":
+            calls["thumbnail_redirects"] += 1
+            return httpx.Response(302, headers={"Location": "https://thumb-cdn.example.test/alpha-one.png"})
+        if request.method == "GET" and url == "https://thumb.example.test/alpha-two":
+            calls["thumbnail_redirects"] += 1
+            return httpx.Response(302, headers={"Location": "https://thumb-cdn.example.test/alpha-two.png"})
+        if request.method == "GET" and url == "https://thumb-cdn.example.test/alpha-one.png":
+            return httpx.Response(200, content=preview_one, headers={"Content-Type": "image/png"})
+        if request.method == "GET" and url == "https://thumb-cdn.example.test/alpha-two.png":
+            return httpx.Response(200, content=preview_two, headers={"Content-Type": "image/png"})
+        if request.method == "POST" and request.url.path.endswith("/chat/completions"):
+            calls["vision"] += 1
+            body = json.loads(request.content.decode("utf-8"))
+            user_content = body["messages"][1]["content"]
+            assert "marker=1" in user_content[0]["text"]
+            assert "marker=2" in user_content[0]["text"]
+            assert user_content[1]["image_url"]["url"].startswith(
+                "data:image/jpeg;base64,"
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "accept": True,
+                                        "selected_marker": 2,
+                                        "ranked_markers": [2],
+                                        "confidence": 0.94,
+                                        "alt_text": "Alpha Observatory telescope",
+                                        "caption": "Alpha Observatory at night",
+                                        "selection_reason": "Candidate two is the clearest view.",
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+        if request.method == "GET" and url == "https://cdn.example.test/alpha-one.png":
+            calls["original_one"] += 1
+            return httpx.Response(200, content=original_two, headers={"Content-Type": "image/png"})
+        if request.method == "GET" and url == "https://cdn.example.test/alpha-two.png":
+            calls["original_two"] += 1
+            return httpx.Response(200, content=original_two, headers={"Content-Type": "image/png"})
+        raise AssertionError(f"unexpected request {request.method} {request.url!s}")
+
+    try:
+        config = OrchestratorConfig(
+            artifacts_root=root / "artifacts",
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            task_ledger_db_path=root / "task_ledger.db",
+            visual_enhancement_enabled=True,
+            visual_finalization_grace_ms=1200,
+            visual_max_concurrent_sidecars=1,
+            visual_max_image_slots_per_turn=1,
+            visual_firecrawl_api_key="",
+            visual_image_search_enabled=True,
+            visual_image_search_base_url="https://www.bing.com/images/search",
+            visual_fireworks_api_key="fireworks-key",
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_contact_sheet_1",
+                request_id="req_contact_sheet_1",
+                session_id="sess_contact_sheet_1",
+                channel="desktop:desk_contact_sheet_1",
+                user_query="Show me a relevant inline image of Alpha Observatory.",
+                http_client=client,
+            )
+            coordinator.consume_text(
+                "Alpha Observatory is built around its telescope.\n\n"
+                "[[visual_slot {\"id\":\"img_1\",\"kind\":\"image\","
+                "\"query\":\"Alpha Observatory telescope under the night sky\"}]]\n\n"
+                "Its optical system is the centerpiece of the site."
+            )
+            final_payload = await coordinator.finalize()
+
+        image_block = next(
+            block for block in final_payload["response_blocks"]
+            if block["type"] == "image_artifact"
+        )
+        assert image_block["provenance"]["source_image_url"] == (
+            "https://cdn.example.test/alpha-two.png"
+        )
+        assert image_block["provenance"]["verified"] is True
+        assert calls == {
+            "vision": 1,
+            "thumbnail_redirects": 2,
+            "original_one": 0,
+            "original_two": 1,
+        }
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.mark.asyncio
@@ -1490,6 +1664,14 @@ async def test_visual_enrichment_auto_injects_image_slot_for_concrete_follow_up(
 
             assert visible_delta
             assert snapshot_events
+            assert any(
+                block.get("type") == "image_slot"
+                for event in snapshot_events
+                for block in event.get("response_blocks", [])
+            )
+            assert coordinator._active_sidecars, (
+                "the automatic image sidecar must start during streaming, not in finalize()"
+            )
 
             final_payload = await coordinator.finalize()
 

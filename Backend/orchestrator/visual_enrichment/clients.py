@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import html
 import json
 import logging
@@ -215,6 +216,14 @@ class DirectImageSearchClient:
                 or ""
             ).strip()
             title = str(payload.get("t") or payload.get("title") or "").strip()
+            thumbnail_url = str(
+                payload.get("turl")
+                or payload.get("thumbnailUrl")
+                or payload.get("thumbnail_url")
+                or ""
+            ).strip()
+            if not thumbnail_url.startswith(("http://", "https://")):
+                thumbnail_url = ""
             snippet = str(
                 payload.get("desc")
                 or payload.get("caption")
@@ -233,6 +242,7 @@ class DirectImageSearchClient:
             results.append(
                 {
                     "image_url": image_url,
+                    "thumbnail_url": thumbnail_url,
                     "source_url": source_url or image_url,
                     "title": title,
                     "snippet": snippet,
@@ -365,6 +375,118 @@ class FireworksVisualClient:
         except ValueError as exc:
             logger.warning("visual_enrichment.fireworks_parse_failed: %s", exc)
             raise VisualEnrichmentError("Fireworks visual verifier returned invalid JSON.") from exc
+
+    async def rank_image_contact_sheet(
+        self,
+        *,
+        slot_query: str,
+        user_query: str,
+        context_excerpt: str,
+        contact_sheet_jpeg: bytes,
+        candidates: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Choose among labeled local previews with one bounded vision request.
+
+        Sending a composed data URL avoids asking the model provider to fetch
+        third-party image URLs (which can redirect, expire, or block bots), and
+        replaces N sequential verifier calls with a single comparison.
+        """
+        if not self.available:
+            raise VisualEnrichmentError("Fireworks visual verifier is not configured.")
+        if not contact_sheet_jpeg:
+            raise VisualEnrichmentError("Contact sheet was empty.")
+        marker_lines: list[str] = []
+        for item in candidates:
+            marker_lines.append(
+                " | ".join(
+                    [
+                        f"marker={item.get('marker')}",
+                        f"title={str(item.get('title') or '')[:180]}",
+                        f"alt={str(item.get('alt_text') or '')[:180]}",
+                        f"source={str(item.get('source_domain') or '')[:100]}",
+                        f"context={str(item.get('nearby_text') or '')[:220]}",
+                    ]
+                )
+            )
+        prompt = (
+            "Choose the single best image to place inline in an assistant response. "
+            "The contact sheet labels candidates with visible numeric markers.\n"
+            "Return exactly one JSON object with keys: accept (boolean), "
+            "selected_marker (integer or 0), ranked_markers (array of integers), "
+            "confidence (0-1 number), alt_text (string), caption (string), "
+            "selection_reason (string).\n"
+            "Rank only candidates that are genuinely acceptable, best first. Set "
+            "accept=false, selected_marker=0, and ranked_markers=[] if none fit. "
+            "Be strict: reject decorative, generic, logo-only, unrelated, misleading, "
+            "low-information, text-heavy, or branding-dominated images unless the user "
+            "explicitly requested that kind of graphic. Prefer a visually specific image "
+            "that directly supports the answer over a merely keyword-related result.\n\n"
+            f"Slot intent: {slot_query}\n"
+            f"Original user question: {user_query}\n"
+            f"Answer context excerpt: {context_excerpt[:1200]}\n"
+            "Candidate metadata:\n"
+            + "\n".join(marker_lines)
+        )
+        encoded_sheet = base64.b64encode(contact_sheet_jpeg).decode("ascii")
+        response = await self._client.post(
+            f"{self.config.base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.config.vision_model or self.config.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Return only JSON. Do not add prose or markdown fences.",
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{encoded_sheet}"
+                                },
+                            },
+                        ],
+                    },
+                ],
+                "temperature": 0.1,
+                "max_tokens": 1400,
+                "response_format": {"type": "json_object"},
+                "reasoning_effort": self.config.reasoning_effort,
+                "stream": False,
+            },
+            timeout=httpx.Timeout(
+                self.config.timeout_sec,
+                connect=min(self.config.timeout_sec, 10.0),
+            ),
+        )
+        if response.status_code >= 400:
+            raise VisualEnrichmentError(self._extract_http_error(response))
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            raise VisualEnrichmentError("Fireworks contact-sheet ranker returned non-JSON.") from exc
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise VisualEnrichmentError("Fireworks contact-sheet ranker returned no choices.")
+        message = choices[0].get("message") if isinstance(choices[0], dict) else {}
+        content = ""
+        if isinstance(message, dict):
+            content = str(message.get("content") or "").strip()
+            if not content and isinstance(message.get("reasoning_content"), str):
+                content = str(message.get("reasoning_content") or "").strip()
+        if not content:
+            raise VisualEnrichmentError("Fireworks contact-sheet ranker returned empty content.")
+        try:
+            return _extract_json_object(content)
+        except ValueError as exc:
+            logger.warning("visual_enrichment.fireworks_contact_sheet_parse_failed: %s", exc)
+            raise VisualEnrichmentError("Fireworks contact-sheet ranker returned invalid JSON.") from exc
 
     @staticmethod
     def _extract_http_error(response: httpx.Response) -> str:

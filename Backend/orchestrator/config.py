@@ -165,6 +165,9 @@ class OrchestratorConfig:
     visual_image_candidate_limit: int = 24
     visual_image_max_bytes: int = 8 * 1024 * 1024
     visual_image_verify_top_k: int = 3
+    visual_image_contact_sheet_enabled: bool = True
+    visual_image_contact_sheet_limit: int = 10
+    visual_image_contact_sheet_candidate_max_bytes: int = 2 * 1024 * 1024
     visual_image_min_confidence: float = 0.58
     # Independent, necessary condition. The confidence score above ranks candidates
     # and is reachable on structural quality alone, so topicality is enforced here
@@ -342,6 +345,23 @@ class OrchestratorConfig:
             visual_image_candidate_limit=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_CANDIDATE_LIMIT", 24)),
             visual_image_max_bytes=max(1024, _env_int("VISUAL_ENHANCEMENT_IMAGE_MAX_BYTES", 8 * 1024 * 1024)),
             visual_image_verify_top_k=max(1, _env_int("VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K", 3)),
+            visual_image_contact_sheet_enabled=_env_bool(
+                "VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_ENABLED", True
+            ),
+            visual_image_contact_sheet_limit=max(
+                1,
+                min(
+                    10,
+                    _env_int("VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_LIMIT", 10),
+                ),
+            ),
+            visual_image_contact_sheet_candidate_max_bytes=max(
+                64 * 1024,
+                _env_int(
+                    "VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_CANDIDATE_MAX_BYTES",
+                    2 * 1024 * 1024,
+                ),
+            ),
             visual_image_min_confidence=max(
                 0.0,
                 min(1.0, _env_float("VISUAL_ENHANCEMENT_IMAGE_MIN_CONFIDENCE", 0.58)),

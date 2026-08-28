@@ -928,6 +928,12 @@ def test_build_visual_enhancement_env_rendered_inherits_shared_keys_from_peer_en
     )
     assert parsed["VISUAL_ENHANCEMENT_IMAGE_SEARCH_TIMEOUT_SEC"] == "12"
     assert parsed["VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT"] == "8"
+    assert parsed["VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_ENABLED"] == "true"
+    assert parsed["VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_LIMIT"] == "10"
+    assert (
+        parsed["VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_CANDIDATE_MAX_BYTES"]
+        == "2097152"
+    )
 
 
 def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_path) -> None:

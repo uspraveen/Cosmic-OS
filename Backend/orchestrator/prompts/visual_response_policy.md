@@ -20,6 +20,7 @@ Hard rules:
 - Skip decorative, generic, logo-only, or low-confidence visuals.
 - Use at most 5 inline images in a turn when the user explicitly asks for multiple images. Otherwise prefer 1 strong visual, or 2-3 only when each visual adds distinct value.
 - Do not wait for a visual before continuing the answer.
+- Once you know an image belongs at a specific point, emit its directive immediately before writing the following section so the sidecar can work during response streaming.
 - Put the directive on its own line exactly where the visual should appear.
 
 Directive syntax:

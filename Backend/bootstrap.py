@@ -952,6 +952,16 @@ def build_visual_enhancement_env_rendered(
     image_verify_top_k = pick_visual(
         ("VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K",), "1"
     )
+    image_contact_sheet_enabled = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_ENABLED",), "true"
+    )
+    image_contact_sheet_limit = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_LIMIT",), "10"
+    )
+    image_contact_sheet_candidate_max_bytes = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_CANDIDATE_MAX_BYTES",),
+        "2097152",
+    )
     image_min_confidence = pick_visual(
         ("VISUAL_ENHANCEMENT_IMAGE_MIN_CONFIDENCE",), "0.58"
     )
@@ -1098,6 +1108,12 @@ def build_visual_enhancement_env_rendered(
         "VISUAL_ENHANCEMENT_IMAGE_CANDIDATE_LIMIT": image_candidate_limit or "12",
         "VISUAL_ENHANCEMENT_IMAGE_MAX_BYTES": image_max_bytes or "8388608",
         "VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K": image_verify_top_k or "1",
+        "VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_ENABLED": image_contact_sheet_enabled
+        or "true",
+        "VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_LIMIT": image_contact_sheet_limit
+        or "10",
+        "VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_CANDIDATE_MAX_BYTES": image_contact_sheet_candidate_max_bytes
+        or "2097152",
         "VISUAL_ENHANCEMENT_IMAGE_MIN_CONFIDENCE": image_min_confidence or "0.58",
         "VISUAL_ENHANCEMENT_IMAGE_SEARCH_ENABLED": image_search_enabled or "true",
         "VISUAL_ENHANCEMENT_IMAGE_SEARCH_BASE_URL": image_search_base_url
