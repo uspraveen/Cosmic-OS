@@ -160,6 +160,9 @@ interface DynamicIslandProps {
     detail?: string
   }
   onLogout?: () => void
+  /** Chat surface width: panel (spotlight card) or wide. */
+  chatWideMode?: boolean
+  onChatWideModeChange?: (wide: boolean) => void
   /** Opens Spaces → Agent Email → Inbox; `mailboxId` selects that inbox when data is loaded. */
   onOpenAgentEmailInbox?: (mailboxId: string) => void
   /** Opens Spaces → Agent Email → Approvals; optional approval id to select when the list loads. */
@@ -407,6 +410,8 @@ export default function DynamicIsland({
   onStaybackChange,
   islandOpacity,
   onOpacityChange,
+  chatWideMode,
+  onChatWideModeChange,
   keyStatus,
   authData,
   gatewayConnection,
@@ -2866,6 +2871,8 @@ export default function DynamicIsland({
           keyStatus={keyStatus}
           islandOpacity={islandOpacity}
           onOpacityChange={onOpacityChange}
+          chatWideMode={chatWideMode ?? false}
+          onChatWideModeChange={onChatWideModeChange ?? (() => {})}
           authData={authData}
           gatewayConnection={gatewayConnection}
           onLogout={onLogout}

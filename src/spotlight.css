@@ -77,6 +77,13 @@ body,
   -webkit-backdrop-filter: blur(25px);
 }
 
+/* WIDE MODE — the panel breathes. Same glass, same identity: the surface cap
+   lifts and the extra width flows to structure (code, consoles, tables,
+   images) while prose keeps a readable measure. Chat only. */
+.overlay.chat-wide {
+  --chat-surface-width: min(1280px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+}
+
 /* MIDDLE POSITION LOGIC */
 .overlay.position-middle {
   justify-content: center;
@@ -126,6 +133,7 @@ body,
 .response-container.chat-response-container {
   width: var(--chat-surface-width);
   max-width: var(--chat-surface-width);
+  transition: width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), max-width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .response-container.visible {
@@ -373,6 +381,26 @@ body,
    back to the literal cap it has today. */
 .chat-response-content .message-row {
   --response-block-width: 100%;
+}
+
+/* Wide mode keeps prose at a readable measure and spends the extra width on
+   structure: code, consoles, tables and images bleed symmetrically past the
+   prose column instead of the column stretching to 1200px lines. The bleed
+   floors at 0 (narrow windows) and caps at 240px so blocks never touch the
+   glass edge. */
+.overlay.chat-wide .chat-response-content {
+  --response-column: min(100%, 640px);
+  --artifact-bleed: clamp(0px, calc((var(--chat-surface-width) - 640px) / 2 - 28px), 240px);
+}
+
+.overlay.chat-wide .chat-response-content .code-block,
+.overlay.chat-wide .chat-response-content .assistant-response-code-block,
+.overlay.chat-wide .chat-response-content .response-content table,
+.overlay.chat-wide .chat-response-content .alpha-agent-console,
+.overlay.chat-wide .chat-response-content .assistant-inline-image-card {
+  width: calc(100% + 2 * var(--artifact-bleed, 0px));
+  max-width: none;
+  margin-inline: calc(-1 * var(--artifact-bleed, 0px));
 }
 
 .response-content::-webkit-scrollbar {
@@ -3407,6 +3435,46 @@ kbd {
   opacity: 0.42;
   cursor: default;
   box-shadow: none;
+}
+
+/* Wide mode toggle. Sits with the other view controls; active shares the
+   attach button's lit treatment so the row reads as one family. */
+.wide-mode-btn {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02)),
+    rgba(16, 18, 23, 0.42);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  width: 32px;
+  height: 32px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.18s ease, background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  margin-right: 2px;
+  margin-bottom: 1px;
+  position: relative;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 10px 18px rgba(0, 0, 0, 0.12);
+}
+
+.wide-mode-btn:hover {
+  color: rgba(255, 255, 255, 0.96);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.03)),
+    rgba(20, 22, 29, 0.52);
+  transform: translateY(-1px);
+}
+
+.wide-mode-btn.active {
+  color: rgba(255, 255, 255, 0.98);
+  background:
+    linear-gradient(180deg, rgba(140, 208, 255, 0.2), rgba(89, 159, 255, 0.08)),
+    rgba(16, 22, 34, 0.62);
+  border-color: rgba(140, 208, 255, 0.22);
 }
 
 .attach-btn-badge {

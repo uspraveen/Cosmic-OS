@@ -43,6 +43,8 @@ interface SettingsProps {
   }
   islandOpacity: number
   onOpacityChange: (opacity: number) => void
+  chatWideMode: boolean
+  onChatWideModeChange: (wide: boolean) => void
   authData?: {
     fullName?: string
     gatewayUrl?: string
@@ -85,6 +87,8 @@ export default function Settings({
   keyStatus,
   islandOpacity,
   onOpacityChange,
+  chatWideMode,
+  onChatWideModeChange,
   authData,
   gatewayConnection,
   onLogout,
@@ -350,7 +354,7 @@ export default function Settings({
                 <button className="setting-nav-btn" onClick={() => setCurrentView('ui')}>
                   <div className="setting-nav-copy">
                     <span style={{ fontWeight: 600 }}>UI Settings</span>
-                    <span className="setting-nav-subcopy">Position, linger timing, and island transparency.</span>
+                    <span className="setting-nav-subcopy">Position, chat width, linger timing, and island transparency.</span>
                   </div>
                   <span style={{ opacity: 0.5 }}>›</span>
                 </button>
@@ -655,6 +659,33 @@ export default function Settings({
                         onClick={() => onPositionChange('middle')}
                       >
                         Middle
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="ui-setting-card">
+                  <div className="ui-setting-head">
+                    <div>
+                      <span className="setting-label">Chat Width</span>
+                      <div className="ui-setting-note">
+                        The default surface width for chat. Panel keeps the spotlight feel; Wide
+                        stretches for code, consoles, and tables. The expand button in the
+                        composer flips it anytime.
+                      </div>
+                    </div>
+                    <div className="toggle-group">
+                      <button
+                        className={`toggle-btn ${!chatWideMode ? 'active' : ''}`}
+                        onClick={() => onChatWideModeChange(false)}
+                      >
+                        Panel
+                      </button>
+                      <button
+                        className={`toggle-btn ${chatWideMode ? 'active' : ''}`}
+                        onClick={() => onChatWideModeChange(true)}
+                      >
+                        Wide
                       </button>
                     </div>
                   </div>

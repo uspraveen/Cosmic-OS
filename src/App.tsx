@@ -1,4 +1,4 @@
-import { ArrowDownToLine, CalendarDays, Check, ChevronDown, ChevronRight, Copy, Mail, Mic, Pencil, Save, Shield, Square, Terminal, X } from 'lucide-react'
+import { ArrowDownToLine, CalendarDays, Check, ChevronDown, ChevronRight, Copy, Mail, Maximize2, Mic, Minimize2, Pencil, Save, Shield, Square, Terminal, X } from 'lucide-react'
 import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
@@ -3608,6 +3608,14 @@ export default function App() {
   const [searchPosition, setSearchPosition] = useState<SearchPosition>('bottom')
   const [staybackTime, setStaybackTime] = useState(0)
   const [islandOpacity, setIslandOpacity] = useState(0.85) // Default opacity
+  // Chat surface width: false = spotlight panel (caps at 800px), true = wide
+  // surface (grows to 1280px). Persisted so the choice survives restarts; the
+  // composer's expand button and Settings → UI Settings both flip this.
+  const [chatWideMode, setChatWideMode] = useState(false)
+  const applyChatWideMode = useCallback((wide: boolean) => {
+    setChatWideMode(wide)
+    window.cosmic?.saveSetting('chatWideMode', wide ? 'wide' : 'panel')
+  }, [])
 
   const [mode, setMode] = useState<QueryMode>('chat')
   const modeRef = useRef<QueryMode>('chat')
@@ -5277,6 +5285,7 @@ export default function App() {
       if (settings['searchPosition']) setSearchPosition(settings['searchPosition'])
       if (settings['staybackTime']) setStaybackTime(parseInt(settings['staybackTime']))
       if (settings['islandOpacity']) setIslandOpacity(parseFloat(settings['islandOpacity']))
+      if (settings['chatWideMode']) setChatWideMode(String(settings['chatWideMode']) === 'wide')
       if (settings['gatewayModelSelection']) {
         const nextModel = normalizeGatewayModelSelection(settings['gatewayModelSelection'])
         selectedModelRef.current = nextModel
@@ -7285,6 +7294,7 @@ export default function App() {
     effectivePosition === 'middle' ? 'position-middle' : '',
     shouldShowResponseSurface ? 'has-response' : '',
     mode === 'spaces' ? 'spaces-active' : '',
+    (chatWideMode && mode === 'chat') ? 'chat-wide' : '',
     (isInputFocused || shouldShowResponseSurface || isStreaming || mode === 'meeting' || mode === 'spaces') ? 'focused' : ''
   ].join(' ')
   const composerLaunchClass = surfaceLaunch?.target === 'chat' ? 'launcher-expand' : ''
@@ -7361,6 +7371,8 @@ export default function App() {
           setIslandOpacity(val)
           window.cosmic?.saveSetting('islandOpacity', val)
         }}
+        chatWideMode={chatWideMode}
+        onChatWideModeChange={applyChatWideMode}
         keyStatus={keyStatus}
         authData={authData}
         gatewayConnection={gatewayStatus}
@@ -8639,6 +8651,22 @@ export default function App() {
                       type="button"
                     >
                       <Mic size={17} strokeWidth={2.15} aria-hidden="true" />
+                    </button>
+
+                    <button
+                      className={`wide-mode-btn ${chatWideMode ? 'active' : ''}`}
+                      onClick={() => applyChatWideMode(!chatWideMode)}
+                      onMouseEnter={(event) => showHoverTooltipForElement(chatWideMode ? 'Panel width' : 'Wide mode', event.currentTarget, 'control')}
+                      onMouseLeave={hideHoverTooltip}
+                      onFocus={(event) => showHoverTooltipForElement(chatWideMode ? 'Panel width' : 'Wide mode', event.currentTarget, 'control')}
+                      onBlur={hideHoverTooltip}
+                      aria-label={chatWideMode ? 'Switch to panel width' : 'Switch to wide mode'}
+                      aria-pressed={chatWideMode}
+                      type="button"
+                    >
+                      {chatWideMode
+                        ? <Minimize2 size={16} strokeWidth={2.15} aria-hidden="true" />
+                        : <Maximize2 size={16} strokeWidth={2.15} aria-hidden="true" />}
                     </button>
 
                     <textarea
