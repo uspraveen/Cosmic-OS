@@ -252,6 +252,86 @@ def test_opencode_cli_status_surfaces_authenticated_for_alpha_auth_walk(tmp_path
     assert agent._provider_status_is_ready(not_ready_payload) is False
 
 
+def test_track_partial_stream_pins_alpha_anchor_at_delegation_boundary() -> None:
+    """Regression: Alpha console anchors pin at the delegation boundary.
+
+    The orchestrator's tool_loop progress event carries specialist_delegations
+    right after its tools ran and before the next turn streams text. Pinning
+    there places the inline console between the pre-delegation paragraph and
+    the post-delegation narration instead of wherever the first terminal
+    event happened to arrive.
+    """
+    from gateway.runtime import ActiveRequest
+
+    runtime = object.__new__(GatewayRuntime)
+    state = ActiveRequest(
+        request_id="req_1",
+        session_id="sess_1",
+        channel="desktop:desk_1",
+        route="opus",
+    )
+
+    runtime._track_partial_stream(state, {"type": "response.chunk", "content": "Let me fire Alpha with the full brief."})
+    pinned = len("Let me fire Alpha with the full brief.")
+
+    runtime._track_partial_stream(
+        state,
+        {
+            "type": "task.progress",
+            "status": "tool_loop",
+            "specialist_delegations": [
+                {"intent": "alpha.execute", "task_id": "tsk_alpha_1"},
+            ],
+        },
+    )
+    assert state.alpha_console_anchors == {"tsk_alpha_1": pinned}
+
+    runtime._track_partial_stream(state, {"type": "response.chunk", "content": "\n\nLet me read the blog post Alpha wrote."})
+    runtime._track_partial_stream(
+        state,
+        {
+            "type": "task.progress",
+            "task_id": "tsk_parent",
+            "codex_terminal": {
+                "stream": "system",
+                "event_type": "opencode.exec.started",
+                "text": "opencode run --auto started",
+                "task_id": "tsk_alpha_1",
+            },
+        },
+    )
+    assert state.alpha_terminal_log[-1]["stream_offset"] == pinned
+
+    # A terminal event that arrived during a blocking delegation already
+    # pinned a (correct, pre-tool) anchor: the later delegation event must
+    # not clobber it.
+    runtime._track_partial_stream(
+        state,
+        {
+            "type": "task.progress",
+            "task_id": "tsk_parent",
+            "codex_terminal": {
+                "stream": "system",
+                "event_type": "opencode.exec.started",
+                "text": "started",
+                "task_id": "tsk_alpha_2",
+            },
+        },
+    )
+    blocking_pinned = state.alpha_console_anchors["tsk_alpha_2"]
+    runtime._track_partial_stream(
+        state,
+        {
+            "type": "task.progress",
+            "status": "tool_loop",
+            "specialist_delegations": [
+                {"intent": "alpha.execute", "task_id": "tsk_alpha_2"},
+            ],
+        },
+    )
+    assert state.alpha_console_anchors["tsk_alpha_2"] == blocking_pinned
+
+
 def test_gateway_shapes_zen_catalog_and_semver_compare() -> None:
     payload = GatewayRuntime._shape_opencode_models_payload(
         {

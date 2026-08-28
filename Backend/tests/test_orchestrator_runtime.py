@@ -1257,6 +1257,111 @@ async def test_orchestrator_runtime_summarizes_parallel_local_tool_work_with_det
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_runtime_emits_segment_boundary_between_tool_turns(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        orchestrator_default_provider="anthropic",
+        task_ledger_db_path=tmp_path / "task_ledger_segment_boundary.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    stream_call_count = 0
+
+    async def scripted_stream(
+        *,
+        system_prompt: str,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]] | None = None,
+        container_id: str | None = None,
+        usage_context: dict[str, object] | None = None,
+        model_override: str | None = None,
+    ):
+        del system_prompt, messages, tools, container_id, usage_context, model_override
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Firing Alpha with the full brief."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "tool_del_1", "name": "delegate_to_agent"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"intent\":\"alpha.execute\",\"input\":{\"goal\":\"probe\"}}"}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Alpha finished the build."}}),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    async def fake_execute(
+        tool_name: str,
+        tool_input: dict[str, object],
+        *,
+        context=None,
+    ) -> str:
+        del context
+        assert tool_name == "delegate_to_agent"
+        return json.dumps(
+            {
+                "delegated": True,
+                "delegation": {
+                    "intent": "alpha.execute",
+                    "agent_id": "cosmic/alpha-agent:1.0.0",
+                    "task_id": "tsk_alpha_boundary",
+                },
+            }
+        )
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    segment_index = next(
+        (index for index, event in enumerate(streamed_events) if event["type"] == "response.segment"),
+        None,
+    )
+    assert segment_index is not None
+    tool_loop_index = max(
+        index
+        for index, event in enumerate(streamed_events)
+        if event["type"] == "task.progress" and event["status"] == "tool_loop"
+    )
+    assert segment_index > tool_loop_index
+    segment_event = streamed_events[segment_index]
+    assert segment_event["reason"] == "tool_call"
+    assert "delegate_to_agent" in segment_event["tools_called"]
+    break_event = streamed_events[segment_index + 1]
+    assert break_event["type"] == "response.chunk"
+    assert break_event["content"] == "\n\n"
+    following_chunks = [
+        event for event in streamed_events[segment_index + 2:] if event["type"] == "response.chunk"
+    ]
+    assert following_chunks and following_chunks[0]["content"] == "Alpha finished the build."
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert complete_event["content"] == "Alpha finished the build."
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runtime_summarizes_server_side_web_search_results(tmp_path) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
     config = OrchestratorConfig(

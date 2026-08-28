@@ -179,8 +179,43 @@ const measureResponseBlockLength = (block: ResponseBlockLike): number => {
   return 1
 }
 
+const MAX_ANCHOR_SNAP_LOOKBACK = 600
+
+export const snapAlphaAnchorOffset = (text: string, offset: number): number => {
+  const safe = Math.max(0, Math.min(Math.floor(offset), text.length))
+  if (safe <= 0 || safe >= text.length) {
+    return safe
+  }
+  if (/\s/.test(text[safe]) || /\s/.test(text[safe - 1])) {
+    return safe
+  }
+  const windowStart = Math.max(0, safe - MAX_ANCHOR_SNAP_LOOKBACK)
+  const window = text.slice(windowStart, safe)
+  const paragraphBreak = window.lastIndexOf('\n\n')
+  if (paragraphBreak >= 0) {
+    return windowStart + paragraphBreak + 2
+  }
+  const sentenceBreak = Math.max(
+    window.lastIndexOf('. '),
+    window.lastIndexOf('! '),
+    window.lastIndexOf('? '),
+  )
+  if (sentenceBreak >= 0) {
+    return windowStart + sentenceBreak + 1
+  }
+  const newline = window.lastIndexOf('\n')
+  if (newline >= 0) {
+    return windowStart + newline + 1
+  }
+  const space = window.lastIndexOf(' ')
+  if (space >= 0) {
+    return windowStart + space
+  }
+  return safe
+}
+
 const splitContentAtOffset = (content: string, offset: number): [string, string] => {
-  const safeOffset = Math.max(0, Math.min(Math.floor(offset), content.length))
+  const safeOffset = snapAlphaAnchorOffset(content, offset)
   return [content.slice(0, safeOffset), content.slice(safeOffset)]
 }
 
@@ -219,7 +254,7 @@ const splitResponseBlocksAtOffset = (
 
     if (block.type === 'markdown') {
       const text = String(block.text || '')
-      const splitAt = safeOffset - cursor
+      const splitAt = snapAlphaAnchorOffset(text, safeOffset - cursor)
       const head = text.slice(0, splitAt)
       const tail = text.slice(splitAt)
       if (head) {

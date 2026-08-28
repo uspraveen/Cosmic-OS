@@ -342,6 +342,7 @@ EPHEMERAL_CHANNEL_EVENT_TYPES = {
     "response.chunk",
     "response.blocks.snapshot",
     "response.thinking.chunk",
+    "response.segment",
     "task.created",
     "task.progress",
     "tool.call",
@@ -23000,6 +23001,22 @@ class GatewayRuntime:
     ) -> None:
         event_type = self._safe_text(event.get("type")) or ""
         if event_type == "task.progress":
+            # Delegation boundary: the orchestrator emits specialist_delegations
+            # right after its tools ran and before the next turn streams text,
+            # so pinning here places the Alpha console exactly at the
+            # generation boundary instead of wherever the first terminal
+            # event happened to land.
+            delegations = event.get("specialist_delegations")
+            if isinstance(delegations, list):
+                for item in delegations:
+                    if not isinstance(item, dict):
+                        continue
+                    delegated_task_id = self._safe_text(item.get("task_id"))
+                    if delegated_task_id:
+                        state.alpha_console_anchors.setdefault(
+                            delegated_task_id,
+                            len(state.partial_content or ""),
+                        )
             terminal_entry = self._normalize_alpha_terminal_entry(
                 event.get("codex_terminal"),
                 task_id=self._safe_text(event.get("task_id")),

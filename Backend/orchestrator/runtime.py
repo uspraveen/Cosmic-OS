@@ -519,6 +519,7 @@ class OrchestratorRuntime:
 
             iteration = 0
             full_response_text = ""
+            streamed_visible_text = False
             full_reasoning_text = ""
             collected_sources: list[dict[str, str]] = []
             produced_artifacts: list[dict[str, Any]] = []
@@ -723,8 +724,10 @@ class OrchestratorRuntime:
                                         for visual_event in visual_events:
                                             yield {**ev, **visual_event}
                                         if visible_chunk:
+                                            streamed_visible_text = True
                                             yield {**ev, "type": "response.chunk", "content": visible_chunk, "done": False}
                                     else:
+                                        streamed_visible_text = True
                                         yield {**ev, "type": "response.chunk", "content": chunk, "done": False}
 
                                 elif dtype == "input_json_delta":
@@ -1048,6 +1051,15 @@ class OrchestratorRuntime:
                             result_strs,
                         ),
                     }
+                    if streamed_visible_text:
+                        yield {
+                            **ev,
+                            "type": "response.segment",
+                            "reason": "tool_call",
+                            "iteration": iteration,
+                            "tools_called": [tb.tool_name for tb in turn_tool_blocks],
+                        }
+                        yield {**ev, "type": "response.chunk", "content": "\n\n", "done": False}
                     continue
 
                 # ── Final response (end_turn or other) ──────────
@@ -1219,6 +1231,7 @@ class OrchestratorRuntime:
         max_request_context_chars = 0
         max_request_message_count = 0
         full_response_text = ""
+        streamed_visible_text = False
         full_reasoning_text = ""
         collected_sources: list[dict[str, str]] = []
         produced_artifacts: list[dict[str, Any]] = []
@@ -1364,6 +1377,7 @@ class OrchestratorRuntime:
 
                 def collect_content_events(visible_text: str) -> list[dict[str, Any]]:
                     nonlocal responding_announced, turn_stream_boundary_emitted
+                    nonlocal streamed_visible_text
                     if not visible_text:
                         return []
                     chunk_to_emit = visible_text
@@ -1395,6 +1409,7 @@ class OrchestratorRuntime:
                         for visual_event in visual_events:
                             events.append({**ev, **visual_event})
                         if visible_chunk:
+                            streamed_visible_text = True
                             events.append(
                                 {
                                     **ev,
@@ -1404,6 +1419,7 @@ class OrchestratorRuntime:
                                 }
                             )
                     else:
+                        streamed_visible_text = True
                         events.append(
                             {
                                 **ev,
@@ -1664,6 +1680,15 @@ class OrchestratorRuntime:
                             result_strs,
                         ),
                     }
+                    if streamed_visible_text:
+                        yield {
+                            **ev,
+                            "type": "response.segment",
+                            "reason": "tool_call",
+                            "iteration": iteration,
+                            "tools_called": [item["name"] for item in normalized_tool_calls],
+                        }
+                        yield {**ev, "type": "response.chunk", "content": "\n\n", "done": False}
                     continue
 
                 break
