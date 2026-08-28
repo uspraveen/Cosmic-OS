@@ -1786,7 +1786,7 @@ const AssistantCollapsibleSection = ({
         {!isOpen && signals.length > 0 && (
           <span className="assistant-collapsible-signals">
             {signals.map((item) => (
-              <AgentGlyph key={`${item.glyph}-${item.label}`} signal={item} size={17} iconSize={10} />
+              <AgentGlyph key={`${item.glyph}-${item.label}`} signal={item} size={18} iconSize={18} />
             ))}
           </span>
         )}
@@ -1849,7 +1849,7 @@ const AssistantFlowTimeline = memo(({
           return (
             <div key={entry.id} className="assistant-flow-node">
               <div className={`assistant-flow-item${isActive ? ' is-active' : ''}`}>
-                <AgentGlyph signal={signal} size={22} active={isActive} />
+                <AgentGlyph signal={signal} size={20} iconSize={18} active={isActive} />
                 <div className="assistant-flow-copy">
                   <div className="assistant-flow-title">
                     <span>{stripActorPrefix(entry.label, signal)}</span>
@@ -1867,7 +1867,7 @@ const AssistantFlowTimeline = memo(({
                     const childActive = streaming && isLastRoot && childIndex === children.length - 1
                     return (
                       <div key={child.id} className={`assistant-flow-item child${childActive ? ' is-active' : ''}`}>
-                        <AgentGlyph signal={childSignal} size={18} iconSize={10} active={childActive} />
+                        <AgentGlyph signal={childSignal} size={18} iconSize={16} active={childActive} />
                         <div className="assistant-flow-copy">
                           <div className="assistant-flow-title">
                             <span>{stripActorPrefix(child.label, childSignal)}</span>
@@ -8449,11 +8449,11 @@ export default function App() {
                   {mode !== 'task' && isStreaming && !activeDocsProgressMessage && (
                     <div className="streaming-indicator">
                       {streamingProgress ? (
-                        // With a sentence to show, the mark plus the sweep across
-                        // the text carry the "still working" signal on their own;
-                        // the dot row would just be saying it a second time.
+                        // With a sentence to show, its leading tool mark and its
+                        // position at the live tail carry status on their own;
+                        // the dot row would just say the same thing twice.
                         <div className="streaming-now">
-                          {liveSignal && <AgentGlyph signal={liveSignal} size={22} active />}
+                          {liveSignal && <AgentGlyph signal={liveSignal} size={20} iconSize={18} active />}
                           <span className="streaming-status">
                             {liveSignal ? stripActorPrefix(streamingProgress, liveSignal) : streamingProgress}
                           </span>

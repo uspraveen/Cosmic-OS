@@ -1,5 +1,6 @@
 import { memo, useState, type ReactNode } from 'react'
 import { faviconUrl, type AgentSignal, type GlyphId } from './agentSignals'
+import cosmicBallLogo from './assets/cosmic-ball-logo-v1.1.png'
 
 /**
  * The marks that lead a flow step, a collapsed section header, and the live
@@ -33,7 +34,7 @@ const line = (size: number, children: ReactNode) => (
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
-    strokeWidth={1.7}
+    strokeWidth={1.85}
     strokeLinecap="round"
     strokeLinejoin="round"
     aria-hidden
@@ -236,33 +237,16 @@ const MarkMemory = ({ size }: MarkProps) =>
     </>,
   )
 
-const MarkThink = ({ size }: MarkProps) =>
-  line(
-    size,
-    <>
-      <path d="M9.4 2.6c.4 3.7 1.1 5.9 2.44 7.24S15.5 12 19.2 12.4c-3.7.4-5.9 1.1-7.36 2.56S9.8 19.5 9.4 23.2c-.4-3.7-1.1-5.9-2.44-7.24S3.6 12.8-.1 12.4c3.7-.4 5.9-1.1 7.36-2.56S9 6.3 9.4 2.6Z" />
-      <path d="M18.4 15.4c.16 1.5.44 2.4.98 2.94s1.44.82 2.94.98c-1.5.16-2.4.44-2.94.98s-.82 1.44-.98 2.94c-.16-1.5-.44-2.4-.98-2.94s-1.44-.82-2.94-.98c1.5-.16 2.4-.44 2.94-.98s.82-1.44.98-2.94Z" />
-    </>,
-  )
-
-const MarkAgent = ({ size }: MarkProps) =>
-  line(
-    size,
-    <>
-      <path d="M12 2.4 21.4 7.4v9.2L12 21.6 2.6 16.6V7.4Z" />
-      <path d="M2.6 7.4 12 12.5l9.4-5.1M12 12.5v9.1" />
-    </>,
-  )
-
-const MarkCosmic = ({ size }: MarkProps) =>
-  line(
-    size,
-    <>
-      <circle cx="12" cy="12" r="2.7" fill="currentColor" stroke="none" />
-      <path d="M16.4 7.6a6.2 6.2 0 0 1 0 8.8M7.6 16.4a6.2 6.2 0 0 1 0-8.8" />
-      <path d="M19.6 4.4a10.7 10.7 0 0 1 0 15.2M4.4 19.6a10.7 10.7 0 0 1 0-15.2" />
-    </>,
-  )
+const MarkCosmicBall = ({ size }: MarkProps) => (
+  <img
+    className="agent-glyph-cosmic-ball"
+    src={cosmicBallLogo}
+    width={size}
+    height={size}
+    alt=""
+    draggable={false}
+  />
+)
 
 const MarkCalendar = ({ size }: MarkProps) =>
   line(
@@ -297,13 +281,13 @@ const MARKS: Record<GlyphId, (props: MarkProps) => ReactNode> = {
   map: MarkMap,
   image: MarkImage,
   memory: MarkMemory,
-  think: MarkThink,
-  agent: MarkAgent,
-  cosmic: MarkCosmic,
+  think: MarkCosmicBall,
+  agent: MarkCosmicBall,
+  cosmic: MarkCosmicBall,
 }
 
 /** Logos carry their own colours and must not be tinted by the row. */
-const SELF_COLOURED = new Set<GlyphId>(['youtube', 'gmail', 'gdocs', 'gsheets', 'firecrawl'])
+const SELF_COLOURED = new Set<GlyphId>(['youtube', 'gmail', 'gdocs', 'gsheets', 'firecrawl', 'think', 'agent', 'cosmic'])
 
 /**
  * Optical size, not measured size. Some marks carry their own margin -- a
@@ -317,11 +301,13 @@ const OPTICAL: Partial<Record<GlyphId, number>> = {
   firecrawl: 1.14,
   youtube: 1.06,
   x: 0.94,
-  think: 1.06,
+  think: 1,
+  agent: 1,
+  cosmic: 1,
 }
 
 export const GlyphMark = ({ glyph, size = 16 }: { glyph: GlyphId; size?: number }) => {
-  const Mark = MARKS[glyph] || MarkCosmic
+  const Mark = MARKS[glyph] || MarkCosmicBall
   return <>{Mark({ size })}</>
 }
 

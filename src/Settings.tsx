@@ -1,5 +1,16 @@
 import { useEffect, useState } from 'react'
-import { Bot } from 'lucide-react'
+import {
+  AlertCircle,
+  Bot,
+  ChevronRight,
+  KeyRound,
+  Monitor,
+  Plug,
+  Settings2,
+  SlidersHorizontal,
+  Smartphone,
+  type LucideIcon,
+} from 'lucide-react'
 import { CursorMark, OpenAIMark, OpenCodeMark } from './brandIcons'
 import LiquidGlass from './LiquidGlass'
 import { SPACES_BLACK_GLASS_BACKGROUND, SPACES_BLACK_GLASS_BACKDROP } from './glassTones'
@@ -25,6 +36,82 @@ function normalizeAlphaHarness(value: unknown): AlphaPreferredHarness {
   if (normalized === 'cursor') return 'cursor'
   if (normalized === 'codex') return 'codex'
   return 'opencode'
+}
+
+type MainSettingsNavItem = {
+  view: 'integrations' | 'agents' | 'api' | 'devices' | 'monitors' | 'ui' | 'preferences'
+  title: string
+  description: string
+  icon: LucideIcon
+}
+
+const MAIN_SETTINGS_GROUPS: Array<{ label: string; items: MainSettingsNavItem[] }> = [
+  {
+    label: 'Connections',
+    items: [
+      {
+        view: 'integrations',
+        title: 'Integrations',
+        description: 'Google accounts, tool bundles, and future provider slots.',
+        icon: Plug,
+      },
+      {
+        view: 'agents',
+        title: 'Agents',
+        description: 'Configure Alpha agent providers and coding backends.',
+        icon: Bot,
+      },
+      {
+        view: 'api',
+        title: 'API Configuration',
+        description: 'Local voice and meeting provider keys. Cosmic chat uses your VM backend.',
+        icon: KeyRound,
+      },
+    ],
+  },
+  {
+    label: 'This Device',
+    items: [
+      {
+        view: 'devices',
+        title: 'Mobile Devices',
+        description: 'Review linked phones and remove access device-by-device or all at once.',
+        icon: Smartphone,
+      },
+      {
+        view: 'monitors',
+        title: 'Display Preferences',
+        description: 'Pin Cosmic to one monitor or leave it on Automatic.',
+        icon: Monitor,
+      },
+      {
+        view: 'ui',
+        title: 'UI Settings',
+        description: 'Position, chat width, linger timing, and island transparency.',
+        icon: SlidersHorizontal,
+      },
+    ],
+  },
+  {
+    label: 'General',
+    items: [
+      {
+        view: 'preferences',
+        title: 'Preferences',
+        description: 'VM-wide response behavior and future backend-backed product preferences.',
+        icon: Settings2,
+      },
+    ],
+  },
+]
+
+function accountInitials(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean)
+  if (!parts.length) return 'C'
+  return parts
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join('')
 }
 
 interface SettingsProps {
@@ -255,136 +342,111 @@ export default function Settings({
             </div>
 
             {currentView === 'main' && (
-              <>
+              <div className="settings-main-page">
                 {authData && (
-                  <div style={{
-                    padding: '14px 16px',
-                    background: 'rgba(255,255,255,0.03)',
-                    border: '1px solid rgba(255,255,255,0.08)',
-                    borderRadius: 12,
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginBottom: 8,
-                  }}>
-                    <div>
-                      <div style={{ color: '#fff', fontWeight: 600, fontSize: 14 }}>
-                        {authData.fullName || 'Cosmic User'}
+                  <section className="settings-main-section">
+                    <div className="settings-account-card">
+                      <div className="settings-account-avatar" aria-hidden="true">
+                        {accountInitials(authData.fullName || 'Cosmic User')}
                       </div>
-                      <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12, marginTop: 2 }}>
-                        {gatewayConnectionLabel}
+                      <div className="settings-account-copy">
+                        <div className="settings-account-name">
+                          {authData.fullName || 'Cosmic User'}
+                        </div>
+                        <div className="settings-account-meta">
+                          <span
+                            className={`settings-account-status ${gatewayConnection?.connected ? 'on' : ''}`}
+                            aria-hidden="true"
+                          />
+                          {gatewayConnectionLabel}
+                        </div>
                       </div>
                     </div>
-                    <button
-                      onClick={() => onLogout?.()}
-                      style={{
-                        padding: '6px 14px',
-                        background: 'rgba(255, 69, 58, 0.15)',
-                        color: '#ff6b6b',
-                        border: 'none',
-                        borderRadius: 8,
-                        fontSize: 12,
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      Log out
-                    </button>
-                  </div>
+                  </section>
                 )}
 
-                <button className="setting-nav-btn" onClick={() => setCurrentView('integrations')}>
-                  <div className="setting-nav-copy">
-                    <div className="settings-nav-title-row">
-                      <span style={{ fontWeight: 600 }}>Integrations</span>
-                      {hasAuthAttention && <span className="settings-attention-pill">Action needed</span>}
+                {MAIN_SETTINGS_GROUPS.map((group) => (
+                  <section key={group.label} className="settings-main-section">
+                    <h3 className="settings-section-label">{group.label}</h3>
+                    <div className="settings-inset-group" role="list">
+                      {group.items.map((item) => {
+                        const Icon = item.icon
+                        const trailing =
+                          item.view === 'integrations' && hasAuthAttention
+                            ? (
+                              <span className="setting-nav-trailing warn">Action needed</span>
+                            )
+                            : item.view === 'api'
+                              ? (
+                                <span className={`setting-nav-trailing ${allKeysConfigured ? 'ready' : 'warn'}`}>
+                                  {allKeysConfigured ? 'All set' : 'Action needed'}
+                                </span>
+                              )
+                              : null
+
+                        return (
+                          <button
+                            key={item.view}
+                            type="button"
+                            className="setting-nav-btn"
+                            role="listitem"
+                            onClick={() => setCurrentView(item.view)}
+                          >
+                            <span className="setting-nav-icon" aria-hidden="true">
+                              <Icon size={16} strokeWidth={2} />
+                            </span>
+                            <div className="setting-nav-copy">
+                              <span className="setting-nav-title">{item.title}</span>
+                              <span className="setting-nav-subcopy">{item.description}</span>
+                            </div>
+                            <div className="setting-nav-trailing-slot">
+                              {trailing}
+                              <ChevronRight className="setting-nav-chevron" size={14} strokeWidth={2.25} aria-hidden="true" />
+                            </div>
+                          </button>
+                        )
+                      })}
                     </div>
-                    <span className="setting-nav-subcopy">
-                      Google accounts, tool bundles, and future provider slots.
-                    </span>
-                  </div>
-                  <span style={{ opacity: 0.5 }}>›</span>
-                </button>
+                  </section>
+                ))}
 
-                <button className="setting-nav-btn" onClick={() => setCurrentView('agents')}>
-                  <div className="setting-nav-copy">
-                    <span style={{ fontWeight: 600 }}>Agents</span>
-                    <span className="setting-nav-subcopy">Configure Alpha agent providers and coding backends.</span>
-                  </div>
-                  <span style={{ opacity: 0.5 }}>›</span>
-                </button>
-
-                <button className="setting-nav-btn" onClick={() => setCurrentView('api')}>
-                  <div className="setting-nav-copy">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span style={{ fontWeight: 600 }}>API Configuration</span>
-                      <span
-                        style={{
-                          fontSize: 10,
-                          background: allKeysConfigured ? 'rgba(76, 175, 80, 0.2)' : 'rgba(255, 193, 7, 0.2)',
-                          color: allKeysConfigured ? '#4caf50' : '#ffc107',
-                          padding: '2px 6px',
-                          borderRadius: 4,
-                        }}
+                {authData ? (
+                  <section className="settings-main-section">
+                    <div className="settings-inset-group settings-signout-group" role="list">
+                      <button
+                        type="button"
+                        className="setting-nav-btn destructive"
+                        role="listitem"
+                        onClick={() => onLogout?.()}
                       >
-                        {allKeysConfigured ? 'All Set' : 'Action Needed'}
-                      </span>
+                        Sign Out
+                      </button>
                     </div>
-                    <span className="setting-nav-subcopy">Local voice and meeting provider keys. Cosmic chat uses your VM backend.</span>
-                  </div>
-                  <span style={{ opacity: 0.5 }}>›</span>
-                </button>
-
-                <button className="setting-nav-btn" onClick={() => setCurrentView('devices')}>
-                  <div className="setting-nav-copy">
-                    <span style={{ fontWeight: 600 }}>Mobile Devices</span>
-                    <span className="setting-nav-subcopy">Review linked phones and remove access device-by-device or all at once.</span>
-                  </div>
-                  <span style={{ opacity: 0.5 }}>›</span>
-                </button>
-
-                <button className="setting-nav-btn" onClick={() => setCurrentView('monitors')}>
-                  <div className="setting-nav-copy">
-                    <span style={{ fontWeight: 600 }}>Display Preferences</span>
-                    <span className="setting-nav-subcopy">Pin Cosmic to one monitor or leave it on Automatic.</span>
-                  </div>
-                  <span style={{ opacity: 0.5 }}>›</span>
-                </button>
-
-                <button className="setting-nav-btn" onClick={() => setCurrentView('ui')}>
-                  <div className="setting-nav-copy">
-                    <span style={{ fontWeight: 600 }}>UI Settings</span>
-                    <span className="setting-nav-subcopy">Position, chat width, linger timing, and island transparency.</span>
-                  </div>
-                  <span style={{ opacity: 0.5 }}>›</span>
-                </button>
-
-                <button className="setting-nav-btn" onClick={() => setCurrentView('preferences')}>
-                  <div className="setting-nav-copy">
-                    <span style={{ fontWeight: 600 }}>Preferences</span>
-                    <span className="setting-nav-subcopy">VM-wide response behavior and future backend-backed product preferences.</span>
-                  </div>
-                  <span style={{ opacity: 0.5 }}>›</span>
-                </button>
-              </>
+                  </section>
+                ) : null}
+              </div>
             )}
 
             {currentView === 'integrations' && (
               <div className="setting-subpage prx-integrations-page">
                 <div className="prx-intro">
                   <p>Connect accounts once and let Cosmic use them across supported apps.</p>
+                  {hasAuthAttention ? (
+                    <div className="prx-attention-callout" role="status">
+                      <span className="prx-attention-icon" aria-hidden="true">
+                        <AlertCircle size={15} strokeWidth={2.1} />
+                      </span>
+                      <div className="prx-attention-copy">
+                        <strong>
+                          {authAttentionCount === 1
+                            ? '1 account needs attention'
+                            : `${authAttentionCount} accounts need attention`}
+                        </strong>
+                        <span>Reconnect the highlighted integration below to restore access on your VM.</span>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-
-                {hasAuthAttention && (
-                  <div className="settings-attention-banner" role="status">
-                    <span className="settings-attention-dot" aria-hidden="true" />
-                    <span>
-                      {authAttentionCount === 1
-                        ? '1 integration needs authentication.'
-                        : `${authAttentionCount} integrations need authentication.`}
-                    </span>
-                  </div>
-                )}
 
                 <button className={`prx-provider-card ${hasAuthAttention ? 'needs-attention' : ''}`} onClick={() => setCurrentView('integrations-google')}>
                   <div className="prx-provider-icon">
@@ -401,6 +463,21 @@ export default function Settings({
                       {hasAuthAttention && <span className="settings-attention-pill compact">Reconnect</span>}
                     </div>
                     <span>{integrationsPreview}</span>
+                  </div>
+                  <div className="prx-provider-arrow">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
+                  </div>
+                </button>
+
+                <button className="prx-provider-card" onClick={() => setCurrentView('integrations-github')} style={{ marginTop: '12px' }}>
+                  <div className="prx-provider-icon" style={{ background: '#24292f' }}>
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M12 .5C5.73.5.5 5.73.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.88-1.54-3.88-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.25.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.12 3.05.74.8 1.18 1.83 1.18 3.08 0 4.41-2.69 5.38-5.25 5.67.41.35.78 1.05.78 2.12 0 1.53-.01 2.77-.01 3.15 0 .31.21.68.8.56A11.51 11.51 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5z" />
+                    </svg>
+                  </div>
+                  <div className="prx-provider-info">
+                    <strong>GitHub</strong>
+                    <span>Let Alpha work in the repositories you choose — commit, push, open PRs.</span>
                   </div>
                   <div className="prx-provider-arrow">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
@@ -431,21 +508,6 @@ export default function Settings({
                   <div className="prx-provider-info">
                     <strong>Telegram</strong>
                     <span>Manage the per-VM bot, webhook health, and linked private DM.</span>
-                  </div>
-                  <div className="prx-provider-arrow">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
-                  </div>
-                </button>
-
-                <button className="prx-provider-card" onClick={() => setCurrentView('integrations-github')} style={{ marginTop: '12px' }}>
-                  <div className="prx-provider-icon" style={{ background: '#24292f' }}>
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M12 .5C5.73.5.5 5.73.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.88-1.54-3.88-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.25.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.12 3.05.74.8 1.18 1.83 1.18 3.08 0 4.41-2.69 5.38-5.25 5.67.41.35.78 1.05.78 2.12 0 1.53-.01 2.77-.01 3.15 0 .31.21.68.8.56A11.51 11.51 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5z" />
-                    </svg>
-                  </div>
-                  <div className="prx-provider-info">
-                    <strong>GitHub</strong>
-                    <span>Let Alpha work in the repositories you choose — commit, push, open PRs.</span>
                   </div>
                   <div className="prx-provider-arrow">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
@@ -531,13 +593,17 @@ export default function Settings({
                   <div className="cosmic-agents-provider-info">
                     <div className="cosmic-agents-provider-title">
                       <strong>OpenCode</strong>
-                      <span className="cosmic-agents-beta-pill">Default</span>
                     </div>
                     <span>Zen models with a live auto-refreshing catalog.</span>
                   </div>
                   <div className="cosmic-agents-provider-meta">
-                    <span className={`cosmic-agents-status-pill ${alphaPreferredHarness === 'opencode' ? 'ready' : 'pending'}`}>
-                      {alphaPreferredHarness === 'opencode' ? 'Selected' : 'Available'}
+                    <span className="cosmic-agents-provider-tag-slot role">
+                      <span className="cosmic-agents-provider-tag default">Default</span>
+                    </span>
+                    <span className="cosmic-agents-provider-tag-slot status">
+                      <span className={`cosmic-agents-provider-tag ${alphaPreferredHarness === 'opencode' ? 'ready' : 'pending'}`}>
+                        {alphaPreferredHarness === 'opencode' ? 'Selected' : 'Available'}
+                      </span>
                     </span>
                   </div>
                   <div className="cosmic-agents-provider-arrow" aria-hidden="true">
@@ -556,8 +622,11 @@ export default function Settings({
                     <span>ChatGPT sign-in or OpenAI API key for the Alpha coding runner.</span>
                   </div>
                   <div className="cosmic-agents-provider-meta">
-                    <span className={`cosmic-agents-status-pill ${alphaPreferredHarness === 'codex' ? 'ready' : 'pending'}`}>
-                      {alphaPreferredHarness === 'codex' ? 'Selected' : 'Available'}
+                    <span className="cosmic-agents-provider-tag-slot role" aria-hidden="true" />
+                    <span className="cosmic-agents-provider-tag-slot status">
+                      <span className={`cosmic-agents-provider-tag ${alphaPreferredHarness === 'codex' ? 'ready' : 'pending'}`}>
+                        {alphaPreferredHarness === 'codex' ? 'Selected' : 'Available'}
+                      </span>
                     </span>
                   </div>
                   <div className="cosmic-agents-provider-arrow" aria-hidden="true">
@@ -576,8 +645,11 @@ export default function Settings({
                     <span>Browser sign-in for the Cursor Agent runner on the VM.</span>
                   </div>
                   <div className="cosmic-agents-provider-meta">
-                    <span className={`cosmic-agents-status-pill ${alphaPreferredHarness === 'cursor' ? 'ready' : 'pending'}`}>
-                      {alphaPreferredHarness === 'cursor' ? 'Selected' : 'Available'}
+                    <span className="cosmic-agents-provider-tag-slot role" aria-hidden="true" />
+                    <span className="cosmic-agents-provider-tag-slot status">
+                      <span className={`cosmic-agents-provider-tag ${alphaPreferredHarness === 'cursor' ? 'ready' : 'pending'}`}>
+                        {alphaPreferredHarness === 'cursor' ? 'Selected' : 'Available'}
+                      </span>
                     </span>
                   </div>
                   <div className="cosmic-agents-provider-arrow" aria-hidden="true">

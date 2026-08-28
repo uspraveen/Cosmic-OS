@@ -345,28 +345,190 @@
   opacity: 1;
 }
 
-.setting-nav-btn {
-  width: 100%;
-  padding: 14px 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 10px;
+/* MAIN SETTINGS HOME — inset grouped lists, Apple Settings rhythm */
+.settings-main-page {
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: -4px;
+}
+
+.settings-main-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.settings-section-label {
+  margin: 0;
+  padding: 0 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(235, 235, 245, 0.52);
+}
+
+.settings-account-card {
+  display: flex;
   align-items: center;
+  gap: 12px;
+  padding: 14px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)),
+    rgba(10, 14, 20, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+.settings-account-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.9);
+  background:
+    radial-gradient(ellipse 120% 90% at 50% 0%, rgba(121, 201, 255, 0.16), transparent 72%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.03)),
+    rgba(0, 0, 0, 0.32);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.08);
+}
+
+.settings-account-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.settings-account-name {
+  color: #fff;
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: -0.022em;
+  line-height: 1.15;
+}
+
+.settings-account-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  color: rgba(235, 235, 245, 0.58);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.settings-account-status {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.settings-account-status.on {
+  background: #30d158;
+  box-shadow: 0 0 10px rgba(48, 209, 88, 0.42);
+}
+
+.settings-inset-group {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)),
+    rgba(10, 14, 20, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+.setting-nav-btn {
+  position: relative;
+  width: 100%;
+  min-height: 58px;
+  padding: 10px 12px 10px 14px;
+  background: transparent;
+  border: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   cursor: pointer;
-  color: white;
-  transition: all 0.2s;
+  color: #fff;
+  transition: background 0.16s ease;
   font-size: 14px;
-  margin-top: 12px;
+  margin-top: 0;
+  text-align: left;
+}
+
+.setting-nav-btn:not(:first-child)::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 58px;
+  right: 0;
+  height: 0.5px;
+  background: rgba(255, 255, 255, 0.09);
+  pointer-events: none;
+}
+
+.setting-nav-btn:hover {
+  background: rgba(255, 255, 255, 0.045);
+  transform: none;
+  box-shadow: none;
+}
+
+.setting-nav-btn:active {
+  background: rgba(255, 255, 255, 0.075);
+}
+
+.setting-nav-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.78);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.025)),
+    rgba(0, 0, 0, 0.22);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+}
+
+.setting-nav-btn:hover .setting-nav-icon {
+  color: rgba(255, 255, 255, 0.92);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.035)),
+    rgba(0, 0, 0, 0.18);
 }
 
 .setting-nav-copy {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
+  flex: 1;
+}
+
+.setting-nav-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: -0.018em;
+  line-height: 1.2;
 }
 
 .settings-nav-title-row {
@@ -374,6 +536,94 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex-wrap: wrap;
+}
+
+.setting-nav-subcopy {
+  font-size: 13px;
+  font-weight: 400;
+  color: rgba(235, 235, 245, 0.58);
+  line-height: 1.32;
+  text-align: left;
+}
+
+.setting-nav-trailing-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.setting-nav-trailing {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.setting-nav-trailing.ready {
+  color: rgba(142, 224, 170, 0.92);
+}
+
+.setting-nav-trailing.warn {
+  color: rgba(255, 181, 94, 0.96);
+}
+
+.setting-nav-chevron {
+  flex-shrink: 0;
+  color: rgba(235, 235, 245, 0.28);
+}
+
+.setting-nav-btn:hover .setting-nav-subcopy {
+  color: rgba(235, 235, 245, 0.66);
+}
+
+.setting-nav-btn:hover .setting-nav-chevron {
+  color: rgba(235, 235, 245, 0.42);
+}
+
+.settings-signout-group .setting-nav-btn {
+  min-height: 48px;
+  justify-content: center;
+}
+
+.setting-nav-btn.destructive {
+  color: #ff6961;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.setting-nav-btn.destructive:hover {
+  background: rgba(255, 105, 97, 0.08);
+}
+
+.setting-nav-btn.destructive:active {
+  background: rgba(255, 105, 97, 0.14);
+}
+
+/* Legacy pills still used on subpages */
+.setting-nav-status-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.setting-nav-status-pill.ready {
+  background: rgba(76, 175, 80, 0.16);
+  color: #7ddea0;
+}
+
+.setting-nav-status-pill.warn {
+  background: rgba(255, 193, 7, 0.14);
+  color: #ffd36a;
 }
 
 .settings-attention-pill {
@@ -396,41 +646,6 @@
   height: 18px;
   padding: 0 6px;
   font-size: 8px;
-}
-
-.settings-attention-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-  background: #ffd166;
-  box-shadow: 0 0 12px rgba(255, 209, 102, 0.42);
-  flex-shrink: 0;
-}
-
-.settings-attention-banner {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: rgba(255, 209, 102, 0.07);
-  border: 1px solid rgba(255, 209, 102, 0.15);
-  color: rgba(255, 238, 194, 0.92);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.setting-nav-subcopy {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.45);
-  line-height: 1.35;
-  text-align: left;
-}
-
-.setting-nav-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.2);
-  transform: translateX(2px);
 }
 
 .setting-subpage {
@@ -993,6 +1208,9 @@
 }
 
 .prx-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   margin-bottom: 4px;
 }
 
@@ -1006,8 +1224,61 @@
 
 .prx-intro p {
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.6);
+  color: rgba(235, 235, 245, 0.58);
   margin: 0;
+  line-height: 1.45;
+}
+
+.prx-attention-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(90deg, rgba(255, 181, 94, 0.07), transparent 46%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.008)),
+    rgba(10, 14, 20, 0.36);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.prx-attention-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: rgba(255, 196, 120, 0.92);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02)),
+    rgba(0, 0, 0, 0.22);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.05);
+}
+
+.prx-attention-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.prx-attention-copy strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.94);
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+.prx-attention-copy span {
+  font-size: 12px;
+  color: rgba(235, 235, 245, 0.54);
   line-height: 1.4;
 }
 
@@ -1033,9 +1304,9 @@
 }
 
 .prx-provider-card.needs-attention {
-  border-color: rgba(255, 209, 102, 0.18);
+  border-color: rgba(255, 181, 94, 0.16);
   background:
-    linear-gradient(90deg, rgba(255, 209, 102, 0.055), transparent 52%),
+    linear-gradient(90deg, rgba(255, 181, 94, 0.045), transparent 48%),
     rgba(255, 255, 255, 0.03);
 }
 
@@ -5517,8 +5788,7 @@
 .cosmic-agents-provider-title {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  min-height: 20px;
 }
 
 .cosmic-agents-provider-title strong {
@@ -5526,19 +5796,6 @@
   font-weight: 600;
   color: #fff;
   letter-spacing: -0.01em;
-}
-
-.cosmic-agents-beta-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 6px;
-  background: rgba(0, 122, 255, 0.16);
-  color: #7ab8ff;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .cosmic-agents-provider-info > span {
@@ -5549,10 +5806,62 @@
 
 .cosmic-agents-provider-meta {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  align-items: center;
   gap: 6px;
   flex-shrink: 0;
+}
+
+.cosmic-agents-provider-tag-slot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.cosmic-agents-provider-tag-slot.role {
+  width: 72px;
+}
+
+.cosmic-agents-provider-tag-slot.status {
+  width: 88px;
+}
+
+.cosmic-agents-provider-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.cosmic-agents-provider-tag.default {
+  color: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.cosmic-agents-provider-tag.ready {
+  color: rgba(190, 255, 214, 0.98);
+  background: rgba(69, 214, 130, 0.1);
+  border-color: rgba(69, 214, 130, 0.22);
+}
+
+.cosmic-agents-provider-tag.setup {
+  color: rgba(255, 230, 180, 0.96);
+  background: rgba(255, 159, 10, 0.12);
+  border-color: rgba(255, 159, 10, 0.22);
+}
+
+.cosmic-agents-provider-tag.pending {
+  color: rgba(180, 210, 255, 0.96);
+  background: rgba(0, 122, 255, 0.12);
+  border-color: rgba(0, 122, 255, 0.22);
 }
 
 .cosmic-agents-status-pill {
@@ -6813,8 +7122,8 @@
   background: rgba(255, 255, 255, 0.14);
 }
 
-/* Consistent right slot in model rows: [Free pill] [fixed 14px icon column].
-   The icon column is always rendered, so Free pills sit in one straight
+/* Consistent right slot in model rows: [Free label] [fixed 14px icon column].
+   The icon column is always rendered, so Free labels sit in one straight
    column whether the row has a lock, a check, or nothing. */
 .opencode-row-right {
   margin-left: auto;
@@ -7160,14 +7469,31 @@
 
 .opencode-free-pill {
   font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #ffd76a;
-  background: rgba(255, 215, 106, 0.1);
-  border: 1px solid rgba(255, 215, 106, 0.3);
-  padding: 1px 6px;
-  border-radius: 999px;
+  color: rgba(255, 215, 106, 0.46);
+}
+
+.opencode-model-list-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(142, 207, 255, 0.72);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.opencode-model-list-toggle:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(142, 207, 255, 0.92);
 }
 
 .cosmic-agents-detail-banner-action {

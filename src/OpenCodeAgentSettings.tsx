@@ -75,6 +75,8 @@ const VARIANT_OPTIONS: Array<{ value: VariantOption; label: string; note: string
   { value: 'xhigh', label: 'XHigh', note: 'Max' },
 ]
 
+const MODEL_LIST_PREVIEW = 10
+
 export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsProps) {
   const [preferredModel, setPreferredModel] = useState('mimo-v2.5-free')
   const [variant, setVariant] = useState<VariantOption>('auto')
@@ -88,6 +90,7 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [modelQuery, setModelQuery] = useState('')
   const [openGroupId, setOpenGroupId] = useState<string | null>(null)
+  const [groupModelsExpanded, setGroupModelsExpanded] = useState(false)
   const [connectTarget, setConnectTarget] = useState<string | null>(null)
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(false)
@@ -291,6 +294,28 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
     () => groups.find((group) => group.id === openGroupId) || null,
     [groups, openGroupId],
   )
+
+  useEffect(() => {
+    if (!openGroupId) {
+      setGroupModelsExpanded(false)
+      return
+    }
+    const group = groups.find((item) => item.id === openGroupId)
+    if (!group || group.models.length <= MODEL_LIST_PREVIEW) {
+      setGroupModelsExpanded(false)
+      return
+    }
+    const preferredIndex = group.models.findIndex((model) => model.id === preferredModel)
+    setGroupModelsExpanded(preferredIndex >= MODEL_LIST_PREVIEW)
+  }, [openGroupId, groups, preferredModel])
+
+  const visibleGroupModels = useMemo(() => {
+    if (!openGroup) return []
+    if (groupModelsExpanded || openGroup.models.length <= MODEL_LIST_PREVIEW) {
+      return openGroup.models
+    }
+    return openGroup.models.slice(0, MODEL_LIST_PREVIEW)
+  }, [openGroup, groupModelsExpanded])
 
   // The strip under the hero: what Alpha will actually run next.
   const currentModel = useMemo(() => {
@@ -513,7 +538,7 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
                   ) : null}
                 </div>
                 <div className="opencode-model-list">
-                  {openGroup.models.map((model) => (
+                  {visibleGroupModels.map((model) => (
                     <button
                       key={model.id}
                       type="button"
@@ -538,6 +563,17 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
                       </span>
                     </button>
                   ))}
+                  {openGroup.models.length > MODEL_LIST_PREVIEW ? (
+                    <button
+                      type="button"
+                      className="opencode-model-list-toggle"
+                      onClick={() => setGroupModelsExpanded((expanded) => !expanded)}
+                    >
+                      {groupModelsExpanded
+                        ? 'Show less'
+                        : `Show ${openGroup.models.length - MODEL_LIST_PREVIEW} more`}
+                    </button>
+                  ) : null}
                 </div>
                 {!openGroup.connected ? (
                   <button type="button" className="cosmic-agents-detail-btn ghost opencode-connect-cta" onClick={scrollToProviders}>
