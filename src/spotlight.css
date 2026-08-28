@@ -383,14 +383,15 @@ body,
   --response-block-width: 100%;
 }
 
-/* Wide mode keeps prose at a readable measure and spends the extra width on
-   structure: code, consoles, tables and images bleed symmetrically past the
-   prose column instead of the column stretching to 1200px lines. The bleed
-   floors at 0 (narrow windows) and caps at 240px so blocks never touch the
-   glass edge. */
+/* Wide mode widens prose decisively (580 -> 740px, ~100 characters at 15px —
+   past print measure on purpose, this surface carries console output and
+   absolute paths that suffer more from wrapping than long lines do) and lets
+   structure reach the full glass: code, consoles, tables and images bleed
+   symmetrically past the prose column. The bleed floors at 0 on narrow
+   windows; at the cap, artifacts span the panel's full inner width. */
 .overlay.chat-wide .chat-response-content {
-  --response-column: min(100%, 640px);
-  --artifact-bleed: clamp(0px, calc((var(--chat-surface-width) - 640px) / 2 - 28px), 240px);
+  --response-column: min(100%, 740px);
+  --artifact-bleed: clamp(0px, calc((var(--chat-surface-width) - 740px) / 2 - 28px), 250px);
 }
 
 .overlay.chat-wide .chat-response-content .code-block,
