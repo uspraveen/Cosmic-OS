@@ -1750,7 +1750,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "memory_search",
             "description": (
                 "Actively search the shared memory system for prior facts, project details, task summaries, session summaries, "
-                "artifact pointers, and related entities. Returns raw memory hits, graph signals, episodes, and the search plan when available."
+                "artifact pointers, related entities, and verbatim past conversations (pass kinds=['transcript'] for "
+                "turn-by-turn records, including email exchanges the current session never saw). "
+                "Returns raw memory hits, graph signals, episodes, and the search plan when available."
             ),
             "input_schema": {
                 "type": "object",
@@ -1772,7 +1774,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     "kinds": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional memory-kind filter such as core_fact, user_data, session_summary, task_summary, agent_note, transcript, or artifact_pointer.",
+                        "description": "Optional memory-kind filter such as core_fact, user_data, session_summary, task_summary, agent_note, transcript (verbatim conversation turns, including email), or artifact_pointer.",
                     },
                     "seed_memory_ids": {
                         "type": "array",

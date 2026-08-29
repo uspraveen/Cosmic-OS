@@ -252,6 +252,16 @@ HEARTBEAT_CORRECTION_HARVEST_LIMIT = 150
 EMAIL_ROLLOVER_MAX_MESSAGES = 40
 EMAIL_ROLLOVER_ITEM_CHARS = 800
 EMAIL_ROLLOVER_TOTAL_CHARS = 8000
+# Email-thread sessions are rollover_exempt, so unlike day sessions they never
+# produced a distilled session_summary memory - their turns existed only as raw
+# transcripts, which passive recall does not search. This worker summarizes a
+# thread once it has gone quiet, giving email activity the same recallable
+# distilled form the daily session already gets.
+EMAIL_THREAD_SUMMARY_CLAIM_STALE_SEC = 1_800
+EMAIL_THREAD_SUMMARY_MAX_ATTEMPTS = 3
+# Roughly attempts-scaled backoff between failed summarization tries, so a
+# persistently failing thread does not hammer the summarizer on every poll.
+EMAIL_THREAD_SUMMARY_BACKOFF_SEC = 1_800
 HEARTBEAT_RECENT_DELIVERY_WINDOW_SEC = 36 * 60 * 60
 HEARTBEAT_RECENT_DELIVERY_LIMIT = 8
 # If chat has been silent and no heartbeat note was successfully delivered for this
@@ -588,7 +598,9 @@ class GatewayRuntime:
         self._specialist_event_worker: asyncio.Task[None] | None = None
         self._rollover_finalize_lock = asyncio.Lock()
         self._session_compaction_lock = asyncio.Lock()
+        self._email_thread_summary_lock = asyncio.Lock()
         self._memory_health_worker: asyncio.Task[None] | None = None
+        self._email_thread_summary_worker: asyncio.Task[None] | None = None
         self._memory_health_snapshot: dict[str, Any] = {
             "enabled": self.memory_client.enabled,
             "status": "disabled" if not self.memory_client.enabled else "starting",
@@ -664,6 +676,10 @@ class GatewayRuntime:
                 self._memory_health_loop(),
                 name="gateway-memory-health",
             )
+            self._email_thread_summary_worker = asyncio.create_task(
+                self._email_thread_summary_loop(),
+                name="gateway-email-thread-summary",
+            )
         await self._register_adapters()
         if self._agent_email_effectively_enabled():
             try:
@@ -717,6 +733,12 @@ class GatewayRuntime:
             self._memory_health_worker.cancel()
             await asyncio.gather(self._memory_health_worker, return_exceptions=True)
             self._memory_health_worker = None
+        if self._email_thread_summary_worker is not None:
+            self._email_thread_summary_worker.cancel()
+            await asyncio.gather(
+                self._email_thread_summary_worker, return_exceptions=True
+            )
+            self._email_thread_summary_worker = None
         await self._flush_usage_queue()
         if self._usage_worker is not None:
             self._usage_worker.cancel()
@@ -11112,6 +11134,24 @@ class GatewayRuntime:
     CROSS_CHANNEL_BRIEF_EXCERPT_CHARS = 220
 
     def _recent_cross_channel_brief(self, session_id: str) -> dict[str, str] | None:
+        """What the user was doing elsewhere, for a turn in an isolated session.
+
+        Email threads run in their own `email-thread:` session and the daily
+        session never contains their turns, so both directions are blind to
+        each other: an email arriving eight minutes after "email me the link"
+        on desktop was answered by a turn that could not see the request, and
+        a desktop message two minutes after an email exchange was answered by
+        a turn that had no idea the exchange happened. Neither session is
+        merged; each turn gets one short, clearly labelled note about what
+        recently happened on the other side.
+        """
+        if self._is_email_thread_session(session_id):
+            return self._recent_desktop_brief_for_email_turn(session_id)
+        return self._recent_email_brief_for_session(session_id)
+
+    def _recent_desktop_brief_for_email_turn(
+        self, session_id: str
+    ) -> dict[str, str] | None:
         """What the user was doing elsewhere, for a thread-scoped email turn.
 
         An inbound email deliberately runs in its own `email-thread:` session so
@@ -11180,6 +11220,78 @@ class GatewayRuntime:
                 "part of this email thread and must not be quoted back as if it were. Use it to "
                 "recognise when this email follows up on something already asked elsewhere, "
                 "rather than treating the request as new.]"
+                + chr(10)
+                + chr(10).join(lines)
+            ),
+        }
+
+    def _recent_email_brief_for_session(self, session_id: str) -> dict[str, str] | None:
+        """What just happened in the user's email correspondence, for a day-session turn.
+
+        The mirror of the email direction. Desktop and mobile turns share the
+        day session, but email threads run in their own sessions, so a desktop
+        question arriving two minutes after Cosmic answered an email ("did you
+        use the YT specialist?") was answered by a turn that could not see the
+        exchange at all. Email activity also lands in shared memory as
+        transcripts, but passive recall does not cover the transcript kind, and
+        a two-minute-old reference should never depend on recall odds anyway.
+
+        As with the email direction, this attaches one short, clearly labelled
+        note; it does not merge the sessions.
+        """
+        normalized_session_id = self._safe_text(session_id)
+        if not normalized_session_id or self._is_email_thread_session(session_id):
+            return None
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(
+                minutes=self.CROSS_CHANNEL_BRIEF_WINDOW_MINUTES
+            )
+            messages = self.session_store.list_email_thread_messages_in_window(
+                started_at=cutoff.isoformat().replace("+00:00", "Z"),
+            )
+        except Exception:
+            logger.exception(
+                "gateway.cross_channel_email_brief_failed session_id=%s", session_id
+            )
+            return None
+        if not messages:
+            return None
+
+        lines: list[str] = []
+        for item in messages:
+            channel = self._safe_text(item.get("channel"))
+            # Only email turns are news here; the day session's own desktop and
+            # mobile history is already present in this turn's context.
+            if not channel or self._channel_platform(channel) != "agent-email":
+                continue
+            excerpt = self._bounded_excerpt(
+                item.get("content"), limit=self.CROSS_CHANNEL_BRIEF_EXCERPT_CHARS
+            )
+            if not excerpt:
+                continue
+            created_raw = self._safe_text(item.get("created_at"))
+            try:
+                created = datetime.fromisoformat(
+                    (created_raw or "").replace("Z", "+00:00")
+                )
+            except ValueError:
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            speaker = "User" if self._safe_text(item.get("role")) == "user" else "Cosmic"
+            lines.append(
+                f"- [{created.strftime('%H:%M')} UTC, email] {speaker}: {excerpt}"
+            )
+        if not lines:
+            return None
+        lines = lines[-self.CROSS_CHANNEL_BRIEF_MAX_ITEMS :]
+        return {
+            "role": "assistant",
+            "content": (
+                "[Recent email correspondence, for context only. These turns ran in the user's "
+                "email threads, not in this session, and must not be quoted back as part of "
+                "this conversation. Use it to recognise when the user is following up on "
+                "something just handled over email, rather than treating the reference as new.]"
                 + chr(10)
                 + chr(10).join(lines)
             ),
@@ -23170,6 +23282,127 @@ class GatewayRuntime:
                     "checked_at": utcnow_iso(),
                 }
 
+    async def _email_thread_summary_loop(self) -> None:
+        # Sleep first: threads must be idle for hours before this pass has any
+        # work, so there is no reason to summarize during startup churn.
+        while True:
+            try:
+                await asyncio.sleep(self.config.email_thread_summary_poll_sec)
+                await self._summarize_idle_email_threads()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # pragma: no cover - defensive loop guard
+                logger.exception("gateway.email_thread_summary_loop_failed")
+
+    async def _summarize_idle_email_threads(self) -> None:
+        async with self._email_thread_summary_lock:
+            try:
+                candidates = self.session_store.list_email_thread_summary_candidates(
+                    idle_minutes=self.config.email_thread_summary_idle_minutes,
+                    claim_stale_sec=EMAIL_THREAD_SUMMARY_CLAIM_STALE_SEC,
+                    max_attempts=EMAIL_THREAD_SUMMARY_MAX_ATTEMPTS,
+                    backoff_sec=EMAIL_THREAD_SUMMARY_BACKOFF_SEC,
+                )
+            except Exception:
+                logger.exception("gateway.email_thread_summary_scan_failed")
+                return
+            for candidate in candidates:
+                session_id = self._safe_text(candidate.get("session_id"))
+                if not session_id:
+                    continue
+                try:
+                    await self._summarize_single_email_thread(candidate)
+                except Exception:
+                    logger.exception(
+                        "gateway.email_thread_summary_failed session_id=%s",
+                        session_id,
+                    )
+
+    async def _summarize_single_email_thread(
+        self, candidate: dict[str, Any]
+    ) -> None:
+        session_id = self._safe_text(candidate.get("session_id"))
+        if not session_id:
+            return
+        candidate_updated_at = self._safe_text(candidate.get("updated_at"))
+        # The claim pins the exact updated_at the candidacy was computed from:
+        # if a message arrives between candidacy and the write, updated_at
+        # moves and this pass is summarizing stale content.
+        if not self.session_store.claim_email_thread_summary(
+            session_id, updated_at=candidate_updated_at or ""
+        ):
+            return
+
+        summary_status = "failed"
+        summary_memory_id: str | None = None
+        summary_text: str | None = None
+        error_text: str | None = None
+        message_count = 0
+        try:
+            history = self.session_store.get_history(session_id)
+            message_count = len(history)
+            if not history:
+                summary_status = "empty"
+            else:
+                transcript_markdown = self._render_session_transcript_markdown(
+                    candidate, history
+                )
+                transcript_path = self._write_session_transcript(
+                    session_id, transcript_markdown
+                )
+                summary_text = await self._summarize_completed_session(
+                    session_id=session_id,
+                    transcript_markdown=transcript_markdown,
+                    history=history,
+                    summary_type="email_thread_summary",
+                )
+                if not summary_text:
+                    summary_status = "skipped"
+                else:
+                    summary_payload = (
+                        self._build_email_thread_summary_memory_payload(
+                            session_id=session_id,
+                            transcript_path=transcript_path,
+                            summary_text=summary_text,
+                            history=history,
+                        )
+                    )
+                    memory_response = await self._write_memory_record(
+                        payload=summary_payload,
+                        audit_event=self._build_memory_write_audit_event(
+                            payload=summary_payload,
+                            operation="session_summary_write",
+                            write_source="gateway_email_thread_summary",
+                            original_kind=self._safe_text(
+                                summary_payload.get("kind")
+                            ),
+                            normalized_kind=self._safe_text(
+                                summary_payload.get("kind")
+                            ),
+                            guard_applied=False,
+                        ),
+                    )
+                    summary_memory_id = self._extract_memory_id(memory_response)
+                    summary_status = (
+                        "stored" if summary_memory_id else "memory_write_failed"
+                    )
+        except Exception as exc:
+            logger.exception(
+                "gateway.email_thread_summary_failed session_id=%s", session_id
+            )
+            summary_status = "failed"
+            summary_text = None
+            summary_memory_id = None
+            error_text = str(exc)
+        self.session_store.mark_email_thread_summary(
+            session_id,
+            status=summary_status,
+            memory_id=summary_memory_id,
+            message_count=message_count,
+            summary_text=summary_text,
+            error=error_text,
+        )
+
     async def _finalize_rollover_sessions(
         self, current_session_id: str | None = None
     ) -> None:
@@ -23393,7 +23626,9 @@ class GatewayRuntime:
     ) -> str:
         transcript_dir = self.config.session_transcript_dir
         transcript_dir.mkdir(parents=True, exist_ok=True)
-        transcript_path = transcript_dir / f"{session_id}.md"
+        # Email-thread ids contain colons, which are illegal in Windows
+        # filenames; day-session ids are untouched by the substitution.
+        transcript_path = transcript_dir / f"{session_id.replace(':', '_')}.md"
         transcript_path.write_text(transcript_markdown, encoding="utf-8")
         return str(transcript_path)
 
@@ -23403,6 +23638,7 @@ class GatewayRuntime:
         session_id: str,
         transcript_markdown: str,
         history: list[dict[str, Any]],
+        summary_type: str = "session_rollover",
     ) -> str | None:
         if not history:
             return None
@@ -23426,7 +23662,7 @@ class GatewayRuntime:
                 request_id=None,
                 session_id=session_id,
                 extra_metadata={
-                    "summary_type": "session_rollover",
+                    "summary_type": summary_type,
                     "session_id": session_id,
                     "message_count": len(history),
                 },
@@ -23465,6 +23701,49 @@ class GatewayRuntime:
             },
             "provenance": {
                 "source_kind": "gateway_rollover",
+                "source_id": session_id,
+                "created_by": "cosmic/gateway:1.0.0",
+                "session_id": session_id,
+            },
+        }
+
+    def _build_email_thread_summary_memory_payload(
+        self,
+        *,
+        session_id: str,
+        transcript_path: str,
+        summary_text: str,
+        history: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        # The thread id itself is opaque (email-thread:<mailbox>:<uuid>), so
+        # title the memory from the email subject when one is known - titles
+        # carry extra weight in recall scoring.
+        subject: str | None = None
+        for item in history:
+            if self._safe_text(item.get("role")) != "user":
+                continue
+            metadata = item.get("metadata")
+            if isinstance(metadata, dict):
+                subject = self._safe_text(metadata.get("subject"))
+                if subject:
+                    subject = self._bounded_excerpt(subject, limit=100)
+            break
+        short_thread_id = session_id.rsplit(":", 1)[-1] or session_id
+        title = subject or f"Email thread {short_thread_id}"
+        return {
+            "kind": "session_summary",
+            "title": f"Email thread summary: {title}",
+            "content": summary_text,
+            "tags": ["email_thread_summary", "agent-email"],
+            "metadata": {
+                "session_id": session_id,
+                "session_scope": "email_thread",
+                "message_count": len(history),
+                "transcript_path": transcript_path,
+                "email_subject": subject,
+            },
+            "provenance": {
+                "source_kind": "gateway_email_thread_summary",
                 "source_id": session_id,
                 "created_by": "cosmic/gateway:1.0.0",
                 "session_id": session_id,

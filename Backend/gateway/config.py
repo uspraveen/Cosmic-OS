@@ -229,9 +229,17 @@ class GatewayConfig:
         "task_summary",
         "agent_note",
         "user_data",
+        # Raw per-turn records, including email threads (which never produce a
+        # session summary of their own). Without this kind, every conversation
+        # turn is written to shared memory but can never be recalled.
+        "transcript",
     )
     cosmic_memory_ingest_transcripts: bool = True
     cosmic_memory_episode_extract_graph: bool = False
+    # Summarize an email thread once it has been idle this long, so email
+    # correspondence gets a recallable session_summary like day sessions do.
+    email_thread_summary_idle_minutes: int = 360
+    email_thread_summary_poll_sec: int = 900
     memory_write_max_per_hour: int = 50
     memory_write_dedup_ttl_sec: int = 86_400
     session_summary_max_output_tokens: int = 2500
@@ -838,6 +846,7 @@ class GatewayConfig:
                     "task_summary",
                     "agent_note",
                     "user_data",
+                    "transcript",
                 ),
             ),
             cosmic_memory_ingest_transcripts=_env_bool(
@@ -846,6 +855,14 @@ class GatewayConfig:
             cosmic_memory_episode_extract_graph=_env_bool(
                 "COSMIC_MEMORY_EPISODE_EXTRACT_GRAPH",
                 False,
+            ),
+            email_thread_summary_idle_minutes=max(
+                15,
+                _env_int("EMAIL_THREAD_SUMMARY_IDLE_MINUTES", 360),
+            ),
+            email_thread_summary_poll_sec=max(
+                60,
+                _env_int("EMAIL_THREAD_SUMMARY_POLL_SEC", 900),
             ),
             memory_write_max_per_hour=max(
                 1,

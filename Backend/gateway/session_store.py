@@ -2005,6 +2005,206 @@ class SessionStore:
             )
         return candidates
 
+    EMAIL_THREAD_SUMMARY_STATE_KEY = "thread_summary"
+    # Claim staleness for email-thread summarization, mirrored from the
+    # gateway constant so session_store stays independently usable.
+    EMAIL_THREAD_SUMMARY_CLAIM_STALE_SEC = 1_800
+
+    @staticmethod
+    def _parse_session_timestamp(value: Any) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def list_email_thread_summary_candidates(
+        self,
+        *,
+        idle_minutes: int,
+        claim_stale_sec: int,
+        max_attempts: int,
+        backoff_sec: int,
+    ) -> list[dict[str, Any]]:
+        """Idle email-thread sessions that still owe a distilled summary.
+
+        Email-thread sessions are rollover_exempt - live threads must not be
+        chopped by the daily rollover - so unlike day sessions they never
+        produced a session_summary memory. A thread becomes a candidate once it
+        has been quiet for `idle_minutes`, and each summarization attempt is
+        tracked in session metadata: a fresh claim suppresses concurrent work,
+        failures back off, and after max_attempts the thread is left alone
+        until new messages move updated_at again.
+        """
+        now = datetime.now(timezone.utc)
+        idle = timedelta(minutes=max(1, int(idle_minutes)))
+        claim_stale = timedelta(seconds=max(1, int(claim_stale_sec)))
+        backoff = timedelta(seconds=max(0, int(backoff_sec)))
+
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    session_id,
+                    created_at,
+                    updated_at,
+                    metadata_json
+                FROM sessions
+                WHERE session_id LIKE ?
+                ORDER BY created_at ASC
+                """,
+                (f"{self.EMAIL_THREAD_SESSION_PREFIX}%",),
+            ).fetchall()
+
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            state = metadata.get(self.EMAIL_THREAD_SUMMARY_STATE_KEY)
+            if not isinstance(state, dict):
+                state = {}
+
+            updated_at = self._parse_session_timestamp(row["updated_at"])
+            if updated_at is None or now - updated_at < idle:
+                continue
+
+            # A fresh claim means another pass is on it; a stale claim (a pass
+            # that died mid-write) is retried.
+            if str(state.get("state") or "") == "in_progress":
+                claimed_at = self._parse_session_timestamp(state.get("claimed_at"))
+                if claimed_at is not None and now - claimed_at < claim_stale:
+                    continue
+
+            attempts = int(state.get("attempts") or 0)
+            attempted_updated_at = str(state.get("attempted_updated_at") or "")
+            same_content = attempted_updated_at == row["updated_at"]
+            failed = str(state.get("status") or "") in {
+                "failed",
+                "memory_write_failed",
+                "",
+            }
+            if same_content and not failed:
+                # This exact content is already distilled; only new messages
+                # reopen candidacy.
+                continue
+            if failed and same_content:
+                if attempts >= max_attempts:
+                    # Gave up on this content; only new messages reopen it.
+                    continue
+                if attempts:
+                    attempted_at = self._parse_session_timestamp(
+                        state.get("attempted_at")
+                    )
+                    if (
+                        attempted_at is not None
+                        and now - attempted_at < backoff * attempts
+                    ):
+                        continue
+
+            candidates.append(
+                {
+                    "session_id": row["session_id"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return candidates
+
+    def claim_email_thread_summary(self, session_id: str, *, updated_at: str) -> bool:
+        """Pin a summarization claim to the thread's current updated_at.
+
+        Returns False when the session moved since candidacy (a new message
+        landed), when a fresh claim already exists, or when the session has
+        already been summarized for this exact content.
+        """
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT updated_at, metadata_json FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            if str(row["updated_at"] or "") != updated_at:
+                return False
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            state = metadata.get(self.EMAIL_THREAD_SUMMARY_STATE_KEY)
+            if isinstance(state, dict) and str(state.get("state") or "") == "in_progress":
+                claimed_at = self._parse_session_timestamp(state.get("claimed_at"))
+                if (
+                    claimed_at is not None
+                    and datetime.now(timezone.utc) - claimed_at
+                    < timedelta(seconds=self.EMAIL_THREAD_SUMMARY_CLAIM_STALE_SEC)
+                ):
+                    return False
+            metadata[self.EMAIL_THREAD_SUMMARY_STATE_KEY] = {
+                "state": "in_progress",
+                "claimed_at": utcnow_iso(),
+            }
+            # Deliberately does not touch updated_at: the claim is bookkeeping,
+            # not activity, and updated_at is the candidacy anchor.
+            connection.execute(
+                "UPDATE sessions SET metadata_json = ? WHERE session_id = ?",
+                (json.dumps(metadata), session_id),
+            )
+            connection.commit()
+        return True
+
+    def mark_email_thread_summary(
+        self,
+        session_id: str,
+        *,
+        status: str,
+        memory_id: str | None = None,
+        message_count: int | None = None,
+        summary_text: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Record the outcome of one summarization attempt for a thread."""
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT updated_at, metadata_json FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            previous = metadata.get(self.EMAIL_THREAD_SUMMARY_STATE_KEY)
+            previous = previous if isinstance(previous, dict) else {}
+            state = {
+                "status": str(status or "failed"),
+                "attempted_at": utcnow_iso(),
+                "attempted_updated_at": row["updated_at"],
+                "attempts": int(previous.get("attempts") or 0) + 1,
+            }
+            if memory_id:
+                state["memory_id"] = memory_id
+            if message_count is not None:
+                state["message_count"] = int(message_count)
+            if summary_text:
+                state["summary_text"] = summary_text
+            if error:
+                state["error"] = error[:400]
+            metadata[self.EMAIL_THREAD_SUMMARY_STATE_KEY] = state
+            connection.execute(
+                """
+                UPDATE sessions
+                SET metadata_json = ?
+                WHERE session_id = ?
+                """,
+                (json.dumps(metadata), session_id),
+            )
+            connection.commit()
+
     def mark_session_rollover_finalized(
         self,
         session_id: str,
