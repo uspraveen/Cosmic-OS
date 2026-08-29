@@ -1362,6 +1362,183 @@ async def test_orchestrator_runtime_emits_segment_boundary_between_tool_turns(tm
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_runtime_emits_segment_boundary_on_openai_path(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        orchestrator_default_provider="fireworks_glm",
+        fireworks_api_key="fw-key",
+        task_ledger_db_path=tmp_path / "task_ledger_segment_boundary_glm.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = _signed_task("signing-secret")
+    stream_call_count = 0
+
+    async def scripted_stream(**kwargs):
+        del kwargs
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            payloads = [
+                {"choices": [{"delta": {"role": "assistant", "content": "Firing Alpha with the full brief."}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_del_1", "function": {"name": "delegate_to_agent", "arguments": "{\"intent\":\"alpha.execute\",\"input\":{\"goal\":\"probe\"}}"}}]}}]},
+                {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+            ]
+        else:
+            payloads = [
+                {"choices": [{"delta": {"role": "assistant", "content": "Alpha finished the build."}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            ]
+        for payload in payloads:
+            yield payload
+
+    async def fake_execute(tool_name, tool_input, *, context=None):
+        del context
+        assert tool_name == "delegate_to_agent"
+        return json.dumps(
+            {
+                "delegated": True,
+                "delegation": {
+                    "intent": "alpha.execute",
+                    "agent_id": "cosmic/alpha-agent:1.0.0",
+                    "task_id": "tsk_alpha_glm",
+                },
+            }
+        )
+
+    runtime._stream_openai_chat_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    segment_index = next(
+        (index for index, event in enumerate(streamed_events) if event["type"] == "response.segment"),
+        None,
+    )
+    assert segment_index is not None, "expected a response.segment boundary on the OpenAI/GLM path"
+    tool_loop_index = max(
+        index
+        for index, event in enumerate(streamed_events)
+        if event["type"] == "task.progress" and event["status"] == "tool_loop"
+    )
+    assert segment_index > tool_loop_index
+    break_event = streamed_events[segment_index + 1]
+    assert break_event["type"] == "response.chunk"
+    assert break_event["content"] == "\n\n"
+    following_chunks = [
+        event for event in streamed_events[segment_index + 2:] if event["type"] == "response.chunk"
+    ]
+    assert following_chunks and following_chunks[0]["content"] == "Alpha finished the build."
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runtime_segment_boundary_survives_visual_coordinator(tmp_path) -> None:
+    """Production runs GLM with visual enhancement enabled — the coordinator
+    sits between the loop and the emitted chunks there. The boundary must
+    survive it."""
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        orchestrator_default_provider="fireworks_glm",
+        fireworks_api_key="fw-key",
+        visual_enhancement_enabled=True,
+        task_ledger_db_path=tmp_path / "task_ledger_segment_boundary_visual.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    task = TaskEnvelope(
+        task_id="tsk_test123",
+        task_list_id="sess_20260307",
+        session_id="sess_20260307",
+        sender="cosmic/gateway:1.0.0",
+        recipient="cosmic/orchestrator:1.0.0",
+        intent="orchestrator.process",
+        input={
+            "query": "Why is the sky blue?",
+            "request_id": "req_test123",
+            "visual_response_enhancement_enabled": True,
+            "conversation_context": [],
+        },
+        idempotency_key="idem_test123",
+        priority="high",
+        signature="",
+        created_at=utcnow(),
+        source="user",
+        source_id="desktop",
+        channel="desktop:desk_test",
+    )
+    task = task.model_copy(update={"signature": sign_task_envelope(task, "signing-secret")})
+    stream_call_count = 0
+
+    async def scripted_stream(**kwargs):
+        del kwargs
+        nonlocal stream_call_count
+        stream_call_count += 1
+        if stream_call_count == 1:
+            payloads = [
+                {"choices": [{"delta": {"role": "assistant", "content": "Firing Alpha with the full brief."}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_del_1", "function": {"name": "delegate_to_agent", "arguments": "{\"intent\":\"alpha.execute\",\"input\":{\"goal\":\"probe\"}}"}}]}}]},
+                {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+            ]
+        else:
+            payloads = [
+                {"choices": [{"delta": {"role": "assistant", "content": "Alpha finished the build."}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            ]
+        for payload in payloads:
+            yield payload
+
+    async def fake_execute(tool_name, tool_input, *, context=None):
+        del context, tool_input
+        assert tool_name == "delegate_to_agent"
+        return json.dumps(
+            {
+                "delegated": True,
+                "delegation": {
+                    "intent": "alpha.execute",
+                    "agent_id": "cosmic/alpha-agent:1.0.0",
+                    "task_id": "tsk_alpha_visual",
+                },
+            }
+        )
+
+    runtime._stream_openai_chat_events = scripted_stream  # type: ignore[method-assign]
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    segment_index = next(
+        (index for index, event in enumerate(streamed_events) if event["type"] == "response.segment"),
+        None,
+    )
+    assert segment_index is not None, "segment boundary missing when the visual coordinator is active"
+    break_chunks = [
+        event for event in streamed_events[segment_index + 1:] if event["type"] == "response.chunk"
+    ]
+    assert break_chunks and break_chunks[0]["content"] == "\n\n"
+    # The break must also reach the coordinator's block stream — snapshots are
+    # what the desktop renders from, so a break that only rides the chunk
+    # stream vanishes from the persisted message.
+    snapshots = [e for e in streamed_events if e.get("type") == "response.blocks.snapshot"]
+    assert snapshots, "expected block snapshots after the coordinator consumed the break"
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runtime_summarizes_server_side_web_search_results(tmp_path) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
     config = OrchestratorConfig(

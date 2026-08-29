@@ -1052,14 +1052,13 @@ class OrchestratorRuntime:
                         ),
                     }
                     if streamed_visible_text:
-                        yield {
-                            **ev,
-                            "type": "response.segment",
-                            "reason": "tool_call",
-                            "iteration": iteration,
-                            "tools_called": [tb.tool_name for tb in turn_tool_blocks],
-                        }
-                        yield {**ev, "type": "response.chunk", "content": "\n\n", "done": False}
+                        async for boundary_event in self._emit_turn_segment_boundary(
+                            ev,
+                            visual_coordinator=visual_coordinator,
+                            iteration=iteration,
+                            tools_called=[tb.tool_name for tb in turn_tool_blocks],
+                        ):
+                            yield boundary_event
                     continue
 
                 # ── Final response (end_turn or other) ──────────
@@ -1681,14 +1680,13 @@ class OrchestratorRuntime:
                         ),
                     }
                     if streamed_visible_text:
-                        yield {
-                            **ev,
-                            "type": "response.segment",
-                            "reason": "tool_call",
-                            "iteration": iteration,
-                            "tools_called": [item["name"] for item in normalized_tool_calls],
-                        }
-                        yield {**ev, "type": "response.chunk", "content": "\n\n", "done": False}
+                        async for boundary_event in self._emit_turn_segment_boundary(
+                            ev,
+                            visual_coordinator=visual_coordinator,
+                            iteration=iteration,
+                            tools_called=[item["name"] for item in normalized_tool_calls],
+                        ):
+                            yield boundary_event
                     continue
 
                 break
@@ -4876,6 +4874,37 @@ class OrchestratorRuntime:
         if merged.startswith(current_text):
             return merged[len(current_text):], True
         return chunk, True
+
+    async def _emit_turn_segment_boundary(
+        self,
+        ev: dict[str, Any],
+        *,
+        visual_coordinator: Any | None,
+        iteration: int,
+        tools_called: list[str],
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Paragraph break between two narration turns.
+
+        The break MUST flow through the visual coordinator when one is active:
+        the coordinator's markdown accumulation feeds the response-block
+        snapshots and the completion content, so a break injected around it
+        reaches the live text stream but silently vanishes from the blocks and
+        from the final persisted message."""
+        yield {
+            **ev,
+            "type": "response.segment",
+            "reason": "tool_call",
+            "iteration": iteration,
+            "tools_called": tools_called,
+        }
+        if visual_coordinator is not None:
+            visible_break, visual_events = visual_coordinator.consume_text("\n\n")
+            for visual_event in visual_events:
+                yield {**ev, **visual_event}
+            if visible_break:
+                yield {**ev, "type": "response.chunk", "content": visible_break, "done": False}
+        else:
+            yield {**ev, "type": "response.chunk", "content": "\n\n", "done": False}
 
     def _estimate_request_context_chars(self, system_prompt: str, messages: list[dict[str, Any]]) -> int:
         try:
