@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import asynccontextmanager
 from contextlib import contextmanager
@@ -162,7 +163,7 @@ def test_desktop_preferences_routes_patch_and_broadcast() -> None:
                 assert initial_payload["cosmic_orchestrator_model"]["provider"] == "fireworks_glm"
                 assert (
                     initial_payload["cosmic_orchestrator_model"]["model"]
-                    == "accounts/fireworks/models/glm-5p2"
+                    == "accounts/fireworks/models/glm-5p3-flash"
                 )
 
                 updated = client.patch(
@@ -232,7 +233,7 @@ def test_desktop_preferences_snapshot_falls_back_when_store_read_fails() -> None
         assert snapshot["cosmic_orchestrator_model"]["provider"] == "fireworks_glm"
         assert (
             snapshot["cosmic_orchestrator_model"]["model"]
-            == "accounts/fireworks/models/glm-5p2"
+            == "accounts/fireworks/models/glm-5p3-flash"
         )
 
 
@@ -304,7 +305,7 @@ def test_cosmic_orchestrator_model_preference_defaults_and_updates() -> None:
 
         initial = runtime.preference_store.get_cosmic_orchestrator_model()
         assert initial["provider"] == "fireworks_glm"
-        assert initial["model"] == "accounts/fireworks/models/glm-5p2"
+        assert initial["model"] == "accounts/fireworks/models/glm-5p3-flash"
         assert initial["revision"] == 1
 
         updated = runtime.preference_store.set_cosmic_orchestrator_model(
@@ -326,10 +327,36 @@ def test_cosmic_orchestrator_model_preference_defaults_and_updates() -> None:
         )
 
         assert updated_glm["provider"] == "fireworks_glm"
-        assert updated_glm["model"] == "accounts/fireworks/models/glm-5p2"
+        assert updated_glm["model"] == "accounts/fireworks/models/glm-5p3"
         assert updated_glm["revision"] == 3
         assert updated_glm["updated_source"] == "test"
         assert updated_glm["updated_device_id"] == "desk_glm_1"
+
+
+def test_cosmic_orchestrator_model_legacy_glm_5p2_row_migrates_to_default() -> None:
+    """A stored GLM 5.2 selection predates the catalog; it must not be honored."""
+    with _runtime_root() as root:
+        runtime = build_runtime(root)
+        runtime.preference_store.initialize()
+
+        with sqlite3.connect(runtime.preference_store.db_path) as connection:
+            connection.execute(
+                "UPDATE app_preferences SET value_json = ? WHERE key = ?",
+                (
+                    json.dumps(
+                        {
+                            "provider": "fireworks_glm",
+                            "model": "accounts/fireworks/models/glm-5p2",
+                        }
+                    ),
+                    "cosmic_orchestrator_model",
+                ),
+            )
+            connection.commit()
+
+        migrated = runtime.preference_store.get_cosmic_orchestrator_model()
+        assert migrated["provider"] == "fireworks_glm"
+        assert migrated["model"] == "accounts/fireworks/models/glm-5p3-flash"
 
 
 @pytest.mark.asyncio

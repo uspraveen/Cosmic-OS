@@ -13690,7 +13690,8 @@ class GatewayRuntime:
             ("anthropic", "claude-sonnet-4-6"),
             ("perplexity", self.config.perplexity_model),
             ("fireworks", "accounts/fireworks/models/kimi-k2p6"),
-            ("fireworks", "accounts/fireworks/models/glm-5p2"),
+            ("fireworks", "accounts/fireworks/models/glm-5p3"),
+            ("fireworks", "accounts/fireworks/models/glm-5p3-flash"),
         ]
         try:
             cosmic_model = self.preference_store.get_cosmic_orchestrator_model()
@@ -20886,7 +20887,7 @@ class GatewayRuntime:
             )
             cosmic_orchestrator_model = {
                 "provider": "fireworks_glm",
-                "model": "accounts/fireworks/models/glm-5p2",
+                "model": "accounts/fireworks/models/glm-5p3-flash",
                 "revision": 1,
                 "updated_at": utcnow_iso(),
                 "updated_source": "runtime_fallback",

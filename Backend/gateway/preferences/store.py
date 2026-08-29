@@ -14,7 +14,11 @@ _ALPHA_EXECUTION_PROVIDER_KEY = "alpha_execution_provider"
 _COSMIC_ORCHESTRATOR_MODEL_KEY = "cosmic_orchestrator_model"
 _COSMIC_HEARTBEAT_KEY = "cosmic_heartbeat"
 _FIREWORKS_KIMI_MODEL = "accounts/fireworks/models/kimi-k2p6"
-_FIREWORKS_GLM_MODEL = "accounts/fireworks/models/glm-5p2"
+_FIREWORKS_GLM_MODEL = "accounts/fireworks/models/glm-5p3"
+_FIREWORKS_GLM_FLASH_MODEL = "accounts/fireworks/models/glm-5p3-flash"
+# GLM 5.2 was removed from the catalog; a stored selection of it falls back to
+# the current default rather than routing to a model we no longer offer.
+_RETIRED_GLM_MODELS = {"accounts/fireworks/models/glm-5p2"}
 
 
 def _json_dumps(value: Any) -> str:
@@ -407,7 +411,7 @@ class GatewayPreferenceStore:
             _ALPHA_EXECUTION_PROVIDER_KEY: {"preferred_harness": "opencode"},
             _COSMIC_ORCHESTRATOR_MODEL_KEY: {
                 "provider": "fireworks_glm",
-                "model": _FIREWORKS_GLM_MODEL,
+                "model": _FIREWORKS_GLM_FLASH_MODEL,
             },
         }
         for key, value in defaults.items():
@@ -522,6 +526,7 @@ class GatewayPreferenceStore:
             "model": self._normalize_cosmic_orchestrator_model(
                 provider,
                 str(value.get("model") or ""),
+                missing_default=_FIREWORKS_GLM_FLASH_MODEL,
             ),
             "revision": int(row["revision"]) if row["revision"] is not None else 1,
             "updated_at": str(row["updated_at"] or "").strip() or utcnow_iso(),
@@ -561,7 +566,16 @@ class GatewayPreferenceStore:
         normalized = str(value or "").strip().lower().replace("-", "_")
         if normalized in {"fireworks", "fireworks_kimi", "kimi", "kimi_k2_6", "smarter"}:
             return "fireworks_kimi"
-        if normalized in {"fireworks_glm", "glm", "glm_5p2", "glm_5_2", "glm52"}:
+        if normalized in {
+            "fireworks_glm",
+            "glm",
+            "glm_5p2",
+            "glm_5_2",
+            "glm52",
+            "glm_5p3",
+            "glm_5_3",
+            "glm53",
+        }:
             return "fireworks_glm"
         return "anthropic"
 
@@ -569,13 +583,26 @@ class GatewayPreferenceStore:
         self,
         provider: str,
         model: str | None,
+        *,
+        missing_default: str = "",
     ) -> str:
+        """Resolve a stored or submitted orchestrator model.
+
+        `missing_default` separates two meanings of "no model": the system
+        default (reading a row that predates the current catalog, or was
+        seeded before a model existed) resolves to the catalog default, while
+        an explicit provider-only selection ("picking GLM") resolves to the
+        GLM slot model. Retired models (GLM 5.2) remap the same way - they
+        are no longer offered, so they cannot be honored.
+        """
         normalized_provider = self._normalize_cosmic_orchestrator_provider(provider)
         normalized_model = str(model or "").strip()
         if normalized_provider == "fireworks_kimi":
             return normalized_model or _FIREWORKS_KIMI_MODEL
         if normalized_provider == "fireworks_glm":
-            return normalized_model or _FIREWORKS_GLM_MODEL
+            if not normalized_model or normalized_model in _RETIRED_GLM_MODELS:
+                return missing_default or _FIREWORKS_GLM_MODEL
+            return normalized_model
         return normalized_model
 
     @contextlib.contextmanager

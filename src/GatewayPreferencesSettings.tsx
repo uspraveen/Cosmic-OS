@@ -8,6 +8,9 @@ type GatewayConnectionState = {
 
 type CosmicOrchestratorProvider = 'anthropic' | 'fireworks_kimi' | 'fireworks_glm'
 
+const GLM_53_MODEL = 'accounts/fireworks/models/glm-5p3'
+const GLM_53_FLASH_MODEL = 'accounts/fireworks/models/glm-5p3-flash'
+
 interface GatewayPreferencesSettingsProps {
   active: boolean
   isAuthenticated: boolean
@@ -84,7 +87,12 @@ function normalizeCosmicProvider(value: unknown): CosmicOrchestratorProvider {
   if (normalized === 'fireworks' || normalized === 'fireworks_kimi' || normalized === 'kimi' || normalized === 'smarter') {
     return 'fireworks_kimi'
   }
-  if (normalized === 'fireworks_glm' || normalized === 'glm' || normalized === 'glm_5p2' || normalized === 'glm_5_2' || normalized === 'glm52') {
+  if (
+    normalized === 'fireworks_glm' || normalized === 'glm' || normalized === 'glm_5p2' ||
+    normalized === 'glm_5_2' || normalized === 'glm52' || normalized === 'glm_5p3' ||
+    normalized === 'glm_5_3' || normalized === 'glm53' || normalized === 'glm_flash' ||
+    normalized === 'glm_5p3_flash' || normalized === 'glm_5_3_flash'
+  ) {
     return 'fireworks_glm'
   }
   return 'anthropic'
@@ -237,6 +245,7 @@ export default function GatewayPreferencesSettings({
   const [preferences, setPreferences] = useState<GatewayPreferenceSnapshot | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [savingKey, setSavingKey] = useState<'visual' | 'cosmic' | 'heartbeat' | null>(null)
+  const [showMoreModels, setShowMoreModels] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const loadPreferences = async () => {
@@ -310,6 +319,12 @@ export default function GatewayPreferencesSettings({
   }, [preferences?.heartbeat.nextFireAt])
 
   const isSaving = Boolean(savingKey)
+  const cosmicModel = preferences?.cosmic.model || ''
+  const isGlmFlashSelected =
+    preferences?.cosmic.provider === 'fireworks_glm' &&
+    (!cosmicModel || cosmicModel === GLM_53_FLASH_MODEL)
+  const isGlm53Selected =
+    preferences?.cosmic.provider === 'fireworks_glm' && cosmicModel === GLM_53_MODEL
   const statusLabel = !isAuthenticated
     ? 'Sign in required'
     : isSaving
@@ -381,8 +396,18 @@ export default function GatewayPreferencesSettings({
     }
   }
 
-  const handleSelectProvider = async (provider: CosmicOrchestratorProvider) => {
-    if (!preferences || !window.cosmic?.saveGatewayPreferences || !canSave || preferences.cosmic.provider === provider) {
+  const handleSelectModel = async (provider: CosmicOrchestratorProvider, model?: string) => {
+    if (!preferences || !window.cosmic?.saveGatewayPreferences || !canSave) {
+      return
+    }
+    if (model === undefined && preferences.cosmic.provider === provider) {
+      return
+    }
+    if (
+      model !== undefined &&
+      preferences.cosmic.provider === provider &&
+      preferences.cosmic.model === model
+    ) {
       return
     }
     setSavingKey('cosmic')
@@ -390,6 +415,7 @@ export default function GatewayPreferencesSettings({
     try {
       const payload = await window.cosmic.saveGatewayPreferences({
         cosmicOrchestratorProvider: provider,
+        ...(model !== undefined ? { cosmicOrchestratorModel: model } : {}),
       })
       const nextPreferences = normalizePreferences(payload)
       if (!nextPreferences) {
@@ -445,7 +471,7 @@ export default function GatewayPreferencesSettings({
         <div className="preferences-card-copy">
           <div className="preferences-card-title">Cosmic Brain</div>
           <div className="preferences-card-note">
-            Choose the model provider behind Cosmic's orchestrator. Smart uses Claude; Kimi and GLM use Fireworks. If GLM is selected and a turn needs images, Cosmic temporarily routes that turn through Kimi without changing your preference.
+            Choose the model behind Cosmic's orchestrator. Smart uses Claude; GLM and Kimi run on Fireworks. GLM 5.3 Flash is natively multimodal, so image turns stay on it. GLM 5.3 has no vision — when a turn needs images, Cosmic temporarily routes that turn through Kimi without changing your preference.
           </div>
           {preferences?.cosmic.model && (
             <div className="preferences-card-detail">
@@ -459,11 +485,11 @@ export default function GatewayPreferencesSettings({
           )}
         </div>
 
-        <div className="preferences-provider-control" aria-label="Cosmic orchestrator provider">
+        <div className="preferences-provider-control" aria-label="Cosmic orchestrator model">
           <button
             type="button"
             className={`preferences-provider-option ${preferences?.cosmic.provider === 'anthropic' ? 'active smart' : ''}`}
-            onClick={() => { void handleSelectProvider('anthropic') }}
+            onClick={() => { void handleSelectModel('anthropic') }}
             disabled={!canSave}
             aria-pressed={preferences?.cosmic.provider === 'anthropic'}
           >
@@ -472,25 +498,47 @@ export default function GatewayPreferencesSettings({
           </button>
           <button
             type="button"
-            className={`preferences-provider-option ${preferences?.cosmic.provider === 'fireworks_kimi' ? 'active' : ''}`}
-            onClick={() => { void handleSelectProvider('fireworks_kimi') }}
+            className={`preferences-provider-option ${isGlmFlashSelected ? 'active' : ''}`}
+            onClick={() => { void handleSelectModel('fireworks_glm', GLM_53_FLASH_MODEL) }}
             disabled={!canSave}
-            aria-pressed={preferences?.cosmic.provider === 'fireworks_kimi'}
+            aria-pressed={isGlmFlashSelected}
           >
-            <span>Kimi</span>
-            <small>Fireworks K2.6</small>
+            <span>GLM Flash</span>
+            <small>Fireworks 5.3 Flash</small>
           </button>
           <button
             type="button"
-            className={`preferences-provider-option ${preferences?.cosmic.provider === 'fireworks_glm' ? 'active' : ''}`}
-            onClick={() => { void handleSelectProvider('fireworks_glm') }}
+            className={`preferences-provider-option ${isGlm53Selected ? 'active' : ''}`}
+            onClick={() => { void handleSelectModel('fireworks_glm', GLM_53_MODEL) }}
             disabled={!canSave}
-            aria-pressed={preferences?.cosmic.provider === 'fireworks_glm'}
+            aria-pressed={isGlm53Selected}
           >
             <span>GLM</span>
-            <small>Fireworks 5.2</small>
+            <small>Fireworks 5.3</small>
           </button>
         </div>
+        <button
+          type="button"
+          className="preferences-provider-more"
+          onClick={() => { setShowMoreModels(!showMoreModels) }}
+          aria-expanded={showMoreModels}
+        >
+          {showMoreModels ? 'Show less' : 'Show more'}
+        </button>
+        {showMoreModels && (
+          <div className="preferences-provider-control preferences-provider-control--more" aria-label="More orchestrator models">
+            <button
+              type="button"
+              className={`preferences-provider-option ${preferences?.cosmic.provider === 'fireworks_kimi' ? 'active' : ''}`}
+              onClick={() => { void handleSelectModel('fireworks_kimi') }}
+              disabled={!canSave}
+              aria-pressed={preferences?.cosmic.provider === 'fireworks_kimi'}
+            >
+              <span>Kimi</span>
+              <small>Fireworks K2.6</small>
+            </button>
+          </div>
+        )}
       </div>
 
       <div className={`preferences-card ${!canSave ? 'muted' : ''}`}>

@@ -117,7 +117,7 @@ class OrchestratorConfig:
     fireworks_api_key: str = ""
     fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
     fireworks_kimi_model: str = "accounts/fireworks/models/kimi-k2p6"
-    fireworks_glm_model: str = "accounts/fireworks/models/glm-5p2"
+    fireworks_glm_model: str = "accounts/fireworks/models/glm-5p3"
     fireworks_vision_fallback_model: str = "accounts/fireworks/models/kimi-k2p6"
     fireworks_kimi_max_tokens: int | None = None
     fireworks_kimi_temperature: float = 0.6
@@ -255,9 +255,9 @@ class OrchestratorConfig:
             fireworks_glm_model=(
                 os.getenv("ORCHESTRATOR_FIREWORKS_GLM_MODEL")
                 or os.getenv("FIREWORKS_GLM_MODEL")
-                or "accounts/fireworks/models/glm-5p2"
+                or "accounts/fireworks/models/glm-5p3"
             ).strip()
-            or "accounts/fireworks/models/glm-5p2",
+            or "accounts/fireworks/models/glm-5p3",
             fireworks_vision_fallback_model=(
                 os.getenv("ORCHESTRATOR_FIREWORKS_VISION_FALLBACK_MODEL")
                 or os.getenv("ORCHESTRATOR_FIREWORKS_KIMI_MODEL")

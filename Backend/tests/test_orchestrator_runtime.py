@@ -320,7 +320,7 @@ async def test_orchestrator_runtime_streams_fireworks_glm_text_path() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if str(request.url).endswith("/chat/completions"):
             payload = json.loads(request.content.decode("utf-8"))
-            assert payload["model"] == "accounts/fireworks/models/glm-5p2"
+            assert payload["model"] == "accounts/fireworks/models/glm-5p3"
             assert payload["messages"][0]["role"] == "system"
             return httpx.Response(
                 200,
@@ -347,7 +347,7 @@ async def test_orchestrator_runtime_streams_fireworks_glm_text_path() -> None:
                     **base_task.input,
                     "cosmic_orchestrator_model": {
                         "provider": "fireworks_glm",
-                        "model": "accounts/fireworks/models/glm-5p2",
+                        "model": "accounts/fireworks/models/glm-5p3",
                     },
                 }
             }
@@ -360,13 +360,13 @@ async def test_orchestrator_runtime_streams_fireworks_glm_text_path() -> None:
 
     assert streamed_events[0]["type"] == "task.created"
     assert streamed_events[0]["model_provider"] == "fireworks_glm"
-    assert streamed_events[0]["model"] == "accounts/fireworks/models/glm-5p2"
+    assert streamed_events[0]["model"] == "accounts/fireworks/models/glm-5p3"
     complete = next(event for event in streamed_events if event["type"] == "response.complete")
     assert complete["content"] == "Hello from GLM."
     assert complete["model_provider"] == "fireworks_glm"
-    assert complete["model"] == "accounts/fireworks/models/glm-5p2"
+    assert complete["model"] == "accounts/fireworks/models/glm-5p3"
     assert complete["preferred_model_provider"] == "fireworks_glm"
-    assert complete["preferred_model"] == "accounts/fireworks/models/glm-5p2"
+    assert complete["preferred_model"] == "accounts/fireworks/models/glm-5p3"
 
 
 @pytest.mark.asyncio
@@ -446,7 +446,7 @@ async def test_orchestrator_runtime_forces_final_text_when_tool_budget_exhausted
                     **base_task.input,
                     "cosmic_orchestrator_model": {
                         "provider": "fireworks_glm",
-                        "model": "accounts/fireworks/models/glm-5p2",
+                        "model": "accounts/fireworks/models/glm-5p3",
                     },
                 }
             }
@@ -517,7 +517,7 @@ async def test_orchestrator_runtime_falls_back_from_glm_to_kimi_for_images() -> 
                     **base_task.input,
                     "cosmic_orchestrator_model": {
                         "provider": "fireworks_glm",
-                        "model": "accounts/fireworks/models/glm-5p2",
+                        "model": "accounts/fireworks/models/glm-5p3",
                     },
                 },
                 "input_artifacts": [
@@ -540,14 +540,14 @@ async def test_orchestrator_runtime_falls_back_from_glm_to_kimi_for_images() -> 
     assert streamed_events[0]["model_provider"] == "fireworks_kimi"
     assert streamed_events[0]["model"] == "accounts/fireworks/models/kimi-k2p6"
     assert streamed_events[0]["preferred_model_provider"] == "fireworks_glm"
-    assert streamed_events[0]["preferred_model"] == "accounts/fireworks/models/glm-5p2"
+    assert streamed_events[0]["preferred_model"] == "accounts/fireworks/models/glm-5p3"
     assert streamed_events[0]["model_fallback_reason"] == "image_input"
     complete = next(event for event in streamed_events if event["type"] == "response.complete")
     assert complete["content"] == "I can inspect the image."
     assert complete["model_provider"] == "fireworks_kimi"
     assert complete["model"] == "accounts/fireworks/models/kimi-k2p6"
     assert complete["preferred_model_provider"] == "fireworks_glm"
-    assert complete["preferred_model"] == "accounts/fireworks/models/glm-5p2"
+    assert complete["preferred_model"] == "accounts/fireworks/models/glm-5p3"
     assert complete["metrics"]["effective_models"] == ["fireworks_kimi:accounts/fireworks/models/kimi-k2p6"]
 
 

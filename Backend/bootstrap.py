@@ -4841,7 +4841,7 @@ def build_service_env_overrides(
         orchestrator_existing.get("FIREWORKS_GLM_MODEL"),
         orchestrator_data.get("ORCHESTRATOR_FIREWORKS_GLM_MODEL"),
         orchestrator_data.get("FIREWORKS_GLM_MODEL"),
-        "accounts/fireworks/models/glm-5p2",
+        "accounts/fireworks/models/glm-5p3",
     )
     orchestrator_fireworks_vision_fallback_model = first_meaningful_value(
         orchestrator_external.get("ORCHESTRATOR_FIREWORKS_VISION_FALLBACK_MODEL"),
@@ -5041,7 +5041,7 @@ def build_service_env_overrides(
             "ORCHESTRATOR_FIREWORKS_KIMI_MODEL": orchestrator_fireworks_kimi_model
             or "accounts/fireworks/models/kimi-k2p6",
             "ORCHESTRATOR_FIREWORKS_GLM_MODEL": orchestrator_fireworks_glm_model
-            or "accounts/fireworks/models/glm-5p2",
+            or "accounts/fireworks/models/glm-5p3",
             "ORCHESTRATOR_FIREWORKS_VISION_FALLBACK_MODEL": orchestrator_fireworks_vision_fallback_model
             or orchestrator_fireworks_kimi_model
             or "accounts/fireworks/models/kimi-k2p6",
