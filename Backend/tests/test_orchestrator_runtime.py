@@ -3686,3 +3686,34 @@ async def test_collect_specialist_receipt_captures_real_gmail_draft_reply_shape(
         "body_preview": "Hi, following up.",
         "to": ["recipient@example.com"],
     }
+
+
+def test_stream_usage_merge_takes_running_maximum_not_sum() -> None:
+    """Providers stream cumulative usage chunks; the total is the last one.
+
+    GLM 5.3 Flash streams a usage object on many chunks. Summing them
+    inflated a single ~1M-context request to 174M prompt tokens and a $31
+    phantom cost. Within one response, per-field running maximum is the
+    honest total.
+    """
+    usage: dict[str, int] = {}
+    usage = OrchestratorRuntime._merge_stream_usage(usage, {"prompt_tokens": 90000, "completion_tokens": 10})
+    usage = OrchestratorRuntime._merge_stream_usage(usage, {"prompt_tokens": 120000, "completion_tokens": 900})
+    usage = OrchestratorRuntime._merge_stream_usage(usage, {"prompt_tokens": 130000, "completion_tokens": 1500, "cached_tokens": 60000})
+    assert usage == {"prompt_tokens": 130000, "completion_tokens": 1500, "cached_tokens": 60000}
+
+    # Anthropic style: message_start carries input, message_delta carries
+    # cumulative output - a per-field maximum keeps both.
+    usage = OrchestratorRuntime._merge_stream_usage({}, {"input_tokens": 19, "cache_read_input_tokens": 0})
+    usage = OrchestratorRuntime._merge_stream_usage(usage, {"output_tokens": 42})
+    assert usage["input_tokens"] == 19
+    assert usage["output_tokens"] == 42
+
+
+def test_cross_call_usage_totals_still_sum() -> None:
+    """Tool iterations are separate API calls; their totals must add up."""
+    total: dict[str, int] = {}
+    total = OrchestratorRuntime._merge_usage(total, {"prompt_tokens": 90000, "completion_tokens": 500})
+    total = OrchestratorRuntime._merge_usage(total, {"prompt_tokens": 95000, "completion_tokens": 300})
+    assert total["prompt_tokens"] == 185000
+    assert total["completion_tokens"] == 800

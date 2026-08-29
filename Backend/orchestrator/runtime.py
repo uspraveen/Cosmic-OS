@@ -620,7 +620,7 @@ class OrchestratorRuntime:
                             # ── message_start ───────────────────────────
                             if ptype == "message_start":
                                 msg_obj = payload.get("message", {})
-                                turn_usage = self._merge_usage(turn_usage, msg_obj.get("usage"))
+                                turn_usage = self._merge_stream_usage(turn_usage, msg_obj.get("usage"))
                                 # Fallback container capture from message_start
                                 _cont = msg_obj.get("container")
                                 if isinstance(_cont, dict):
@@ -632,7 +632,7 @@ class OrchestratorRuntime:
 
                             # ── message_delta ───────────────────────────
                             if ptype == "message_delta":
-                                turn_usage = self._merge_usage(turn_usage, payload.get("usage"))
+                                turn_usage = self._merge_stream_usage(turn_usage, payload.get("usage"))
                                 delta = payload.get("delta")
                                 if isinstance(delta, dict):
                                     turn_stop_reason = str(delta.get("stop_reason") or "").strip() or turn_stop_reason
@@ -1453,7 +1453,7 @@ class OrchestratorRuntime:
                 ):
                     usage_batch = self._extract_openai_usage(payload)
                     if usage_batch:
-                        turn_usage = self._merge_usage(turn_usage, usage_batch)
+                        turn_usage = self._merge_stream_usage(turn_usage, usage_batch)
                     choices = payload.get("choices")
                     if not isinstance(choices, list) or not choices:
                         continue
@@ -2356,7 +2356,7 @@ class OrchestratorRuntime:
                         parsed = json.loads(data_str)
                         if not isinstance(parsed, dict):
                             continue
-                        usage = self._merge_usage(usage, self._extract_openai_usage(parsed))
+                        usage = self._merge_stream_usage(usage, self._extract_openai_usage(parsed))
                         choices = parsed.get("choices")
                         if isinstance(choices, list) and choices:
                             yielded_any = True
@@ -2420,7 +2420,7 @@ class OrchestratorRuntime:
         ):
             usage_batch = self._extract_openai_usage(payload)
             if usage_batch:
-                usage = self._merge_usage(usage, usage_batch)
+                usage = self._merge_stream_usage(usage, usage_batch)
             choices = payload.get("choices")
             if not isinstance(choices, list) or not choices:
                 continue
@@ -4203,9 +4203,9 @@ class OrchestratorRuntime:
                                 if ptype == "message_start":
                                     message = payload.get("message")
                                     if isinstance(message, dict):
-                                        usage = self._merge_usage(usage, message.get("usage"))
+                                        usage = self._merge_stream_usage(usage, message.get("usage"))
                                 elif ptype == "message_delta":
-                                    usage = self._merge_usage(usage, payload.get("usage"))
+                                    usage = self._merge_stream_usage(usage, payload.get("usage"))
                         yield item
                 await self._record_internal_usage_event(
                     metered_call=metered_call,
@@ -4826,13 +4826,34 @@ class OrchestratorRuntime:
             return existing_text + "\n\n" + incoming_text
         return existing_text or incoming_text
 
-    def _merge_usage(self, existing: dict[str, Any], usage: Any) -> dict[str, Any]:
+    @staticmethod
+    def _merge_usage(existing: dict[str, Any], usage: Any) -> dict[str, Any]:
         if not isinstance(usage, dict):
             return existing
         merged = dict(existing)
         for key, value in usage.items():
             if isinstance(value, (int, float)):
                 merged[key] = merged.get(key, 0) + int(value)
+        return merged
+
+    @staticmethod
+    def _merge_stream_usage(existing: dict[str, Any], usage: Any) -> dict[str, Any]:
+        """Merge usage chunks from within ONE streamed response.
+
+        Usage fields on a stream are cumulative: providers either send a full
+        usage object on the final chunk or a running total on many chunks, so
+        the true value per field is the running maximum. Summing instead of
+        taking the maximum inflated turns whose provider streams usage on
+        every chunk (GLM 5.3 Flash reported ~180M prompt tokens for a single
+        ~1M-context request). Cross-response totals - one merge per completed
+        API call, e.g. tool iterations - still use _merge_usage, which sums.
+        """
+        if not isinstance(usage, dict):
+            return existing
+        merged = dict(existing)
+        for key, value in usage.items():
+            if isinstance(value, (int, float)):
+                merged[key] = max(merged.get(key, 0), int(value))
         return merged
 
     @staticmethod
