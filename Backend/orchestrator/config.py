@@ -296,7 +296,7 @@ class OrchestratorConfig:
                 min(2.0, _env_float("ORCHESTRATOR_FIREWORKS_TEMPERATURE", 0.6)),
             ),
             fireworks_reasoning_effort=_env_reasoning_effort(
-                "ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", "high"
+                "ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", "medium"
             ),
             local_code_execution_enabled=_env_bool("ORCHESTRATOR_CODE_SANDBOX_ENABLED", True),
             local_code_execution_timeout_sec=max(

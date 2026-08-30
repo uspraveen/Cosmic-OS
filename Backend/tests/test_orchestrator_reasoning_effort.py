@@ -8,7 +8,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from orchestrator.config import OrchestratorConfig
+from orchestrator.config import OrchestratorConfig, _env_reasoning_effort
 from orchestrator.runtime import OrchestratorRuntime
 from orchestrator.tools.executor import ToolExecutor
 from orchestrator.tools.registry import (
@@ -76,6 +76,19 @@ def _sse(chunks: list[bytes]) -> httpx.Response:
         headers={"content-type": "text/event-stream"},
         stream=SSEByteStream(chunks),
     )
+
+
+def test_env_reasoning_effort_parsing_and_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", raising=False)
+    assert _env_reasoning_effort("ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", "medium") == "medium"
+    monkeypatch.setenv("ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", "max")
+    assert _env_reasoning_effort("ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", "medium") == "max"
+    monkeypatch.setenv("ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", "4096")
+    assert _env_reasoning_effort("ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", "medium") == 4096
+    monkeypatch.setenv("ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", "bogus")
+    assert _env_reasoning_effort("ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", "medium") == "medium"
+    monkeypatch.delenv("ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", raising=False)
+    assert OrchestratorConfig.from_env().fireworks_reasoning_effort == "medium"
 
 
 def test_think_deeper_is_registered_as_local_parallel_safe_tool() -> None:
