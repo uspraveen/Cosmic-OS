@@ -1298,6 +1298,8 @@ class OrchestratorRuntime:
         )
         research_paths: set[str] = set()
         specialist_receipts: list[dict[str, Any]] = []
+        reasoning_effort_override: str | int | None = None
+        reasoning_escalations = 0
         preferred_provider = model_selection.preferred_provider
         preferred_model = model_selection.preferred_model
         effective_provider = model_selection.effective_provider
@@ -1358,6 +1360,11 @@ class OrchestratorRuntime:
                 iteration += 1
                 turn_stream_boundary_emitted = False
                 fireworks_requests += 1
+                current_reasoning_effort = (
+                    reasoning_effort_override
+                    if reasoning_effort_override is not None
+                    else self.config.fireworks_reasoning_effort
+                )
                 turn_selection = self._effective_fireworks_selection_for_images(
                     preferred_provider=preferred_provider,
                     preferred_model=preferred_model,
@@ -1505,8 +1512,10 @@ class OrchestratorRuntime:
                             "source": task.source,
                             "source_id": task.source_id,
                             "channel": channel,
+                            "reasoning_effort": current_reasoning_effort,
                         },
                     },
+                    reasoning_effort=current_reasoning_effort,
                 ):
                     usage_batch = self._extract_openai_usage(payload)
                     if usage_batch:
@@ -1653,7 +1662,22 @@ class OrchestratorRuntime:
 
                     for item, parsed_input, result_str in zip(normalized_tool_calls, parsed_inputs, result_strs):
                         tool_name = item["name"]
-                        if tool_name == "perplexity_research":
+                        if tool_name == "think_deeper":
+                            try:
+                                think_deeper_result = json.loads(result_str)
+                            except (TypeError, json.JSONDecodeError):
+                                think_deeper_result = {}
+                            if isinstance(think_deeper_result, dict) and not think_deeper_result.get("error"):
+                                new_effort = think_deeper_result.get("reasoning_effort")
+                                if isinstance(new_effort, bool):
+                                    new_effort = None
+                                if isinstance(new_effort, int):
+                                    reasoning_effort_override = max(256, min(32768, new_effort))
+                                    reasoning_escalations += 1
+                                elif isinstance(new_effort, str) and new_effort.strip():
+                                    reasoning_effort_override = str(new_effort).strip().lower()
+                                    reasoning_escalations += 1
+                        elif tool_name == "perplexity_research":
                             research_paths.add("perplexity_research")
                             self._collect_perplexity_sources(result_str, collected_sources)
                         elif tool_name in {"firecrawl_scrape", "firecrawl_extract", "firecrawl_recall_session"}:
@@ -1787,8 +1811,18 @@ class OrchestratorRuntime:
                                 "source_id": task.source_id,
                                 "channel": channel,
                                 "finalization": True,
+                                "reasoning_effort": (
+                                    reasoning_effort_override
+                                    if reasoning_effort_override is not None
+                                    else self.config.fireworks_reasoning_effort
+                                ),
                             },
                         },
+                        reasoning_effort=(
+                            reasoning_effort_override
+                            if reasoning_effort_override is not None
+                            else self.config.fireworks_reasoning_effort
+                        ),
                     )
                 except Exception:
                     logger.exception(
@@ -1869,6 +1903,12 @@ class OrchestratorRuntime:
                     "effective_models": sorted(effective_model_keys),
                     "max_request_context_chars": max_request_context_chars,
                     "max_request_message_count": max_request_message_count,
+                    "reasoning_effort": (
+                        reasoning_effort_override
+                        if reasoning_effort_override is not None
+                        else self.config.fireworks_reasoning_effort
+                    ),
+                    "reasoning_escalations": reasoning_escalations,
                 },
             }
             self.task_ledger.mark_completed(task.task_id, result=result_payload)
@@ -1897,6 +1937,12 @@ class OrchestratorRuntime:
                     "effective_models": sorted(effective_model_keys),
                     "max_request_context_chars": max_request_context_chars,
                     "max_request_message_count": max_request_message_count,
+                    "reasoning_effort": (
+                        reasoning_effort_override
+                        if reasoning_effort_override is not None
+                        else self.config.fireworks_reasoning_effort
+                    ),
+                    "reasoning_escalations": reasoning_escalations,
                     **cumulative_usage,
                 },
             }
@@ -2216,6 +2262,7 @@ class OrchestratorRuntime:
             "search the agent catalog and delegate to Alpha (`alpha.execute`) for project/VM work, or the relevant tabular/docs specialist for scoped data work. "
             "When current web information is needed, use COSMIC's research routes such as Perplexity, Firecrawl, X search, docs tools, and memory instead of claiming native web access. "
             "Do not say a capability is unavailable until you have considered the available COSMIC specialist/local tools."
+            " Your default reasoning budget is tuned for speed: answer directly for routine turns, and when you hit something genuinely hard — surprising tool results, tricky debugging, conflicting constraints — call `think_deeper` once to raise your thinking budget for the rest of the turn instead of writing long unstructured deliberation."
         )
         base = str(system_prompt or "").rstrip()
         return f"{base}\n\n{note}" if base else note
@@ -2366,6 +2413,7 @@ class OrchestratorRuntime:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         usage_context: dict[str, Any] | None,
+        reasoning_effort: str | int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         base_url = self.config.fireworks_base_url.rstrip("/")
         body: dict[str, Any] = {
@@ -2377,6 +2425,11 @@ class OrchestratorRuntime:
         }
         if self.config.fireworks_kimi_max_tokens is not None:
             body["max_tokens"] = self.config.fireworks_kimi_max_tokens
+        effective_reasoning_effort = (
+            reasoning_effort if reasoning_effort is not None else self.config.fireworks_reasoning_effort
+        )
+        if effective_reasoning_effort is not None and model_name == self.config.fireworks_glm_model:
+            body["reasoning_effort"] = effective_reasoning_effort
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
@@ -2461,6 +2514,7 @@ class OrchestratorRuntime:
         model_name: str,
         messages: list[dict[str, Any]],
         usage_context: dict[str, Any] | None,
+        reasoning_effort: str | int | None = None,
     ) -> tuple[str, dict[str, int]]:
         """One extra non-tool completion to force a text reply after a turn's
         tool-call budget is exhausted. Without this, a turn that spends every
@@ -2477,6 +2531,7 @@ class OrchestratorRuntime:
             messages=messages,
             tools=[],
             usage_context=usage_context,
+            reasoning_effort=reasoning_effort,
         ):
             usage_batch = self._extract_openai_usage(payload)
             if usage_batch:

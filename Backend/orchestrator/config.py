@@ -34,6 +34,20 @@ def _env_optional_positive_int(name: str) -> int | None:
     return value if value > 0 else None
 
 
+def _env_reasoning_effort(name: str, default: str | int) -> str | int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"low", "medium", "high", "max", "xhigh"}:
+        return normalized
+    try:
+        value = int(normalized)
+    except ValueError:
+        return default
+    return max(256, min(32768, value))
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None:
@@ -121,6 +135,14 @@ class OrchestratorConfig:
     fireworks_vision_fallback_model: str = "accounts/fireworks/models/kimi-k2p6"
     fireworks_kimi_max_tokens: int | None = None
     fireworks_kimi_temperature: float = 0.6
+    # Default reasoning budget for the GLM brain on the Fireworks path.
+    # Empirically on glm-5p3-flash (probed 2026-08-30): omitting the parameter
+    # runs the Max tier (~20s of hidden thinking per turn), "medium" still
+    # thinks heavily (~13s, ~4k reasoning chars), while "high" and "low"
+    # skip visible reasoning entirely (~1s). "high" is therefore the lowest
+    # effective effort of the high/medium pair. The model can raise it for
+    # the rest of a turn via the think_deeper tool.
+    fireworks_reasoning_effort: str | int = "high"
     local_code_execution_enabled: bool = True
     local_code_execution_timeout_sec: float = 45.0
     local_code_execution_allow_network: bool = False
@@ -269,6 +291,9 @@ class OrchestratorConfig:
             fireworks_kimi_temperature=max(
                 0.0,
                 min(2.0, _env_float("ORCHESTRATOR_FIREWORKS_TEMPERATURE", 0.6)),
+            ),
+            fireworks_reasoning_effort=_env_reasoning_effort(
+                "ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", "high"
             ),
             local_code_execution_enabled=_env_bool("ORCHESTRATOR_CODE_SANDBOX_ENABLED", True),
             local_code_execution_timeout_sec=max(

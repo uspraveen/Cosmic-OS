@@ -2164,6 +2164,76 @@ class ToolExecutor:
 
         return {"deleted": True, "cron_id": cron_id, "message": "Reminder deleted."}
 
+    # ── Reasoning Budget (meta-tool) ────────────────────────────
+
+    async def _think_deeper(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        """Validate a think_deeper call. Purely local: it never touches the
+        network or any store. The runtime loop reads `reasoning_effort` from
+        the returned JSON and applies it to the model requests that follow."""
+        del context
+        effort = tool_input.get("effort")
+        budget = tool_input.get("budget_tokens")
+        reason = str(tool_input.get("reason") or "").strip()
+        has_effort = effort is not None and str(effort).strip() != ""
+        has_budget = budget is not None and str(budget).strip() != ""
+        if not has_effort and not has_budget:
+            return {
+                "error": True,
+                "message": (
+                    "Provide either `effort` (one of: low, medium, high, max) or "
+                    "`budget_tokens` (integer between 256 and 32768)."
+                ),
+            }
+        if has_effort and has_budget:
+            return {
+                "error": True,
+                "message": "Pass either `effort` or `budget_tokens`, not both.",
+            }
+        if has_effort:
+            normalized = str(effort).strip().lower()
+            if normalized == "xhigh":
+                normalized = "max"
+            if normalized not in ("low", "medium", "high", "max"):
+                return {
+                    "error": True,
+                    "message": (
+                        f"Unknown effort level: {str(effort)[:40]!r}. "
+                        "Use one of: low, medium, high, max."
+                    ),
+                }
+            return {
+                "status": "ok",
+                "reasoning_effort": normalized,
+                "scope": "subsequent model calls in this turn",
+                "reason": reason[:300],
+            }
+        try:
+            budget_value = int(budget)
+        except (TypeError, ValueError):
+            return {
+                "error": True,
+                "message": "budget_tokens must be an integer between 256 and 32768.",
+            }
+        if budget_value < 256 or budget_value > 32768:
+            return {
+                "error": True,
+                "message": (
+                    f"budget_tokens must be between 256 and 32768 (got {budget_value}). "
+                    "Recommended range: 2048-8192."
+                ),
+            }
+        return {
+            "status": "ok",
+            "reasoning_effort": budget_value,
+            "scope": "subsequent model calls in this turn",
+            "reason": reason[:300],
+        }
+
     # ── Internal helpers ────────────────────────────────────────
 
     async def _dispatch_specialist_agent(

@@ -368,6 +368,16 @@ def _delete_event_automation_progress(tool_input: dict[str, Any]) -> str:
     return f"Removing event automation {automation_id}..." if automation_id else "Removing event automation..."
 
 
+def _think_deeper_progress(tool_input: dict[str, Any]) -> str:
+    effort = tool_input.get("effort")
+    budget = tool_input.get("budget_tokens")
+    if isinstance(budget, int) and not isinstance(budget, bool):
+        return f"Thinking deeper on the problem (reasoning budget: {budget} tokens)..."
+    if isinstance(effort, str) and effort.strip():
+        return f"Thinking deeper on the problem (reasoning effort: {effort.strip()})..."
+    return "Raising the reasoning budget for deeper thinking..."
+
+
 def _delete_reminder_progress(tool_input: dict[str, Any]) -> str:
     cron_id = str(tool_input.get("cron_id") or "").strip()
     return f"Removing reminder {cron_id}..." if cron_id else "Removing reminder..."
@@ -2339,6 +2349,59 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_delete_reminder_progress,
         handler_method="_delete_reminder",
     ),
+    ToolSpec(
+        name="think_deeper",
+        api_definition={
+            "name": "think_deeper",
+            "description": (
+                "Raise (or lower) your own reasoning budget for the rest of this turn. "
+                "COSMIC starts every turn with a lean, fast default thinking budget. When you hit "
+                "something genuinely hard — a surprising tool result, tricky debugging, subtle "
+                "multi-constraint planning, or a first answer that keeps coming out wrong — call this "
+                "once to let your NEXT model calls reason much longer before answering. Pass either "
+                "effort (a named level) or budget_tokens (a hard cap on thinking tokens), not both. "
+                "This is a compute-budget lever only: it does not fetch data, run code, or change any "
+                "tool. Use it sparingly — at most a couple of times per task, and never for routine "
+                "lookups, simple follow-ups, or questions you already know how to answer."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "effort": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "max"],
+                        "description": (
+                            "Named reasoning level for subsequent model calls in this turn. "
+                            "'max' enables the deepest thinking; 'high'/'low' answer fast with "
+                            "minimal hidden thinking; 'medium' is moderate."
+                        ),
+                    },
+                    "budget_tokens": {
+                        "type": "integer",
+                        "minimum": 256,
+                        "maximum": 32768,
+                        "description": (
+                            "Hard cap on hidden thinking tokens for the next model calls in this turn "
+                            "(recommended 2048-8192). Use this instead of `effort` when you want a precise budget."
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "One short sentence explaining why the current thinking budget is not enough.",
+                    },
+                },
+                "required": ["reason"],
+            },
+        },
+        group="thinking",
+        prompt_summary=(
+            "Raise or lower how much hidden thinking your next model calls may do when a problem turns out "
+            "harder than expected. Costs one cheap round trip; use sparingly."
+        ),
+        progress_builder=_think_deeper_progress,
+        handler_method="_think_deeper",
+        read_only=True,
+    ),
 )
 
 _TOOL_BY_NAME = {spec.name: spec for spec in _MODEL_TOOL_SPECS}
@@ -2355,6 +2418,7 @@ _GROUP_ORDER = (
     "history",
     "automations",
     "scheduling",
+    "thinking",
 )
 _GROUP_TITLES = {
     "web": "Web",
@@ -2369,6 +2433,7 @@ _GROUP_TITLES = {
     "history": "History",
     "automations": "Event Automations",
     "scheduling": "Scheduling",
+    "thinking": "Thinking",
 }
 
 
