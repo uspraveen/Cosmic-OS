@@ -9440,6 +9440,12 @@ class GatewayRuntime:
             self.active_task_channels.pop(task.task_id, None)
             if active_request is not None:
                 self.active_requests_by_task.pop(task.task_id, None)
+            logger.exception(
+                "gateway.orchestrator_stream_error request_id=%s task_id=%s error=%s",
+                request_id,
+                task.task_id,
+                str(exc),
+            )
             await send(
                 {
                     "type": "error",

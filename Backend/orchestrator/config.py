@@ -137,12 +137,15 @@ class OrchestratorConfig:
     fireworks_kimi_temperature: float = 0.6
     # Default reasoning budget for the GLM brain on the Fireworks path.
     # Empirically on glm-5p3-flash (probed 2026-08-30): omitting the parameter
-    # runs the Max tier (~20s of hidden thinking per turn), "medium" still
-    # thinks heavily (~13s, ~4k reasoning chars), while "high" and "low"
-    # skip visible reasoning entirely (~1s). "high" is therefore the lowest
-    # effective effort of the high/medium pair. The model can raise it for
-    # the rest of a turn via the think_deeper tool.
-    fireworks_reasoning_effort: str | int = "high"
+    # runs the Max tier (~20s of hidden thinking per turn). "high"/"low" skip
+    # visible reasoning (~1s) but on tool-heavy turns with large context the
+    # model can degenerate into a think-only completion with an EMPTY answer
+    # (observed live: 781 completion tokens of reasoning, zero content, and the
+    # gateway delivery then crashed). "medium" is the safe default: it reliably
+    # produces a visible answer (~13s on a hard prompt, far less on routine
+    # turns) and is still ~15x faster than the unbounded Max default. The model
+    # can raise it for the rest of a turn via the think_deeper tool.
+    fireworks_reasoning_effort: str | int = "medium"
     local_code_execution_enabled: bool = True
     local_code_execution_timeout_sec: float = 45.0
     local_code_execution_allow_network: bool = False

@@ -1789,6 +1789,14 @@ class OrchestratorRuntime:
                         ),
                     }
                 )
+
+            # Safety net: never ship an empty answer. This also fires when the
+            # model degenerates to a think-only completion (empty content but
+            # stop_reason == "stop", e.g. some GLM effort tiers), which the
+            # gateway delivery layer does not tolerate. Force one tools-less
+            # completion at a known-good reasoning level so the turn always ends
+            # with real visible text.
+            if not full_response_text.strip():
                 try:
                     finalize_text, finalize_usage = await self._finalize_openai_text_without_tools(
                         model_name=effective_model,
@@ -1811,22 +1819,14 @@ class OrchestratorRuntime:
                                 "source_id": task.source_id,
                                 "channel": channel,
                                 "finalization": True,
-                                "reasoning_effort": (
-                                    reasoning_effort_override
-                                    if reasoning_effort_override is not None
-                                    else self.config.fireworks_reasoning_effort
-                                ),
+                                "reasoning_effort": "medium",
                             },
                         },
-                        reasoning_effort=(
-                            reasoning_effort_override
-                            if reasoning_effort_override is not None
-                            else self.config.fireworks_reasoning_effort
-                        ),
+                        reasoning_effort="medium",
                     )
                 except Exception:
                     logger.exception(
-                        "orchestrator.max_iterations_finalization_failed task_id=%s",
+                        "orchestrator.finalization_failed task_id=%s",
                         task.task_id,
                     )
                     finalize_text = ""
@@ -1837,7 +1837,11 @@ class OrchestratorRuntime:
                     full_response_text = self._append_stream_text(full_response_text, finalize_text)
                     cumulative_usage = self._merge_usage(cumulative_usage, finalize_usage)
                     stop_reason = "end_turn"
-                    result_type = "max_iterations_finalized"
+                    result_type = (
+                        "max_iterations_finalized"
+                        if hit_max_iterations
+                        else "empty_response_finalized"
+                    )
 
             final_response_blocks: list[dict[str, Any]] | None = None
             if visual_coordinator is not None:
@@ -2262,7 +2266,7 @@ class OrchestratorRuntime:
             "search the agent catalog and delegate to Alpha (`alpha.execute`) for project/VM work, or the relevant tabular/docs specialist for scoped data work. "
             "When current web information is needed, use COSMIC's research routes such as Perplexity, Firecrawl, X search, docs tools, and memory instead of claiming native web access. "
             "Do not say a capability is unavailable until you have considered the available COSMIC specialist/local tools."
-            " Your default reasoning budget is tuned for speed: answer directly for routine turns, and when you hit something genuinely hard — surprising tool results, tricky debugging, conflicting constraints — call `think_deeper` once to raise your thinking budget for the rest of the turn instead of writing long unstructured deliberation."
+            " Your default reasoning budget is lean. Answer directly for routine turns, and when you hit something genuinely hard — surprising tool results, tricky debugging, conflicting constraints — call `think_deeper` once to raise your reasoning budget for the rest of the turn instead of writing long unstructured deliberation."
         )
         base = str(system_prompt or "").rstrip()
         return f"{base}\n\n{note}" if base else note

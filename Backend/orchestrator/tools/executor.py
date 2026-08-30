@@ -2185,7 +2185,7 @@ class ToolExecutor:
             return {
                 "error": True,
                 "message": (
-                    "Provide either `effort` (one of: low, medium, high, max) or "
+                    "Provide either `effort` (one of: medium, max) or "
                     "`budget_tokens` (integer between 256 and 32768)."
                 ),
             }
@@ -2198,12 +2198,12 @@ class ToolExecutor:
             normalized = str(effort).strip().lower()
             if normalized == "xhigh":
                 normalized = "max"
-            if normalized not in ("low", "medium", "high", "max"):
+            if normalized not in ("medium", "max"):
                 return {
                     "error": True,
                     "message": (
                         f"Unknown effort level: {str(effort)[:40]!r}. "
-                        "Use one of: low, medium, high, max."
+                        "Use one of: medium, max."
                     ),
                 }
             return {

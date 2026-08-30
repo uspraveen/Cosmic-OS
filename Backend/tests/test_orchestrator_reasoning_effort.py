@@ -134,7 +134,16 @@ async def test_tool_executor_think_deeper_rejects_bad_level() -> None:
     executor = ToolExecutor()
     result = json.loads(await executor.execute("think_deeper", {"effort": "turbo", "reason": "x"}))
     assert result.get("error") is True
-    assert "low, medium, high, max" in result["message"]
+    assert "medium, max" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_think_deeper_rejects_risky_shallow_levels() -> None:
+    executor = ToolExecutor()
+    for shallow in ("low", "high"):
+        result = json.loads(await executor.execute("think_deeper", {"effort": shallow, "reason": "faster"}))
+        assert result.get("error") is True
+        assert "medium, max" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -188,9 +197,9 @@ async def test_glm_body_carries_default_reasoning_effort(tmp_path: Path) -> None
         rmtree(runtime_root, ignore_errors=True)
 
     assert len(request_bodies) >= 1
-    assert request_bodies[0]["reasoning_effort"] == "high"
+    assert request_bodies[0]["reasoning_effort"] == "medium"
     complete = next(e for e in streamed_events if e["type"] == "response.complete")
-    assert complete["metrics"]["reasoning_effort"] == "high"
+    assert complete["metrics"]["reasoning_effort"] == "medium"
     assert complete["metrics"]["reasoning_escalations"] == 0
 
 
@@ -242,7 +251,7 @@ async def test_think_deeper_escalation_applies_to_next_request(tmp_path: Path) -
         rmtree(tmp_path, ignore_errors=True)
 
     assert len(request_bodies) == 2
-    assert request_bodies[0]["reasoning_effort"] == "high"
+    assert request_bodies[0]["reasoning_effort"] == "medium"
     assert request_bodies[1]["reasoning_effort"] == 4096
     complete = next(e for e in streamed_events if e["type"] == "response.complete")
     assert complete["metrics"]["reasoning_effort"] == 4096
@@ -252,6 +261,61 @@ async def test_think_deeper_escalation_applies_to_next_request(tmp_path: Path) -
     ]
     assert len(tool_results) == 1
     assert "ok" in str(tool_results[0].get("result_preview") or "")
+
+
+@pytest.mark.asyncio
+async def test_empty_completion_triggers_finalization_safety_net(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "reasoning_empty"
+    request_bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/chat/completions"):
+            payload = json.loads(request.content.decode("utf-8"))
+            request_bodies.append(payload)
+            if len(request_bodies) == 1:
+                # Degenerate: model thinks then stops with no visible content.
+                return _sse(
+                    [
+                        b'data: {"choices":[{"delta":{"reasoning_content":"pondering..."},"finish_reason":null}]}\n\n',
+                        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":5,"total_tokens":55}}\n\n',
+                        b"data: [DONE]\n\n",
+                    ]
+                )
+            # The finalization call must be tools-less and use a safe effort.
+            assert "tools" not in payload
+            assert payload.get("reasoning_effort") == "medium"
+            return _sse(
+                [
+                    b'data: {"choices":[{"delta":{"content":"Recovered answer."},"finish_reason":null}]}\n\n',
+                    b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":4,"total_tokens":54}}\n\n',
+                    b"data: [DONE]\n\n",
+                ]
+            )
+        return httpx.Response(204)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="",
+        fireworks_api_key="fireworks-key",
+        task_ledger_db_path=runtime_root / "task_ledger.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    await runtime.start()
+    try:
+        task = _with_model_selection(
+            _signed_task("signing-secret"), "fireworks_glm", "accounts/fireworks/models/glm-5p3"
+        )
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+        rmtree(tmp_path, ignore_errors=True)
+
+    assert len(request_bodies) == 2
+    complete = next(e for e in streamed_events if e["type"] == "response.complete")
+    assert complete["content"] == "Recovered answer."
+    assert complete["result_type"] == "empty_response_finalized"
 
 
 @pytest.mark.asyncio
@@ -302,8 +366,8 @@ async def test_think_deeper_invalid_args_keep_default_effort(tmp_path: Path) -> 
         rmtree(runtime_root, ignore_errors=True)
 
     assert len(request_bodies) == 2
-    assert request_bodies[0]["reasoning_effort"] == "high"
-    assert request_bodies[1]["reasoning_effort"] == "high"
+    assert request_bodies[0]["reasoning_effort"] == "medium"
+    assert request_bodies[1]["reasoning_effort"] == "medium"
     complete = next(e for e in streamed_events if e["type"] == "response.complete")
     assert complete["content"] == "Answered anyway."
     assert complete["metrics"]["reasoning_escalations"] == 0
