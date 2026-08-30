@@ -9146,6 +9146,7 @@ class GatewayRuntime:
                 metadata={"gateway_delivery_status": delivery_status},
                 completed=self._safe_text(delivery_event.get("type"))
                 in {"response.complete", "task.failed", "task.cancelled", "error"},
+                execution_event=delivery_event,
             )
             await self._maybe_schedule_delivered_memory_ingest(
                 delivery_event,
@@ -16013,6 +16014,42 @@ class GatewayRuntime:
             "queued_for_approval",
         }
 
+    def _execution_identity_from_event(
+        self,
+        event: dict[str, Any] | None,
+        *,
+        route: str | None = None,
+    ) -> dict[str, str]:
+        payload = event if isinstance(event, dict) else {}
+        metrics = payload.get("metrics")
+        metric_payload = metrics if isinstance(metrics, dict) else {}
+        routing_route = (
+            self._safe_text(payload.get("routing_route"))
+            or self._safe_text(payload.get("route"))
+            or self._safe_text(route)
+            or "opus"
+        )
+        execution_route = self._safe_text(payload.get("execution_route")) or {
+            "opus": "orchestrator",
+            "haiku": "direct",
+            "perplexity": "research",
+        }.get(routing_route, routing_route)
+        identity = {
+            "routing_route": routing_route,
+            "execution_route": execution_route,
+            "model_provider": self._safe_text(payload.get("model_provider"))
+            or self._safe_text(metric_payload.get("model_provider")),
+            "model": self._safe_text(payload.get("model"))
+            or self._safe_text(metric_payload.get("model")),
+            "preferred_model_provider": self._safe_text(
+                payload.get("preferred_model_provider")
+            )
+            or self._safe_text(metric_payload.get("preferred_model_provider")),
+            "preferred_model": self._safe_text(payload.get("preferred_model"))
+            or self._safe_text(metric_payload.get("preferred_model")),
+        }
+        return {key: value for key, value in identity.items() if value}
+
     def _trace_request_event(
         self,
         *,
@@ -16034,6 +16071,7 @@ class GatewayRuntime:
         delivery: dict[str, Any] | None = None,
         completed: bool = False,
         metadata: dict[str, Any] | None = None,
+        execution_event: dict[str, Any] | None = None,
     ) -> None:
         normalized_request_id = self._safe_text(request_id)
         normalized_session_id = self._safe_text(session_id)
@@ -16044,12 +16082,23 @@ class GatewayRuntime:
             or not normalized_channel
         ):
             return
+        execution_identity = self._execution_identity_from_event(
+            execution_event,
+            route=route,
+        )
         try:
             self.request_trace_store.record_event(
                 request_id=normalized_request_id,
                 session_id=normalized_session_id,
                 channel=normalized_channel,
                 route=self._safe_text(route) or "opus",
+                execution_route=execution_identity.get("execution_route"),
+                model_provider=execution_identity.get("model_provider"),
+                model=execution_identity.get("model"),
+                preferred_model_provider=execution_identity.get(
+                    "preferred_model_provider"
+                ),
+                preferred_model=execution_identity.get("preferred_model"),
                 event_type=event_type,
                 stage=stage,
                 status=status,
@@ -19311,6 +19360,7 @@ class GatewayRuntime:
                     or self._safe_text(event.get("content")),
                     task_id=task_id,
                     completed=True,
+                    execution_event=event,
                 )
                 return
         if self._is_weekly_my_tools_review_event(event):
@@ -19348,6 +19398,7 @@ class GatewayRuntime:
                     or self._safe_text(event.get("content")),
                     task_id=task_id,
                     completed=True,
+                    execution_event=event,
                 )
                 return
         if self._is_gmail_surface_decision_event(event):
@@ -19385,6 +19436,7 @@ class GatewayRuntime:
                     or self._safe_text(event.get("content")),
                     task_id=task_id,
                     completed=True,
+                    execution_event=event,
                 )
                 return
         if request_id and task_id:
@@ -19409,6 +19461,7 @@ class GatewayRuntime:
                     title="Task bound to request",
                     detail=task_id,
                     task_id=task_id,
+                    execution_event=event,
                 )
         if event_type == "response.blocks.snapshot":
             event_channel = self._safe_text(event.get("channel")) or ""
@@ -19483,6 +19536,7 @@ class GatewayRuntime:
                     or "No meaningful My Tools update to surface.",
                     task_id=task_id,
                     completed=False,
+                    execution_event=event,
                 )
                 return
             if (
@@ -19530,6 +19584,7 @@ class GatewayRuntime:
                     or HEARTBEAT_SUPPRESS_TOKEN,
                     task_id=task_id,
                     completed=False,
+                    execution_event=event,
                 )
                 return
             if heartbeat_decision and heartbeat_decision["decision"] == "deliver":
@@ -19553,6 +19608,7 @@ class GatewayRuntime:
                         detail=self._safe_text(heartbeat_decision.get("reason")),
                         task_id=task_id,
                         completed=False,
+                        execution_event=event,
                     )
             gmail_surface_decision = (
                 self._parse_gmail_surface_decision(event)
@@ -19580,6 +19636,7 @@ class GatewayRuntime:
                     or "Orchestrator chose not to interrupt for this Gmail item.",
                     task_id=task_id,
                     completed=False,
+                    execution_event=event,
                 )
                 return
             if (
@@ -19620,6 +19677,7 @@ class GatewayRuntime:
                         detail=duplicate_summary,
                         task_id=task_id,
                         completed=False,
+                        execution_event=event,
                     )
                     return
             research_provenance = self._normalize_research_provenance(
@@ -19736,6 +19794,10 @@ class GatewayRuntime:
                 metadata={
                     "task_id": self._safe_text(event.get("task_id")),
                     "metrics": event.get("metrics"),
+                    **self._execution_identity_from_event(
+                        event,
+                        route=self._safe_text(event.get("route")) or "opus",
+                    ),
                     "thinking_text": self._safe_text(event.get("thinking_text")),
                     "source": self._safe_text(event.get("source")),
                     "source_id": self._safe_text(event.get("source_id")),
@@ -19886,6 +19948,7 @@ class GatewayRuntime:
                     "supporting_artifact_count": len(supporting_artifacts),
                     "response_block_count": len(response_blocks),
                 },
+                execution_event=event,
             )
             # Cross-channel sync: push the assistant response to connected realtime clients on other platforms.
             if event_channel and session_id:
@@ -19972,6 +20035,7 @@ class GatewayRuntime:
                 or None,
                 task_id=task_id,
                 completed=event_type in {"task.failed", "task.cancelled"},
+                execution_event=event,
             )
             push_title = (
                 "Task failed"

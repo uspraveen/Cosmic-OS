@@ -97,6 +97,10 @@ async def test_haiku_adapter_streams_thinking_and_text() -> None:
     assert sent_events[1]["content"] == "Answer body"
     assert sent_events[2]["type"] == "response.complete"
     assert sent_events[2]["route"] == "haiku"
+    assert sent_events[2]["routing_route"] == "haiku"
+    assert sent_events[2]["execution_route"] == "direct"
+    assert sent_events[2]["model_provider"] == "anthropic"
+    assert sent_events[2]["model"] == "claude-haiku-4-5"
     assert sent_events[2]["thinking_text"] == "Reasoning..."
     assert sent_events[2]["metrics"]["input_tokens"] == 42
     assert sent_events[2]["metrics"]["output_tokens"] == 9
@@ -111,6 +115,12 @@ async def test_haiku_adapter_streams_thinking_and_text() -> None:
             "content": "Answer body",
             "awaiting_reply": False,
             "metadata": {
+                "routing_route": "haiku",
+                "execution_route": "direct",
+                "model_provider": "anthropic",
+                "model": "claude-haiku-4-5",
+                "preferred_model_provider": "anthropic",
+                "preferred_model": "claude-haiku-4-5",
                 "thinking_text": "Reasoning...",
                 "stop_reason": "end_turn",
             },

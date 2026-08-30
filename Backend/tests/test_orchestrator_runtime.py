@@ -359,10 +359,16 @@ async def test_orchestrator_runtime_streams_fireworks_glm_text_path() -> None:
         rmtree(runtime_root, ignore_errors=True)
 
     assert streamed_events[0]["type"] == "task.created"
+    assert streamed_events[0]["route"] == "opus"
+    assert streamed_events[0]["routing_route"] == "opus"
+    assert streamed_events[0]["execution_route"] == "orchestrator"
     assert streamed_events[0]["model_provider"] == "fireworks_glm"
     assert streamed_events[0]["model"] == "accounts/fireworks/models/glm-5p3"
     complete = next(event for event in streamed_events if event["type"] == "response.complete")
     assert complete["content"] == "Hello from GLM."
+    assert complete["route"] == "opus"
+    assert complete["routing_route"] == "opus"
+    assert complete["execution_route"] == "orchestrator"
     assert complete["model_provider"] == "fireworks_glm"
     assert complete["model"] == "accounts/fireworks/models/glm-5p3"
     assert complete["preferred_model_provider"] == "fireworks_glm"

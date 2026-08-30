@@ -81,13 +81,28 @@ class PerplexityAdapter(LLMStreamProcessor):
             raise DirectRouteHandoff(result.handoff_route)
 
         sources = await source_task if source_task else self._normalize_sources(citations)
-        metadata = {"sources": sources} if sources else None
+        metadata: dict[str, Any] = {
+            "routing_route": "perplexity",
+            "execution_route": "research",
+            "model_provider": "perplexity",
+            "model": self.model,
+            "preferred_model_provider": "perplexity",
+            "preferred_model": self.model,
+        }
+        if sources:
+            metadata["sources"] = sources
         complete_payload = {
             "type": "response.complete",
             "request_id": request_id,
             "session_id": session_id,
             "content": result.content,
             "route": "perplexity",
+            "routing_route": "perplexity",
+            "execution_route": "research",
+            "model_provider": "perplexity",
+            "model": self.model,
+            "preferred_model_provider": "perplexity",
+            "preferred_model": self.model,
             "awaiting_reply": result.awaiting_reply,
             "metrics": {
                 **result.metrics,

@@ -117,9 +117,15 @@ class HaikuAdapter(LLMStreamProcessor):
         if result.handoff_route is not None:
             raise DirectRouteHandoff(result.handoff_route)
 
-        metadata: dict[str, Any] | None = None
+        metadata: dict[str, Any] = {
+            "routing_route": "haiku",
+            "execution_route": "direct",
+            "model_provider": "anthropic",
+            "model": self.model,
+            "preferred_model_provider": "anthropic",
+            "preferred_model": self.model,
+        }
         if thinking_text or stop_reason:
-            metadata = {}
             if thinking_text:
                 metadata["thinking_text"] = thinking_text
             if stop_reason:
@@ -132,6 +138,12 @@ class HaikuAdapter(LLMStreamProcessor):
                 "session_id": session_id,
                 "content": result.content,
                 "route": "haiku",
+                "routing_route": "haiku",
+                "execution_route": "direct",
+                "model_provider": "anthropic",
+                "model": self.model,
+                "preferred_model_provider": "anthropic",
+                "preferred_model": self.model,
                 "awaiting_reply": result.awaiting_reply,
                 "thinking_text": thinking_text,
                 "metrics": {

@@ -297,6 +297,12 @@ interface GatewayRequestTrace {
   session_id: string
   channel: string
   route: string
+  routing_route: string
+  execution_route: string | null
+  model_provider: string | null
+  model: string | null
+  preferred_model_provider: string | null
+  preferred_model: string | null
   source: string | null
   source_id: string | null
   task_id: string | null
@@ -1270,6 +1276,12 @@ function normalizeGatewayRequestTracePayload(raw: unknown): { sessionId: string 
       session_id: typeof row.session_id === 'string' && row.session_id.trim() ? row.session_id.trim() : sessionId || '',
       channel: String(row.channel || '').trim() || 'unknown',
       route: String(row.route || '').trim() || 'opus',
+      routing_route: String(row.routing_route || row.route || '').trim() || 'opus',
+      execution_route: typeof row.execution_route === 'string' && row.execution_route.trim() ? row.execution_route.trim() : null,
+      model_provider: typeof row.model_provider === 'string' && row.model_provider.trim() ? row.model_provider.trim() : null,
+      model: typeof row.model === 'string' && row.model.trim() ? row.model.trim() : null,
+      preferred_model_provider: typeof row.preferred_model_provider === 'string' && row.preferred_model_provider.trim() ? row.preferred_model_provider.trim() : null,
+      preferred_model: typeof row.preferred_model === 'string' && row.preferred_model.trim() ? row.preferred_model.trim() : null,
       source: typeof row.source === 'string' && row.source.trim() ? row.source.trim() : null,
       source_id: typeof row.source_id === 'string' && row.source_id.trim() ? row.source_id.trim() : null,
       task_id: typeof row.task_id === 'string' && row.task_id.trim() ? row.task_id.trim() : null,
@@ -8167,6 +8179,8 @@ export default function SpacesControlCenter({
                             <div className="spaces-session-trace-list">
                               {selectedSessionRequestTraces.map((trace) => {
                                 const deliveryStatus = typeof trace.delivery?.status === 'string' ? trace.delivery.status : ''
+                                const executedModel = [trace.model_provider, trace.model].filter(Boolean).join(':')
+                                const preferredModel = [trace.preferred_model_provider, trace.preferred_model].filter(Boolean).join(':')
                                 return (
                                   <article key={trace.request_id} className="spaces-session-trace-card">
                                     <header className="spaces-session-trace-head">
@@ -8183,7 +8197,12 @@ export default function SpacesControlCenter({
                                     </header>
                                     <div className="spaces-session-trace-meta">
                                       <span title={trace.request_id}>{trace.request_id}</span>
-                                      <span>{trace.route}</span>
+                                      <span>{trace.execution_route || 'unknown execution'}</span>
+                                      {executedModel ? <span title="Executed model">{executedModel}</span> : null}
+                                      <span title="Legacy routing lane">router {trace.routing_route}</span>
+                                      {preferredModel && preferredModel !== executedModel ? (
+                                        <span title="Preferred model before fallback">preferred {preferredModel}</span>
+                                      ) : null}
                                       <span>{trace.channel}</span>
                                       {trace.task_id ? <span title={trace.task_id}>task {trace.task_id}</span> : null}
                                       {trace.updated_at ? <span>{formatSessionAbsolute(trace.updated_at)}</span> : null}

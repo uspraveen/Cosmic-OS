@@ -453,6 +453,14 @@ class OrchestratorRuntime:
             "channel": channel,
             "source": task.source,
             "source_id": task.source_id,
+            # route is the legacy router lane, not the model that executed.
+            "route": "opus",
+            "routing_route": "opus",
+            "execution_route": "orchestrator",
+            "model_provider": orchestrator_provider,
+            "model": model_selection.effective_model,
+            "preferred_model_provider": model_selection.preferred_provider,
+            "preferred_model": model_selection.preferred_model,
         }
 
         created_event = {
@@ -536,6 +544,7 @@ class OrchestratorRuntime:
             container_captured = False
             container_reuse_turns = 0
             anthropic_requests = 0
+            effective_anthropic_model = model_selection.effective_model
             max_request_context_chars = 0
             max_request_message_count = 0
             saw_tool_loop = False
@@ -587,6 +596,9 @@ class OrchestratorRuntime:
                     reasoning_announced = False
                     responding_announced = False
                     server_tool_progress_emitted = False
+                    effective_anthropic_model = (
+                        turn_model_override or model_selection.effective_model
+                    )
 
                     stream_kwargs: dict[str, Any] = {
                         "system_prompt": system_prompt,
@@ -600,6 +612,12 @@ class OrchestratorRuntime:
                             "route": "opus",
                             "operation": usage_operation,
                             "metadata_json": {
+                                "routing_route": "opus",
+                                "execution_route": "orchestrator",
+                                "provider": orchestrator_provider,
+                                "model": effective_anthropic_model,
+                                "preferred_provider": model_selection.preferred_provider,
+                                "preferred_model": model_selection.preferred_model,
                                 "iteration": iteration,
                                 "source": task.source,
                                 "source_id": task.source_id,
@@ -1142,12 +1160,20 @@ class OrchestratorRuntime:
                 "result_type": result_type,
                 "awaiting_reply": awaiting_reply,
                 "thinking_text": full_reasoning_text,
+                "model_provider": orchestrator_provider,
+                "model": effective_anthropic_model,
+                "preferred_model_provider": model_selection.preferred_provider,
+                "preferred_model": model_selection.preferred_model,
                 "metrics": {
                     "rtt_ms": elapsed_ms,
                     "tool_iterations": iteration,
                     "anthropic_requests": anthropic_requests,
                     "container_captured": container_captured,
                     "container_reuse_turns": container_reuse_turns,
+                    "model_provider": orchestrator_provider,
+                    "model": effective_anthropic_model,
+                    "preferred_model_provider": model_selection.preferred_provider,
+                    "preferred_model": model_selection.preferred_model,
                     "max_request_context_chars": max_request_context_chars,
                     "max_request_message_count": max_request_message_count,
                     **cumulative_usage,
@@ -1170,14 +1196,36 @@ class OrchestratorRuntime:
             if final_response_blocks:
                 complete_event["response_blocks"] = final_response_blocks
             yield complete_event
-            yield {**ev, "type": "task.completed", "route": "opus", "status": "completed"}
+            yield {
+                **ev,
+                "type": "task.completed",
+                "route": "opus",
+                "status": "completed",
+                "model_provider": orchestrator_provider,
+                "model": effective_anthropic_model,
+                "preferred_model_provider": model_selection.preferred_provider,
+                "preferred_model": model_selection.preferred_model,
+            }
 
         except asyncio.CancelledError:
             run_state = self._active_runs.get(task.task_id)
             if run_state and run_state.cancel_requested:
                 message = run_state.cancel_message
                 self.task_ledger.mark_cancelled(task.task_id, message=message)
-                yield {**ev, "type": "task.cancelled", "route": "opus", "status": "cancelled", "message": message}
+                yield {
+                    **ev,
+                    "type": "task.cancelled",
+                    "route": "opus",
+                    "status": "cancelled",
+                    "message": message,
+                    "model_provider": orchestrator_provider,
+                    "model": locals().get(
+                        "effective_anthropic_model",
+                        model_selection.effective_model,
+                    ),
+                    "preferred_model_provider": model_selection.preferred_provider,
+                    "preferred_model": model_selection.preferred_model,
+                }
                 return
             self.task_ledger.mark_failed(
                 task.task_id,
@@ -1197,6 +1245,13 @@ class OrchestratorRuntime:
             self.task_ledger.mark_failed(task.task_id, code=code, message=message)
             yield {
                 **ev, "type": "task.failed", "route": "opus", "status": "failed",
+                "model_provider": orchestrator_provider,
+                "model": locals().get(
+                    "effective_anthropic_model",
+                    model_selection.effective_model,
+                ),
+                "preferred_model_provider": model_selection.preferred_provider,
+                "preferred_model": model_selection.preferred_model,
                 "error": {"code": code, "message": message, "retryable": retryable},
             }
         finally:
@@ -1440,6 +1495,8 @@ class OrchestratorRuntime:
                         "route": "opus",
                         "operation": usage_operation,
                         "metadata_json": {
+                            "routing_route": "opus",
+                            "execution_route": "orchestrator",
                             "provider": effective_provider,
                             "model": effective_model,
                             "preferred_provider": preferred_provider,
@@ -1719,6 +1776,8 @@ class OrchestratorRuntime:
                             "route": "opus",
                             "operation": usage_operation,
                             "metadata_json": {
+                                "routing_route": "opus",
+                                "execution_route": "orchestrator",
                                 "provider": effective_provider,
                                 "model": effective_model,
                                 "preferred_provider": preferred_provider,

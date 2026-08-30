@@ -12,6 +12,14 @@ _MAX_QUERY_EXCERPT_CHARS = 400
 _MAX_EVENT_DETAIL_CHARS = 800
 
 
+def _execution_route_for_routing_route(route: str) -> str:
+    return {
+        "opus": "orchestrator",
+        "haiku": "direct",
+        "perplexity": "research",
+    }.get(route, route or "unknown")
+
+
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"), default=str)
 
@@ -53,6 +61,11 @@ class RequestTraceStore:
                     session_id TEXT NOT NULL,
                     channel TEXT NOT NULL,
                     route TEXT NOT NULL,
+                    execution_route TEXT,
+                    model_provider TEXT,
+                    model TEXT,
+                    preferred_model_provider TEXT,
+                    preferred_model TEXT,
                     source TEXT,
                     source_id TEXT,
                     task_id TEXT,
@@ -75,6 +88,33 @@ class RequestTraceStore:
                     ON request_traces(status, updated_at DESC);
                 """
             )
+            existing_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(request_traces)").fetchall()
+            }
+            for column_name in (
+                "execution_route",
+                "model_provider",
+                "model",
+                "preferred_model_provider",
+                "preferred_model",
+            ):
+                if column_name not in existing_columns:
+                    connection.execute(
+                        f"ALTER TABLE request_traces ADD COLUMN {column_name} TEXT"
+                    )
+            connection.execute(
+                """
+                UPDATE request_traces
+                SET execution_route = CASE route
+                    WHEN 'opus' THEN 'orchestrator'
+                    WHEN 'haiku' THEN 'direct'
+                    WHEN 'perplexity' THEN 'research'
+                    ELSE route
+                END
+                WHERE execution_route IS NULL OR TRIM(execution_route) = ''
+                """
+            )
             connection.commit()
 
     def record_event(
@@ -84,6 +124,11 @@ class RequestTraceStore:
         session_id: str,
         channel: str,
         route: str,
+        execution_route: str | None = None,
+        model_provider: str | None = None,
+        model: str | None = None,
+        preferred_model_provider: str | None = None,
+        preferred_model: str | None = None,
         event_type: str,
         stage: str,
         status: str,
@@ -104,6 +149,10 @@ class RequestTraceStore:
         normalized_session_id = str(session_id or "").strip()
         normalized_channel = str(channel or "").strip()
         normalized_route = str(route or "").strip() or "opus"
+        normalized_execution_route = (
+            str(execution_route or "").strip()
+            or _execution_route_for_routing_route(normalized_route)
+        )
         normalized_event_type = str(event_type or "").strip()
         if not normalized_request_id or not normalized_session_id or not normalized_channel or not normalized_event_type:
             raise ValueError("request_id, session_id, channel, and event_type are required")
@@ -114,7 +163,8 @@ class RequestTraceStore:
             row = connection.execute(
                 """
                 SELECT events_json, created_at, task_id, source, source_id, user_query_excerpt,
-                       specialist_receipts_json, delivery_json, status
+                       specialist_receipts_json, delivery_json, status, execution_route,
+                       model_provider, model, preferred_model_provider, preferred_model
                 FROM request_traces
                 WHERE request_id = ?
                 LIMIT 1
@@ -132,7 +182,18 @@ class RequestTraceStore:
                 "stage": str(stage or "").strip() or normalized_event_type,
                 "status": str(status or "").strip() or "active",
                 "title": str(title or "").strip() or normalized_event_type,
+                "routing_route": normalized_route,
+                "execution_route": normalized_execution_route,
             }
+            event_model_identity = {
+                "model_provider": str(model_provider or "").strip(),
+                "model": str(model or "").strip(),
+                "preferred_model_provider": str(preferred_model_provider or "").strip(),
+                "preferred_model": str(preferred_model or "").strip(),
+            }
+            event_payload.update(
+                {key: value for key, value in event_model_identity.items() if value}
+            )
             truncated_detail = _truncate_text(detail, max_chars=_MAX_EVENT_DETAIL_CHARS)
             if truncated_detail:
                 event_payload["detail"] = truncated_detail
@@ -167,6 +228,27 @@ class RequestTraceStore:
             resolved_final_message = _truncate_text(final_message, max_chars=_MAX_EVENT_DETAIL_CHARS)
             created_at = row["created_at"] if row and row["created_at"] else now
 
+            def _resolve_identity(value: str | None, column_name: str) -> str | None:
+                normalized = str(value or "").strip()
+                if normalized:
+                    return normalized
+                return (
+                    str(row[column_name]).strip()
+                    if row and row[column_name]
+                    else None
+                )
+
+            resolved_model_provider = _resolve_identity(model_provider, "model_provider")
+            resolved_model = _resolve_identity(model, "model")
+            resolved_preferred_model_provider = _resolve_identity(
+                preferred_model_provider,
+                "preferred_model_provider",
+            )
+            resolved_preferred_model = _resolve_identity(
+                preferred_model,
+                "preferred_model",
+            )
+
             connection.execute(
                 """
                 INSERT INTO request_traces (
@@ -174,6 +256,11 @@ class RequestTraceStore:
                     session_id,
                     channel,
                     route,
+                    execution_route,
+                    model_provider,
+                    model,
+                    preferred_model_provider,
+                    preferred_model,
                     source,
                     source_id,
                     task_id,
@@ -188,11 +275,19 @@ class RequestTraceStore:
                     updated_at,
                     completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(request_id) DO UPDATE SET
                     session_id = excluded.session_id,
                     channel = excluded.channel,
                     route = excluded.route,
+                    execution_route = excluded.execution_route,
+                    model_provider = COALESCE(excluded.model_provider, request_traces.model_provider),
+                    model = COALESCE(excluded.model, request_traces.model),
+                    preferred_model_provider = COALESCE(
+                        excluded.preferred_model_provider,
+                        request_traces.preferred_model_provider
+                    ),
+                    preferred_model = COALESCE(excluded.preferred_model, request_traces.preferred_model),
                     source = excluded.source,
                     source_id = excluded.source_id,
                     task_id = excluded.task_id,
@@ -219,6 +314,11 @@ class RequestTraceStore:
                     normalized_session_id,
                     normalized_channel,
                     normalized_route,
+                    normalized_execution_route,
+                    resolved_model_provider,
+                    resolved_model,
+                    resolved_preferred_model_provider,
+                    resolved_preferred_model,
                     resolved_source,
                     resolved_source_id,
                     resolved_task_id,
@@ -243,7 +343,9 @@ class RequestTraceStore:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT request_id, session_id, channel, route, source, source_id, task_id,
+                SELECT request_id, session_id, channel, route, execution_route,
+                       model_provider, model, preferred_model_provider, preferred_model,
+                       source, source_id, task_id,
                        user_query_excerpt, status, final_event_type, final_message,
                        specialist_receipts_json, delivery_json, events_json,
                        created_at, updated_at, completed_at
@@ -263,7 +365,9 @@ class RequestTraceStore:
         with self._lock, self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT request_id, session_id, channel, route, source, source_id, task_id,
+                SELECT request_id, session_id, channel, route, execution_route,
+                       model_provider, model, preferred_model_provider, preferred_model,
+                       source, source_id, task_id,
                        user_query_excerpt, status, final_event_type, final_message,
                        specialist_receipts_json, delivery_json, events_json,
                        created_at, updated_at, completed_at
@@ -283,6 +387,12 @@ class RequestTraceStore:
             "session_id": row["session_id"],
             "channel": row["channel"],
             "route": row["route"],
+            "routing_route": row["route"],
+            "execution_route": row["execution_route"],
+            "model_provider": row["model_provider"],
+            "model": row["model"],
+            "preferred_model_provider": row["preferred_model_provider"],
+            "preferred_model": row["preferred_model"],
             "source": row["source"],
             "source_id": row["source_id"],
             "task_id": row["task_id"],

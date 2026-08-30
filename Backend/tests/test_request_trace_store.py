@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 from gateway.request_trace_store import RequestTraceStore
@@ -24,6 +25,11 @@ def test_request_trace_store_records_and_lists_session_traces(tmp_path: Path) ->
         session_id="sess_123",
         channel="desktop:desk_1",
         route="opus",
+        execution_route="orchestrator",
+        model_provider="fireworks_glm",
+        model="accounts/fireworks/models/glm-5p3",
+        preferred_model_provider="fireworks_glm",
+        preferred_model="accounts/fireworks/models/glm-5p3",
         event_type="response.complete",
         stage="response",
         status="completed",
@@ -40,6 +46,11 @@ def test_request_trace_store_records_and_lists_session_traces(tmp_path: Path) ->
     assert len(traces) == 1
     trace = traces[0]
     assert trace["request_id"] == "req_123"
+    assert trace["route"] == "opus"
+    assert trace["routing_route"] == "opus"
+    assert trace["execution_route"] == "orchestrator"
+    assert trace["model_provider"] == "fireworks_glm"
+    assert trace["model"] == "accounts/fireworks/models/glm-5p3"
     assert trace["task_id"] == "tsk_123"
     assert trace["status"] == "completed"
     assert trace["final_event_type"] == "response.complete"
@@ -48,6 +59,10 @@ def test_request_trace_store_records_and_lists_session_traces(tmp_path: Path) ->
     assert len(trace["events"]) == 2
     assert trace["events"][0]["event_type"] == "request.accepted"
     assert trace["events"][1]["event_type"] == "response.complete"
+    assert trace["events"][1]["routing_route"] == "opus"
+    assert trace["events"][1]["execution_route"] == "orchestrator"
+    assert trace["events"][1]["model_provider"] == "fireworks_glm"
+    assert trace["events"][1]["model"] == "accounts/fireworks/models/glm-5p3"
 
 
 def test_request_trace_store_does_not_let_later_housekeeping_event_downgrade_sent_status(
@@ -126,3 +141,62 @@ def test_request_trace_store_get_request_trace_returns_single_record(tmp_path: P
     assert trace["request_id"] == "req_single"
     assert trace["session_id"] == "sess_single"
     assert trace["events"][0]["stage"] == "email_preprocess"
+
+
+def test_request_trace_store_migrates_legacy_route_to_explicit_execution_route(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "request_traces.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE request_traces (
+                request_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                route TEXT NOT NULL,
+                source TEXT,
+                source_id TEXT,
+                task_id TEXT,
+                user_query_excerpt TEXT,
+                status TEXT NOT NULL,
+                final_event_type TEXT,
+                final_message TEXT,
+                specialist_receipts_json TEXT,
+                delivery_json TEXT,
+                events_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO request_traces (
+                request_id, session_id, channel, route, status, events_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "req_legacy",
+                "sess_legacy",
+                "desktop:legacy",
+                "opus",
+                "completed",
+                "[]",
+                "2026-08-29T00:00:00Z",
+                "2026-08-29T00:00:01Z",
+            ),
+        )
+
+    store = RequestTraceStore(db_path)
+    store.initialize()
+
+    trace = store.get_request_trace("req_legacy")
+    assert trace is not None
+    assert trace["route"] == "opus"
+    assert trace["routing_route"] == "opus"
+    assert trace["execution_route"] == "orchestrator"
+    assert trace["model_provider"] is None
+    assert trace["model"] is None
