@@ -2428,7 +2428,12 @@ class OrchestratorRuntime:
         effective_reasoning_effort = (
             reasoning_effort if reasoning_effort is not None else self.config.fireworks_reasoning_effort
         )
-        if effective_reasoning_effort is not None and model_name == self.config.fireworks_glm_model:
+        effective_reasoning_effort = (
+            reasoning_effort if reasoning_effort is not None else self.config.fireworks_reasoning_effort
+        )
+        # Scope: only the GLM brain (any glm-* variant). The Kimi vision
+        # fallback and other providers keep their native behavior untouched.
+        if effective_reasoning_effort is not None and "glm" in model_name.lower():
             body["reasoning_effort"] = effective_reasoning_effort
         if tools:
             body["tools"] = tools
