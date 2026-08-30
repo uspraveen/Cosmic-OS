@@ -2354,12 +2354,12 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "think_deeper",
             "description": (
-                "Raise (or lower) your own reasoning budget for the rest of this turn. "
-                "COSMIC starts every turn with a lean, fast default thinking budget. When you hit "
+                "Raise your own reasoning budget for the rest of this turn. "
+                "COSMIC starts every turn with a lean default thinking budget. When you hit "
                 "something genuinely hard — a surprising tool result, tricky debugging, subtle "
                 "multi-constraint planning, or a first answer that keeps coming out wrong — call this "
                 "once to let your NEXT model calls reason much longer before answering. Pass either "
-                "effort (a named level) or budget_tokens (a hard cap on thinking tokens), not both. "
+                "effort (a deeper level) or budget_tokens (a hard cap on thinking tokens), not both. "
                 "This is a compute-budget lever only: it does not fetch data, run code, or change any "
                 "tool. Use it sparingly — at most a couple of times per task, and never for routine "
                 "lookups, simple follow-ups, or questions you already know how to answer."
@@ -2369,11 +2369,10 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "properties": {
                     "effort": {
                         "type": "string",
-                        "enum": ["low", "medium", "high", "max"],
+                        "enum": ["medium", "max"],
                         "description": (
-                            "Named reasoning level for subsequent model calls in this turn. "
-                            "'max' enables the deepest thinking; 'high'/'low' answer fast with "
-                            "minimal hidden thinking; 'medium' is moderate."
+                            "Reasoning level for subsequent model calls in this turn. "
+                            "'medium' is the normal default; 'max' enables the deepest thinking."
                         ),
                     },
                     "budget_tokens": {
@@ -2395,7 +2394,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         },
         group="thinking",
         prompt_summary=(
-            "Raise or lower how much hidden thinking your next model calls may do when a problem turns out "
+            "Raise how much hidden thinking your next model calls may do when a problem turns out "
             "harder than expected. Costs one cheap round trip; use sparingly."
         ),
         progress_builder=_think_deeper_progress,
