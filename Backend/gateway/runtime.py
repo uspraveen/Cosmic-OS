@@ -16014,7 +16014,7 @@ class GatewayRuntime:
             "queued_for_approval",
         }
 
-    def _execution_identity_from_event(
+    def _dispatch_identity_from_event(
         self,
         event: dict[str, Any] | None,
         *,
@@ -16023,20 +16023,25 @@ class GatewayRuntime:
         payload = event if isinstance(event, dict) else {}
         metrics = payload.get("metrics")
         metric_payload = metrics if isinstance(metrics, dict) else {}
-        routing_route = (
-            self._safe_text(payload.get("routing_route"))
+        legacy_route = (
+            self._safe_text(payload.get("legacy_route"))
+            or self._safe_text(payload.get("routing_route"))
             or self._safe_text(payload.get("route"))
             or self._safe_text(route)
             or "opus"
         )
-        execution_route = self._safe_text(payload.get("execution_route")) or {
-            "opus": "orchestrator",
-            "haiku": "direct",
-            "perplexity": "research",
-        }.get(routing_route, routing_route)
+        dispatch_target = (
+            self._safe_text(payload.get("dispatch_target"))
+            or self._safe_text(payload.get("execution_route"))
+            or {
+                "opus": "orchestrator",
+                "haiku": "direct",
+                "perplexity": "research",
+            }.get(legacy_route, legacy_route)
+        )
         identity = {
-            "routing_route": routing_route,
-            "execution_route": execution_route,
+            "legacy_route": legacy_route,
+            "dispatch_target": dispatch_target,
             "model_provider": self._safe_text(payload.get("model_provider"))
             or self._safe_text(metric_payload.get("model_provider")),
             "model": self._safe_text(payload.get("model"))
@@ -16082,7 +16087,7 @@ class GatewayRuntime:
             or not normalized_channel
         ):
             return
-        execution_identity = self._execution_identity_from_event(
+        dispatch_identity = self._dispatch_identity_from_event(
             execution_event,
             route=route,
         )
@@ -16092,13 +16097,13 @@ class GatewayRuntime:
                 session_id=normalized_session_id,
                 channel=normalized_channel,
                 route=self._safe_text(route) or "opus",
-                execution_route=execution_identity.get("execution_route"),
-                model_provider=execution_identity.get("model_provider"),
-                model=execution_identity.get("model"),
-                preferred_model_provider=execution_identity.get(
+                dispatch_target=dispatch_identity.get("dispatch_target"),
+                model_provider=dispatch_identity.get("model_provider"),
+                model=dispatch_identity.get("model"),
+                preferred_model_provider=dispatch_identity.get(
                     "preferred_model_provider"
                 ),
-                preferred_model=execution_identity.get("preferred_model"),
+                preferred_model=dispatch_identity.get("preferred_model"),
                 event_type=event_type,
                 stage=stage,
                 status=status,
@@ -19794,7 +19799,7 @@ class GatewayRuntime:
                 metadata={
                     "task_id": self._safe_text(event.get("task_id")),
                     "metrics": event.get("metrics"),
-                    **self._execution_identity_from_event(
+                    **self._dispatch_identity_from_event(
                         event,
                         route=self._safe_text(event.get("route")) or "opus",
                     ),

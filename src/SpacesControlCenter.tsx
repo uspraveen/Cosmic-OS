@@ -297,8 +297,8 @@ interface GatewayRequestTrace {
   session_id: string
   channel: string
   route: string
-  routing_route: string
-  execution_route: string | null
+  legacy_route: string
+  dispatch_target: string | null
   model_provider: string | null
   model: string | null
   preferred_model_provider: string | null
@@ -1276,8 +1276,12 @@ function normalizeGatewayRequestTracePayload(raw: unknown): { sessionId: string 
       session_id: typeof row.session_id === 'string' && row.session_id.trim() ? row.session_id.trim() : sessionId || '',
       channel: String(row.channel || '').trim() || 'unknown',
       route: String(row.route || '').trim() || 'opus',
-      routing_route: String(row.routing_route || row.route || '').trim() || 'opus',
-      execution_route: typeof row.execution_route === 'string' && row.execution_route.trim() ? row.execution_route.trim() : null,
+      legacy_route: String(row.legacy_route || row.routing_route || row.route || '').trim() || 'opus',
+      dispatch_target: typeof row.dispatch_target === 'string' && row.dispatch_target.trim()
+        ? row.dispatch_target.trim()
+        : typeof row.execution_route === 'string' && row.execution_route.trim()
+          ? row.execution_route.trim()
+          : null,
       model_provider: typeof row.model_provider === 'string' && row.model_provider.trim() ? row.model_provider.trim() : null,
       model: typeof row.model === 'string' && row.model.trim() ? row.model.trim() : null,
       preferred_model_provider: typeof row.preferred_model_provider === 'string' && row.preferred_model_provider.trim() ? row.preferred_model_provider.trim() : null,
@@ -8197,9 +8201,9 @@ export default function SpacesControlCenter({
                                     </header>
                                     <div className="spaces-session-trace-meta">
                                       <span title={trace.request_id}>{trace.request_id}</span>
-                                      <span>{trace.execution_route || 'unknown execution'}</span>
+                                      <span>{trace.dispatch_target || 'unknown target'}</span>
                                       {executedModel ? <span title="Executed model">{executedModel}</span> : null}
-                                      <span title="Legacy routing lane">router {trace.routing_route}</span>
+                                      <span title="Legacy compatibility token">legacy {trace.legacy_route}</span>
                                       {preferredModel && preferredModel !== executedModel ? (
                                         <span title="Preferred model before fallback">preferred {preferredModel}</span>
                                       ) : null}

@@ -12,7 +12,7 @@ _MAX_QUERY_EXCERPT_CHARS = 400
 _MAX_EVENT_DETAIL_CHARS = 800
 
 
-def _execution_route_for_routing_route(route: str) -> str:
+def _dispatch_target_for_legacy_route(route: str) -> str:
     return {
         "opus": "orchestrator",
         "haiku": "direct",
@@ -61,6 +61,7 @@ class RequestTraceStore:
                     session_id TEXT NOT NULL,
                     channel TEXT NOT NULL,
                     route TEXT NOT NULL,
+                    dispatch_target TEXT,
                     execution_route TEXT,
                     model_provider TEXT,
                     model TEXT,
@@ -93,6 +94,7 @@ class RequestTraceStore:
                 for row in connection.execute("PRAGMA table_info(request_traces)").fetchall()
             }
             for column_name in (
+                "dispatch_target",
                 "execution_route",
                 "model_provider",
                 "model",
@@ -115,6 +117,21 @@ class RequestTraceStore:
                 WHERE execution_route IS NULL OR TRIM(execution_route) = ''
                 """
             )
+            connection.execute(
+                """
+                UPDATE request_traces
+                SET dispatch_target = COALESCE(
+                    NULLIF(TRIM(execution_route), ''),
+                    CASE route
+                        WHEN 'opus' THEN 'orchestrator'
+                        WHEN 'haiku' THEN 'direct'
+                        WHEN 'perplexity' THEN 'research'
+                        ELSE route
+                    END
+                )
+                WHERE dispatch_target IS NULL OR TRIM(dispatch_target) = ''
+                """
+            )
             connection.commit()
 
     def record_event(
@@ -124,6 +141,7 @@ class RequestTraceStore:
         session_id: str,
         channel: str,
         route: str,
+        dispatch_target: str | None = None,
         execution_route: str | None = None,
         model_provider: str | None = None,
         model: str | None = None,
@@ -149,9 +167,10 @@ class RequestTraceStore:
         normalized_session_id = str(session_id or "").strip()
         normalized_channel = str(channel or "").strip()
         normalized_route = str(route or "").strip() or "opus"
-        normalized_execution_route = (
-            str(execution_route or "").strip()
-            or _execution_route_for_routing_route(normalized_route)
+        normalized_dispatch_target = (
+            str(dispatch_target or "").strip()
+            or str(execution_route or "").strip()
+            or _dispatch_target_for_legacy_route(normalized_route)
         )
         normalized_event_type = str(event_type or "").strip()
         if not normalized_request_id or not normalized_session_id or not normalized_channel or not normalized_event_type:
@@ -163,7 +182,8 @@ class RequestTraceStore:
             row = connection.execute(
                 """
                 SELECT events_json, created_at, task_id, source, source_id, user_query_excerpt,
-                       specialist_receipts_json, delivery_json, status, execution_route,
+                       specialist_receipts_json, delivery_json, status, dispatch_target,
+                       execution_route,
                        model_provider, model, preferred_model_provider, preferred_model
                 FROM request_traces
                 WHERE request_id = ?
@@ -182,8 +202,8 @@ class RequestTraceStore:
                 "stage": str(stage or "").strip() or normalized_event_type,
                 "status": str(status or "").strip() or "active",
                 "title": str(title or "").strip() or normalized_event_type,
-                "routing_route": normalized_route,
-                "execution_route": normalized_execution_route,
+                "legacy_route": normalized_route,
+                "dispatch_target": normalized_dispatch_target,
             }
             event_model_identity = {
                 "model_provider": str(model_provider or "").strip(),
@@ -256,6 +276,7 @@ class RequestTraceStore:
                     session_id,
                     channel,
                     route,
+                    dispatch_target,
                     execution_route,
                     model_provider,
                     model,
@@ -275,11 +296,12 @@ class RequestTraceStore:
                     updated_at,
                     completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(request_id) DO UPDATE SET
                     session_id = excluded.session_id,
                     channel = excluded.channel,
                     route = excluded.route,
+                    dispatch_target = excluded.dispatch_target,
                     execution_route = excluded.execution_route,
                     model_provider = COALESCE(excluded.model_provider, request_traces.model_provider),
                     model = COALESCE(excluded.model, request_traces.model),
@@ -314,7 +336,8 @@ class RequestTraceStore:
                     normalized_session_id,
                     normalized_channel,
                     normalized_route,
-                    normalized_execution_route,
+                    normalized_dispatch_target,
+                    normalized_dispatch_target,
                     resolved_model_provider,
                     resolved_model,
                     resolved_preferred_model_provider,
@@ -343,7 +366,8 @@ class RequestTraceStore:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT request_id, session_id, channel, route, execution_route,
+                SELECT request_id, session_id, channel, route, dispatch_target,
+                       execution_route,
                        model_provider, model, preferred_model_provider, preferred_model,
                        source, source_id, task_id,
                        user_query_excerpt, status, final_event_type, final_message,
@@ -365,7 +389,8 @@ class RequestTraceStore:
         with self._lock, self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT request_id, session_id, channel, route, execution_route,
+                SELECT request_id, session_id, channel, route, dispatch_target,
+                       execution_route,
                        model_provider, model, preferred_model_provider, preferred_model,
                        source, source_id, task_id,
                        user_query_excerpt, status, final_event_type, final_message,
@@ -387,7 +412,8 @@ class RequestTraceStore:
             "session_id": row["session_id"],
             "channel": row["channel"],
             "route": row["route"],
-            "routing_route": row["route"],
+            "legacy_route": row["route"],
+            "dispatch_target": row["dispatch_target"],
             "execution_route": row["execution_route"],
             "model_provider": row["model_provider"],
             "model": row["model"],

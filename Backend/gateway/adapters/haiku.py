@@ -118,8 +118,8 @@ class HaikuAdapter(LLMStreamProcessor):
             raise DirectRouteHandoff(result.handoff_route)
 
         metadata: dict[str, Any] = {
-            "routing_route": "haiku",
-            "execution_route": "direct",
+            "legacy_route": "haiku",
+            "dispatch_target": "direct",
             "model_provider": "anthropic",
             "model": self.model,
             "preferred_model_provider": "anthropic",
@@ -138,8 +138,8 @@ class HaikuAdapter(LLMStreamProcessor):
                 "session_id": session_id,
                 "content": result.content,
                 "route": "haiku",
-                "routing_route": "haiku",
-                "execution_route": "direct",
+                "legacy_route": "haiku",
+                "dispatch_target": "direct",
                 "model_provider": "anthropic",
                 "model": self.model,
                 "preferred_model_provider": "anthropic",

@@ -82,8 +82,8 @@ class PerplexityAdapter(LLMStreamProcessor):
 
         sources = await source_task if source_task else self._normalize_sources(citations)
         metadata: dict[str, Any] = {
-            "routing_route": "perplexity",
-            "execution_route": "research",
+            "legacy_route": "perplexity",
+            "dispatch_target": "research",
             "model_provider": "perplexity",
             "model": self.model,
             "preferred_model_provider": "perplexity",
@@ -97,8 +97,8 @@ class PerplexityAdapter(LLMStreamProcessor):
             "session_id": session_id,
             "content": result.content,
             "route": "perplexity",
-            "routing_route": "perplexity",
-            "execution_route": "research",
+            "legacy_route": "perplexity",
+            "dispatch_target": "research",
             "model_provider": "perplexity",
             "model": self.model,
             "preferred_model_provider": "perplexity",

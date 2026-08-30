@@ -453,10 +453,10 @@ class OrchestratorRuntime:
             "channel": channel,
             "source": task.source,
             "source_id": task.source_id,
-            # route is the legacy router lane, not the model that executed.
+            # route is a legacy compatibility token, not an execution lane or model.
             "route": "opus",
-            "routing_route": "opus",
-            "execution_route": "orchestrator",
+            "legacy_route": "opus",
+            "dispatch_target": "orchestrator",
             "model_provider": orchestrator_provider,
             "model": model_selection.effective_model,
             "preferred_model_provider": model_selection.preferred_provider,
@@ -612,8 +612,8 @@ class OrchestratorRuntime:
                             "route": "opus",
                             "operation": usage_operation,
                             "metadata_json": {
-                                "routing_route": "opus",
-                                "execution_route": "orchestrator",
+                                "legacy_route": "opus",
+                                "dispatch_target": "orchestrator",
                                 "provider": orchestrator_provider,
                                 "model": effective_anthropic_model,
                                 "preferred_provider": model_selection.preferred_provider,
@@ -1495,8 +1495,8 @@ class OrchestratorRuntime:
                         "route": "opus",
                         "operation": usage_operation,
                         "metadata_json": {
-                            "routing_route": "opus",
-                            "execution_route": "orchestrator",
+                            "legacy_route": "opus",
+                            "dispatch_target": "orchestrator",
                             "provider": effective_provider,
                             "model": effective_model,
                             "preferred_provider": preferred_provider,
@@ -1776,8 +1776,8 @@ class OrchestratorRuntime:
                             "route": "opus",
                             "operation": usage_operation,
                             "metadata_json": {
-                                "routing_route": "opus",
-                                "execution_route": "orchestrator",
+                                "legacy_route": "opus",
+                                "dispatch_target": "orchestrator",
                                 "provider": effective_provider,
                                 "model": effective_model,
                                 "preferred_provider": preferred_provider,
