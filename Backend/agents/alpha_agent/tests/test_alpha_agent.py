@@ -290,7 +290,7 @@ def test_codex_runner_builds_workspace_write_exec_command(tmp_path: Path) -> Non
         paths=paths,
         prompt="Build the app",
         output_path=paths.artifacts / "codex-last-message.md",
-        model="gpt-5.5",
+        model="gpt-5.6-terra",
         reasoning_effort="high",
     )
     joined = " ".join(command)
@@ -301,7 +301,7 @@ def test_codex_runner_builds_workspace_write_exec_command(tmp_path: Path) -> Non
     assert "--sandbox workspace-write" in joined
     assert "--skip-git-repo-check" in joined
     assert "--output-last-message" in command
-    assert "gpt-5.5" in command
+    assert "gpt-5.6-terra" in command
     assert "-c" in command
     assert 'model_reasoning_effort="high"' in command
     assert command[-1] == "-"
@@ -373,12 +373,16 @@ def test_cursor_model_normalization_preserves_explicit_fast_variant() -> None:
     assert normalize_cursor_model("Composer 2.5") == "composer-2.5"
     assert normalize_cursor_model("composer-2.5-fast") == "composer-2.5-fast"
     assert normalize_cursor_model("auto") is None
-    assert normalize_cursor_model("Grok") == "cursor-grok-4.5-high"
-    assert normalize_cursor_model("Cursor Grok 4.5") == "cursor-grok-4.5-high"
-    assert normalize_cursor_model("cursor-grok-4.5") == "cursor-grok-4.5-high"
-    assert normalize_cursor_model("cursor-grok-4.5-high") == "cursor-grok-4.5-high"
-    assert normalize_cursor_model("cursor-grok-4.5-high-fast") == "cursor-grok-4.5-high-fast"
-    assert normalize_cursor_model("cursor-grok-4.5-medium") == "cursor-grok-4.5-medium"
+    assert normalize_cursor_model("Grok") == "cursor-grok-4.6-high"
+    assert normalize_cursor_model("Cursor Grok 4.6") == "cursor-grok-4.6-high"
+    assert normalize_cursor_model("cursor-grok-4.6") == "cursor-grok-4.6-high"
+    assert normalize_cursor_model("cursor-grok-4.6-high") == "cursor-grok-4.6-high"
+    assert normalize_cursor_model("cursor-grok-4.6-high-fast") == "cursor-grok-4.6-high-fast"
+    assert normalize_cursor_model("cursor-grok-4.6-medium") == "cursor-grok-4.6-medium"
+    # Saved 4.5 ids from before Cursor's upgrade migrate to 4.6.
+    assert normalize_cursor_model("cursor-grok-4.5-high") == "cursor-grok-4.6-high"
+    assert normalize_cursor_model("cursor-grok-4.5-high-fast") == "cursor-grok-4.6-high-fast"
+    assert normalize_cursor_model("cursor-grok-4.5-medium") == "cursor-grok-4.6-medium"
 
 
 def test_cursor_runner_detects_fast_model_mismatch(tmp_path: Path) -> None:
@@ -403,12 +407,12 @@ def test_cursor_runner_detects_fast_model_mismatch(tmp_path: Path) -> None:
         observed_model="Composer 2",
     )
     assert runner._model_mismatch(
-        requested_model="cursor-grok-4.5-high",
-        observed_model="Cursor Grok 4.5 Fast",
+        requested_model="cursor-grok-4.6-high",
+        observed_model="Cursor Grok 4.6 Fast",
     )
     assert not runner._model_mismatch(
-        requested_model="cursor-grok-4.5-high",
-        observed_model="Cursor Grok 4.5",
+        requested_model="cursor-grok-4.6-high",
+        observed_model="Cursor Grok 4.6",
     )
 
 
@@ -497,7 +501,7 @@ def test_alpha_execute_retries_dirty_cursor_before_any_cross_provider_fallback(t
     async def fetch_status(provider: str) -> dict[str, object]:
         return {
             "status": "authenticated",
-            "preferred_model": "composer-2.5" if provider == "cursor" else "gpt-5.1-codex",
+            "preferred_model": "composer-2.5" if provider == "cursor" else "gpt-5.6-terra",
             "cli": {"authenticated": True},
         }
 

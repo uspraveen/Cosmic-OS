@@ -8,13 +8,12 @@ type CodexApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
 type CodexReasoningEffort = 'auto' | 'low' | 'medium' | 'high' | 'xhigh'
 
 const MODEL_OPTIONS = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'gpt-5.5', label: 'GPT-5.5' },
-  { value: 'gpt-5.4', label: 'GPT-5.4' },
-  { value: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
-  { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
-  { value: 'gpt-5.2', label: 'GPT-5.2' },
+  { value: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+  { value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+  { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
 ]
+
+const DEFAULT_CODEX_MODEL = 'gpt-5.6-terra'
 
 const APPROVAL_MODES: Array<{ value: CodexApprovalMode; label: string; note: string }> = [
   { value: 'suggest', label: 'Suggest', note: 'Read and propose' },
@@ -99,7 +98,7 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
   const [authMode, setAuthMode] = useState<CodexAuthMode>('chatgpt')
   const [apiKeyDraft, setApiKeyDraft] = useState('')
   const [hasApiKey, setHasApiKey] = useState(false)
-  const [preferredModel, setPreferredModel] = useState('auto')
+  const [preferredModel, setPreferredModel] = useState(DEFAULT_CODEX_MODEL)
   const [reasoningEffort, setReasoningEffort] = useState<CodexReasoningEffort>('auto')
   const [approvalMode, setApprovalMode] = useState<CodexApprovalMode>('suggest')
   const [vmSyncEnabled, setVmSyncEnabled] = useState(true)
@@ -169,12 +168,12 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
   const applyGatewayStatus = (rawStatus: unknown) => {
     const status = (rawStatus && typeof rawStatus === 'object' ? rawStatus : {}) as CodexGatewayStatus
     const nextAuthMode = normalizeAuthMode(status.auth_mode)
-    const nextModel = String(status.preferred_model ?? 'auto').trim() || 'auto'
+    const nextModel = String(status.preferred_model ?? DEFAULT_CODEX_MODEL).trim() || DEFAULT_CODEX_MODEL
 
     setGatewayStatus(status)
     setAuthMode(nextAuthMode)
     setHasApiKey(Boolean(status.has_api_key))
-    setPreferredModel(MODEL_OPTIONS.some((option) => option.value === nextModel) ? nextModel : 'auto')
+    setPreferredModel(MODEL_OPTIONS.some((option) => option.value === nextModel) ? nextModel : DEFAULT_CODEX_MODEL)
     setReasoningEffort(normalizeReasoningEffort(status.reasoning_effort))
     setApprovalMode(normalizeApprovalMode(status.approval_mode))
     setVmSyncEnabled(status.vm_sync_enabled !== false)

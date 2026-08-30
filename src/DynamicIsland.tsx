@@ -636,8 +636,9 @@ export default function DynamicIsland({
     ],
   )
 
-  const shouldExpand =
-    searchActive ||
+  // Full carousel / notifications / settings — never driven by Cosmic overlay
+  // being open. Overlay-open uses the thin session island instead.
+  const needsFullIsland =
     (!suppressIslandHoverExpand && (hovered || internalHover)) ||
     showSettings ||
     isAnchored ||
@@ -647,17 +648,26 @@ export default function DynamicIsland({
     !!integrationToast ||
     !!authAttentionReminder ||
     !!selectedCalendarEvent ||
+    showMonthView ||
     voiceActive ||
     weatherAlertPeek ||
-    !!agentWorkPayload
+    (!!agentWorkPayload && !searchActive)
+  const sessionIslandActive = searchActive && !needsFullIsland
+  const shouldExpand = needsFullIsland || searchActive
   const [expanded, setExpanded] = useState(shouldExpand)
+  const fullIslandStaybackRef = useRef(false)
 
   useEffect(() => {
     let timer: NodeJS.Timeout
     if (shouldExpand) {
       setExpanded(true)
+      fullIslandStaybackRef.current = needsFullIsland
     } else {
-      const delayMs = staybackTime * 1000
+      // Session-only dismiss (hide Cosmic) collapses immediately so the 160px
+      // home slide does not flash. Stayback still applies after a real
+      // full-island interaction (hover, pin, notification, …).
+      const delayMs = fullIslandStaybackRef.current ? staybackTime * 1000 : 0
+      fullIslandStaybackRef.current = false
       if (delayMs > 0) {
         timer = setTimeout(() => { setExpanded(false) }, delayMs)
       } else {
@@ -665,7 +675,7 @@ export default function DynamicIsland({
       }
     }
     return () => clearTimeout(timer)
-  }, [shouldExpand, staybackTime])
+  }, [shouldExpand, needsFullIsland, staybackTime])
 
   const wasExpanded = useRef(expanded)
   useEffect(() => {
@@ -1578,6 +1588,7 @@ export default function DynamicIsland({
   const lastWheel = useRef(0)
   const onWheel = (e: React.WheelEvent) => {
     if (
+      sessionIslandActive ||
       showMonthView ||
       selectedCalendarEvent ||
       notificationEvent ||
@@ -1607,6 +1618,15 @@ export default function DynamicIsland({
       }
     }
   }
+
+  const renderSession = () => (
+    <div className="slide slide-session">
+      <div className="session-wordmark" aria-label="COSMIC">COSMIC</div>
+      <div className="session-time">
+        {now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+      </div>
+    </div>
+  )
 
   const renderHome = () => (
     <div className="slide slide-home">
@@ -2767,7 +2787,7 @@ export default function DynamicIsland({
   return (
     <>
       <div
-        className={`island ${expanded ? 'expanded' : ''} ${authAttentionReminder ? 'auth-attention-open' : ''} ${integrationToast ? `integration-open tone-${integrationToast.tone}` : ''} ${expanded && notificationIslandActive ? 'island-notification-slide' : ''} ${agentWorkPayload ? 'agent-work-active' : ''}`}
+        className={`island ${sessionIslandActive ? 'session' : expanded ? 'expanded' : ''} ${authAttentionReminder ? 'auth-attention-open' : ''} ${integrationToast ? `integration-open tone-${integrationToast.tone}` : ''} ${expanded && !sessionIslandActive && notificationIslandActive ? 'island-notification-slide' : ''} ${!sessionIslandActive && agentWorkPayload ? 'agent-work-active' : ''}`}
         onMouseEnter={() => {
           if (weatherAlertPeekRef.current && Date.now() >= peekUserCancelArmTimestampRef.current) {
             cancelWeatherPeekForUserHover()
@@ -2786,7 +2806,13 @@ export default function DynamicIsland({
       >
         {!expanded && <div className="notch"><div className="notch-bar" /></div>}
 
-        {expanded && (
+        {expanded && sessionIslandActive && (
+          <div className="island-content island-content-session">
+            {renderSession()}
+          </div>
+        )}
+
+        {expanded && !sessionIslandActive && (
           <>
             {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && !authAttentionReminder && !agentWorkPayload && (
               <>

@@ -12,6 +12,7 @@
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   border-radius: 0 0 16px 16px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
   box-shadow:
     0 0 0 0.5px rgba(255, 255, 255, 0.1),
     0 8px 24px rgba(0, 0, 0, 0.7);
@@ -30,6 +31,55 @@
   width: 540px;
   height: 160px;
   border-radius: 0 0 40px 40px;
+}
+
+/* Cosmic UI session — same width as the expanded island, thin strip.
+   Wordmark type matches mobile Chat header / .spaces-header-brand. */
+.island.session {
+  width: 540px;
+  height: 42px;
+  border-radius: 0 0 22px 22px;
+}
+
+.island.session .island-content,
+.island-content-session {
+  height: 100%;
+  padding: 0 22px;
+}
+
+.slide-session {
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.session-wordmark {
+  /* Matches mobile Chat header `.cosmicBrand` (ChatScreen.tsx): 17px, 6.5px
+     tracking, uppercase. Typeface is the Cosmic wordmark stack used by
+     .spaces-header-brand — Matter is the mobile family, Bahnschrift is the
+     desktop stand-in on Windows. */
+  color: #ffffff;
+  font-family: "Matter-Regular", "Bahnschrift", "Avenir Next Condensed", "Segoe UI Variable Display", "Helvetica Neue", Arial, sans-serif;
+  font-size: 17px;
+  font-weight: 400;
+  letter-spacing: 6.5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  line-height: 1;
+  text-shadow: 0 1px 14px rgba(255, 255, 255, 0.22);
+}
+
+.session-time {
+  flex: 0 0 auto;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.78);
+  line-height: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
 }
 
 /* Notch */

@@ -8,8 +8,8 @@ from typing import Any
 
 
 CURSOR_CLI_CONFIG_RELATIVE_PATH = Path(".cursor") / "cli-config.json"
-DEFAULT_CURSOR_MODEL = "cursor-grok-4.5-high"
-DEFAULT_CURSOR_MODEL_DISPLAY = "Cursor Grok 4.5"
+DEFAULT_CURSOR_MODEL = "cursor-grok-4.6-high"
+DEFAULT_CURSOR_MODEL_DISPLAY = "Cursor Grok 4.6"
 # Composer still uses an explicit Fast parameter; keep those models pinned to Standard.
 NON_FAST_CURSOR_MODELS = ("composer-2.5", "composer-2")
 FAST_PARAMETER = {"id": "fast", "value": "false"}

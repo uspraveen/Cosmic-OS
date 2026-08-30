@@ -41,9 +41,12 @@ body,
      (520px up to 800px, then it stops), and the composer inherits that ceiling
      so it can never end up wider than the answer above it. */
   --chat-surface-width: min(max(520px, 44vw), 800px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+  /* 200px clears the 160px expanded island. Session island is 42px; :has() below
+     drops this so the response panel can use the recovered height. */
+  --overlay-top-clearance: 200px;
 
   /* Safe Zones */
-  padding-top: 200px;
+  padding-top: var(--overlay-top-clearance);
   padding-bottom: 24px;
   gap: 10px;
 
@@ -58,7 +61,7 @@ body,
 
   will-change: opacity;
   z-index: 9000;
-  transition: justify-content 0.5s ease, background-color 0.4s ease, backdrop-filter 0.4s ease;
+  transition: justify-content 0.5s ease, background-color 0.4s ease, backdrop-filter 0.4s ease, padding-top 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .overlay.visible {
@@ -67,7 +70,11 @@ body,
   background: rgba(0, 0, 0, 0.2);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
-  transition: opacity 0.3s ease;
+  transition: opacity 0.3s ease, padding-top 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+#root:has(.island.session) .overlay.visible {
+  --overlay-top-clearance: 56px;
 }
 
 /* FOCUSED STATE */
@@ -98,7 +105,7 @@ body,
 .overlay.spaces-active {
   justify-content: center;
   padding-bottom: 0;
-  transition: background-color 0.4s ease, backdrop-filter 0.4s ease, opacity 0.3s ease;
+  transition: background-color 0.4s ease, backdrop-filter 0.4s ease, opacity 0.3s ease, padding-top 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 /* ========== RESPONSE CONTAINER ========== */
@@ -107,7 +114,7 @@ body,
      made this container look narrower on high-resolution monitors and wider on low-res ones. */
   width: min(max(520px, 44vw), calc(100vw - var(--task-rail-reserve, 0px) - 72px));
   max-width: min(max(520px, 44vw), calc(100vw - var(--task-rail-reserve, 0px) - 72px));
-  max-height: calc(100vh - 280px);
+  max-height: calc(100vh - var(--overlay-top-clearance) - 80px);
   flex: 1 1 auto;
   min-height: 0;
   margin-bottom: 0;
@@ -386,9 +393,9 @@ body,
 /* Wide mode is a density choice: the content column tracks the glass instead
    of sitting at a fixed cap inside it. Prose takes surface minus a constant
    240px of breathing room (~120px shoulders at any width), and artifacts —
-   code, consoles, tables, images — bleed the rest of the way to the padding,
-   so structure always spans the full inner width. Proportional on purpose:
-   the border never grows again as the display gets wider. */
+   code and tables — bleed the rest of the way to the padding. Session strips
+   and inline images stay on the reading column so they share both edges with
+   the reply. */
 .overlay.chat-wide .chat-response-content {
   --response-column: min(100%, max(580px, calc(var(--chat-surface-width) - 240px)));
   --artifact-bleed: 88px;
@@ -396,9 +403,7 @@ body,
 
 .overlay.chat-wide .chat-response-content .code-block,
 .overlay.chat-wide .chat-response-content .assistant-response-code-block,
-.overlay.chat-wide .chat-response-content .response-content table,
-.overlay.chat-wide .chat-response-content .alpha-agent-console,
-.overlay.chat-wide .chat-response-content .assistant-inline-image-card {
+.overlay.chat-wide .chat-response-content .response-content table {
   width: calc(100% + 2 * var(--artifact-bleed, 0px));
   max-width: none;
   margin-inline: calc(-1 * var(--artifact-bleed, 0px));
@@ -727,9 +732,8 @@ body,
 
 /* ========== SEARCH BAR (Unified Glass) ========== */
 .cosmic {
-  /* Proportional viewport sizing with one shared ceiling: the composer grows
-     with the viewport like the response panel does, but never past it — the
-     question box must never sit wider than the answer above it. */
+  /* Panel mode: 38vw bar under a 44vw card — the response sits a little wider.
+     Wide mode keeps that same 6vw shoulder instead of matching the panel. */
   width: min(max(460px, 38vw), var(--chat-surface-width));
   max-width: min(max(460px, 38vw), var(--chat-surface-width));
   display: flex;
@@ -738,7 +742,11 @@ body,
   transform: scale(0.96);
   will-change: transform, opacity;
   flex-shrink: 0;
+}
 
+.overlay.chat-wide .cosmic {
+  width: max(460px, calc(var(--chat-surface-width) - 6vw));
+  max-width: max(460px, calc(var(--chat-surface-width) - 6vw));
 }
 
 .cosmic.visible {

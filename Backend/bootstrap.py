@@ -3360,9 +3360,10 @@ def build_alpha_agent_env_rendered(
             "ALPHA_OPENCODE_HOME", "/var/lib/cosmic/alpha/homes/opencode"
         )
         or "/var/lib/cosmic/alpha/homes/opencode",
-        "ALPHA_CODEX_MODEL": pick_env("ALPHA_CODEX_MODEL", "") or "",
-        "ALPHA_CURSOR_MODEL": pick_env("ALPHA_CURSOR_MODEL", "cursor-grok-4.5-high")
-        or "cursor-grok-4.5-high",
+        "ALPHA_CODEX_MODEL": pick_env("ALPHA_CODEX_MODEL", "gpt-5.6-terra")
+        or "gpt-5.6-terra",
+        "ALPHA_CURSOR_MODEL": pick_env("ALPHA_CURSOR_MODEL", "cursor-grok-4.6-high")
+        or "cursor-grok-4.6-high",
         "ALPHA_OPENCODE_MODEL": pick_env("ALPHA_OPENCODE_MODEL", "mimo-v2.5-free")
         or "mimo-v2.5-free",
         "ALPHA_CODEX_SANDBOX": pick_env("ALPHA_CODEX_SANDBOX", "danger-full-access")

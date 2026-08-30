@@ -13,7 +13,7 @@ type CursorApprovalMode = 'suggest' | 'auto_edit' | 'full_auto'
 
 const MODEL_OPTIONS = [
   { value: 'auto', label: 'Auto', note: 'Use CLI config' },
-  { value: 'cursor-grok-4.5-high', label: 'Cursor Grok 4.5', note: 'High effort, not Fast' },
+  { value: 'cursor-grok-4.6-high', label: 'Cursor Grok 4.6', note: 'High effort, not Fast' },
   { value: 'composer-2.5', label: 'Composer 2.5', note: 'Standard, not Fast' },
   { value: 'gpt-5', label: 'GPT-5', note: 'Manual' },
   { value: 'claude-4-sonnet', label: 'Claude Sonnet', note: 'Manual' },
@@ -64,16 +64,25 @@ function normalizeCursorModelOption(value: unknown) {
   if ([
     'grok',
     'grok 4.5',
+    'grok 4.6',
     'grok4.5',
+    'grok4.6',
     'grok-4.5',
+    'grok-4.6',
     'grok-4.5-high',
+    'grok-4.6-high',
     'cursor grok',
     'cursor-grok',
     'cursor grok 4.5',
+    'cursor grok 4.6',
     'cursor-grok-4.5',
+    'cursor-grok-4.6',
     'cursor-grok-4.5-high',
+    'cursor-grok-4.6-high',
     'cursor grok 4.5 high',
-  ].includes(lowered)) return 'cursor-grok-4.5-high'
+    'cursor grok 4.6 high',
+  ].includes(lowered)) return 'cursor-grok-4.6-high'
+  if (lowered.startsWith('cursor-grok-4.5')) return lowered.replace('cursor-grok-4.5', 'cursor-grok-4.6')
   if ([
     'composer',
     'composer-2',

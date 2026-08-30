@@ -15,12 +15,8 @@ from .credentials.encryption import decrypt_token, encrypt_token_str
 PROVIDER_CODEX = "codex"
 PROVIDER_CURSOR = "cursor"
 PROVIDER_OPENCODE = "opencode"
-_CODEX_MODEL_ALIASES = {
-    "gpt-5.1-codex": "gpt-5.4",
-    "gpt-5.1-codex-mini": "gpt-5.4",
-    "gpt-5.3-codex-mini": "gpt-5.4",
-}
-_CODEX_MODELS = {"auto", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"}
+_CODEX_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+DEFAULT_CODEX_MODEL = "gpt-5.6-terra"
 _CURSOR_MODEL_ALIASES = {
     "composer": "composer-2.5",
     "composer normal": "composer-2.5",
@@ -37,17 +33,29 @@ _CURSOR_MODEL_ALIASES = {
     "composer-2.5-normal": "composer-2.5",
     "composer 2.5 normal": "composer-2.5",
     "normal composer 2.5": "composer-2.5",
-    # Cursor Grok 4.5 — High effort, not Fast (effort/fast are part of the CLI model id).
-    "grok": "cursor-grok-4.5-high",
-    "grok 4.5": "cursor-grok-4.5-high",
-    "grok4.5": "cursor-grok-4.5-high",
-    "grok-4.5": "cursor-grok-4.5-high",
-    "grok-4.5-high": "cursor-grok-4.5-high",
-    "cursor grok": "cursor-grok-4.5-high",
-    "cursor-grok": "cursor-grok-4.5-high",
-    "cursor grok 4.5": "cursor-grok-4.5-high",
-    "cursor-grok-4.5": "cursor-grok-4.5-high",
-    "cursor grok 4.5 high": "cursor-grok-4.5-high",
+    # Cursor Grok 4.6 — High effort, not Fast (effort/fast are part of the CLI model id).
+    # 4.5 spellings map to 4.6 so preferences saved before Cursor's upgrade keep working.
+    "grok": "cursor-grok-4.6-high",
+    "grok 4.5": "cursor-grok-4.6-high",
+    "grok 4.6": "cursor-grok-4.6-high",
+    "grok4.5": "cursor-grok-4.6-high",
+    "grok4.6": "cursor-grok-4.6-high",
+    "grok-4.5": "cursor-grok-4.6-high",
+    "grok-4.6": "cursor-grok-4.6-high",
+    "grok-4.5-high": "cursor-grok-4.6-high",
+    "grok-4.6-high": "cursor-grok-4.6-high",
+    "cursor grok": "cursor-grok-4.6-high",
+    "cursor-grok": "cursor-grok-4.6-high",
+    "cursor grok 4.5": "cursor-grok-4.6-high",
+    "cursor grok 4.6": "cursor-grok-4.6-high",
+    "cursor-grok-4.5": "cursor-grok-4.6-high",
+    "cursor-grok-4.6": "cursor-grok-4.6-high",
+    "cursor grok 4.5 high": "cursor-grok-4.6-high",
+    "cursor grok 4.6 high": "cursor-grok-4.6-high",
+    "cursor-grok-4.5-high": "cursor-grok-4.6-high",
+    "cursor-grok-4.6-high": "cursor-grok-4.6-high",
+    "cursor-grok-4.5-high-fast": "cursor-grok-4.6-high-fast",
+    "cursor-grok-4.5-medium": "cursor-grok-4.6-medium",
 }
 # OpenCode Zen model ids rotate weekly (models.dev + opencode.ai/zen/v1/models
 # feed), so this list is a curated seed for the default picker plus friendly
@@ -119,7 +127,7 @@ class AgentAuthStore:
             PROVIDER_CODEX,
             include_secret=include_secret,
             default_auth_mode="chatgpt",
-            default_preferred_model="auto",
+            default_preferred_model=DEFAULT_CODEX_MODEL,
         )
 
     def get_cursor(self, *, include_secret: bool = False) -> dict[str, Any]:
@@ -127,7 +135,7 @@ class AgentAuthStore:
             PROVIDER_CURSOR,
             include_secret=include_secret,
             default_auth_mode="oauth",
-            default_preferred_model="cursor-grok-4.5-high",
+            default_preferred_model="cursor-grok-4.6-high",
         )
 
     def _opencode_keys(self, *, include_secret: bool) -> dict[str, Any]:
@@ -633,6 +641,11 @@ class AgentAuthStore:
                 str(payload.get("preferred_model") or ""),
                 fallback=default_preferred_model,
             )
+        if provider == PROVIDER_CODEX:
+            payload["preferred_model"] = _normalize_codex_model(
+                str(payload.get("preferred_model") or ""),
+                fallback=default_preferred_model,
+            )
         if provider == PROVIDER_OPENCODE:
             payload["preferred_model"] = _normalize_opencode_model(
                 str(payload.get("preferred_model") or ""),
@@ -657,12 +670,13 @@ def _normalize_choice(value: str | None, *, allowed: set[str], fallback: str) ->
 
 
 def _normalize_codex_model(value: str | None, *, fallback: str) -> str:
-    normalized = str(value or "").strip()
-    if not normalized:
-        normalized = str(fallback or "").strip() or "auto"
-    normalized = normalized.lower()
-    normalized = _CODEX_MODEL_ALIASES.get(normalized, normalized)
-    return normalized if normalized in _CODEX_MODELS else "auto"
+    normalized = str(value or "").strip().lower()
+    if normalized in _CODEX_MODELS:
+        return normalized
+    fallback = str(fallback or "").strip().lower()
+    if fallback in _CODEX_MODELS:
+        return fallback
+    return DEFAULT_CODEX_MODEL
 
 
 def _normalize_cursor_model(value: str | None, *, fallback: str) -> str:

@@ -37,11 +37,11 @@ def test_cursor_cli_config_preserves_auth_and_pins_default_model(tmp_path) -> No
     assert path == config_path
     assert changed is True
     assert config["authInfo"] == {"accessToken": "keep-me"}
-    assert config["model"]["modelId"] == "cursor-grok-4.5-high"
-    assert config["model"]["displayName"] == "Cursor Grok 4.5"
-    assert config["model"]["displayNameShort"] == "Cursor Grok 4.5"
+    assert config["model"]["modelId"] == "cursor-grok-4.6-high"
+    assert config["model"]["displayName"] == "Cursor Grok 4.6"
+    assert config["model"]["displayNameShort"] == "Cursor Grok 4.6"
     assert config["selectedModel"] == {
-        "modelId": "cursor-grok-4.5-high",
+        "modelId": "cursor-grok-4.6-high",
         "parameters": [],
     }
     assert config["permissions"]["allow"] == ["Shell(ls)"]
@@ -55,10 +55,10 @@ def test_cursor_cli_config_creates_minimal_default_model_config(tmp_path) -> Non
     assert path.exists()
     assert changed is True
     assert config["version"] == 1
-    assert config["model"]["modelId"] == "cursor-grok-4.5-high"
-    assert config["model"]["displayName"] == "Cursor Grok 4.5"
+    assert config["model"]["modelId"] == "cursor-grok-4.6-high"
+    assert config["model"]["displayName"] == "Cursor Grok 4.6"
     assert config["selectedModel"] == {
-        "modelId": "cursor-grok-4.5-high",
+        "modelId": "cursor-grok-4.6-high",
         "parameters": [],
     }
     assert config["editor"] == {"vimMode": False}

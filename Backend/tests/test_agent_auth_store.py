@@ -29,9 +29,12 @@ def test_codex_auth_store_encrypts_api_key_and_returns_redacted_status() -> None
         store = AgentAuthStore(db_path)
         store.initialize()
 
+        initial = store.get_codex(include_secret=False)
+        assert initial["preferred_model"] == "gpt-5.6-terra"
+
         saved = store.save_codex(
             auth_mode="api_key",
-            preferred_model="gpt-5.3-codex",
+            preferred_model="gpt-5.6-sol",
             approval_mode="auto_edit",
             vm_sync_enabled=True,
             api_key="sk-test-secret-value",
@@ -40,10 +43,15 @@ def test_codex_auth_store_encrypts_api_key_and_returns_redacted_status() -> None
         )
 
         assert saved["auth_mode"] == "api_key"
-        assert saved["preferred_model"] == "gpt-5.3-codex"
+        assert saved["preferred_model"] == "gpt-5.6-sol"
         assert saved["approval_mode"] == "auto_edit"
         assert saved["has_api_key"] is True
         assert "api_key" not in saved
+
+        # Retired model ids (and anything unknown) keep the current valid
+        # selection instead of reaching the CLI.
+        unknown = store.save_codex(preferred_model="gpt-5.4")
+        assert unknown["preferred_model"] == "gpt-5.6-sol"
 
         with sqlite3.connect(db_path) as conn:
             row = conn.execute(
@@ -63,7 +71,7 @@ def test_codex_auth_store_logout_clears_secret_but_preserves_preferences() -> No
         store = AgentAuthStore(root / "credentials.db")
         store.save_codex(
             auth_mode="api_key",
-            preferred_model="gpt-5.4",
+            preferred_model="gpt-5.6-luna",
             approval_mode="full_auto",
             vm_sync_enabled=False,
             api_key="sk-test-secret-value",
@@ -77,7 +85,7 @@ def test_codex_auth_store_logout_clears_secret_but_preserves_preferences() -> No
         )
 
         assert cleared["auth_mode"] == "api_key"
-        assert cleared["preferred_model"] == "gpt-5.4"
+        assert cleared["preferred_model"] == "gpt-5.6-luna"
         assert cleared["approval_mode"] == "full_auto"
         assert cleared["vm_sync_enabled"] is False
         assert cleared["has_api_key"] is False
@@ -93,7 +101,7 @@ def test_cursor_auth_store_uses_oauth_without_api_key_secret() -> None:
         store.initialize()
 
         initial = store.get_cursor(include_secret=False)
-        assert initial["preferred_model"] == "cursor-grok-4.5-high"
+        assert initial["preferred_model"] == "cursor-grok-4.6-high"
 
         saved = store.save_cursor(
             preferred_model="Composer 2",
@@ -114,12 +122,16 @@ def test_cursor_auth_store_uses_oauth_without_api_key_secret() -> None:
         assert updated["preferred_model"] == "composer-2.5"
         assert updated["approval_mode"] == "full_auto"
 
-        grok = store.save_cursor(preferred_model="Grok 4.5")
-        assert grok["preferred_model"] == "cursor-grok-4.5-high"
+        grok = store.save_cursor(preferred_model="Grok 4.6")
+        assert grok["preferred_model"] == "cursor-grok-4.6-high"
+
+        # Ids saved before Cursor upgraded Grok 4.5 to 4.6 normalize to 4.6.
+        migrated = store.save_cursor(preferred_model="cursor-grok-4.5-high")
+        assert migrated["preferred_model"] == "cursor-grok-4.6-high"
 
         # Explicit Fast variant must not be rewritten to High.
-        grok_fast = store.save_cursor(preferred_model="cursor-grok-4.5-high-fast")
-        assert grok_fast["preferred_model"] == "cursor-grok-4.5-high-fast"
+        grok_fast = store.save_cursor(preferred_model="cursor-grok-4.6-high-fast")
+        assert grok_fast["preferred_model"] == "cursor-grok-4.6-high-fast"
 
         manual = store.save_cursor(preferred_model="gpt-5")
         assert manual["preferred_model"] == "gpt-5"

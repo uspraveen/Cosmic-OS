@@ -5340,12 +5340,14 @@ export default function App() {
       const overlay = searchState !== 'hidden' && !!el.closest('.overlay')
 
       const cronNotice = !!el.closest('.cron-result-shell')
-      const shouldHighlightIsland = island || settings || overlay
-      const isInteractive = shouldHighlightIsland || cronNotice
+      // Overlay must stay interactive for clicks, but must not count as
+      // island hover — otherwise Cosmic UI keeps the full home slide open.
+      const islandHover = island || settings
+      const isInteractive = islandHover || overlay || cronNotice
 
-      if (lastIsland !== shouldHighlightIsland) {
-        lastIsland = shouldHighlightIsland
-        setIsIslandHovered(shouldHighlightIsland)
+      if (lastIsland !== islandHover) {
+        lastIsland = islandHover
+        setIsIslandHovered(islandHover)
       }
       const shouldIgnore = !isInteractive
       if (lastIgnore === shouldIgnore) return

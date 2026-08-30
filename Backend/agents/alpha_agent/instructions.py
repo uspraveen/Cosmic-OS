@@ -409,7 +409,7 @@ def _cli_identity_line(cli: str) -> str:
     if cli == "cursor":
         return (
             "You are running as the **Cursor CLI** (`cursor-agent`). You have "
-            "the cursor-grok-4.5-high model (High effort, not Fast) and Cursor's "
+            "the cursor-grok-4.6-high model (High effort, not Fast) and Cursor's "
             "edit/diff tooling. Make use of patch-style edits where they fit."
         )
     if cli == "opencode":
