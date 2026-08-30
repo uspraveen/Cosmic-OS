@@ -5660,10 +5660,11 @@
 
 .cosmic-agents-provider-card {
   position: relative;
-  display: flex;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 16px;
-  padding: 18px 20px;
+  gap: 14px;
+  padding: 16px 18px;
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background:
@@ -5799,6 +5800,45 @@
   line-height: 1.4;
 }
 
+.cosmic-agents-provider-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.cosmic-agents-provider-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cosmic-agents-provider-head strong {
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  min-width: 0;
+}
+
+.cosmic-agents-provider-badges {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.cosmic-agents-provider-desc {
+  display: block;
+  font-size: 13px;
+  color: rgba(235, 235, 245, 0.58);
+  line-height: 1.42;
+}
+
 .cosmic-agents-provider-info {
   flex: 1;
   display: flex;
@@ -5840,21 +5880,21 @@
 }
 
 .cosmic-agents-provider-tag-slot.role {
-  width: 72px;
+  width: auto;
 }
 
 .cosmic-agents-provider-tag-slot.status {
-  width: 88px;
+  width: auto;
 }
 
 .cosmic-agents-provider-tag {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 24px;
-  padding: 0 10px;
+  height: 22px;
+  padding: 0 8px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 750;
   letter-spacing: 0.05em;
   text-transform: uppercase;

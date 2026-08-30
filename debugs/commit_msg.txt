@@ -1,0 +1,23 @@
+Stop summing usage chunks within one streamed response
+
+Usage fields on a stream are cumulative: providers send a full usage object
+on the final chunk, or a running total on many chunks. The orchestrator's
+merge summed every chunk it saw, which was invisible while Fireworks only
+sent usage once per stream - and became loud the day GLM 5.3 Flash became
+the default brain. Flash streams usage repeatedly, so a single ~1M-context
+request recorded ~174M prompt tokens and a ~$31 phantom cost (3 calls, $22.92
+of invented spend in the usage DB).
+
+Within one response, usage now merges per-field as a running maximum - the
+last cumulative value wins, and Anthropic's split reporting (input on
+message_start, cumulative output on message_delta) keeps both halves. Across
+responses - tool iterations, each a separate billed API call - totals still
+sum. Six within-response merge sites move to the max merge; the three
+cross-response sites keep the summing merge, and both are pinned by tests.
+
+Also surfaced by this audit, not fixed here:
+- The Anthropic account has been out of credits since Aug 28: every gateway
+  haiku call (daily rollover summaries, email-thread summaries, event
+  automation matching) fails HTTP 400. Needs a billing top-up.
+- cosmic-memory's usage logger records xAI graph-extraction tokens but never
+  estimates cost from specs, so those events log null cost.

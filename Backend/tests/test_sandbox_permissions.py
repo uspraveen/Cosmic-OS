@@ -32,12 +32,10 @@ def test_normalize_requested_capabilities_blocks_sensitive_paths() -> None:
     assert capabilities["allowed_hosts"] == ["example.com"]
 
 
-def test_capabilities_require_permission_when_network_or_host_paths() -> None:
-    caps = normalize_requested_capabilities({"network": True})
-    assert capabilities_require_permission(caps, settings_allow_network=False) is True
-    assert capabilities_require_permission(caps, settings_allow_network=True) is False
-    host_caps = normalize_requested_capabilities({"host_read_paths": ["/tmp"]})
-    assert capabilities_require_permission(host_caps, settings_allow_network=False) is True
+def test_capabilities_require_permission_only_for_writes() -> None:
+    assert capabilities_require_permission({"network": True}) is False
+    assert capabilities_require_permission({"host_read_paths": ["/tmp"]}) is False
+    assert capabilities_require_permission({"host_write_paths": ["/tmp"]}) is True
 
 
 def test_sandbox_permission_store_round_trip(tmp_path: Path) -> None:

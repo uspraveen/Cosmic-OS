@@ -590,21 +590,17 @@ export default function Settings({
                   <div className="cosmic-agents-provider-icon" aria-hidden="true">
                     <OpenCodeMark size={22} />
                   </div>
-                  <div className="cosmic-agents-provider-info">
-                    <div className="cosmic-agents-provider-title">
+                  <div className="cosmic-agents-provider-body">
+                    <div className="cosmic-agents-provider-head">
                       <strong>OpenCode</strong>
+                      <div className="cosmic-agents-provider-badges">
+                        <span className="cosmic-agents-provider-tag default">Default</span>
+                        <span className={`cosmic-agents-provider-tag ${alphaPreferredHarness === 'opencode' ? 'ready' : 'pending'}`}>
+                          {alphaPreferredHarness === 'opencode' ? 'Selected' : 'Available'}
+                        </span>
+                      </div>
                     </div>
-                    <span>Zen models with a live auto-refreshing catalog.</span>
-                  </div>
-                  <div className="cosmic-agents-provider-meta">
-                    <span className="cosmic-agents-provider-tag-slot role">
-                      <span className="cosmic-agents-provider-tag default">Default</span>
-                    </span>
-                    <span className="cosmic-agents-provider-tag-slot status">
-                      <span className={`cosmic-agents-provider-tag ${alphaPreferredHarness === 'opencode' ? 'ready' : 'pending'}`}>
-                        {alphaPreferredHarness === 'opencode' ? 'Selected' : 'Available'}
-                      </span>
-                    </span>
+                    <span className="cosmic-agents-provider-desc">Connect models with API keys from 15+ providers.</span>
                   </div>
                   <div className="cosmic-agents-provider-arrow" aria-hidden="true">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
@@ -615,19 +611,16 @@ export default function Settings({
                   <div className="cosmic-agents-provider-icon" aria-hidden="true">
                     <OpenAIMark size={22} />
                   </div>
-                  <div className="cosmic-agents-provider-info">
-                    <div className="cosmic-agents-provider-title">
+                  <div className="cosmic-agents-provider-body">
+                    <div className="cosmic-agents-provider-head">
                       <strong>Codex</strong>
+                      <div className="cosmic-agents-provider-badges">
+                        <span className={`cosmic-agents-provider-tag ${alphaPreferredHarness === 'codex' ? 'ready' : 'pending'}`}>
+                          {alphaPreferredHarness === 'codex' ? 'Selected' : 'Available'}
+                        </span>
+                      </div>
                     </div>
-                    <span>ChatGPT sign-in or OpenAI API key for the Alpha coding runner.</span>
-                  </div>
-                  <div className="cosmic-agents-provider-meta">
-                    <span className="cosmic-agents-provider-tag-slot role" aria-hidden="true" />
-                    <span className="cosmic-agents-provider-tag-slot status">
-                      <span className={`cosmic-agents-provider-tag ${alphaPreferredHarness === 'codex' ? 'ready' : 'pending'}`}>
-                        {alphaPreferredHarness === 'codex' ? 'Selected' : 'Available'}
-                      </span>
-                    </span>
+                    <span className="cosmic-agents-provider-desc">Connect to Codex using API or OAuth.</span>
                   </div>
                   <div className="cosmic-agents-provider-arrow" aria-hidden="true">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
@@ -638,19 +631,16 @@ export default function Settings({
                   <div className="cosmic-agents-provider-icon cursor" aria-hidden="true">
                     <CursorMark size={22} />
                   </div>
-                  <div className="cosmic-agents-provider-info">
-                    <div className="cosmic-agents-provider-title">
+                  <div className="cosmic-agents-provider-body">
+                    <div className="cosmic-agents-provider-head">
                       <strong>Cursor CLI</strong>
+                      <div className="cosmic-agents-provider-badges">
+                        <span className={`cosmic-agents-provider-tag ${alphaPreferredHarness === 'cursor' ? 'ready' : 'pending'}`}>
+                          {alphaPreferredHarness === 'cursor' ? 'Selected' : 'Available'}
+                        </span>
+                      </div>
                     </div>
-                    <span>Browser sign-in for the Cursor Agent runner on the VM.</span>
-                  </div>
-                  <div className="cosmic-agents-provider-meta">
-                    <span className="cosmic-agents-provider-tag-slot role" aria-hidden="true" />
-                    <span className="cosmic-agents-provider-tag-slot status">
-                      <span className={`cosmic-agents-provider-tag ${alphaPreferredHarness === 'cursor' ? 'ready' : 'pending'}`}>
-                        {alphaPreferredHarness === 'cursor' ? 'Selected' : 'Available'}
-                      </span>
-                    </span>
+                    <span className="cosmic-agents-provider-desc">Connect your Cursor account.</span>
                   </div>
                   <div className="cosmic-agents-provider-arrow" aria-hidden="true">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>

@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cosmic response type</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;500;600&family=Instrument+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=Literata:opsz,wght@7..72,400;7..72,600&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=Source+Sans+3:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #07080a;
+      --panel: rgba(16, 18, 22, 0.92);
+      --stroke: rgba(255, 255, 255, 0.08);
+      --text: rgba(255, 255, 255, 0.92);
+      --muted: rgba(235, 235, 245, 0.58);
+      --dim: rgba(235, 235, 245, 0.38);
+      --accent: #7acaff;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
+    }
+    body { padding: 40px 28px 80px; }
+    .wrap { max-width: 920px; margin: 0 auto; }
+    h1 { font-size: 24px; font-weight: 650; letter-spacing: -0.03em; margin: 0 0 8px; }
+    .lede { color: var(--muted); font-size: 14px; line-height: 1.5; margin: 0 0 22px; max-width: 62ch; }
+    .callout {
+      padding: 12px 14px;
+      border: 1px solid var(--stroke);
+      background: rgba(122, 202, 255, 0.06);
+      border-radius: 10px;
+      font-size: 13px;
+      line-height: 1.45;
+      color: var(--muted);
+      margin-bottom: 28px;
+    }
+    .callout strong { color: var(--text); font-weight: 600; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+    button.pill {
+      appearance: none;
+      border: 1px solid var(--stroke);
+      background: transparent;
+      color: var(--muted);
+      padding: 6px 11px;
+      border-radius: 999px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    button.pill.active {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text);
+      border-color: rgba(255, 255, 255, 0.16);
+    }
+    h2 { font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--dim); margin: 22px 0 10px; }
+    .note { color: var(--muted); font-size: 13px; line-height: 1.45; margin: 0 0 14px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .specimen {
+      padding: 18px;
+      border-radius: 12px;
+      border: 1px solid var(--stroke);
+      background: var(--panel);
+    }
+    .specimen.muted { background: rgba(255, 255, 255, 0.03); }
+    .kicker {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--dim);
+      margin-bottom: 12px;
+    }
+    .heading { font-weight: 600; letter-spacing: -0.02em; line-height: 1.25; margin: 0 0 10px; }
+    .body { font-weight: 400; line-height: 1.55; color: rgba(235, 235, 245, 0.78); margin: 0 0 10px; }
+    .detail { font-style: italic; line-height: 1.55; color: var(--dim); margin: 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--stroke); vertical-align: top; }
+    th { color: var(--dim); font-weight: 600; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
+    td.face { color: var(--text); font-weight: 500; white-space: nowrap; }
+    td.lane { color: var(--dim); text-transform: capitalize; }
+    td.verdict { color: var(--muted); }
+    .foot { margin-top: 22px; color: var(--dim); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Cosmic response type</h1>
+    <p class="lede">Chrome stays SF Pro / Segoe. This is only the model’s voice. Tiempos Text is the licensed original; Newsreader is the face you can ship.</p>
+    <div class="callout"><strong>Recommendation — Newsreader</strong> at 16px / 400 / 1.55. Same job as Tiempos: a briefing, not a settings panel. Not Inter, Geist, or the system UI font.</div>
+
+    <h2>Face</h2>
+    <div class="row" id="lanes"></div>
+    <div class="row" id="faces"></div>
+    <p class="note" id="note"></p>
+    <div id="hero"></div>
+
+    <h2>Against today</h2>
+    <p class="note">Same sentence. Left is Cosmic as it ships. Right is the face you selected.</p>
+    <div class="grid" id="compare"></div>
+
+    <h2>Why these, not others</h2>
+    <table>
+      <thead><tr><th>Face</th><th>Lane</th><th>Verdict</th></tr></thead>
+      <tbody id="table"></tbody>
+    </table>
+    <p class="foot">Tiempos Text (Klim) is not on Google Fonts, so Newsreader stands in. Code stays SF Mono — this page is prose only.</p>
+  </div>
+  <script>
+    const FACES = [
+      { id: "newsreader", name: "Newsreader", stack: '"Newsreader", Georgia, serif', lane: "serif", role: "Pick",
+        note: "Closest open stand-in for Tiempos Text. Optical sizes, cut for screens. This is the one I would ship.", size: 16, tracking: "0.002em" },
+      { id: "source-serif", name: "Source Serif 4", stack: '"Source Serif 4", Georgia, serif', lane: "serif", role: "Alt serif",
+        note: "Adobe’s screen serif. A little more bookish than Newsreader. Fine if you want quieter ink.", size: 16, tracking: "0.001em" },
+      { id: "literata", name: "Literata", stack: '"Literata", Georgia, serif', lane: "serif", role: "Reading",
+        note: "Designed for Google Play Books. Very comfortable, slightly soft. Feels like a reader, not a lab.", size: 16.5, tracking: "0" },
+      { id: "ibm-serif", name: "IBM Plex Serif", stack: '"IBM Plex Serif", Georgia, serif', lane: "serif", role: "Corporate",
+        note: "The lab-report serif. Competent, a bit IBM. I would not use it for Cosmic’s voice.", size: 16, tracking: "0" },
+      { id: "instrument-serif", name: "Instrument Serif", stack: '"Instrument Serif", Georgia, serif', lane: "serif", role: "Display",
+        note: "Beautiful in a heading. Too much character for 400 words of answer. Skip for body.", size: 17, tracking: "-0.01em" },
+      { id: "instrument-sans", name: "Instrument Sans", stack: '"Instrument Sans", "Segoe UI", sans-serif', lane: "sans", role: "Sans pick",
+        note: "If you refuse a serif. Humanist, not Inter. Still a choice, not a default.", size: 15.5, tracking: "-0.011em" },
+      { id: "source-sans", name: "Source Sans 3", stack: '"Source Sans 3", "Segoe UI", sans-serif', lane: "sans", role: "Quiet sans",
+        note: "Pairs with Source Serif 4. Neutral, readable, slightly forgettable — which can be a virtue.", size: 15.5, tracking: "0" },
+      { id: "ibm-sans", name: "IBM Plex Sans", stack: '"IBM Plex Sans", "Segoe UI", sans-serif', lane: "sans", role: "Engineer",
+        note: "Frontier-lab adjacent, but it reads as IBM Cloud. Wrong for a personal OS.", size: 15.5, tracking: "0" },
+      { id: "current", name: "Current UI", stack: '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif', lane: "ui", role: "Today",
+        note: "What Cosmic uses now for replies. Same face as Settings. The model sounds like the chrome.", size: 15, tracking: "0.01em" },
+    ];
+    const HEADING = "Monday, in order";
+    const BODY = "You have three things on Monday that actually matter: the 9:30 with Priya, the visa follow-up, and the draft sitting in Gmail. I’ll take the draft first — the other two don’t move until that’s gone.";
+    const DETAIL = "I already have the thread. I’ll tighten the ask, keep your voice, and leave it unsent until you look.";
+
+    let lane = "all";
+    let faceId = "newsreader";
+
+    function specimen(face, label, muted) {
+      return `<div class="specimen${muted ? " muted" : ""}">
+        <div class="kicker" style="font-family:${face.stack}">${label}</div>
+        <p class="heading" style="font-family:${face.stack};font-size:20px">${HEADING}</p>
+        <p class="body" style="font-family:${face.stack};font-size:${face.size}px;letter-spacing:${face.tracking}">${BODY}</p>
+        <p class="detail" style="font-family:${face.stack};font-size:${face.size}px;letter-spacing:${face.tracking}">${DETAIL}</p>
+      </div>`;
+    }
+
+    function render() {
+      const selected = FACES.find((f) => f.id === faceId);
+      const current = FACES.find((f) => f.id === "current");
+      const visible = FACES.filter((f) => lane === "all" || f.lane === lane);
+
+      document.getElementById("lanes").innerHTML = [
+        ["all", "All"], ["serif", "Serif"], ["sans", "Sans"], ["ui", "Current UI"],
+      ].map(([id, label]) => `<button class="pill${lane === id ? " active" : ""}" data-lane="${id}">${label}</button>`).join("");
+
+      document.getElementById("faces").innerHTML = visible.map((f) =>
+        `<button class="pill${f.id === faceId ? " active" : ""}" data-face="${f.id}">${f.name}</button>`
+      ).join("");
+
+      document.getElementById("note").textContent = selected.note;
+      document.getElementById("hero").innerHTML = specimen(selected, `${selected.size}px · ${selected.tracking} tracking · 1.55`);
+      document.getElementById("compare").innerHTML =
+        specimen(current, "Shipping now", true) + specimen(selected, selected.name);
+      document.getElementById("table").innerHTML = FACES.map((f) =>
+        `<tr><td class="face">${f.name}</td><td class="lane">${f.lane}</td><td class="verdict">${f.note}</td></tr>`
+      ).join("");
+    }
+
+    document.body.addEventListener("click", (event) => {
+      const laneBtn = event.target.closest("[data-lane]");
+      const faceBtn = event.target.closest("[data-face]");
+      if (laneBtn) { lane = laneBtn.getAttribute("data-lane"); render(); }
+      if (faceBtn) { faceId = faceBtn.getAttribute("data-face"); render(); }
+    });
+
+    render();
+  </script>
+</body>
+</html>

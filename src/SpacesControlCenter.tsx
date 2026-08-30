@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentPropsWithoutRef, CSSProperties, RefObject } from 'react'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
@@ -1455,7 +1455,10 @@ function summarizeCronCadence(expr: string): string {
   return text
 }
 
-const SESSION_MARKDOWN_REMARK = [remarkGfm, remarkMath]
+const SESSION_MARKDOWN_REMARK: ReactMarkdownOptions['remarkPlugins'] = [
+  remarkGfm,
+  [remarkMath, { singleDollarTextMath: false }],
+]
 const SESSION_MARKDOWN_REHYPE = [rehypeKatex]
 type MarkdownElementProps<Tag extends keyof HTMLElementTagNameMap> = ComponentPropsWithoutRef<Tag> & { node?: unknown }
 type MarkdownCodeProps = MarkdownElementProps<'code'> & { inline?: boolean }

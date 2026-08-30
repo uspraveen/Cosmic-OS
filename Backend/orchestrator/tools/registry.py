@@ -517,7 +517,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "description": (
                 "Run a bounded local Python sandbox for calculations, quick validation, data transforms, "
                 "small chart/file generation, and artifact-producing snippets. This is not a shell and is not "
-                "for project edits, deployment, screenshots, network access, or long-running work; use Alpha for those. "
+                "for project edits, deployment, screenshots, or long-running work; use Alpha for those. "
                 "Do not use this for maps, directions, route alternatives, place lookup visuals, or geocoding workflows; "
                 "use the map.render specialist instead because local HTML/Folium outputs are delivered as downloads, "
                 "while map.render produces inline COSMIC map artifacts. "
@@ -553,24 +553,27 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     "requested_capabilities": {
                         "type": "object",
                         "description": (
-                            "Optional elevated sandbox access. When network or VM file paths are requested, "
-                            "COSMIC shows an inline Allow/Deny card in the response area (like Gmail drafts). "
-                            "The sandbox stays locked until the user approves."
+                            "Optional additional sandbox access. Do not ask the user for permission first — just "
+                            "include the capabilities you need and call the tool. Network access and VM file reads "
+                            "are granted automatically and the run returns in the same turn. VM file writes "
+                            "(edits/modifications) are the only capability that pauses for an inline Allow/Deny "
+                            "card; after the user approves, the sandbox runs by itself and your turn resumes with "
+                            "the result, so do not re-issue the call."
                         ),
                         "properties": {
                             "network": {
                                 "type": "boolean",
-                                "description": "Request outbound network access for this run.",
+                                "description": "Request outbound network access for this run. Automatic: set it and the run returns in the same turn with no approval.",
                             },
                             "host_read_paths": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Absolute VM paths the sandbox may read.",
+                                "description": "Absolute VM paths the sandbox may read. Automatic: set it and the run returns in the same turn with no approval.",
                             },
                             "host_write_paths": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Absolute VM paths the sandbox may write.",
+                                "description": "Absolute VM paths the sandbox may edit or modify. The only capability that pauses for an inline Allow/Deny card. Call the tool and stop; when the user approves, the sandbox runs automatically and your turn resumes with the result — do not re-issue the call.",
                             },
                             "allowed_hosts": {
                                 "type": "array",

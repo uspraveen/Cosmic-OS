@@ -33,16 +33,13 @@ def normalize_requested_capabilities(raw: Any) -> dict[str, Any]:
     }
 
 
-def capabilities_require_permission(
-    capabilities: dict[str, Any],
-    *,
-    settings_allow_network: bool,
-) -> bool:
-    if capabilities.get("host_read_paths") or capabilities.get("host_write_paths"):
-        return True
-    if capabilities.get("network") and not settings_allow_network:
-        return True
-    return False
+def capabilities_require_permission(capabilities: dict[str, Any]) -> bool:
+    """Only VM file writes (edits/modifications) require user approval.
+
+    Reads and network access are granted automatically: they are non-destructive
+    and the sandbox still blocks process execution and path escapes entirely.
+    """
+    return bool(capabilities.get("host_write_paths"))
 
 
 def build_permission_summary(capabilities: dict[str, Any], *, description: str = "") -> str:

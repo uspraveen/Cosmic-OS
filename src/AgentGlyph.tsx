@@ -37,6 +37,7 @@ const line = (size: number, children: ReactNode) => (
     strokeWidth={1.85}
     strokeLinecap="round"
     strokeLinejoin="round"
+    preserveAspectRatio="xMidYMid meet"
     aria-hidden
   >
     {children}
@@ -45,9 +46,34 @@ const line = (size: number, children: ReactNode) => (
 
 /** A real logo, in its real colours. */
 const logo = (size: number, children: ReactNode) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+  <svg
+    className="agent-glyph-logo"
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="none"
+    preserveAspectRatio="xMidYMid meet"
+    aria-hidden
+  >
     {children}
   </svg>
+)
+
+/**
+ * Brand marks painted as an image so inherited CSS fill/stroke/color — from the
+ * blue Flow header button, from `currentColor`, from parent opacity — cannot
+ * retint them. Inline SVG presentation attributes lose to inherited CSS `fill`.
+ */
+const brandImage = (size: number, svg: string) => (
+  <img
+    className="agent-glyph-logo"
+    src={`data:image/svg+xml,${encodeURIComponent(svg)}`}
+    width={size}
+    height={size}
+    alt=""
+    draggable={false}
+  />
 )
 
 /* -- Product logos ------------------------------------------------------- */
@@ -72,19 +98,13 @@ const MarkYouTube = ({ size }: MarkProps) =>
     </>,
   )
 
-// The whole Gmail mark, not a red letter. The white envelope is half of what
-// makes it recognisable this small, and the Google colours are the other half.
+// Official 2020 Gmail mark (Wikimedia). No white overlay — at 16px that overlay
+// antialiases into gray and muddies every brand fill. Painted as an image so
+// the Flow header's blue `color` cannot inherit as SVG `fill`.
 const MarkGmail = ({ size }: MarkProps) =>
-  logo(
+  brandImage(
     size,
-    <>
-      <path d="M2.5 19.9h3V11.4L1 8v10.4a1.5 1.5 0 0 0 1.5 1.5Z" fill="#4285F4" />
-      <path d="M18.5 19.9h3a1.5 1.5 0 0 0 1.5-1.5V8l-4.5 3.4Z" fill="#34A853" />
-      <path d="M18.5 5.6v5.8L23 8V6.4c0-1.86-2.12-2.92-3.6-1.8Z" fill="#FBBC04" />
-      <path d="M5.5 11.4V5.6L12 10.5l6.5-4.9v5.8L12 16.3Z" fill="#FFFFFF" />
-      <path d="M1 6.4V8l4.5 3.4V5.6L4.6 4.6C3.12 3.48 1 4.54 1 6.4Z" fill="#C5221F" />
-      <path d="M5.5 5.6 12 10.5l6.5-4.9V4.5L12 9.4 5.5 4.5Z" fill="#EA4335" />
-    </>,
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="52 42 88 66"><path fill="#4285F4" d="M58 108h14V74L52 59v43c0 3.32 2.69 6 6 6"/><path fill="#34A853" d="M120 108h14c3.32 0 6-2.69 6-6V59l-20 15"/><path fill="#FBBC04" d="M120 48v26l20-15v-8c0-7.42-8.47-11.65-14.4-7.2"/><path fill="#EA4335" d="M72 74V48l24 18 24-18v26L96 92"/><path fill="#C5221F" d="M52 51v8l20 15V48l-5.6-4.2c-5.94-4.45-14.4-.22-14.4 7.2"/></svg>',
   )
 
 const GoogleDocPage = ({ body, fold }: { body: string; fold: string }) => (
@@ -227,15 +247,39 @@ const MarkImage = ({ size }: MarkProps) =>
     </>,
   )
 
+/** Stored facts and semantic memory — a small knowledge graph, not a database. */
 const MarkMemory = ({ size }: MarkProps) =>
   line(
     size,
     <>
-      <ellipse cx="12" cy="5.4" rx="8.4" ry="3.4" />
-      <path d="M3.6 5.4v6.4c0 1.9 3.8 3.4 8.4 3.4s8.4-1.5 8.4-3.4V5.4" />
-      <path d="M3.6 11.8v6.4c0 1.9 3.8 3.4 8.4 3.4s8.4-1.5 8.4-3.4v-6.4" />
+      <circle cx="12" cy="11.6" r="2.1" />
+      <circle cx="7.1" cy="16.8" r="1.55" />
+      <circle cx="16.9" cy="16.8" r="1.55" />
+      <circle cx="12" cy="6.1" r="1.55" />
+      <path d="M12 9.4v1" />
+      <path d="M10.4 13.1 8.3 15.2" />
+      <path d="M13.6 13.1 15.7 15.2" />
     </>,
   )
+
+/** Session history: open ring with a solid arrow — thick enough to read at 16px. */
+const MarkRecall = ({ size }: MarkProps) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2.5}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    preserveAspectRatio="xMidYMid meet"
+    aria-hidden
+  >
+    <path d="M17.55 7.4A7.2 7.2 0 1 1 6.45 7.4" />
+    <path fill="currentColor" stroke="none" d="M8.15 7.15 12 2.85l3.85 4.3Z" />
+  </svg>
+)
 
 const MarkCosmicBall = ({ size }: MarkProps) => (
   <img
@@ -247,6 +291,15 @@ const MarkCosmicBall = ({ size }: MarkProps) => (
     draggable={false}
   />
 )
+
+const MarkSchedule = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <circle cx="12" cy="12" r="8.4" />
+      <path d="M12 7.4v5l3.2 2.2" />
+    </>,
+  )
 
 const MarkCalendar = ({ size }: MarkProps) =>
   line(
@@ -281,6 +334,8 @@ const MARKS: Record<GlyphId, (props: MarkProps) => ReactNode> = {
   map: MarkMap,
   image: MarkImage,
   memory: MarkMemory,
+  recall: MarkRecall,
+  schedule: MarkSchedule,
   think: MarkCosmicBall,
   agent: MarkCosmicBall,
   cosmic: MarkCosmicBall,
@@ -300,6 +355,7 @@ const OPTICAL: Partial<Record<GlyphId, number>> = {
   gsheets: 1.16,
   firecrawl: 1.14,
   youtube: 1.06,
+  recall: 1.12,
   x: 0.94,
   think: 1,
   agent: 1,

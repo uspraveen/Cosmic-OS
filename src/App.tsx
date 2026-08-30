@@ -1,7 +1,7 @@
-import { ArrowDownToLine, CalendarDays, Check, ChevronDown, ChevronRight, Copy, Mail, Maximize2, Mic, Minimize2, Pencil, Save, Shield, Square, Terminal, X } from 'lucide-react'
+import { CalendarDays, Check, ChevronRight, Code2, Copy, Mail, Maximize2, Mic, Minimize2, Pencil, Save, Shield, Square, X } from 'lucide-react'
 import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
@@ -25,6 +25,7 @@ import {
   type AlphaConsoleAnchor,
 } from './alphaStreamLayout'
 import { appendStreamText, mergeCompletedStreamText } from './streamText'
+import { scrubAssistantProse } from './assistantProse'
 import { canAdoptTaskForActiveStream, canClaimActiveStreamSlot, extractEventStreamIds, isEventForActiveStream as isEventForActiveStreamIds, shouldBindToLastAssistantMessage } from './streamIdentity'
 import { groupRepliesWithTheirQuery } from './transcriptOrder'
 import { groupEmailThreads, stripEmailEnvelope, type EmailThreadUnit } from './emailThreads'
@@ -1852,11 +1853,11 @@ const AssistantFlowTimeline = memo(({
                 <AgentGlyph signal={signal} size={20} iconSize={18} active={isActive} />
                 <div className="assistant-flow-copy">
                   <div className="assistant-flow-title">
-                    <span>{stripActorPrefix(entry.label, signal)}</span>
+                    <span>{scrubAssistantProse(stripActorPrefix(entry.label, signal))}</span>
                     <DomainCluster domains={signal.domains} />
                   </div>
                   {entry.detail && entry.detail !== entry.label && (
-                    <div className="assistant-flow-detail">{entry.detail}</div>
+                    <div className="assistant-flow-detail">{scrubAssistantProse(entry.detail)}</div>
                   )}
                 </div>
               </div>
@@ -1870,11 +1871,11 @@ const AssistantFlowTimeline = memo(({
                         <AgentGlyph signal={childSignal} size={18} iconSize={16} active={childActive} />
                         <div className="assistant-flow-copy">
                           <div className="assistant-flow-title">
-                            <span>{stripActorPrefix(child.label, childSignal)}</span>
+                            <span>{scrubAssistantProse(stripActorPrefix(child.label, childSignal))}</span>
                             <DomainCluster domains={childSignal.domains} size={13} />
                           </div>
                           {child.detail && child.detail !== child.label && (
-                            <div className="assistant-flow-detail">{child.detail}</div>
+                            <div className="assistant-flow-detail">{scrubAssistantProse(child.detail)}</div>
                           )}
                         </div>
                       </div>
@@ -2044,21 +2045,10 @@ const buildAlphaConsoleView = (
 
 const formatAlphaProviderLabel = (provider?: string | null) => {
   const normalized = String(provider || '').trim().toLowerCase()
-  if (normalized === 'cursor') return 'Cursor CLI'
-  if (normalized === 'codex') return 'Codex CLI'
-  if (normalized === 'opencode') return 'OpenCode CLI'
-  return 'Alpha CLI'
-}
-
-const formatAlphaConsoleTime = (value?: string | null) => {
-  if (!value) {
-    return ''
-  }
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return ''
-  }
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  if (normalized === 'cursor') return 'Cursor'
+  if (normalized === 'codex') return 'Codex'
+  if (normalized === 'opencode') return 'OpenCode'
+  return 'Alpha'
 }
 
 const AlphaAgentConsole = ({
@@ -2159,16 +2149,20 @@ const AlphaAgentConsole = ({
   const statusLabel = view.status === 'running'
     ? 'Running'
     : view.status === 'completed'
-      ? 'Complete'
+      ? 'Done'
       : view.status === 'failed'
         ? 'Failed'
         : 'Stopped'
   const normalizedRequestId = String(requestId || '').trim()
   const normalizedTaskId = String(view.taskId || '').trim()
   const canStop = isRunning && Boolean(normalizedTaskId || normalizedRequestId)
+  const preview = latestLine
+    ? [latestLine.text, latestLine.detail].filter(Boolean).join(' — ')
+    : ''
+  const providerLabel = formatAlphaProviderLabel(view.provider)
 
   return (
-    <div className={`alpha-agent-console is-${view.status}`}>
+    <div className={`alpha-agent-console is-${view.status}${expanded ? ' is-open' : ''}`}>
       <div className="alpha-agent-console-head">
         <button
           type="button"
@@ -2182,34 +2176,35 @@ const AlphaAgentConsole = ({
             return next
           })}
           aria-expanded={expanded}
-          aria-label={expanded ? 'Collapse Alpha Agent console' : 'Expand Alpha Agent console'}
-          title={expanded ? 'Collapse Alpha Agent console' : 'Expand Alpha Agent console'}
+          aria-label={expanded ? `Collapse ${providerLabel} session` : `Expand ${providerLabel} session`}
         >
-          {expanded ? <ChevronDown size={15} strokeWidth={2.2} /> : <ChevronRight size={15} strokeWidth={2.2} />}
-        </button>
-        <div className="alpha-agent-console-title">
-          <span className="alpha-agent-console-icon" aria-hidden="true">
-            <Terminal size={15} strokeWidth={2.1} />
+          <ChevronRight className="alpha-agent-console-chevron" size={13} strokeWidth={2.2} aria-hidden />
+          <Code2 className="alpha-agent-console-mark" size={14} strokeWidth={2} aria-hidden />
+          <span className="alpha-agent-console-identity">
+            <span className="alpha-agent-console-name">{providerLabel}</span>
+            {!expanded && preview ? (
+              <span className="alpha-agent-console-preview">{preview}</span>
+            ) : null}
           </span>
-          <span>{formatAlphaProviderLabel(view.provider)}</span>
-        </div>
-        <div className="alpha-agent-console-meta">
-          <span className="alpha-agent-console-status">{statusLabel}</span>
-          {normalizedTaskId && <span className="alpha-agent-console-task">{normalizedTaskId}</span>}
-        </div>
-        <button
-          type="button"
-          className="alpha-agent-console-stop"
-          onClick={() => onStop({
-            requestId: normalizedRequestId || undefined,
-            taskId: normalizedTaskId || undefined,
-          })}
-          disabled={!canStop}
-          title={canStop ? 'Stop Alpha Agent' : 'Alpha Agent is not running'}
-          aria-label="Stop Alpha Agent"
-        >
-          <Square size={12} fill="currentColor" strokeWidth={2.2} />
+          <span className="alpha-agent-console-status">
+            {isRunning ? <span className="alpha-agent-console-pulse" aria-hidden /> : null}
+            {statusLabel}
+          </span>
         </button>
+        {canStop ? (
+          <button
+            type="button"
+            className="alpha-agent-console-stop"
+            onClick={() => onStop({
+              requestId: normalizedRequestId || undefined,
+              taskId: normalizedTaskId || undefined,
+            })}
+            title="Stop"
+            aria-label={`Stop ${providerLabel}`}
+          >
+            <Square size={10} fill="currentColor" strokeWidth={2.2} />
+          </button>
+        ) : null}
       </div>
 
       {expanded && (
@@ -2224,25 +2219,22 @@ const AlphaAgentConsole = ({
             onTouchStart={markUserScrollIntent}
             onScroll={updateTerminalPinState}
           >
-            {view.lines.map((entry) => {
-              return (
-                <div key={entry.id} className={`alpha-agent-terminal-line is-${entry.stream || 'stdout'}`}>
-                  <span className="alpha-agent-terminal-time">{formatAlphaConsoleTime(entry.createdAt)}</span>
-                  <span className="alpha-agent-terminal-prompt">$</span>
-                  <span className="alpha-agent-terminal-copy">
-                    <span>{entry.text}</span>
-                    {entry.detail && <span className="alpha-agent-terminal-detail">{entry.detail}</span>}
-                  </span>
-                </div>
-              )
-            })}
-            {isRunning && (
-              <div className="alpha-agent-terminal-line is-live">
-                <span className="alpha-agent-terminal-time">live</span>
-                <span className="alpha-agent-terminal-prompt">$</span>
+            {view.lines.map((entry, index) => (
+              <div
+                key={entry.id}
+                className={`alpha-agent-terminal-line is-${entry.stream || 'stdout'}${isRunning && index === view.lines.length - 1 ? ' is-live' : ''}`}
+              >
+                <span className="alpha-agent-terminal-tick" aria-hidden />
                 <span className="alpha-agent-terminal-copy">
-                  streaming {formatAlphaProviderLabel(view.provider).toLowerCase()} events
+                  <span>{entry.text}</span>
+                  {entry.detail && <span className="alpha-agent-terminal-detail">{entry.detail}</span>}
                 </span>
+              </div>
+            ))}
+            {isRunning && view.lines.length === 0 && (
+              <div className="alpha-agent-terminal-line is-live">
+                <span className="alpha-agent-terminal-tick" aria-hidden />
+                <span className="alpha-agent-terminal-copy" />
               </div>
             )}
           </div>
@@ -2251,10 +2243,9 @@ const AlphaAgentConsole = ({
               type="button"
               className="alpha-agent-terminal-bottom"
               onClick={() => scrollTerminalToBottom('smooth')}
-              aria-label="Jump to latest Alpha CLI output"
-              title="Jump to latest Alpha CLI output"
+              aria-label="Jump to latest output"
             >
-              <ArrowDownToLine size={14} strokeWidth={2.2} />
+              Latest
             </button>
           )}
         </div>
@@ -2569,13 +2560,18 @@ const assistantMarkdownComponents = {
 // Memoised because it is the single most expensive thing on the screen during
 // a stream: without this, every chunk re-parses the markdown of every message
 // in the transcript, not just the one that grew.
+const ASSISTANT_MARKDOWN_REMARK: ReactMarkdownOptions['remarkPlugins'] = [
+  remarkGfm,
+  [remarkMath, { singleDollarTextMath: false }],
+]
+
 const AssistantMarkdownBlock = memo(({ content }: { content: string }) => (
   <ReactMarkdown
-    remarkPlugins={[remarkGfm, remarkMath]}
+    remarkPlugins={ASSISTANT_MARKDOWN_REMARK}
     rehypePlugins={[rehypeKatex]}
     components={assistantMarkdownComponents}
   >
-    {content}
+    {scrubAssistantProse(content)}
   </ReactMarkdown>
 ))
 AssistantMarkdownBlock.displayName = 'AssistantMarkdownBlock'
@@ -7906,7 +7902,7 @@ export default function App() {
                                         {String(task.partialContent || '').trim() ? (
                                           <div className="task-background-preview">
                                             <ReactMarkdown
-                                              remarkPlugins={[remarkGfm, remarkMath]}
+                                              remarkPlugins={ASSISTANT_MARKDOWN_REMARK}
                                               rehypePlugins={[rehypeKatex]}
                                               components={assistantMarkdownComponents}
                                             >

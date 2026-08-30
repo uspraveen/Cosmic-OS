@@ -18,8 +18,8 @@ export type GlyphId =
   | 'youtube'
   | 'gmail'
   | 'firecrawl'
-  // Tinted functional marks -- a Google product, but drawn as its own glyph
-  // rather than a logo we would only approximate.
+  // Tinted functional marks -- drawn as their own glyph rather than a logo we
+  // would only approximate. Calendar and schedule stay neutral monoline marks.
   | 'calendar'
   | 'gdocs'
   | 'gsheets'
@@ -35,6 +35,8 @@ export type GlyphId =
   | 'map'
   | 'image'
   | 'memory'
+  | 'recall'
+  | 'schedule'
   | 'think'
   | 'agent'
   | 'cosmic'
@@ -74,7 +76,6 @@ const BRAND = {
   youtube: '#FF0033',
   gmail: '#EA4335',
   firecrawl: '#FF6A1F',
-  calendar: '#4285F4',
   gdocs: '#4285F4',
   gsheets: '#34A853',
   map: '#EA4335',
@@ -200,6 +201,7 @@ const AGENT_GLYPHS: Array<[string, GlyphId, string]> = [
   ['map', 'map', 'Maps'],
   ['image-generator', 'image', 'Images'],
   ['firecrawl', 'firecrawl', 'Firecrawl'],
+  ['scheduler', 'schedule', 'Schedule'],
   ['alpha-agent', 'terminal', 'Alpha agent'],
   ['orchestrator', 'cosmic', 'Cosmic'],
 ]
@@ -222,6 +224,9 @@ const INTENT_GLYPHS: Array<[RegExp, GlyphId, string]> = [
   [/^slide(s)?\./, 'slides', 'Slides'],
   [/^image\./, 'image', 'Images'],
   [/^memory\./, 'memory', 'Memory'],
+  [/^session\./, 'recall', 'Session'],
+  [/^scheduler\./, 'schedule', 'Schedule'],
+  [/^reminder\./, 'schedule', 'Schedule'],
 ]
 
 /**
@@ -233,11 +238,12 @@ const LABEL_GLYPHS: Array<[RegExp, GlyphId, string]> = [
   [/\bcode sandbox\b/, 'sandbox', 'Code sandbox'],
   [/\bfirecrawl\b/, 'firecrawl', 'Firecrawl'],
   [/\bweb search(es)?\b|\bsearched the web\b|\bperplexity\b|\bresearch(ed)?\b/, 'search', 'Research'],
-  [/\bsearched memory\b|\bmemory block\b|\bcore fact\b|\bremember(ed)?\b/, 'memory', 'Memory'],
+  [/\bsession (history|state|turns)\b|\brevisit(ed|ing)?\b|\bnotebook\b|\bexact history\b|\bdetailed session history\b/, 'recall', 'Session'],
+  [/\bsearched memory\b|\bmemory block\b|\bcore fact\b|\bremember(ed)?\b|\bfull memory\b/, 'memory', 'Memory'],
   [/\bspecialist catalog\b|\bspecialist intents\b/, 'agent', 'Specialists'],
   [/\bdelegat(ed|ing|e)\b/, 'agent', 'Specialist'],
   [/\bcapability wishlist\b|\bcustom tool\b/, 'cosmic', 'Cosmic'],
-  [/\breminder\b|\bevent automation\b|\bschedul(ed|e)\b/, 'calendar', 'Schedule'],
+  [/\breminder\b|\bevent automation\b|\bschedul(ed|e)\b|\bcron\b/, 'schedule', 'Schedule'],
   [/\bspreadsheet\b|\bworkbook\b|\bsheet\b/, 'table', 'Spreadsheets'],
   [/\bslide(s|deck)?\b|\bpresentation\b/, 'slides', 'Slides'],
   [/\bdiagram\b/, 'diagram', 'Diagrams'],
@@ -245,7 +251,6 @@ const LABEL_GLYPHS: Array<[RegExp, GlyphId, string]> = [
   [/\bterminal\b|\bcursor cli\b|\bcodex\b|\balpha agent\b/, 'terminal', 'Alpha agent'],
   [/\breason(ing|ed)?\b|\bthinking\b|\bthought\b/, 'think', 'Reasoning'],
   [/\bwrit(ing|es|e) the response\b|\bcomposing\b/, 'cosmic', 'Cosmic'],
-  [/\bsession (history|state|turns)\b|\brevisit(ed)?\b|\bnotebook\b/, 'memory', 'Memory'],
 ]
 
 const signal = (glyph: GlyphId, label: string, domains: string[]): AgentSignal => {

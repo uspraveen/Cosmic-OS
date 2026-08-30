@@ -341,10 +341,7 @@ class ToolExecutor:
             max_files=self.local_code_settings.max_files,
             max_file_bytes=self.local_code_settings.max_file_bytes,
         )
-        if capabilities_require_permission(
-            capabilities,
-            settings_allow_network=settings.allow_network,
-        ):
+        if capabilities_require_permission(capabilities):
             # The create call may run the sandbox inline when the session already
             # granted covering capabilities, so allow enough time for execution.
             create_timeout = max(60.0, (timeout_sec or settings.timeout_sec) + 60.0)
@@ -392,7 +389,7 @@ class ToolExecutor:
                 "permission_required": True,
                 "status": "permission_required",
                 "tool": "cosmic_code_execution",
-                "message": "Sandbox needs your approval before it can use the requested network or VM file access.",
+                "message": "Sandbox needs your approval before it can edit the requested VM files.",
                 "sandbox_permission": receipt,
             }
             presentation = self._sandbox_permission_presentation_contract(
@@ -449,14 +446,13 @@ class ToolExecutor:
             "block_type": "sandbox_permission_request",
             "covers": [
                 "permission summary",
-                "requested network access",
-                "requested VM file paths",
+                "requested VM file edit paths",
                 "approval actions",
             ],
             "response_mode": "brief_acknowledgement",
             "instruction": (
                 "The client will render a sandbox permission card with Allow/Deny controls beside your final response. "
-                "Briefly explain why the sandbox needs access and wait for the user to approve or deny. "
+                "Briefly explain why the sandbox needs to edit these VM files and wait for the user to approve or deny. "
                 "Do not claim the sandbox already ran until approval completes."
             ),
         }

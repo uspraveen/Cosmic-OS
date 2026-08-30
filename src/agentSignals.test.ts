@@ -74,6 +74,17 @@ describe('resolveAgentSignal', () => {
     expect(resolveAgentSignal({ label: 'ran the local code sandbox' }).glyph).toBe('sandbox')
     expect(resolveAgentSignal({ label: 'searched memory for "harj"' }).glyph).toBe('memory')
     expect(resolveAgentSignal({ label: 'searched the specialist catalog' }).glyph).toBe('agent')
+    expect(resolveAgentSignal({ label: 'Revisiting exact session history...' }).glyph).toBe('recall')
+    expect(resolveAgentSignal({ label: 'revisited exact session history' }).glyph).toBe('recall')
+    expect(resolveAgentSignal({ label: 'loaded full memory block "Session summary"' }).glyph).toBe('memory')
+    expect(resolveAgentSignal({ label: 'Creating reminder: Portfolio new visitor check' }).glyph).toBe('schedule')
+    expect(resolveAgentSignal({ label: 'Creating reminder: Portfolio new visitor check' }).brand).toBeUndefined()
+  })
+
+  it('keeps Google Calendar on the calendar mark without a product tint', () => {
+    const result = resolveAgentSignal({ intent: 'calendar.create_event', label: 'made an event' })
+    expect(result.glyph).toBe('calendar')
+    expect(result.brand).toBeUndefined()
   })
 
   it('gives Firecrawl its own mark rather than the generic globe', () => {

@@ -928,7 +928,7 @@ export default function MeetingMode({
                         {item.question && <div className="m-qa-q">{item.question}</div>}
                         <div className="m-qa-a m-answer-markdown">
                           <ReactMarkdown
-                            remarkPlugins={[remarkGfm, remarkMath]}
+                            remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
                             rehypePlugins={[rehypeKatex]}
                             components={{
                               a: ({ href, ...props }) => (
