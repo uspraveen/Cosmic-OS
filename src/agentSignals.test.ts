@@ -87,6 +87,12 @@ describe('resolveAgentSignal', () => {
     expect(result.brand).toBeUndefined()
   })
 
+  it('maps an explicit thinking kind to the brain mark, and prose to the ball', () => {
+    expect(resolveAgentSignal({ kind: 'thinking', label: 'Thinking deeper on the problem' }).glyph).toBe('brain')
+    // Plain reasoning prose keeps the Cosmic ball, not the escalation brain.
+    expect(resolveAgentSignal({ label: 'Cosmic is reasoning through the request.' }).glyph).toBe('think')
+  })
+
   it('gives Firecrawl its own mark rather than the generic globe', () => {
     // It does most of the page reading, so it is the mark seen most often.
     expect(resolveAgentSignal({ agentId: 'cosmic/firecrawl-web-scrape-agent', label: 'read a page' }).glyph)

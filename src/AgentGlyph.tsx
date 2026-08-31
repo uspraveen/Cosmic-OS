@@ -1,6 +1,7 @@
 import { memo, useState, type ReactNode } from 'react'
 import { faviconUrl, type AgentSignal, type GlyphId } from './agentSignals'
 import cosmicBallLogo from './assets/cosmic-ball-logo-v1.1.png'
+import brainMark from './assets/brain-flaticon.png'
 
 /**
  * The marks that lead a flow step, a collapsed section header, and the live
@@ -262,17 +263,18 @@ const MarkMemory = ({ size }: MarkProps) =>
     </>,
   )
 
-/** The orchestrator escalating its own reasoning budget is cognition, not a
- *  delegated product, so it gets a functional monoline mark — a brain (Lucide's
- *  two-hemisphere silhouette) — rather than a borrowed logo. */
-const MarkBrain = ({ size }: MarkProps) =>
-  line(
-    size,
-    <>
-      <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" />
-      <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" />
-    </>,
-  )
+/** The orchestrator escalating its own reasoning budget. Painted as an image
+ *  (like the Cosmic ball) so inherited CSS colour cannot retint the artwork. */
+const MarkBrain = ({ size }: MarkProps) => (
+  <img
+    className="agent-glyph-logo"
+    src={brainMark}
+    width={size}
+    height={size}
+    alt=""
+    draggable={false}
+  />
+)
 
 /** Session history: open ring with a solid arrow — thick enough to read at 16px. */
 const MarkRecall = ({ size }: MarkProps) => (
@@ -348,13 +350,14 @@ const MARKS: Record<GlyphId, (props: MarkProps) => ReactNode> = {
   memory: MarkMemory,
   recall: MarkRecall,
   schedule: MarkSchedule,
-  think: MarkBrain,
+  think: MarkCosmicBall,
+  brain: MarkBrain,
   agent: MarkCosmicBall,
   cosmic: MarkCosmicBall,
 }
 
 /** Logos carry their own colours and must not be tinted by the row. */
-const SELF_COLOURED = new Set<GlyphId>(['youtube', 'gmail', 'gdocs', 'gsheets', 'firecrawl', 'agent', 'cosmic'])
+const SELF_COLOURED = new Set<GlyphId>(['youtube', 'gmail', 'gdocs', 'gsheets', 'firecrawl', 'think', 'brain', 'agent', 'cosmic'])
 
 /**
  * Optical size, not measured size. Some marks carry their own margin -- a

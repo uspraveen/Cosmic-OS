@@ -38,6 +38,7 @@ export type GlyphId =
   | 'recall'
   | 'schedule'
   | 'think'
+  | 'brain'
   | 'agent'
   | 'cosmic'
 
@@ -275,7 +276,7 @@ export const resolveAgentSignal = (entry: FlowEntryLike): AgentSignal => {
   // A reasoning escalation/reset surfaces with an explicit kind from the
   // orchestrator rather than relying on label wording.
   if (text(entry.kind) === 'thinking') {
-    return signal('think', 'Thinking deeper', domains)
+    return signal('brain', 'Thinking deeper', domains)
   }
 
   for (const domain of domains) {
