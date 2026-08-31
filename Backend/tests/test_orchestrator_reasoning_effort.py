@@ -274,6 +274,19 @@ async def test_think_deeper_escalation_applies_to_next_request(tmp_path: Path) -
     ]
     assert len(tool_results) == 1
     assert "ok" in str(tool_results[0].get("result_preview") or "")
+    # The escalation surfaces a distinct flow kind and a terminal come-down note.
+    escalation_progress = [
+        e
+        for e in streamed_events
+        if e.get("type") == "task.progress" and e.get("tool_name") == "think_deeper"
+    ]
+    assert escalation_progress and escalation_progress[0].get("kind") == "thinking"
+    resets = [
+        e for e in streamed_events if e.get("type") == "task.progress" and e.get("status") == "reasoning_reset"
+    ]
+    assert len(resets) == 1
+    assert resets[0].get("kind") == "thinking"
+    assert "Reasoning back to default" in str(resets[0].get("message") or "")
 
 
 @pytest.mark.asyncio

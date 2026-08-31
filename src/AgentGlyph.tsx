@@ -262,6 +262,18 @@ const MarkMemory = ({ size }: MarkProps) =>
     </>,
   )
 
+/** The orchestrator escalating its own reasoning budget is cognition, not a
+ *  delegated product, so it gets a functional monoline mark — a brain (Lucide's
+ *  two-hemisphere silhouette) — rather than a borrowed logo. */
+const MarkBrain = ({ size }: MarkProps) =>
+  line(
+    size,
+    <>
+      <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" />
+      <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" />
+    </>,
+  )
+
 /** Session history: open ring with a solid arrow — thick enough to read at 16px. */
 const MarkRecall = ({ size }: MarkProps) => (
   <svg
@@ -336,13 +348,13 @@ const MARKS: Record<GlyphId, (props: MarkProps) => ReactNode> = {
   memory: MarkMemory,
   recall: MarkRecall,
   schedule: MarkSchedule,
-  think: MarkCosmicBall,
+  think: MarkBrain,
   agent: MarkCosmicBall,
   cosmic: MarkCosmicBall,
 }
 
 /** Logos carry their own colours and must not be tinted by the row. */
-const SELF_COLOURED = new Set<GlyphId>(['youtube', 'gmail', 'gdocs', 'gsheets', 'firecrawl', 'think', 'agent', 'cosmic'])
+const SELF_COLOURED = new Set<GlyphId>(['youtube', 'gmail', 'gdocs', 'gsheets', 'firecrawl', 'agent', 'cosmic'])
 
 /**
  * Optical size, not measured size. Some marks carry their own margin -- a

@@ -272,6 +272,12 @@ export const resolveAgentSignal = (entry: FlowEntryLike): AgentSignal => {
   const body = `${label} ${detail}`
   const domains = extractDomains(body)
 
+  // A reasoning escalation/reset surfaces with an explicit kind from the
+  // orchestrator rather than relying on label wording.
+  if (text(entry.kind) === 'thinking') {
+    return signal('think', 'Thinking deeper', domains)
+  }
+
   for (const domain of domains) {
     const glyph = glyphForDomain(domain)
     if (glyph) {

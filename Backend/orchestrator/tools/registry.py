@@ -2458,6 +2458,17 @@ def get_tool_spec(name: str) -> ToolSpec | None:
     return _TOOL_BY_NAME.get(str(name or "").strip())
 
 
+def tool_activity_kind(tool_name: str) -> str | None:
+    """The flow/activity kind a tool's progress should render as, or None to
+    fall back to the generic tool treatment. Tool specs opt in via their
+    group; today every spec in the "thinking" group (the think_deeper
+    meta-tool) surfaces as a distinct reasoning marker in the UI."""
+    spec = get_tool_spec(tool_name)
+    if spec is not None and spec.group == "thinking":
+        return "thinking"
+    return None
+
+
 def get_local_tool_spec(name: str) -> ToolSpec | None:
     spec = get_tool_spec(name)
     if spec is None or not spec.is_local:

@@ -12865,7 +12865,7 @@ class GatewayRuntime:
             self._safe_text(progress_state.get("kind"))
             if isinstance(progress_state, dict)
             else None
-        ) or (
+        ) or self._safe_text(event.get("kind")) or (
             "task_lifecycle"
             if event_type in {"task.suspended", "task.resumed", "task.input_required"}
             else "generic"

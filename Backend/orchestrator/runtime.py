@@ -69,6 +69,7 @@ from .tools.registry import (
     get_local_tool_definitions,
     get_model_tool_definitions,
     get_parallel_safe_local_tool_names,
+    tool_activity_kind,
 )
 from .visual_enrichment import VisualEnrichmentCoordinator
 
@@ -1618,7 +1619,7 @@ class OrchestratorRuntime:
                         parsed_inputs.append(parsed_input)
 
                         progress_msg = build_tool_progress_message(item["name"], parsed_input)
-                        yield {
+                        progress_event: dict[str, Any] = {
                             **ev,
                             "type": "task.progress",
                             "status": "tool_call",
@@ -1626,6 +1627,10 @@ class OrchestratorRuntime:
                             "tool_name": item["name"],
                             "message": progress_msg,
                         }
+                        activity_kind = tool_activity_kind(item["name"])
+                        if activity_kind:
+                            progress_event["kind"] = activity_kind
+                        yield progress_event
                         yield {
                             **ev,
                             "type": "tool.call",
@@ -1966,6 +1971,17 @@ class OrchestratorRuntime:
                 complete_event["supporting_artifacts"] = supporting_artifacts
             if final_response_blocks:
                 complete_event["response_blocks"] = final_response_blocks
+            if reasoning_escalations > 0:
+                yield {
+                    **ev,
+                    "type": "task.progress",
+                    "status": "reasoning_reset",
+                    "message": (
+                        f"Reasoning back to default "
+                        f"({self.config.fireworks_reasoning_effort})"
+                    ),
+                    "kind": "thinking",
+                }
             yield complete_event
             yield {
                 **ev,
