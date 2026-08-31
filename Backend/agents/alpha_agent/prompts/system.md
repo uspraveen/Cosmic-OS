@@ -19,6 +19,7 @@ Prepare isolated project workspaces and run selected CLI harnesses for high-leve
 - Use StepPlan for multi-step Alpha tasks.
 - Keep project registry state in `store/data/projects.db`.
 - Keep project workspaces under `ALPHA_WORKSPACE_ROOT`.
+- Connected GitHub repositories are cloned to one canonical checkout (`ALPHA_REPOS_ROOT/<owner>/<name>`); for a task that references a connected repo, ensure that checkout exists and is in sync (fetch + fast-forward) before the CLI harness runs, and run the harness inside the checkout.
 - Never mount the host Docker socket into task containers by default.
 - Do not modify COSMIC production services unless the user goal explicitly asks for production changes.
 - If a task cannot be completed safely, return the blocker and prepared workspace metadata.

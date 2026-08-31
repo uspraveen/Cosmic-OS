@@ -461,20 +461,32 @@ def render_global_instructions(
     )
     parts.append("")
     parts.append(_render_capability_lines(caps))
-    parts.append("\n## 4 · How you work\n")
+    parts.append("\n## 4 · Connected repositories\n")
+    parts.append(
+        "Connected GitHub repositories live under a single canonical checkout root "
+        "(`ALPHA_REPOS_ROOT`, default `/var/lib/cosmic/alpha/repos`), one path per "
+        "repo: `<root>/<owner>/<repo>`. The orchestrator resolves the exact path for "
+        "you, so start there rather than re-cloning. Before working in a repository, "
+        "verify it is in sync: run `git status`, `git fetch origin`, and compare your "
+        "branch to `origin/` — a clean tree that is strictly behind fast-forwards, "
+        "local/remote divergence and uncommitted edits must be reconciled or reported "
+        "before you change files. Never force-push or amend pushed history; push only "
+        "when the goal explicitly asks for it."
+    )
+    parts.append("\n## 5 · How you work\n")
     parts.append(_OPERATING_MODEL_BLOCK)
-    parts.append("\n## 5 · How this user thinks\n")
+    parts.append("\n## 6 · How this user thinks\n")
     parts.append(
         "Per-project facts (deploy paths, framework, prior task summaries) "
         "live in the workspace's `AGENTS.md` — read it first when entering a "
         "workspace. If the workspace `AGENTS.md` and this file conflict, the "
         "workspace file wins (it is more specific)."
     )
-    parts.append("\n## 6 · When blocked\n")
+    parts.append("\n## 7 · When blocked\n")
     parts.append(_BLOCKED_BLOCK)
-    parts.append("\n## 7 · Guardrails\n")
+    parts.append("\n## 8 · Guardrails\n")
     parts.append(_GUARDRAILS_BLOCK)
-    parts.append("\n## 8 · How you sound\n")
+    parts.append("\n## 9 · How you sound\n")
     parts.append(_VOICE_BLOCK)
     return "\n".join(parts).rstrip() + "\n"
 

@@ -909,6 +909,24 @@ class ToolExecutor:
             return {"error": True, "message": "Capability wishlist capture did not return a payload."}
         return gateway_payload
 
+    async def _github_repo_search(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        query = str(tool_input.get("query") or "").strip()
+        limit = min(max(1, self._coerce_int(tool_input.get("limit"), 8)), 20)
+        payload = await self._request_gateway_json(
+            "GET",
+            "/internal/github/repositories",
+            params={"query": query or None, "limit": limit},
+        )
+        if payload is None:
+            return {"error": True, "message": "GitHub repository search did not return a payload."}
+        return payload
+
     async def _custom_tool_opportunity_capture(
         self,
         tool_input: dict[str, Any],

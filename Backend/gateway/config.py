@@ -261,6 +261,10 @@ class GatewayConfig:
     # Needed for the first-time install URL (github.com/apps/<slug>/installations/new),
     # which is not derivable from the client id.
     github_app_slug: str = ""
+    # Shared secret for GitHub webhook signature verification (X-Hub-Signature-256).
+    # Optional: unset keeps the endpoint open for local development, matching
+    # the Gmail webhook's behavior.
+    github_webhook_secret: str = ""
 
     @classmethod
     def from_env(cls) -> "GatewayConfig":
@@ -899,4 +903,5 @@ class GatewayConfig:
             ).strip()
             or "http://localhost:8086/",
             github_app_slug=os.getenv("GITHUB_APP_SLUG", "").strip(),
+            github_webhook_secret=os.getenv("GITHUB_WEBHOOK_SECRET", "").strip(),
         )

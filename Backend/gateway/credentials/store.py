@@ -34,6 +34,10 @@ def _new_credential_ref() -> str:
     return f"cred_{uuid4().hex[:12]}"
 
 
+def _new_repo_row_id() -> str:
+    return f"ghr_{uuid4().hex[:12]}"
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
     account_id TEXT PRIMARY KEY,
@@ -91,6 +95,52 @@ CREATE TABLE IF NOT EXISTS credential_audit (
 
 CREATE INDEX IF NOT EXISTS idx_audit_task ON credential_audit(task_id);
 CREATE INDEX IF NOT EXISTS idx_audit_credential ON credential_audit(credential_ref);
+
+CREATE TABLE IF NOT EXISTS github_repositories (
+    repo_row_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    installation_id TEXT NOT NULL DEFAULT '',
+    github_repo_id TEXT NOT NULL,
+    node_id TEXT NOT NULL DEFAULT '',
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    full_name TEXT NOT NULL,
+    private INTEGER NOT NULL DEFAULT 0,
+    clone_url TEXT NOT NULL DEFAULT '',
+    ssh_url TEXT NOT NULL DEFAULT '',
+    html_url TEXT NOT NULL DEFAULT '',
+    default_branch TEXT NOT NULL DEFAULT '',
+    permissions_json TEXT NOT NULL DEFAULT '{}',
+    local_path TEXT,
+    branch TEXT,
+    last_commit_sha TEXT,
+    last_commit_message TEXT,
+    last_commit_author TEXT,
+    last_commit_at TEXT,
+    last_ahead INTEGER NOT NULL DEFAULT 0,
+    last_behind INTEGER NOT NULL DEFAULT 0,
+    last_dirty INTEGER NOT NULL DEFAULT 0,
+    last_task_id TEXT,
+    last_session_id TEXT,
+    alpha_project_id TEXT,
+    last_progress_source TEXT,
+    last_progress_at TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    sync_error TEXT,
+    synced_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_github_repositories_unique
+ON github_repositories(account_id, github_repo_id);
+
+CREATE INDEX IF NOT EXISTS idx_github_repositories_status
+ON github_repositories(status, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_github_repositories_full_name
+ON github_repositories(full_name);
 """
 
 
@@ -245,6 +295,7 @@ class CredentialStore:
 
     def delete_account(self, account_id: str) -> None:
         conn = self._get_conn()
+        conn.execute("DELETE FROM github_repositories WHERE account_id = ?", [account_id])
         conn.execute("DELETE FROM credentials WHERE account_id = ?", [account_id])
         conn.execute("DELETE FROM resource_bindings WHERE account_id = ?", [account_id])
         conn.execute("DELETE FROM accounts WHERE account_id = ?", [account_id])
@@ -452,6 +503,462 @@ class CredentialStore:
         else:
             return []
         return [dict(r) for r in rows]
+
+    # ── GitHub Repositories ───────────────────────────────────────────
+    #
+    # The gateway owns the authoritative list of repositories a GitHub App
+    # installation granted COSMIC access to. Rows carry both the authorization
+    # facts (clone URL, permissions, status) and the last local progress Alpha
+    # reported (checkout path, branch, last commit) so the orchestrator and
+    # Alpha can resolve "the user's repo X" to a concrete VM path and state.
+
+    def upsert_github_repositories(
+        self,
+        *,
+        account_id: str,
+        installation_id: str,
+        repos: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        """Insert/update repository rows from a GitHub API payload.
+
+        Each item is a GitHub repository object (``id``, ``full_name``,
+        ``clone_url``, ``permissions``, ...). Existing rows keep their local
+        progress columns; only authorization fields are refreshed, and a repo
+        that had lost access and reappears is marked active again.
+        """
+        now_iso = _utcnow_iso()
+        conn = self._get_conn()
+        added = 0
+        updated = 0
+        for repo in repos:
+            if not isinstance(repo, dict):
+                continue
+            repo_id = str(repo.get("id") or "").strip()
+            full_name = str(repo.get("full_name") or "").strip()
+            if not repo_id or not full_name:
+                continue
+            owner, _, name = full_name.partition("/")
+            name = name or full_name
+            row = conn.execute(
+                "SELECT repo_row_id FROM github_repositories WHERE account_id = ? AND github_repo_id = ?",
+                [account_id, repo_id],
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """INSERT INTO github_repositories (
+                        repo_row_id, account_id, installation_id, github_repo_id,
+                        node_id, owner, name, full_name, private, clone_url,
+                        ssh_url, html_url, default_branch, permissions_json,
+                        status, synced_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
+                    [
+                        _new_repo_row_id(),
+                        account_id,
+                        str(installation_id or ""),
+                        repo_id,
+                        str(repo.get("node_id") or ""),
+                        owner,
+                        name,
+                        full_name,
+                        1 if repo.get("private") else 0,
+                        str(repo.get("clone_url") or ""),
+                        str(repo.get("ssh_url") or ""),
+                        str(repo.get("html_url") or ""),
+                        str(repo.get("default_branch") or ""),
+                        json.dumps(repo.get("permissions") or {}),
+                        now_iso,
+                        now_iso,
+                        now_iso,
+                    ],
+                )
+                added += 1
+                continue
+            conn.execute(
+                """UPDATE github_repositories
+                   SET installation_id = ?,
+                       node_id = ?,
+                       owner = ?,
+                       name = ?,
+                       full_name = ?,
+                       private = ?,
+                       clone_url = ?,
+                       ssh_url = ?,
+                       html_url = ?,
+                       default_branch = ?,
+                       permissions_json = ?,
+                       status = 'active',
+                       sync_error = NULL,
+                       synced_at = ?,
+                       updated_at = ?
+                   WHERE account_id = ? AND github_repo_id = ?""",
+                [
+                    str(installation_id or ""),
+                    str(repo.get("node_id") or ""),
+                    owner,
+                    name,
+                    full_name,
+                    1 if repo.get("private") else 0,
+                    str(repo.get("clone_url") or ""),
+                    str(repo.get("ssh_url") or ""),
+                    str(repo.get("html_url") or ""),
+                    str(repo.get("default_branch") or ""),
+                    json.dumps(repo.get("permissions") or {}),
+                    now_iso,
+                    now_iso,
+                    account_id,
+                    repo_id,
+                ],
+            )
+            updated += 1
+        conn.commit()
+        return {"added": added, "updated": updated, "total": added + updated}
+
+    def mark_github_repositories_missing(
+        self,
+        account_id: str,
+        keep_github_repo_ids: set[str] | list[str],
+    ) -> list[str]:
+        """Mark a sync pass: repos of this account not in the keep set lose access.
+
+        GitHub delivers removals both via webhooks and implicitly, when an
+        installation's repository list comes back without a repo it used to
+        contain. Only previously-usable rows are downgraded; anything already
+        revoked/access_removed keeps its terminal state.
+        """
+        keep = {str(item) for item in (keep_github_repo_ids or []) if str(item).strip()}
+        now_iso = _utcnow_iso()
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT repo_row_id, github_repo_id FROM github_repositories WHERE account_id = ? AND status = 'active'",
+            [account_id],
+        ).fetchall()
+        demoted: list[str] = []
+        for row in rows:
+            if str(row["github_repo_id"]) in keep:
+                continue
+            conn.execute(
+                """UPDATE github_repositories
+                   SET status = 'access_removed', updated_at = ?
+                   WHERE repo_row_id = ?""",
+                [now_iso, row["repo_row_id"]],
+            )
+            demoted.append(str(row["repo_row_id"]))
+        conn.commit()
+        return demoted
+
+    def list_github_repositories(
+        self,
+        *,
+        account_id: str | None = None,
+        statuses: list[str] | tuple[str, ...] = ("active",),
+        query: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        conn = self._get_conn()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if account_id:
+            clauses.append("account_id = ?")
+            params.append(account_id)
+        normalized_statuses = [str(item).strip() for item in (statuses or ()) if str(item or "").strip()]
+        if normalized_statuses and "all" not in normalized_statuses:
+            placeholders = ", ".join("?" for _ in normalized_statuses)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(normalized_statuses)
+        sql = "SELECT * FROM github_repositories"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY updated_at DESC"
+        rows = conn.execute(sql, params).fetchall()
+        result = [self._row_to_github_repository(row) for row in rows]
+        needle = str(query or "").strip().casefold()
+        if needle:
+            def matches(item: dict[str, Any]) -> bool:
+                haystack = " ".join(
+                    str(item.get(key) or "")
+                    for key in (
+                        "full_name",
+                        "owner",
+                        "name",
+                        "html_url",
+                        "clone_url",
+                        "local_path",
+                        "alpha_project_id",
+                    )
+                ).casefold()
+                return needle in haystack
+            result = [item for item in result if matches(item)]
+        cap = max(1, min(int(limit or 50), 200))
+        return result[:cap]
+
+    def get_github_repository(self, repo_row_id: str) -> dict[str, Any] | None:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM github_repositories WHERE repo_row_id = ?",
+            [str(repo_row_id or "").strip()],
+        ).fetchone()
+        return self._row_to_github_repository(row) if row is not None else None
+
+    def find_github_repository(self, ref: str) -> dict[str, Any] | None:
+        """Resolve a free-form repo reference to the newest matching row.
+
+        Accepts a repo_row_id, ``owner/name``, an https clone/html URL, or an
+        ssh URL. Case-insensitive on the name forms because GitHub treats them
+        as such. Ties break on updated_at DESC, so a reconnected account wins.
+        """
+        normalized = str(ref or "").strip()
+        if not normalized:
+            return None
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM github_repositories WHERE repo_row_id = ?",
+            [normalized],
+        ).fetchone()
+        if row is not None:
+            return self._row_to_github_repository(row)
+        folded = normalized.casefold().rstrip("/")
+        for candidate in self._github_ref_variants(folded):
+            row = conn.execute(
+                """SELECT * FROM github_repositories
+                   WHERE LOWER(full_name) = ? OR LOWER(clone_url) = ?
+                      OR LOWER(html_url) = ? OR LOWER(ssh_url) = ?
+                   ORDER BY updated_at DESC LIMIT 1""",
+                [candidate, candidate, candidate, candidate],
+            ).fetchone()
+            if row is not None:
+                return self._row_to_github_repository(row)
+        return None
+
+    @staticmethod
+    def _github_ref_variants(ref: str) -> list[str]:
+        """Name/URL forms that should match the same repository row."""
+        variants = [ref]
+        if ref.startswith("https://github.com/") and ref.endswith(".git"):
+            variants.append(ref[: -len(".git")])
+        if ref.startswith("https://github.com/"):
+            variants.append(ref[len("https://github.com/"):].removesuffix(".git"))
+        if ref.startswith("git@github.com:"):
+            variants.append(ref[len("git@github.com:"):].removesuffix(".git"))
+        if ref.startswith("ssh://git@github.com/"):
+            variants.append(ref[len("ssh://git@github.com/"):].removesuffix(".git"))
+        return [item for item in dict.fromkeys(variants) if item]
+
+    def update_github_repository_progress(
+        self,
+        repo_row_id: str,
+        *,
+        local_path: str | None = None,
+        branch: str | None = None,
+        commit_sha: str | None = None,
+        commit_message: str | None = None,
+        commit_author: str | None = None,
+        commit_at: str | None = None,
+        ahead: int | None = None,
+        behind: int | None = None,
+        dirty: bool | None = None,
+        task_id: str | None = None,
+        session_id: str | None = None,
+        alpha_project_id: str | None = None,
+        source: str | None = None,
+        sync_error: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Record Alpha's last known local state for a repository.
+
+        Progress fields are COALESCEd so a partial report (for example a
+        clone that failed before any commit was read) never erases a known
+        good last-commit record.
+        """
+        normalized_row_id = str(repo_row_id or "").strip()
+        if not normalized_row_id:
+            return None
+        now_iso = _utcnow_iso()
+        conn = self._get_conn()
+        existing = conn.execute(
+            "SELECT * FROM github_repositories WHERE repo_row_id = ?",
+            [normalized_row_id],
+        ).fetchone()
+        if existing is None:
+            return None
+        conn.execute(
+            """UPDATE github_repositories
+               SET local_path = COALESCE(?, local_path),
+                   branch = COALESCE(?, branch),
+                   last_commit_sha = COALESCE(?, last_commit_sha),
+                   last_commit_message = COALESCE(?, last_commit_message),
+                   last_commit_author = COALESCE(?, last_commit_author),
+                   last_commit_at = COALESCE(?, last_commit_at),
+                   last_ahead = COALESCE(?, last_ahead),
+                   last_behind = COALESCE(?, last_behind),
+                   last_dirty = COALESCE(?, last_dirty),
+                   last_task_id = COALESCE(?, last_task_id),
+                   last_session_id = COALESCE(?, last_session_id),
+                   alpha_project_id = COALESCE(?, alpha_project_id),
+                   last_progress_source = ?,
+                   last_progress_at = ?,
+                   sync_error = ?,
+                   updated_at = ?
+               WHERE repo_row_id = ?""",
+            [
+                local_path,
+                branch,
+                commit_sha,
+                commit_message,
+                commit_author,
+                commit_at,
+                ahead,
+                behind,
+                None if dirty is None else (1 if dirty else 0),
+                task_id,
+                session_id,
+                alpha_project_id,
+                str(source or "").strip() or None,
+                now_iso,
+                str(sync_error or "").strip()[:500] or None,
+                now_iso,
+                normalized_row_id,
+            ],
+        )
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM github_repositories WHERE repo_row_id = ?",
+            [normalized_row_id],
+        ).fetchone()
+        return self._row_to_github_repository(updated) if updated is not None else None
+
+    def mark_github_repositories_status(
+        self,
+        *,
+        account_id: str,
+        github_repo_ids: list[str] | set[str],
+        status: str,
+        sync_error: str | None = None,
+    ) -> list[str]:
+        """Transition repository rows to an explicit status (access_removed, revoked, active)."""
+        normalized = [str(item) for item in (github_repo_ids or []) if str(item).strip()]
+        if not normalized:
+            return []
+        now_iso = _utcnow_iso()
+        conn = self._get_conn()
+        updated: list[str] = []
+        for repo_id in normalized:
+            row = conn.execute(
+                "SELECT repo_row_id FROM github_repositories WHERE account_id = ? AND github_repo_id = ?",
+                [account_id, repo_id],
+            ).fetchone()
+            if row is None:
+                continue
+            conn.execute(
+                "UPDATE github_repositories SET status = ?, sync_error = ?, updated_at = ? WHERE repo_row_id = ?",
+                [status, (sync_error or "")[:500] or None, now_iso, row["repo_row_id"]],
+            )
+            updated.append(str(row["repo_row_id"]))
+        conn.commit()
+        return updated
+
+    def set_github_repositories_status_for_installation(
+        self,
+        installation_id: str,
+        *,
+        status: str,
+        sync_error: str | None = None,
+    ) -> list[str]:
+        """Transition every repository row of one installation to a status.
+
+        Used by webhooks for installation-wide revocation/suspension, where
+        the event carries the installation but not a repo list.
+        """
+        normalized = str(installation_id or "").strip()
+        if not normalized:
+            return []
+        now_iso = _utcnow_iso()
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT repo_row_id FROM github_repositories WHERE installation_id = ? AND status = 'active'",
+            [installation_id],
+        ).fetchall()
+        updated: list[str] = []
+        for row in rows:
+            conn.execute(
+                "UPDATE github_repositories SET status = ?, sync_error = ?, updated_at = ? WHERE repo_row_id = ?",
+                [status, (sync_error or "")[:500] or None, now_iso, row["repo_row_id"]],
+            )
+            updated.append(str(row["repo_row_id"]))
+        conn.commit()
+        return updated
+
+    def find_account_id_by_installation(self, installation_id: str) -> str | None:
+        normalized = str(installation_id or "").strip()
+        if not normalized:
+            return None
+        conn = self._get_conn()
+        row = conn.execute(
+            """SELECT account_id FROM accounts
+               WHERE json_extract(metadata_json, '$.github_installation_id') = ?
+               ORDER BY connected_at DESC LIMIT 1""",
+            [normalized],
+        ).fetchone()
+        if row is not None:
+            return str(row["account_id"])
+        # Fallback for stores where the JSON1 functions are unavailable:
+        # scan github accounts and match in Python.
+        for account_row in conn.execute(
+            "SELECT account_id, metadata_json FROM accounts WHERE provider = 'github'"
+        ).fetchall():
+            try:
+                metadata = json.loads(account_row["metadata_json"] or "{}")
+            except Exception:
+                continue
+            if str(metadata.get("github_installation_id") or "").strip() == normalized:
+                return str(account_row["account_id"])
+        return None
+
+    def _row_to_github_repository(self, row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            permissions = json.loads(row["permissions_json"] or "{}")
+        except Exception:
+            permissions = {}
+        if not isinstance(permissions, dict):
+            permissions = {}
+        return {
+            "repo_row_id": row["repo_row_id"],
+            "account_id": row["account_id"],
+            "installation_id": row["installation_id"],
+            "github_repo_id": row["github_repo_id"],
+            "node_id": row["node_id"],
+            "owner": row["owner"],
+            "name": row["name"],
+            "full_name": row["full_name"],
+            "private": bool(row["private"]),
+            "clone_url": row["clone_url"],
+            "ssh_url": row["ssh_url"],
+            "html_url": row["html_url"],
+            "default_branch": row["default_branch"],
+            "permissions": permissions,
+            "can_push": bool(permissions.get("push")),
+            "local_path": row["local_path"],
+            "branch": row["branch"],
+            "last_commit": {
+                "sha": row["last_commit_sha"],
+                "message": row["last_commit_message"],
+                "author": row["last_commit_author"],
+                "committed_at": row["last_commit_at"],
+            }
+            if row["last_commit_sha"]
+            else None,
+            "last_ahead": int(row["last_ahead"] or 0),
+            "last_behind": int(row["last_behind"] or 0),
+            "last_dirty": bool(row["last_dirty"]),
+            "last_task_id": row["last_task_id"],
+            "last_session_id": row["last_session_id"],
+            "alpha_project_id": row["alpha_project_id"],
+            "last_progress_source": row["last_progress_source"],
+            "last_progress_at": row["last_progress_at"],
+            "status": row["status"],
+            "sync_error": row["sync_error"],
+            "synced_at": row["synced_at"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
     # ── Helpers ───────────────────────────────────────────────────────
 

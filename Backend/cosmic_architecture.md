@@ -5857,6 +5857,16 @@ These rules are non-negotiable. Violating any of them is a security incident.
 7. **One credential_ref per (account, agent, scope-set).** No shared "global token" across agents. If two agents need the same provider, each gets its own credential_ref with its own scope validation.
 8. **Channel runtime auth is not Credential Manager data.** Device/session state for channel bridges (for example, Baileys multi-file auth) does **not** belong in `gateway/credentials.db`. `credentials.db` is only for provider OAuth credentials. Channel/device auth lives in the owning bridge's persistent `store/`.
 
+### 22.11 GitHub Repository Registry
+
+The Gateway owns the authoritative list of repositories a GitHub App installation granted COSMIC access to, stored in the `github_repositories` table of `gateway/credentials.db`. A row carries both **authorization facts** (owner/name, clone/ssh/html URL, default branch, `permissions` with `push`/`admin`, `status`) and **local progress** Alpha reports back (canonical checkout `local_path`, `branch`, `last_commit` sha/message/author/time, `ahead`/`behind`, `dirty`, `alpha_project_id`).
+
+- **Enumeration.** After a GitHub connect/reconnect, the Gateway enumerates the installation with the stored user-to-server token: `GET /user/installations/{id}/repositories` (paginated, `github_client.py`). Reconnect, the internal sync endpoint, and GitHub webhooks keep the list true; repos that disappear from the grant are demoted to `access_removed` (or `revoked` on uninstall).
+- **Webhooks.** `POST /webhooks/github` (HMAC-SHA256 of the raw body via `GITHUB_WEBHOOK_SECRET`, `X-Hub-Signature-256`) handles `installation`, `installation_repositories`, and `repository` events with a verify-early, apply-in-background shape that mirrors the Gmail webhook. These events only maintain the authorization registry; commits reach the registry through Alpha's task reporting instead.
+- **Internal endpoints (orchestrator + Alpha).** `GET /internal/github/repositories` (list/search), `... /resolve?ref=` (resolve id / owner/name / clone url), `POST .../sync` (re-enumerate), `POST .../{repo_row_id}/progress` (Alpha reports local state).
+- **Orchestrator.** The `github_repo_search` local tool reads the registry so the orchestrator can resolve a repo reference, learn its VM checkout path, and read its last progress (branch + last commit) before delegating to `alpha.execute`.
+- **Alpha.** Connected repos clone to one canonical path `<ALPHA_REPOS_ROOT>/<owner>/<name>` (default `/var/lib/cosmic/alpha/repos`). Before running a harness on a repo-backed task, Alpha ensures the checkout exists and is in sync (`clone` / `fetch` + `--ff-only` when clean and strictly behind), runs the harness inside the checkout, skips the polluting workspace `AGENTS.md`, and reports the fresh branch/last-commit/ahead-behind state back to the Gateway so later turns resume the exact checkout.
+
 ---
 
 ## 23. Session & Memory Management

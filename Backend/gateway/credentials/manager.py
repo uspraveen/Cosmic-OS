@@ -23,6 +23,7 @@ from secrets import token_urlsafe
 from typing import Any
 from urllib.parse import urlencode
 
+from .github_client import GitHubApiClient
 from .providers import GoogleAdapter, ProviderAdapter, get_provider_adapter
 from .store import CredentialStore
 
@@ -277,6 +278,8 @@ class CredentialManager:
         github_client_id: str = "",
         github_client_secret: str = "",
         github_redirect_uri: str = "",
+        github_app_slug: str = "",
+        github_api_client: Any = None,
     ) -> None:
         self._store = store
         self._google_client_id = google_client_id
@@ -285,8 +288,22 @@ class CredentialManager:
         self._github_client_id = github_client_id
         self._github_client_secret = github_client_secret
         self._github_redirect_uri = github_redirect_uri
+        self._github_app_slug = (github_app_slug or "").strip()
+        self._github_api = github_api_client
         # In-flight OAuth flows: state -> OAuthFlowState
         self._pending_flows: dict[str, OAuthFlowState] = {}
+
+    def _github_api_client(self):
+        """Lazily construct the GitHub enumeration client.
+
+        Injectable for tests; the lazy default keeps constructing a
+        CredentialManager free of network clients when GitHub is unused.
+        """
+        if self._github_api is None:
+            from .github_client import GitHubApiClient
+
+            self._github_api = GitHubApiClient()
+        return self._github_api
 
     def _oauth_client(self, provider: str) -> tuple[str, str, str]:
         """(client_id, client_secret, redirect_uri) for one provider.
@@ -555,6 +572,360 @@ class CredentialManager:
             return self._store.get_account(account_id) if account_id else None
         self._store.update_account(account_id, metadata_patch=patch)
         return self._store.get_account(account_id)
+
+    # ── GitHub Repository Enumeration ─────────────────────────────────
+
+    async def sync_github_repositories(
+        self,
+        account_id: str | None = None,
+        *,
+        max_pages: int = 10,
+    ) -> dict[str, Any]:
+        """Enumerate an installation's repositories into the store.
+
+        Resolves a fresh user-to-server token, finds the account's GitHub App
+        installation (metadata first, then a live installations lookup), lists
+        the installation's repositories, reconciles them into the
+        ``github_repositories`` table, and demotes rows that dropped out of
+        the grant. Never raises into the caller: failures come back as
+        ``{"synced": False, "error": ...}`` so a background sync can log and
+        move on without an exception handler at every call site.
+        """
+        accounts = (
+            [acct for acct in self._store.list_accounts("github") if acct.get("status") == "active"]
+            if account_id is None
+            else [acct for acct in [self._store.get_account(account_id)] if acct is not None]
+        )
+        if not accounts:
+            return {
+                "synced": False,
+                "reason": "no_active_github_account",
+                "repo_count": 0,
+                "added": 0,
+                "updated": 0,
+                "removed": [],
+            }
+
+        if len(accounts) == 1:
+            try:
+                return await self._sync_github_repositories_for_account(
+                    accounts[0], max_pages=max_pages
+                )
+            except Exception as exc:
+                logger.warning(
+                    "credentials.github_repo_sync_failed account_id=%s error=%s",
+                    accounts[0].get("account_id"),
+                    str(exc)[:200],
+                )
+                return {
+                    "synced": False,
+                    "account_id": accounts[0].get("account_id"),
+                    "error": str(exc)[:300],
+                    "repo_count": 0,
+                    "added": 0,
+                    "updated": 0,
+                    "removed": [],
+                }
+
+        totals: dict[str, Any] = {"repo_count": 0, "added": 0, "updated": 0, "removed": []}
+        failed: list[dict[str, Any]] = []
+        for acct in accounts:
+            try:
+                single = await self._sync_github_repositories_for_account(acct, max_pages=max_pages)
+            except Exception as exc:
+                logger.warning(
+                    "credentials.github_repo_sync_failed account_id=%s error=%s",
+                    acct.get("account_id"),
+                    str(exc)[:200],
+                )
+                failed.append(
+                    {"account_id": acct.get("account_id"), "error": str(exc)[:300]}
+                )
+                continue
+            totals["repo_count"] += int(single.get("repo_count") or 0)
+            totals["added"] += int(single.get("added") or 0)
+            totals["updated"] += int(single.get("updated") or 0)
+            totals["removed"].extend(single.get("removed") or [])
+        return {
+            "synced": not failed,
+            "failed_accounts": failed,
+            "account_id": None,
+            "installation_id": "",
+            "repo_count": totals["repo_count"],
+            "added": totals["added"],
+            "updated": totals["updated"],
+            "removed": totals["removed"],
+        }
+
+    def list_github_repositories(
+        self,
+        *,
+        account_id: str | None = None,
+        statuses: list[str] | tuple[str, ...] = ("active",),
+        query: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return self._store.list_github_repositories(
+            account_id=account_id,
+            statuses=statuses,
+            query=query,
+            limit=limit,
+        )
+
+    def find_github_repository(self, ref: str) -> dict[str, Any] | None:
+        return self._store.find_github_repository(ref)
+
+    def record_github_repository_progress(
+        self,
+        repo_row_id: str,
+        *,
+        local_path: str | None = None,
+        branch: str | None = None,
+        commit_sha: str | None = None,
+        commit_message: str | None = None,
+        commit_author: str | None = None,
+        commit_at: str | None = None,
+        ahead: int | None = None,
+        behind: int | None = None,
+        dirty: bool | None = None,
+        task_id: str | None = None,
+        session_id: str | None = None,
+        alpha_project_id: str | None = None,
+        source: str | None = None,
+        sync_error: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Record Alpha's last known local state for one repository.
+
+        Rejects unknown repos so a stale Alpha cannot fabricate rows; the
+        authorization table stays gateway-owned.
+        """
+        return self._store.update_github_repository_progress(
+            repo_row_id,
+            local_path=local_path,
+            branch=branch,
+            commit_sha=commit_sha,
+            commit_message=commit_message,
+            commit_author=commit_author,
+            commit_at=commit_at,
+            ahead=ahead,
+            behind=behind,
+            dirty=dirty,
+            task_id=task_id,
+            session_id=session_id,
+            alpha_project_id=alpha_project_id,
+            source=source,
+            sync_error=sync_error,
+        )
+
+    def find_account_id_by_installation(self, installation_id: str) -> str | None:
+        return self._store.find_account_id_by_installation(installation_id)
+
+    def mark_github_repositories_status(
+        self,
+        *,
+        account_id: str,
+        github_repo_ids: list[str] | set[str],
+        status: str,
+        sync_error: str | None = None,
+    ) -> list[str]:
+        return self._store.mark_github_repositories_status(
+            account_id=account_id,
+            github_repo_ids=github_repo_ids,
+            status=status,
+            sync_error=sync_error,
+        )
+
+    def revoke_github_repositories_for_installation(
+        self,
+        installation_id: str,
+        *,
+        sync_error: str | None = None,
+    ) -> list[str]:
+        return self._store.set_github_repositories_status_for_installation(
+            installation_id,
+            status="revoked",
+            sync_error=sync_error,
+        )
+
+    def mark_github_repositories_for_installation(
+        self,
+        installation_id: str,
+        *,
+        status: str,
+        sync_error: str | None = None,
+    ) -> list[str]:
+        return self._store.set_github_repositories_status_for_installation(
+            installation_id,
+            status=status,
+            sync_error=sync_error,
+        )
+
+    async def _sync_github_repositories_for_account(
+        self,
+        account: dict[str, Any],
+        *,
+        max_pages: int,
+    ) -> dict[str, Any]:
+        """Sync one GitHub account's installation repository list.
+
+        Raises on credential/API failure so callers can distinguish "nothing
+        to sync" from "enumeration failed"; webhook and connect callers log.
+        """
+        account_id = str(account.get("account_id") or "")
+        if not account_id or account.get("provider") != "github":
+            raise ValueError(f"No GitHub account found: {account_id}")
+        cred = self._store.get_active_credential(account_id)
+        if cred is None or not cred.get("access_token"):
+            raise PermissionError(f"No active GitHub credential for account {account_id}.")
+        # Enumeration can take several paged round trips; a token resolved at
+        # entry could expire mid-listing. Resolve through the shared refresh
+        # path so the token is fresh by construction.
+        resolved = await self.resolve_credential(
+            provider="github",
+            required_scopes=[],
+            account_id=account_id,
+            allow_primary_fallback=True,
+        )
+        if not resolved or not resolved.get("access_token"):
+            # GitHub App tokens may be non-expiring (no refresh token); the
+            # resolve path demands a refresh token, so fall back to the raw
+            # stored access token when it is present and unexpired.
+            cred = self._store.get_active_credential(account_id)
+            expires_at = cred.get("access_token_expires_at") if cred else None
+            if cred and cred.get("access_token") and (
+                not expires_at or float(expires_at) > time.time() + 90
+            ):
+                resolved = {"access_token": cred["access_token"]}
+        if not resolved or not resolved.get("access_token"):
+            raise PermissionError(f"Unable to resolve a usable GitHub token for {account_id}.")
+        token = str(resolved["access_token"])
+
+        metadata = account.get("_metadata") if isinstance(account.get("_metadata"), dict) else {}
+        installation_id = str(metadata.get("github_installation_id") or "").strip()
+        try:
+            if not installation_id:
+                installation_id = await self._discover_github_installation_id(
+                    token, account_id
+                )
+                if installation_id:
+                    self.update_account_metadata(
+                        account_id, {"github_installation_id": installation_id}
+                    )
+            repositories = []
+            if installation_id:
+                repositories = await self._github_api_client().list_installation_repositories(
+                    token,
+                    installation_id,
+                    max_pages=max_pages,
+                )
+        except PermissionError:
+            self._store.log_audit(
+                action="github_repo_sync",
+                provider="github",
+                result="credential_rejected",
+            )
+            raise
+        except KeyError:
+            # The installation id stored at connect time no longer exists
+            # (uninstalled from the GitHub side). Nothing to reconcile.
+            self._store.log_audit(
+                action="github_repo_sync",
+                provider="github",
+                result="installation_missing",
+            )
+            return {
+                "account_id": account_id,
+                "installation_id": "",
+                "repo_count": 0,
+                "added": 0,
+                "updated": 0,
+                "removed": [],
+                "synced": False,
+                "reason": "installation_missing",
+            }
+
+        summary = self._store.upsert_github_repositories(
+            account_id=account_id,
+            installation_id=installation_id,
+            repos=repositories,
+        )
+        removed = self._store.mark_github_repositories_missing(
+            account_id,
+            [str(item.get("id")) for item in repositories if isinstance(item, dict)],
+        )
+        self._store.update_account(
+            account_id,
+            metadata_patch={
+                "github_repos_synced_at": time.time(),
+                "github_repos_count": len(repositories),
+            },
+        )
+        self._store.log_audit(
+            action="github_repo_sync",
+            provider="github",
+            result="success",
+            credential_ref=(cred.get("credential_ref") if cred else "") or "",
+        )
+        logger.info(
+            "credentials.github_repos_synced account_id=%s installation=%s repos=%d added=%d updated=%d removed=%d",
+            account_id,
+            installation_id,
+            len(repositories),
+            summary["added"],
+            summary["updated"],
+            len(removed),
+        )
+        return {
+            "synced": True,
+            "account_id": account_id,
+            "installation_id": installation_id,
+            "repo_count": len(repositories),
+            "added": summary["added"],
+            "updated": summary["updated"],
+            "removed": removed,
+        }
+
+    async def _discover_github_installation_id(
+        self,
+        access_token: str,
+        account_id: str,
+    ) -> str:
+        """Find this user's installation of our GitHub App.
+
+        ``/user/installations`` returns installations across every App the
+        user has authorized, so a bare count of one is only safe to trust when
+        it is genuinely the only one. Any ambiguity is left unresolved: the
+        connect flow already stamps the installation id from the callback, so
+        this discovery path only fires for accounts connected before that
+        existed or flows that skipped the install page.
+        """
+        try:
+            installations = await self._github_api_client().list_user_installations(
+                access_token
+            )
+        except Exception as exc:
+            logger.warning(
+                "credentials.github_installations_lookup_failed account_id=%s error=%s",
+                account_id,
+                str(exc)[:200],
+            )
+            return ""
+        owned = [
+            item
+            for item in installations
+            if self._github_app_slug
+            and str(item.get("app_slug") or "").strip().lower() == self._github_app_slug.lower()
+        ]
+        if not owned and len(installations) == 1:
+            owned = installations
+        if len(owned) == 1:
+            return str(owned[0].get("id") or "").strip()
+        logger.warning(
+            "credentials.github_installation_ambiguous account_id=%s installations=%d",
+            account_id,
+            len(installations),
+        )
+        return ""
 
     async def disconnect_account(self, account_id: str) -> dict[str, Any]:
         """Revoke tokens and mark account as revoked."""

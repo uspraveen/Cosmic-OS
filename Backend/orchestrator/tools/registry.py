@@ -143,6 +143,11 @@ def _tool_opportunity_update_progress(tool_input: dict[str, Any]) -> str:
     return f"Updating custom tool opportunity {opportunity_id}" if opportunity_id else "Updating a custom tool opportunity..."
 
 
+def _github_repo_search_progress(tool_input: dict[str, Any]) -> str:
+    query = str(tool_input.get("query") or "").strip()
+    return f"Looking up connected GitHub repositories: {query}" if query else "Looking up connected GitHub repositories..."
+
+
 def _docs_browse_progress(tool_input: dict[str, Any]) -> str:
     bundle_id = str(tool_input.get("bundle_id") or "").strip()
     index_kind = str(tool_input.get("index_kind") or "documents").strip() or "documents"
@@ -895,6 +900,40 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Update a My Tools opportunity and link it to Alpha execution/deployment state.",
         progress_builder=_tool_opportunity_update_progress,
         handler_method="_custom_tool_opportunity_update",
+    ),
+    ToolSpec(
+        name="github_repo_search",
+        api_definition={
+            "name": "github_repo_search",
+            "description": (
+                "Search repositories connected through the user's GitHub integration. "
+                "Each result carries the repository's owner/name, visibility, default branch, "
+                "the canonical VM checkout path Alpha uses, and its last local progress "
+                "(branch, last commit sha/message/author/time, ahead/behind, alpha project id). "
+                "Use this whenever the user references one of their GitHub repositories, asks which "
+                "repositories are connected, or needs to know where Alpha last worked before "
+                "delegating repo work to alpha.execute."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional repository name, owner/name, URL, or keyword to filter by.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of repositories to return. Default 8.",
+                        "default": 8,
+                    },
+                },
+            },
+        },
+        group="integrations",
+        prompt_summary="Look up connected GitHub repositories, their VM checkout paths, and last Alpha progress (branch + last commit).",
+        progress_builder=_github_repo_search_progress,
+        handler_method="_github_repo_search",
+        read_only=True,
     ),
     ToolSpec(
         name="docs_browse",
@@ -2414,6 +2453,7 @@ _GROUP_ORDER = (
     "web",
     "research",
     "specialists",
+    "integrations",
     "code",
     "artifacts",
     "documents",
@@ -2429,6 +2469,7 @@ _GROUP_TITLES = {
     "web": "Web",
     "research": "Research",
     "specialists": "Specialists",
+    "integrations": "Integrations",
     "code": "Code Execution",
     "artifacts": "Artifacts",
     "documents": "Documents",

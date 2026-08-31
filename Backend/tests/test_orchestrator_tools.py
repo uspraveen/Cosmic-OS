@@ -1616,3 +1616,57 @@ async def test_heartbeat_notes_append_survives_the_document_cap(tmp_path: Path) 
     assert "THE NEW NOTE" in written, "an append past the cap must not be discarded"
     assert "lease runs to Dec 8 2026" in written, "standing state must survive too"
     assert len(written) <= HEARTBEAT_NOTES_MAX_CHARS + len("# COSMIC Heartbeat Notes\n\n") + 2
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_github_repo_search_uses_internal_route() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url == httpx.URL(
+            "http://gateway/internal/github/repositories?query=portfolio&limit=8"
+        )
+        assert request.headers["X-Internal-Token"] == "internal-token"
+        return httpx.Response(
+            200,
+            json={
+                "repositories": [
+                    {
+                        "repo_row_id": "ghr_1",
+                        "full_name": "uspraveen/portfolio",
+                        "clone_url": "https://github.com/uspraveen/portfolio.git",
+                        "default_branch": "main",
+                        "local_path": "/var/lib/cosmic/alpha/repos/uspraveen/portfolio",
+                        "branch": "main",
+                        "last_commit": {
+                            "sha": "abc123",
+                            "message": "feat: ship it",
+                            "author": "praveen",
+                            "committed_at": "2026-08-30T10:00:00+00:00",
+                        },
+                        "last_ahead": 0,
+                        "last_behind": 0,
+                        "alpha_project_id": "prj_x",
+                        "status": "active",
+                    }
+                ],
+                "count": 1,
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    try:
+        raw_result = await executor.execute(
+            "github_repo_search", {"query": "portfolio", "limit": 8}
+        )
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert result["count"] == 1
+    assert result["repositories"][0]["full_name"] == "uspraveen/portfolio"
+    assert result["repositories"][0]["last_commit"]["sha"] == "abc123"

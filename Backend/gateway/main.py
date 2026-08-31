@@ -10,6 +10,7 @@ from .config import GatewayConfig
 from .automations.routes import router as automation_router
 from .credentials.routes import router as credential_router
 from .gmail_routes import router as gmail_router
+from .github_routes import router as github_router
 from .memory.routes import router as memory_router
 from .preferences.routes import router as preferences_router
 from .runtime import GatewayRuntime
@@ -39,6 +40,7 @@ app.include_router(channel_router)
 app.include_router(automation_router)
 app.include_router(credential_router)
 app.include_router(gmail_router)
+app.include_router(github_router)
 app.include_router(memory_router)
 app.include_router(preferences_router)
 app.include_router(usage_router)

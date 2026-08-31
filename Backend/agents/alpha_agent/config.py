@@ -62,6 +62,15 @@ class AlphaAgentConfig:
     opencode_default_model: str
     zen_api_key: str
     cli_idle_check_sec: float
+    # Connected GitHub repositories are cloned into a canonical checkout root
+    # so the orchestrator and Alpha agree on one stable path per repo.
+    repos_root: Path | None = None
+    repo_sync_enabled: bool = True
+    repo_sync_timeout_sec: float = 600.0
+
+    @property
+    def repos_dir(self) -> Path:
+        return self.repos_root or (self.alpha_root / "repos")
 
     @classmethod
     def from_env(cls) -> "AlphaAgentConfig":
@@ -144,5 +153,13 @@ class AlphaAgentConfig:
             cli_idle_check_sec=max(
                 30.0,
                 float(os.getenv("ALPHA_CLI_IDLE_CHECK_SEC", "60") or "60"),
+            ),
+            repos_root=_optional_path(os.getenv("ALPHA_REPOS_ROOT"))
+            or alpha_root
+            / "repos",
+            repo_sync_enabled=_truthy(os.getenv("ALPHA_REPO_SYNC"), default=True),
+            repo_sync_timeout_sec=max(
+                30.0,
+                float(os.getenv("ALPHA_REPO_SYNC_TIMEOUT_SEC", "600") or "600"),
             ),
         )

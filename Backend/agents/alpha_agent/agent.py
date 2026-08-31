@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import re
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -20,6 +22,7 @@ from .docker_runner import DockerWorkspaceRunner
 from .instructions import seed_workspace_instructions
 from .opencode_runner import OpenCodeRunResult, OpenCodeWorkspaceRunner
 from .project_registry import HarnessSessionRecord, ProjectCandidate, ProjectRecord, ProjectRegistry
+from .repo_sync import RepoCheckout, RepoWorktree
 from .workspace_manager import WorkspaceManager, WorkspacePaths
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,11 @@ class AlphaAgent(AgentRuntime):
         self.codex_runner = CodexWorkspaceRunner(self.config)
         self.cursor_runner = CursorWorkspaceRunner(self.config)
         self.opencode_runner = OpenCodeWorkspaceRunner(self.config)
+        self.repo_worktree = RepoWorktree(
+            self.config.repos_dir,
+            timeout_sec=self.config.repo_sync_timeout_sec,
+            enabled=self.config.repo_sync_enabled,
+        )
         super().__init__(
             agent_card_path=AGENT_ROOT / "agent_card.yaml",
             redis_client=redis_client,
@@ -147,6 +155,29 @@ class AlphaAgent(AgentRuntime):
             await self.step_plan.update(1, "completed", f"Using Alpha project {project.project_id}")
 
         paths = self.workspace_manager.prepare(project_id=project.project_id, task_id=task.task_id)
+
+        # Connected GitHub repositories get a single canonical checkout under
+        # <repos_root>/<owner>/<name>. When the task references one of those,
+        # ensure the checkout exists and is in sync, then run the harness inside
+        # it so Alpha edits the real repo instead of a scratch project dir.
+        # Never pollutes the user's repo: the workspace AGENTS.md is skipped for
+        # repo-backed runs and input staging moves to the artifacts dir.
+        connected_repo, repo_checkout = await self._prepare_connected_repo(task, project)
+        repo_backed = bool(
+            connected_repo and repo_checkout and repo_checkout.usable
+        )
+        repo_url_for_record = self._optional_string(task.input.get("repo_url"))
+        if repo_backed and repo_checkout is not None and repo_checkout.snapshot is not None:
+            repo_url_for_record = connected_repo.get("clone_url") or repo_url_for_record
+            paths = replace(paths, workspace=Path(repo_checkout.snapshot.local_path))
+            await self._report_repo_progress(
+                str(connected_repo.get("repo_row_id") or ""),
+                snapshot=repo_checkout.snapshot,
+                task=task,
+                project_id=project.project_id,
+                source="alpha_task_started",
+            )
+
         project = self.registry.mark_task(
             project.project_id,
             task_id=task.task_id,
@@ -157,25 +188,27 @@ class AlphaAgent(AgentRuntime):
             goal=goal[:2000],
             context_brief=context_brief,
             preferred_harness=requested_harness,
-            repo_url=self._optional_string(task.input.get("repo_url")),
+            repo_url=repo_url_for_record,
             deployment_url=self._optional_string(task.input.get("deployment_url")),
         )
 
         # Drop a project-aware AGENTS.md into the workspace so Codex/Cursor
         # pick it up via cwd-walk. Idempotent: same content => no rewrite.
+        # Skipped for repo-backed runs so we never dirty the user's repository.
         # Best-effort — never block task execution on instruction seeding.
-        try:
-            seed_workspace_instructions(
-                workspace_path=paths.workspace,
-                artifacts_path=paths.artifacts,
-                project=project,
-            )
-        except Exception:
-            logger.exception(
-                "alpha.workspace_instructions_seed_failed task_id=%s project_id=%s",
-                task.task_id,
-                project.project_id,
-            )
+        if not repo_backed:
+            try:
+                seed_workspace_instructions(
+                    workspace_path=paths.workspace,
+                    artifacts_path=paths.artifacts,
+                    project=project,
+                )
+            except Exception:
+                logger.exception(
+                    "alpha.workspace_instructions_seed_failed task_id=%s project_id=%s",
+                    task.task_id,
+                    project.project_id,
+                )
 
         if self.step_plan is not None:
             await self.step_plan.update(2, "completed", f"Workspace prepared at {paths.workspace}")
@@ -235,9 +268,12 @@ class AlphaAgent(AgentRuntime):
             )
 
         # Off the event loop: this now unpacks archives, not just copies files,
-        # and the size ceiling is measured in hundreds of megabytes.
+        # and the size ceiling is measured in hundreds of megabytes. For
+        # repo-backed runs, inputs stage into the artifacts dir so a repository
+        # checkout stays clean of COSMIC's own scratch files.
+        staging_root = paths.artifacts if repo_backed else paths.workspace
         staged_inputs = await asyncio.to_thread(
-            self._stage_input_artifacts, task, workspace=paths.workspace
+            self._stage_input_artifacts, task, workspace=staging_root
         )
         base_prompt = self._build_cli_prompt(
             task=task,
@@ -245,6 +281,8 @@ class AlphaAgent(AgentRuntime):
             workspace=str(paths.workspace),
             artifacts_dir=str(paths.artifacts),
             staged_inputs=staged_inputs,
+            repo_checkout=repo_checkout if repo_backed else None,
+            repo_full_name=connected_repo.get("full_name") if repo_backed and connected_repo else None,
         )
 
         async def cancel_check() -> bool:
@@ -511,6 +549,17 @@ class AlphaAgent(AgentRuntime):
             if run_result.ok:
                 if self.step_plan is not None:
                     await self.step_plan.update(5, "completed", f"{provider_label} completed the task.")
+                if repo_backed and connected_repo:
+                    final_snapshot = await asyncio.to_thread(
+                        self.repo_worktree.snapshot, Path(paths.workspace)
+                    )
+                    await self._report_repo_progress(
+                        str(connected_repo.get("repo_row_id") or ""),
+                        snapshot=final_snapshot,
+                        task=task,
+                        project_id=project.project_id,
+                        source="alpha_task_completed",
+                    )
                 output: dict[str, Any] = {
                     "status": "completed",
                     "project": project.as_dict(),
@@ -521,6 +570,12 @@ class AlphaAgent(AgentRuntime):
                     "attempts": attempt_outputs,
                     "next_action": f"Review {provider_label} output and continue with the same project_ref for follow-up work.",
                 }
+                if repo_backed and connected_repo:
+                    output["repository"] = {
+                        "full_name": connected_repo.get("full_name"),
+                        "local_path": str(paths.workspace),
+                        "repo_row_id": connected_repo.get("repo_row_id"),
+                    }
                 if native_session:
                     output["native_session"] = native_session.as_dict()
                 if fallback_from:
@@ -631,6 +686,97 @@ class AlphaAgent(AgentRuntime):
                 return project
         recent = self.registry.recent_for_session(task.session_id, limit=1)
         return recent[0] if recent else None
+
+    _GITHUB_REPO_URL_RE = re.compile(
+        r"(?:https?://(?:www\.)?github\.com/|git@github\.com:|ssh://git@github\.com/)"
+        r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[/?#]|$)",
+        re.IGNORECASE,
+    )
+
+    def _repo_ref_from_task(self, task: TaskEnvelope, project: ProjectRecord | None) -> str | None:
+        explicit = self._optional_string(
+            task.input.get("repo_url") or task.input.get("repo_full_name")
+        )
+        if explicit:
+            return explicit
+        if project is not None and project.repo_url:
+            return project.repo_url
+        goal = str(task.input.get("goal") or "")
+        match = self._GITHUB_REPO_URL_RE.search(goal)
+        if match:
+            return match.group(0).rstrip(".,()[]{}!?;:'\"")
+        return None
+
+    async def _resolve_connected_repo(self, ref: str) -> dict[str, Any] | None:
+        if not self.gateway_internal_token:
+            return None
+        try:
+            response = await self._http_client.get(
+                f"{self.gateway_url.rstrip('/')}/internal/github/repositories/resolve",
+                headers={"X-Internal-Token": self.gateway_internal_token},
+                params={"ref": ref},
+                timeout=15.0,
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            payload = response.json()
+            return payload.get("repository") if isinstance(payload, dict) else None
+        except Exception:
+            logger.debug("alpha.github_repo_resolve_failed ref=%s", ref, exc_info=True)
+            return None
+
+    async def _report_repo_progress(
+        self,
+        repo_row_id: str,
+        *,
+        snapshot: Any,
+        task: TaskEnvelope,
+        project_id: str,
+        source: str,
+    ) -> None:
+        if not self.gateway_internal_token or not repo_row_id:
+            return
+        try:
+            commit = snapshot.last_commit if snapshot.last_commit else {}
+            await self._http_client.post(
+                f"{self.gateway_url.rstrip('/')}/internal/github/repositories/{repo_row_id}/progress",
+                headers={"X-Internal-Token": self.gateway_internal_token},
+                json={
+                    "local_path": snapshot.local_path or None,
+                    "branch": snapshot.branch,
+                    "commit": commit or None,
+                    "ahead": snapshot.ahead,
+                    "behind": snapshot.behind,
+                    "dirty": snapshot.dirty,
+                    "task_id": task.task_id,
+                    "session_id": task.session_id,
+                    "project_id": project_id,
+                    "source": source,
+                },
+                timeout=15.0,
+            )
+        except Exception:
+            logger.debug(
+                "alpha.github_repo_progress_report_failed repo=%s source=%s",
+                repo_row_id,
+                source,
+                exc_info=True,
+            )
+
+    async def _prepare_connected_repo(
+        self,
+        task: TaskEnvelope,
+        project: ProjectRecord | None,
+    ) -> tuple[dict[str, Any] | None, RepoCheckout | None]:
+        ref = self._repo_ref_from_task(task, project)
+        if not ref or not self.config.repo_sync_enabled:
+            return None, None
+        repo = await self._resolve_connected_repo(ref)
+        if repo is None or str(repo.get("status") or "") != "active":
+            return repo, None
+        checkout = await asyncio.to_thread(self.repo_worktree.ensure, repo=repo)
+        return repo, checkout
 
     def _load_runtime_text(self) -> None:
         for relative in ("prompts/system.md", "prompts/policies.md", "store/learnings.md"):
@@ -1301,6 +1447,8 @@ class AlphaAgent(AgentRuntime):
         workspace: str,
         artifacts_dir: str,
         staged_inputs: list[dict[str, str]] | None = None,
+        repo_checkout: RepoCheckout | None = None,
+        repo_full_name: str | None = None,
     ) -> str:
         deliverables = self._coerce_string_list(task.input.get("deliverables"))
         constraints = task.input.get("constraints") if isinstance(task.input.get("constraints"), dict) else {}
@@ -1326,15 +1474,21 @@ class AlphaAgent(AgentRuntime):
             f"- workspace: {workspace}",
             f"- repo_url: {project.repo_url or self._optional_string(task.input.get('repo_url')) or ''}",
             f"- deployment_url: {project.deployment_url or self._optional_string(task.input.get('deployment_url')) or ''}",
-            "",
-            "## Operating Rules",
-            "- Work only inside the workspace unless the task explicitly requires external setup.",
-            "- Do not alter the COSMIC production repo or services unless the user goal explicitly asks for that.",
-            f"- Put every user-facing deliverable file in this artifact directory: {artifacts_dir}",
-            "- If you create a deliverable elsewhere in the workspace, mention its absolute path in your final report.",
-            "- Prefer small, verifiable changes and run relevant checks when the project provides them.",
-            "- Leave a concise final report with what changed, where it is, checks run, and any blocker.",
         ]
+        if repo_checkout is not None and repo_checkout.snapshot is not None:
+            lines.extend(self._render_repo_block(repo_checkout, repo_full_name or ""))
+        lines.extend(
+            [
+                "",
+                "## Operating Rules",
+                "- Work only inside the workspace unless the task explicitly requires external setup.",
+                "- Do not alter the COSMIC production repo or services unless the user goal explicitly asks for that.",
+                f"- Put every user-facing deliverable file in this artifact directory: {artifacts_dir}",
+                "- If you create a deliverable elsewhere in the workspace, mention its absolute path in your final report.",
+                "- Prefer small, verifiable changes and run relevant checks when the project provides them.",
+                "- Leave a concise final report with what changed, where it is, checks run, and any blocker.",
+            ]
+        )
         if deliverables:
             lines.extend(["", "## Requested Deliverables"])
             lines.extend(f"- {item}" for item in deliverables)
@@ -1367,6 +1521,37 @@ class AlphaAgent(AgentRuntime):
             lines.extend(["", "## Constraints"])
             lines.extend(f"- {key}: {value}" for key, value in sorted(constraints.items()))
         return "\n".join(lines)
+
+    def _render_repo_block(self, checkout: RepoCheckout, full_name: str) -> list[str]:
+        snapshot = checkout.snapshot
+        commit = snapshot.last_commit or {}
+        commit_line = ""
+        if commit.get("sha"):
+            commit_line = (
+                f"- last commit at handoff: {commit.get('sha', '')} "
+                f'"{commit.get("message", "")}" by {commit.get("author", "unknown")} '
+                f"({commit.get('committed_at', 'unknown time')})"
+            )
+        sync_state = {
+            "cloned": "freshly cloned from origin",
+            "fast_forwarded": "was behind and was fast-forwarded to origin",
+            "up_to_date": "in sync with origin",
+            "diverged": "HAS DIVERGED from origin (local and remote commits)",
+            "dirty": "has uncommitted changes (do not pull/merge before resolving)",
+        }.get(checkout.action, checkout.action)
+        return [
+            "",
+            "## Connected Repository",
+            f"- repository: {full_name}",
+            f"- checkout path (your working directory): {snapshot.local_path}",
+            f"- branch: {snapshot.branch or 'unknown'} (ahead {snapshot.ahead}, behind {snapshot.behind})",
+            f"- working tree: {sync_state}",
+            commit_line,
+            "- Before making changes, re-verify sync: `git status`, `git fetch origin`, and compare "
+            "your branch to origin. Reconcile (stash/pull/ff-only) if the checkout moved since this handoff.",
+            "- Never rewrite history (no force-push, no amend of pushed commits). Push only when the user "
+            "goal explicitly asks for it; otherwise keep commits local and say so in your final report.",
+        ]
 
     def _externalize_large_goal(self, goal: str, *, artifacts_dir: str) -> str | None:
         if len(goal) <= 8000:

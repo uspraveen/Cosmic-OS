@@ -339,6 +339,7 @@ async def github_oauth_callback(
                 logger.exception(
                     "Failed to record GitHub installation id for %s", account_id
                 )
+            _schedule_github_repo_sync(request, account_id)
     subtitle = (
         str(account.get("display_name") or account.get("account_label") or "").strip()
         or "Your GitHub account"
@@ -1283,3 +1284,183 @@ async def get_calendar_agenda(request: Request):
         "accounts": calendar_accounts,
         "events": all_events,
     }
+
+
+# ── GitHub repository registry (internal) ────────────────────────────────────
+
+
+async def _background_github_repo_sync(mgr, account_id: str) -> None:
+    try:
+        await mgr.sync_github_repositories(account_id)
+    except Exception:
+        logger.exception(
+            "credentials.github_repo_sync_background_failed account_id=%s",
+            account_id,
+        )
+
+
+def _schedule_github_repo_sync(request: Request, account_id: str) -> None:
+    """Fire-and-forget repository enumeration after a connect/reconnect.
+
+    The OAuth callback must not block on GitHub API pagination; the repo list
+    lands a moment later and the tool surface reads it from the store.
+    Best-effort by design: the connect already succeeded, and a failed
+    enumeration retries on the next reconnect or webhook.
+    """
+    try:
+        mgr = _get_manager(request)
+    except Exception:
+        return
+    task = asyncio.create_task(_background_github_repo_sync(mgr, account_id))
+    runtime = getattr(request.app.state, "gateway_runtime", None)
+    background = getattr(runtime, "_background_tasks", None)
+    if background is not None:
+        background.add(task)
+
+
+class GitHubRepoSyncRequest(BaseModel):
+    account_id: str | None = None
+    max_pages: int | None = None
+
+
+class GitHubRepoProgressRequest(BaseModel):
+    local_path: str | None = None
+    branch: str | None = None
+    commit: dict[str, Any] | None = None
+    ahead: int | None = None
+    behind: int | None = None
+    dirty: bool | None = None
+    task_id: str | None = None
+    session_id: str | None = None
+    project_id: str | None = None
+    source: str | None = None
+    sync_error: str | None = None
+
+# ── GitHub repository registry (internal — orchestrator / alpha) ────────────
+
+
+def _public_github_repo(repo: dict[str, Any]) -> dict[str, Any]:
+    """Projection for tool-facing payloads: no token material, ids and state only."""
+    return {
+        "repo_row_id": repo.get("repo_row_id"),
+        "account_id": repo.get("account_id"),
+        "github_repo_id": repo.get("github_repo_id"),
+        "full_name": repo.get("full_name"),
+        "owner": repo.get("owner"),
+        "name": repo.get("name"),
+        "private": bool(repo.get("private")),
+        "clone_url": repo.get("clone_url"),
+        "ssh_url": repo.get("ssh_url"),
+        "html_url": repo.get("html_url"),
+        "default_branch": repo.get("default_branch"),
+        "permissions": repo.get("permissions") or {},
+        "can_push": bool(repo.get("can_push")),
+        "local_path": repo.get("local_path"),
+        "branch": repo.get("branch"),
+        "last_commit": repo.get("last_commit"),
+        "last_ahead": repo.get("last_ahead"),
+        "last_behind": repo.get("last_behind"),
+        "last_dirty": bool(repo.get("last_dirty")),
+        "last_task_id": repo.get("last_task_id"),
+        "last_session_id": repo.get("last_session_id"),
+        "alpha_project_id": repo.get("alpha_project_id"),
+        "last_progress_source": repo.get("last_progress_source"),
+        "last_progress_at": repo.get("last_progress_at"),
+        "status": repo.get("status"),
+        "sync_error": repo.get("sync_error"),
+        "synced_at": repo.get("synced_at"),
+    }
+
+
+@router.get("/internal/github/repositories")
+async def list_github_repositories_route(
+    request: Request,
+    query: str = Query(""),
+    limit: int = Query(50),
+    status: str = Query("active"),
+):
+    """List connected GitHub repositories with their local progress.
+
+    The orchestrator uses this to resolve repo references and report where a
+    repository lives on the VM and what the last Alpha progress was.
+    """
+    _check_internal_token(request)
+    mgr = _get_manager(request)
+    statuses = ["all"] if status in ("all", "*") else [item.strip() for item in status.split(",") if item.strip()] or ["active"]
+    repositories = mgr.list_github_repositories(
+        statuses=tuple(statuses),
+        query=query,
+        limit=limit,
+    )
+    return {
+        "repositories": [_public_github_repo(item) for item in repositories],
+        "count": len(repositories),
+    }
+
+
+@router.get("/internal/github/repositories/resolve")
+async def resolve_github_repository_route(
+    request: Request,
+    ref: str = Query(""),
+):
+    """Resolve a repo id, owner/name, or clone/html/ssh URL to one repository."""
+    _check_internal_token(request)
+    mgr = _get_manager(request)
+    repo = mgr.find_github_repository(ref) if ref else None
+    if repo is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "repository_not_found",
+                "message": "No connected GitHub repository matched that reference.",
+            },
+        )
+    return {"found": True, "repository": _public_github_repo(repo)}
+
+
+@router.post("/internal/github/repositories/sync")
+async def sync_github_repositories_route(body: GitHubRepoSyncRequest, request: Request):
+    """Re-enumerate installation repositories from GitHub on demand."""
+    _check_internal_token(request)
+    mgr = _get_manager(request)
+    max_pages = max(1, min(int(body.max_pages or 10), 30))
+    try:
+        result = await mgr.sync_github_repositories(
+            body.account_id or None, max_pages=max_pages
+        )
+    except Exception as exc:
+        logger.exception("credentials.github_repo_sync_route_failed")
+        raise HTTPException(status_code=502, detail=str(exc)[:300]) from exc
+    return result
+
+
+@router.post("/internal/github/repositories/{repo_row_id}/progress")
+async def github_repository_progress(
+    repo_row_id: str, body: GitHubRepoProgressRequest, request: Request
+):
+    """Alpha reports a repository's last known local state (clone path, branch,
+    last commit, ahead/behind, dirty flag) so the orchestrator can reason
+    about progress without shelling out to git."""
+    _check_internal_token(request)
+    mgr = _get_manager(request)
+    commit = body.commit if isinstance(body.commit, dict) else {}
+    updated = mgr.record_github_repository_progress(
+        str(repo_row_id or "").strip(),
+        local_path=(body.local_path or "").strip() or None,
+        branch=(body.branch or "").strip() or None,
+        commit_sha=str(commit.get("sha") or "").strip() if commit else None,
+        commit_message=(str(commit.get("message") or "").strip()[:500] if commit else None),
+        commit_author=(str(commit.get("author") or "").strip() or None) if commit else None,
+        commit_at=(str(commit.get("committed_at") or "").strip() or None) if commit else None,
+        ahead=body.ahead,
+        behind=body.behind,
+        dirty=body.dirty,
+        task_id=(body.task_id or "").strip() or None,
+        session_id=(body.session_id or "").strip() or None,
+        alpha_project_id=(body.project_id or "").strip() or None,
+        source=(body.source or "").strip() or None,
+        sync_error=body.sync_error,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Unknown GitHub repository.")
+    return {"updated": True, "repository": _public_github_repo(updated)}
