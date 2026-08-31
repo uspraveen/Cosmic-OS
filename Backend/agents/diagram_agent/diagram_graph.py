@@ -13,6 +13,7 @@ The graph:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -26,6 +27,7 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnvelope
+from shared.svg_preview import maybe_write_svg_preview
 
 from .config import DiagramAgentConfig
 from .internal_llm import (
@@ -656,6 +658,20 @@ def _build_graph(cfg: DiagramAgentConfig, ctx: _GraphCtx):
 
             out_path = task_artifact_dir / out_filename
             if out_path.exists():
+                if out_mime == "image/svg+xml":
+                    preview_path = await asyncio.to_thread(
+                        maybe_write_svg_preview, out_path
+                    )
+                    if preview_path is not None:
+                        step_artifacts.append(
+                            agent._artifact_manifest(
+                                task_id=task.task_id,
+                                path=preview_path,
+                                mime="image/png",
+                                kind="output",
+                                audience="deliverable",
+                            )
+                        )
                 step_artifacts.append(
                     agent._artifact_manifest(
                         task_id=task.task_id,

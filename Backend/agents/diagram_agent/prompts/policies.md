@@ -28,6 +28,7 @@
 - If CLI fails, return the source code as an artifact with a clear note about the render failure.
 - Clean up temp files after rendering.
 - Support `svg` and `png` output formats; default to SVG.
+- SVG output also writes a PNG inline preview (`diagram_preview.png`) so the desktop can show the diagram like a generated image. Keep the SVG as the downloadable original. The preview is a readable window, not a compressed view of a long or wide diagram.
 - Surface concrete renderer/runtime causes when available (for example missing Chrome for Mermaid CLI), not just generic exit codes.
 
 ### Excalidraw Specifics

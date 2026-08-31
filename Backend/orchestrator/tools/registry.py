@@ -531,7 +531,11 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "Do not use this for maps, directions, route alternatives, place lookup visuals, or geocoding workflows; "
                 "use the map.render specialist instead because local HTML/Folium outputs are delivered as downloads, "
                 "while map.render produces inline COSMIC map artifacts. "
-                "Write files that should be delivered to the user under the relative `outputs/` directory."
+                "Write files that should be delivered to the user under the relative `outputs/` directory. "
+                "`import os` and `import sys` are blocked unless host filesystem access is granted; "
+                "use `pathlib.Path` for files under `outputs/`. "
+                "Charts inherit a Cosmic dark theme automatically (#2596be). Do not wrap figures in extra "
+                "frames or call seaborn.set_theme() with a default palette."
             ),
             "input_schema": {
                 "type": "object",
@@ -540,7 +544,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "string",
                         "description": (
                             "Python code to execute. Use print() for concise results. Write deliverable files under "
-                            "`outputs/`, for example outputs/result.csv or outputs/chart.png."
+                            "`outputs/` with pathlib (for example Path('outputs/chart.png')). "
+                            "`import os` is blocked unless host filesystem access is granted. "
+                            "Do not draw a second frame around charts; Cosmic already styles the figure."
                         ),
                     },
                     "description": {

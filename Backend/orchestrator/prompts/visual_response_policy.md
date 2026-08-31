@@ -89,3 +89,5 @@ Chart data completeness (read carefully — ragged charts look broken):
 - Keep charts legible: prefer at most ~6 series and ~8 categories. If you have more, pick the most relevant subset (for example the leading models and the headline benchmarks) and note the rest in text.
 - Order categories meaningfully (e.g. chronological, or by the primary series value) and keep the same series order across every chart in the answer so the colors stay consistent.
 - Put the most important series first; it is emphasized in the chart's color order and area fill.
+- Category labels can be real names (model names, products). The renderer lays long names out as horizontal bars so they stay readable on the panel-width chat surface. Do not abbreviate labels into opaque codes just to fit a vertical chart.
+- `title` is the short heading on the card. `caption` is one supporting sentence. Do not repeat the title inside the caption.

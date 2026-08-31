@@ -921,9 +921,9 @@ def build_visual_enhancement_env_rendered(
         )
 
     enabled = pick_visual(("VISUAL_ENHANCEMENT_ENABLED",), "true")
-    max_visuals = pick_visual(("VISUAL_ENHANCEMENT_MAX_VISUALS_PER_TURN",), "2")
+    max_visuals = pick_visual(("VISUAL_ENHANCEMENT_MAX_VISUALS_PER_TURN",), "5")
     max_image_slots = pick_visual(
-        ("VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN",), "1"
+        ("VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN",), "5"
     )
     max_chart_slots = pick_visual(
         ("VISUAL_ENHANCEMENT_MAX_CHART_SLOTS_PER_TURN",), "1"
@@ -932,7 +932,7 @@ def build_visual_enhancement_env_rendered(
         ("VISUAL_ENHANCEMENT_MAX_CONCURRENT_SIDECARS",), "2"
     )
     image_slot_timeout_ms = pick_visual(
-        ("VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS",), "6000"
+        ("VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS",), "8000"
     )
     chart_slot_timeout_ms = pick_visual(
         ("VISUAL_ENHANCEMENT_CHART_SLOT_TIMEOUT_MS",), "4000"
@@ -950,7 +950,7 @@ def build_visual_enhancement_env_rendered(
         ("VISUAL_ENHANCEMENT_IMAGE_MAX_BYTES",), "8388608"
     )
     image_verify_top_k = pick_visual(
-        ("VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K",), "1"
+        ("VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K",), "3"
     )
     image_contact_sheet_enabled = pick_visual(
         ("VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_ENABLED",), "true"
@@ -1097,17 +1097,17 @@ def build_visual_enhancement_env_rendered(
 
     overrides = {
         "VISUAL_ENHANCEMENT_ENABLED": enabled or "true",
-        "VISUAL_ENHANCEMENT_MAX_VISUALS_PER_TURN": max_visuals or "2",
-        "VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN": max_image_slots or "1",
+        "VISUAL_ENHANCEMENT_MAX_VISUALS_PER_TURN": max_visuals or "5",
+        "VISUAL_ENHANCEMENT_MAX_IMAGE_SLOTS_PER_TURN": max_image_slots or "5",
         "VISUAL_ENHANCEMENT_MAX_CHART_SLOTS_PER_TURN": max_chart_slots or "1",
         "VISUAL_ENHANCEMENT_MAX_CONCURRENT_SIDECARS": max_concurrent_sidecars or "2",
-        "VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS": image_slot_timeout_ms or "6000",
+        "VISUAL_ENHANCEMENT_IMAGE_SLOT_TIMEOUT_MS": image_slot_timeout_ms or "8000",
         "VISUAL_ENHANCEMENT_CHART_SLOT_TIMEOUT_MS": chart_slot_timeout_ms or "4000",
         "VISUAL_ENHANCEMENT_FINALIZATION_GRACE_MS": finalization_grace_ms or "750",
         "VISUAL_ENHANCEMENT_IMAGE_SOURCE_PAGE_LIMIT": image_source_page_limit or "3",
-        "VISUAL_ENHANCEMENT_IMAGE_CANDIDATE_LIMIT": image_candidate_limit or "12",
+        "VISUAL_ENHANCEMENT_IMAGE_CANDIDATE_LIMIT": image_candidate_limit or "24",
         "VISUAL_ENHANCEMENT_IMAGE_MAX_BYTES": image_max_bytes or "8388608",
-        "VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K": image_verify_top_k or "1",
+        "VISUAL_ENHANCEMENT_IMAGE_VERIFY_TOP_K": image_verify_top_k or "3",
         "VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_ENABLED": image_contact_sheet_enabled
         or "true",
         "VISUAL_ENHANCEMENT_IMAGE_CONTACT_SHEET_LIMIT": image_contact_sheet_limit

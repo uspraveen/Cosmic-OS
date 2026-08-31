@@ -5617,38 +5617,6 @@
   color: rgba(255, 255, 255, 0.55);
 }
 
-.cosmic-agents-hero-status {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(0, 0, 0, 0.2);
-}
-
-.cosmic-agents-live-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.25);
-  flex-shrink: 0;
-  transition: background 0.3s, box-shadow 0.3s;
-}
-
-.cosmic-agents-live-dot.on {
-  background: #30d158;
-  box-shadow: 0 0 0 4px rgba(48, 209, 88, 0.14);
-}
-
-.cosmic-agents-status-text {
-  font-size: 13px;
-  font-weight: 600;
-  color: #fff;
-}
-
 .cosmic-agents-section-label {
   margin: 0 0 -6px 2px;
   font-size: 11px;

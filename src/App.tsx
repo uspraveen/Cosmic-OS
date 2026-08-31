@@ -2604,12 +2604,9 @@ const humanizeArtifactFilename = (filename?: string | null) => {
     .trim()
 }
 
-const formatInlineVisualBadge = (block: ResponseArtifactBlock) => {
+const isGeneratedPlotCard = (block: { kind?: string | null; mimeType?: string | null }) => {
   const kind = formatArtifactKind(block)
-  if (kind === 'chart') return 'Generated chart'
-  if (kind === 'reference image') return 'Reference image'
-  if (kind === 'image') return 'Inline image'
-  return kind
+  return kind === 'chart' || kind === 'local code output'
 }
 
 const formatInlineVisualSourceChip = (block: ResponseArtifactBlock) => {
@@ -2617,13 +2614,14 @@ const formatInlineVisualSourceChip = (block: ResponseArtifactBlock) => {
   if (sourceDomain) {
     return sourceDomain.replace(/^www\./i, '')
   }
-  if (formatArtifactKind(block) === 'chart') {
-    return 'Cosmic'
-  }
   return ''
 }
 
 const formatInlineVisualTitle = (block: ResponseArtifactBlock | MapArtifactBlock) => {
+  if (isGeneratedPlotCard(block as ResponseArtifactBlock)) {
+    const chartTitle = String((block as ResponseArtifactBlock).provenance?.sourceTitle || '').trim()
+    if (chartTitle) return chartTitle
+  }
   const caption = String(block.caption || '').trim()
   if (caption) return caption
   if (block.type === 'image_artifact' || block.type === 'file_artifact') {
@@ -2635,13 +2633,14 @@ const formatInlineVisualTitle = (block: ResponseArtifactBlock | MapArtifactBlock
   if (block.type === 'map_artifact' || formatArtifactKind(block) === 'map') {
     return 'Interactive map'
   }
-  return formatArtifactKind(block) === 'chart' ? 'Inline chart' : 'Inline visual'
+  return isGeneratedPlotCard(block as ResponseArtifactBlock) ? 'Chart' : 'Inline visual'
 }
 
 const formatInlineVisualSubtitle = (block: ResponseArtifactBlock, title: string) => {
   const kind = formatArtifactKind(block)
-  if (kind === 'chart') {
-    return 'Generated from structured data in this response.'
+  if (kind === 'chart' || kind === 'local code output') {
+    const caption = String(block.caption || '').trim()
+    return caption && caption !== title ? caption : ''
   }
   const sourceTitle = String(block.provenance?.sourceTitle || '').trim()
   if (sourceTitle && sourceTitle !== title) {
@@ -3247,13 +3246,12 @@ const AssistantResponseBlocks = memo(({
         }
         if (block.type === 'image_artifact') {
           const attribution = formatInlineVisualAttribution(block)
-          const badge = formatInlineVisualBadge(block)
           const sourceChip = formatInlineVisualSourceChip(block)
           const visualTitle = formatInlineVisualTitle(block)
           const visualSubtitle = formatInlineVisualSubtitle(block, visualTitle)
-          const isChart = formatArtifactKind(block) === 'chart'
+          const isGeneratedVisual = isGeneratedPlotCard(block)
           return (
-            <figure key={block.id} className={['assistant-inline-image-card', isChart ? 'is-chart' : 'is-image'].join(' ')}>
+            <figure key={block.id} className={['assistant-inline-image-card', isGeneratedVisual ? 'is-chart' : 'is-image'].join(' ')}>
               <div className="assistant-inline-image-frame">
                 {block.previewUrl ? (
                   <img
@@ -3267,17 +3265,14 @@ const AssistantResponseBlocks = memo(({
                 )}
               </div>
               <figcaption className="assistant-inline-image-meta">
-                <div className="assistant-inline-image-topline">
-                  <div className="assistant-inline-image-badge">{badge}</div>
-                  {sourceChip && (
-                    <div className="assistant-inline-image-source-chip">{sourceChip}</div>
-                  )}
-                </div>
                 <div className="assistant-inline-image-name">{visualTitle}</div>
                 {visualSubtitle && (
                   <div className="assistant-inline-image-subtitle">{visualSubtitle}</div>
                 )}
-                {attribution && attribution !== visualTitle && attribution !== visualSubtitle && (
+                {sourceChip && sourceChip !== visualTitle && sourceChip !== visualSubtitle && (
+                  <div className="assistant-inline-image-subtitle">{sourceChip}</div>
+                )}
+                {!isGeneratedVisual && attribution && attribution !== visualTitle && attribution !== visualSubtitle && attribution !== sourceChip && (
                   <div className="assistant-inline-image-provenance">{attribution}</div>
                 )}
               </figcaption>

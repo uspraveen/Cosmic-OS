@@ -9,6 +9,7 @@ import {
   Settings2,
   SlidersHorizontal,
   Smartphone,
+  SquareTerminal,
   type LucideIcon,
 } from 'lucide-react'
 import { CursorMark, OpenAIMark, OpenCodeMark } from './brandIcons'
@@ -521,23 +522,13 @@ export default function Settings({
                 <div className="cosmic-agents-hero">
                   <div className="cosmic-agents-hero-top">
                     <div className="cosmic-agents-hero-icon" aria-hidden="true">
-                      <Bot size={28} />
+                      <SquareTerminal size={28} />
                     </div>
                     <div className="cosmic-agents-hero-text">
                       <span className="cosmic-agents-kicker">Agent Providers</span>
                       <h3>Alpha Agents</h3>
                       <p>Connect coding providers that Alpha can use for project-level work on your VM.</p>
                     </div>
-                  </div>
-                  <div className="cosmic-agents-hero-status">
-                    <span className="cosmic-agents-live-dot on" aria-hidden="true" />
-                    <span className="cosmic-agents-status-text">
-                      {alphaPreferredHarness === 'cursor'
-                        ? 'Cursor selected'
-                        : alphaPreferredHarness === 'codex'
-                          ? 'Codex selected'
-                          : 'OpenCode selected'}
-                    </span>
                   </div>
                 </div>
 

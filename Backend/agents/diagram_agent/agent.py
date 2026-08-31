@@ -8,6 +8,7 @@ Direct handler fallback: same logic without graph state management.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -26,6 +27,7 @@ from shared.contracts import (
     utcnow,
 )
 from shared.sqlite_client import connect_sync
+from shared.svg_preview import maybe_write_svg_preview
 
 from .config import AGENT_ROOT, DiagramAgentConfig
 from .internal_llm import (
@@ -581,6 +583,20 @@ class DiagramAgent(AgentRuntime):
                 else f"diagram.{'png' if output_format == 'png' else 'svg'}"
             )
             if out_path.exists():
+                if out_mime == "image/svg+xml":
+                    preview_path = await asyncio.to_thread(
+                        maybe_write_svg_preview, out_path
+                    )
+                    if preview_path is not None:
+                        artifacts.append(
+                            self._artifact_manifest(
+                                task_id=task.task_id,
+                                path=preview_path,
+                                mime="image/png",
+                                kind="output",
+                                audience="deliverable",
+                            )
+                        )
                 artifacts.append(
                     self._artifact_manifest(
                         task_id=task.task_id,

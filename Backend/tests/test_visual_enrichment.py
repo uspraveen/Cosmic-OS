@@ -795,7 +795,7 @@ async def test_visual_enrichment_coordinator_generates_inline_chart_supporting_a
         assert chart_block["id"] == "chart_1"
         assert chart_block["kind"] == "chart"
         assert chart_block["caption"] == "Quarterly revenue trend"
-        assert chart_block["provenance"]["attribution_label"] == "Generated chart"
+        assert chart_block["provenance"]["source_title"] == "Quarterly revenue"
         assert "Revenue increased across the year." in final_payload["content"]
         assert (
             "The strongest acceleration happened in the second half."
@@ -911,7 +911,7 @@ def test_visual_enrichment_final_blocks_keep_failed_explicit_image_slot_without_
     assert cleaned == blocks
 
 
-def test_visual_enrichment_default_image_timeout_keeps_inline_images_fast(
+def test_visual_enrichment_default_image_timeout_is_an_eight_second_floor(
 ) -> None:
     config = OrchestratorConfig()
     assert config.visual_max_visuals_per_turn == 5
@@ -922,7 +922,7 @@ def test_visual_enrichment_default_image_timeout_keeps_inline_images_fast(
     assert config.visual_image_contact_sheet_limit == 10
     assert config.visual_image_contact_sheet_candidate_max_bytes == 2 * 1024 * 1024
     assert config.visual_image_search_result_limit == 12
-    assert config.visual_image_slot_timeout_ms == 6000
+    assert config.visual_image_slot_timeout_ms == 8000
     assert config.visual_image_search_timeout_sec == 5.0
     assert config.visual_download_timeout_sec == 6.0
 
@@ -952,6 +952,40 @@ async def test_visual_enrichment_finalization_uses_only_remaining_slot_budget() 
         coordinator._slot_deadlines["img_1"] = time.monotonic() - 1.0
         try:
             assert coordinator._finalization_wait_timeout_sec() == pytest.approx(0.05)
+        finally:
+            sleeper.cancel()
+            await asyncio.gather(sleeper, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_short_response_still_waits_image_floor() -> None:
+    config = OrchestratorConfig(
+        visual_finalization_grace_ms=50,
+        visual_image_slot_timeout_ms=8000,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: pytest.fail(f"unexpected request: {request.url!s}")
+        )
+    ) as client:
+        coordinator = VisualEnrichmentCoordinator(
+            config=config,
+            task_id="tsk_image_floor_1",
+            request_id="req_image_floor_1",
+            session_id="sess_image_floor_1",
+            channel="desktop:desk_image_floor_1",
+            user_query="test",
+            http_client=client,
+        )
+        sleeper = asyncio.create_task(asyncio.sleep(30))
+        coordinator._active_sidecars["img_1"] = sleeper
+        coordinator._slot_deadlines["img_1"] = time.monotonic() + 8.0
+        coordinator._response_open = False
+        try:
+            assert coordinator._finalization_wait_timeout_sec() == pytest.approx(8.0, abs=0.15)
+            coordinator._response_open = True
+            coordinator._slot_deadlines["img_1"] = time.monotonic() - 1.0
+            assert coordinator._remaining_slot_sec("img_1") == pytest.approx(8.0, abs=0.05)
         finally:
             sleeper.cancel()
             await asyncio.gather(sleeper, return_exceptions=True)
@@ -1785,6 +1819,45 @@ def test_render_chart_png_uses_high_resolution_dark_theme() -> None:
     assert len(image_bytes) > 10_000
     with Image.open(BytesIO(image_bytes)) as image:
         assert image.size == (1600, 900)
+        pixels = image.load()
+        accent = (0x25, 0x96, 0xBE)
+        found_accent = False
+        for x in range(0, image.width, 24):
+            for y in range(0, image.height, 24):
+                pixel = pixels[x, y]
+                if all(abs(pixel[i] - accent[i]) < 48 for i in range(3)):
+                    found_accent = True
+                    break
+            if found_accent:
+                break
+        assert found_accent
+
+
+def test_render_chart_png_uses_horizontal_bars_for_long_category_names() -> None:
+    spec = normalize_chart_spec(
+        {
+            "chart_type": "bar",
+            "title": "VRAM needed at BF16 (weights only)",
+            "y_label": "VRAM (GB)",
+            "series": [
+                {
+                    "label": "VRAM",
+                    "points": [
+                        {"x": "Marlin-2B", "y": 4},
+                        {"x": "Qwen2-VL-8B", "y": 16},
+                        {"x": "Cosmos Reason2-2B", "y": 24},
+                        {"x": "Cosmos Reason2-8B", "y": 32},
+                    ],
+                }
+            ],
+        },
+        max_points=20,
+    )
+    image_bytes = render_chart_png(spec)
+    with Image.open(BytesIO(image_bytes)) as image:
+        assert image.size[0] == 1600
+        assert image.size[1] <= 900
+        assert image.size[1] >= 560
 
 
 # ── Regression cover for the "irrelevant inline image" defect ────────────────

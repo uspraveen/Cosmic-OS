@@ -93,7 +93,6 @@ _FAILED_INLINE_IMAGE_LABEL = "Couldn't find a reliable inline image for this ans
 _FAILED_INLINE_CHART_LABEL = "Couldn't generate a clear inline chart for this answer."
 _TIMED_OUT_INLINE_IMAGE_LABEL = "This inline image took too long to finish."
 _TIMED_OUT_INLINE_CHART_LABEL = "This inline chart took too long to finish."
-_IMPLICIT_IMAGE_SLOT_TIMEOUT_CAP_MS = 6000
 # Images the run itself captured are addressed by this scheme so they travel the
 # same candidate/download/artifact path as anything pulled off the web.
 _RUN_CAPTURE_SCHEME = "cosmic-run://"
@@ -733,6 +732,7 @@ class VisualEnrichmentCoordinator:
         self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._active_sidecars: dict[str, asyncio.Task[None]] = {}
         self._slot_deadlines: dict[str, float] = {}
+        self._response_open = True
         self._waiting_for_sources: set[str] = set()
         self._queued_slot_ids: list[str] = []
         self._slots: dict[str, VisualSlotDirective] = {}
@@ -969,14 +969,17 @@ class VisualEnrichmentCoordinator:
             )
         return candidates
 
+    def _image_min_runtime_sec(self) -> float:
+        return max(0.25, int(self.config.visual_image_slot_timeout_ms) / 1000.0)
+
     def _slot_timeout_ms(self, slot: VisualSlotDirective | None) -> int:
         if slot is None:
             return 0
-        if slot.timeout_ms:
-            return max(250, int(slot.timeout_ms))
         if slot.kind == "chart":
+            if slot.timeout_ms:
+                return max(250, int(slot.timeout_ms))
             return max(250, int(self.config.visual_chart_slot_timeout_ms))
-        return max(250, int(self.config.visual_image_slot_timeout_ms))
+        return int(self._image_min_runtime_sec() * 1000)
 
     def _finalization_wait_timeout_sec(self) -> float:
         base_sec = max(
@@ -996,6 +999,17 @@ class VisualEnrichmentCoordinator:
         if max_remaining_sec <= 0:
             return base_sec
         return max(base_sec, max_remaining_sec)
+
+    def _remaining_slot_sec(self, slot_id: str) -> float:
+        deadline = self._slot_deadlines.get(slot_id)
+        remaining = (
+            max(0.0, deadline - time.monotonic())
+            if deadline is not None
+            else self._image_min_runtime_sec()
+        )
+        if self._response_open:
+            return max(remaining, self._image_min_runtime_sec())
+        return remaining
 
     def _failure_label_for_slot(
         self,
@@ -1106,10 +1120,7 @@ class VisualEnrichmentCoordinator:
             query=query,
             caption=None,
             loading_label="Finding a relevant image",
-            timeout_ms=min(
-                _IMPLICIT_IMAGE_SLOT_TIMEOUT_CAP_MS,
-                max(250, int(self.config.visual_image_slot_timeout_ms)),
-            ),
+            timeout_ms=None,
             source_urls=source_urls,
             context_excerpt=visible_text[-1200:].strip(),
         )
@@ -1147,6 +1158,7 @@ class VisualEnrichmentCoordinator:
             events.append(self._build_snapshot_event())
         if self._maybe_schedule_implicit_image_slot():
             events.append(self._build_snapshot_event())
+        self._response_open = False
 
         deadline = asyncio.get_running_loop().time() + max(
             0.0,
@@ -1307,9 +1319,7 @@ class VisualEnrichmentCoordinator:
         )
 
     def _start_image_sidecar(self, slot: VisualSlotDirective) -> None:
-        self._slot_deadlines[slot.id] = time.monotonic() + (
-            self._slot_timeout_ms(slot) / 1000.0
-        )
+        self._slot_deadlines[slot.id] = time.monotonic() + self._image_min_runtime_sec()
         self._active_sidecars[slot.id] = asyncio.create_task(
             self._run_image_sidecar(slot),
             name=f"visual-image-{slot.id}",
@@ -1538,17 +1548,22 @@ class VisualEnrichmentCoordinator:
             and ranked[0].relevance >= self.config.visual_image_min_relevance
         )
         contact_sheet_completed = False
+        contact_sheet_timed_out = False
         if (
             self._fireworks.available
             and self.config.visual_image_contact_sheet_enabled
             and not primary_run_capture
         ):
+            ranking_budget = max(1.5, self._remaining_slot_sec(slot.id) - 2.0)
             try:
                 (
                     contact_sheet,
                     marked_candidates,
                     original_byte_cache,
-                ) = await self._build_contact_sheet(ranked)
+                ) = await asyncio.wait_for(
+                    self._build_contact_sheet(ranked),
+                    timeout=max(1.0, ranking_budget * 0.55),
+                )
                 candidate_metadata = [
                     {
                         "marker": marker,
@@ -1559,12 +1574,15 @@ class VisualEnrichmentCoordinator:
                     }
                     for marker, candidate in marked_candidates
                 ]
-                sheet_verdict = await self._fireworks.rank_image_contact_sheet(
-                    slot_query=_safe_text(slot.query) or self.user_query,
-                    user_query=self.user_query,
-                    context_excerpt=slot.context_excerpt,
-                    contact_sheet_jpeg=contact_sheet,
-                    candidates=candidate_metadata,
+                sheet_verdict = await asyncio.wait_for(
+                    self._fireworks.rank_image_contact_sheet(
+                        slot_query=_safe_text(slot.query) or self.user_query,
+                        user_query=self.user_query,
+                        context_excerpt=slot.context_excerpt,
+                        contact_sheet_jpeg=contact_sheet,
+                        candidates=candidate_metadata,
+                    ),
+                    timeout=max(1.0, ranking_budget * 0.45),
                 )
                 contact_sheet_completed = True
                 marker_map = dict(marked_candidates)
@@ -1583,19 +1601,14 @@ class VisualEnrichmentCoordinator:
                 vision_confidence = _parse_float(
                     sheet_verdict.get("confidence"), default=0.0
                 )
-                accepted_markers = (
-                    ranked_markers
-                    if sheet_verdict.get("accept") is True
-                    and selected_marker in marker_map
-                    and vision_confidence >= self.config.visual_image_min_confidence
-                    else []
-                )
+                vision_accepted = sheet_verdict.get("accept") is True and selected_marker in marker_map
+                accepted_markers = ranked_markers if vision_accepted else []
                 for choice_index, marker in enumerate(accepted_markers):
                     candidate = marker_map[marker]
                     enriched_verdict = dict(sheet_verdict)
                     enriched_verdict.update(
                         {
-                            "confidence": vision_confidence,
+                            "confidence": max(vision_confidence, candidate.score),
                             "verified": True,
                             "relevance": round(candidate.relevance, 4),
                             "retrieval_kind": candidate.retrieval_kind,
@@ -1621,20 +1634,38 @@ class VisualEnrichmentCoordinator:
                     )
                     add_attempt(candidate, enriched_verdict)
                 if not explicit_image_request:
-                    # A successful visual comparison is authoritative. Candidates
-                    # it did not rank as acceptable must not re-enter through the
-                    # metadata-only fallback below.
-                    verifier_rejected_urls.update(
-                        candidate.image_url
-                        for candidate in ranked
-                        if candidate.retrieval_kind != "run_capture"
-                    )
+                    if vision_accepted and accepted_markers:
+                        accepted_urls = {
+                            marker_map[marker].image_url for marker in accepted_markers
+                        }
+                        verifier_rejected_urls.update(
+                            candidate.image_url
+                            for candidate in ranked
+                            if candidate.retrieval_kind != "run_capture"
+                            and candidate.image_url not in accepted_urls
+                        )
+                    elif sheet_verdict.get("accept") is False:
+                        # Vision compared the sheet and said none belong. That is
+                        # authoritative. A timeout or parse miss must not take
+                        # this branch.
+                        verifier_rejected_urls.update(
+                            candidate.image_url
+                            for candidate in ranked
+                            if candidate.retrieval_kind != "run_capture"
+                        )
                 logger.info(
                     "visual_enrichment.contact_sheet_ranked slot_id=%s candidates=%s accepted=%s confidence=%.3f",
                     slot.id,
                     len(marked_candidates),
                     len(accepted_markers),
                     vision_confidence,
+                )
+            except asyncio.TimeoutError:
+                contact_sheet_timed_out = True
+                logger.warning(
+                    "visual_enrichment.contact_sheet_timed_out slot_id=%s budget_sec=%.2f",
+                    slot.id,
+                    ranking_budget,
                 )
             except Exception as exc:
                 logger.warning(
@@ -1656,6 +1687,7 @@ class VisualEnrichmentCoordinator:
             self._fireworks.available
             and top_k > 0
             and not contact_sheet_completed
+            and not contact_sheet_timed_out
             and not primary_run_capture
         ):
             for candidate in ranked[:top_k]:
@@ -2048,7 +2080,7 @@ class VisualEnrichmentCoordinator:
                 slot=slot,
                 image_url="generated://chart",
                 source_url="",
-                source_title="Generated inline chart",
+                source_title=_safe_text(spec.get("title")) or "Chart",
                 source_domain="",
                 caption=_safe_text(spec.get("caption")) or _safe_text(slot.caption),
                 filename_hint=f"{slot.id}.png",
@@ -2060,8 +2092,7 @@ class VisualEnrichmentCoordinator:
                 kind="chart",
                 caption=_safe_text(spec.get("caption")) or _safe_text(slot.caption),
                 provenance={
-                    "source_title": "Generated inline chart",
-                    "attribution_label": "Generated chart",
+                    "source_title": _safe_text(spec.get("title")) or "Chart",
                     "selection_reason": "Generated from structured numeric data in the assistant response.",
                     "confidence": 1.0,
                 },

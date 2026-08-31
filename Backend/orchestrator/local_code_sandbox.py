@@ -246,18 +246,114 @@ _cosmic_socket.getaddrinfo = _cosmic_filtered_getaddrinfo
 '''
 
 _FONT_FALLBACK_PRELUDE = '''
-try:
-    import matplotlib as _cosmic_mpl
-    _cosmic_mpl.rcParams["font.family"] = "DejaVu Sans"
-    _cosmic_mpl.rcParams["font.sans-serif"] = [
-        "DejaVu Sans",
-        "Liberation Sans",
-        "Arial",
-        "Helvetica",
-        "sans-serif",
-    ]
-except Exception:
-    pass
+_COSMIC_PLOT_PALETTE = ["#2596be", "#7ec8e3", "#1a6a88", "#c4a574", "#5d8a9a", "#b8dce8"]
+_COSMIC_SEABORN_PATCHED = False
+_COSMIC_MPL_THEMED = False
+
+def _cosmic_apply_plot_theme(*, force=False):
+    global _COSMIC_MPL_THEMED
+    if _COSMIC_MPL_THEMED and not force:
+        return
+    try:
+        import matplotlib as _cosmic_mpl
+        from matplotlib.colors import LinearSegmentedColormap as _CosmicCmap
+    except Exception:
+        return
+    _params = {
+        "font.family": "DejaVu Sans",
+        "font.sans-serif": ["DejaVu Sans", "Liberation Sans", "Segoe UI", "Arial", "Helvetica", "sans-serif"],
+        "figure.facecolor": "none",
+        "axes.facecolor": "none",
+        "savefig.facecolor": "none",
+        "savefig.edgecolor": "none",
+        "savefig.transparent": True,
+        "text.color": "#E8F1F6",
+        "axes.labelcolor": "#8AA3B0",
+        "axes.titlecolor": "#E8F1F6",
+        "xtick.color": "#8AA3B0",
+        "ytick.color": "#8AA3B0",
+        "axes.edgecolor": "#2A5564",
+        "axes.linewidth": 0.7,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": True,
+        "grid.color": "#1A333C",
+        "grid.linewidth": 0.6,
+        "grid.alpha": 0.9,
+        "legend.facecolor": "none",
+        "legend.edgecolor": "#1A333C",
+        "legend.labelcolor": "#E8F1F6",
+        "figure.dpi": 140,
+        "savefig.dpi": 160,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.16,
+    }
+    try:
+        _params["axes.prop_cycle"] = _cosmic_mpl.cycler(color=list(_COSMIC_PLOT_PALETTE))
+    except Exception:
+        pass
+    for _key, _value in _params.items():
+        try:
+            _cosmic_mpl.rcParams[_key] = _value
+        except Exception:
+            pass
+    try:
+        _cmap = _CosmicCmap.from_list(
+            "cosmic",
+            ["#071016", "#0d3a4d", "#2596be", "#7ec8e3", "#e8f1f6"],
+        )
+        try:
+            _cosmic_mpl.colormaps.register(_cmap, force=True)
+        except Exception:
+            try:
+                _cosmic_mpl.cm.register_cmap(name="cosmic", cmap=_cmap)
+            except Exception:
+                pass
+        _cosmic_mpl.rcParams["image.cmap"] = "cosmic"
+    except Exception:
+        pass
+    _COSMIC_MPL_THEMED = True
+
+def _cosmic_patch_seaborn(module=None):
+    global _COSMIC_SEABORN_PATCHED
+    if _COSMIC_SEABORN_PATCHED:
+        return
+    try:
+        import seaborn as _cosmic_sns
+    except Exception:
+        return
+    _cosmic_sns = module or _cosmic_sns
+    _COSMIC_SEABORN_PATCHED = True
+    _cosmic_orig_sns_theme = getattr(_cosmic_sns, "set_theme", None)
+    if callable(_cosmic_orig_sns_theme):
+        def _cosmic_sns_set_theme(*args, **kwargs):
+            kwargs.setdefault("palette", list(_COSMIC_PLOT_PALETTE))
+            result = _cosmic_orig_sns_theme(*args, **kwargs)
+            _cosmic_apply_plot_theme(force=True)
+            return result
+        _cosmic_sns.set_theme = _cosmic_sns_set_theme
+    for _name in ("heatmap", "clustermap"):
+        _orig = getattr(_cosmic_sns, _name, None)
+        if not callable(_orig):
+            continue
+        def _wrap_cmap(fn=_orig):
+            def wrapped(*args, **kwargs):
+                kwargs.setdefault("cmap", "cosmic")
+                return fn(*args, **kwargs)
+            return wrapped
+        setattr(_cosmic_sns, _name, _wrap_cmap())
+
+_cosmic_apply_plot_theme()
+_cosmic_patch_seaborn()
+_cosmic_orig_import = _cosmic_builtins.__import__
+def _cosmic_import(name, globals=None, locals=None, fromlist=(), level=0):
+    module = _cosmic_orig_import(name, globals, locals, fromlist, level)
+    if name == "seaborn" or (isinstance(name, str) and name.startswith("seaborn.")):
+        _cosmic_patch_seaborn()
+    if name == "matplotlib" or (isinstance(name, str) and name.startswith("matplotlib.")):
+        _cosmic_apply_plot_theme()
+    return module
+_cosmic_builtins.__import__ = _cosmic_import
 '''
 
 
@@ -541,7 +637,39 @@ def _build_env(
             env[key] = os.environ[key]
     Path(env["TMPDIR"]).mkdir(parents=True, exist_ok=True)
     Path(env["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
+    _write_matplotlibrc(Path(env["MPLCONFIGDIR"]))
     return env
+
+
+def _write_matplotlibrc(config_dir: Path) -> None:
+    (config_dir / "matplotlibrc").write_text(
+        "\n".join(
+            [
+                "figure.facecolor: none",
+                "axes.facecolor: none",
+                "savefig.facecolor: none",
+                "savefig.edgecolor: none",
+                "savefig.transparent: True",
+                "text.color: E8F1F6",
+                "axes.labelcolor: 8AA3B0",
+                "xtick.color: 8AA3B0",
+                "ytick.color: 8AA3B0",
+                "axes.edgecolor: 2A5564",
+                "axes.linewidth: 0.7",
+                "axes.spines.top: False",
+                "axes.spines.right: False",
+                "axes.grid: True",
+                "grid.color: 1A333C",
+                "legend.facecolor: none",
+                "legend.edgecolor: 1A333C",
+                "font.family: sans-serif",
+                "font.sans-serif: DejaVu Sans, Liberation Sans, Segoe UI, Arial, sans-serif",
+                "axes.prop_cycle: cycler('color', ['2596be', '7ec8e3', '1a6a88', 'c4a574', '5d8a9a', 'b8dce8'])",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _collect_output_artifacts(

@@ -76,6 +76,12 @@ from .image_artifacts import (
     infer_image_mime_from_extension,
     is_supported_image_artifact,
 )
+from .svg_preview import (
+    compute_preview_window,
+    crop_readable_preview,
+    maybe_write_svg_preview,
+    preview_path_for,
+)
 from .bundle_artifacts import (
     SUPPORTED_BUNDLE_EXTENSIONS,
     SUPPORTED_BUNDLE_MIME_TYPES,
@@ -172,6 +178,10 @@ __all__ = [
     "infer_tabular_mime_from_extension",
     "is_supported_document_artifact",
     "is_supported_image_artifact",
+    "compute_preview_window",
+    "crop_readable_preview",
+    "maybe_write_svg_preview",
+    "preview_path_for",
     "is_supported_tabular_artifact",
     "validate_safe_sheet_id",
     "get_model_spec",

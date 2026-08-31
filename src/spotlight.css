@@ -409,6 +409,16 @@ body,
   margin-inline: calc(-1 * var(--artifact-bleed, 0px));
 }
 
+/* Panel mode keeps prose at 580px, which is too tight for a dual-plot PNG.
+   Charts use the glass: out to 12px from the panel edge. */
+.overlay:not(.chat-wide) .chat-response-content .assistant-inline-image-card.is-chart,
+.overlay:not(.chat-wide) .chat-response-content .assistant-inline-visual-slot.is-chart {
+  --chart-bleed: max(12px, calc((var(--chat-surface-width) - 24px - 580px) / 2));
+  width: calc(100% + 2 * var(--chart-bleed));
+  max-width: none;
+  margin-inline: calc(-1 * var(--chart-bleed));
+}
+
 .response-content::-webkit-scrollbar {
   width: 4px;
 }
@@ -2846,17 +2856,12 @@ kbd {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 14px;
-  padding: 14px;
-  border-radius: 26px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  background:
-    radial-gradient(circle at top left, rgba(93, 170, 255, 0.18), transparent 40%),
-    radial-gradient(circle at bottom right, rgba(92, 232, 173, 0.12), transparent 44%),
-    linear-gradient(180deg, rgba(14, 17, 28, 0.96), rgba(7, 9, 16, 0.96));
-  box-shadow:
-    0 24px 64px rgba(0, 0, 0, 0.34),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  gap: 10px;
+  padding: 10px;
+  border-radius: var(--response-radius-card, 12px);
+  border: 0;
+  background: var(--response-fill-tertiary, rgba(255, 255, 255, 0.055));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
 }
 
 .assistant-inline-visual-slot::before {
@@ -2870,14 +2875,7 @@ kbd {
 
 .assistant-inline-visual-slot.is-failed {
   gap: 0;
-  padding: 14px 16px;
-  border-color: rgba(255, 255, 255, 0.08);
-  background:
-    radial-gradient(circle at top left, rgba(255, 255, 255, 0.06), transparent 44%),
-    linear-gradient(180deg, rgba(15, 17, 24, 0.94), rgba(8, 10, 15, 0.94));
-  box-shadow:
-    0 16px 42px rgba(0, 0, 0, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  padding: 10px 12px;
 }
 
 .assistant-inline-visual-slot.is-failed::before {
@@ -2892,25 +2890,16 @@ kbd {
 
 .assistant-inline-visual-slot-shell {
   width: 100%;
-  min-height: clamp(228px, 34vw, 320px);
-  border-radius: 22px;
-  padding: 18px;
+  min-height: clamp(180px, 28vw, 260px);
+  border-radius: var(--response-radius-inner, 9px);
+  padding: 14px;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
   gap: 14px;
-  background:
-    radial-gradient(circle at top right, rgba(85, 132, 255, 0.16), transparent 34%),
-    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01)),
-    rgba(9, 11, 18, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    inset 0 -24px 48px rgba(0, 0, 0, 0.28);
-}
-
-.assistant-inline-visual-slot.is-chart .assistant-inline-visual-slot-shell {
-  min-height: clamp(240px, 36vw, 332px);
+  background: rgba(255, 255, 255, 0.04);
+  border: 0;
+  box-shadow: none;
 }
 
 .assistant-inline-visual-slot-band {
@@ -2934,13 +2923,13 @@ kbd {
 .assistant-inline-visual-slot-badge {
   align-self: flex-start;
   font-size: 10px;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.62);
-  padding: 5px 10px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.42);
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: 0;
 }
 
 .assistant-inline-visual-slot-label {
@@ -2995,24 +2984,19 @@ kbd {
   margin-inline: auto;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 14px;
-  border-radius: 26px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  background:
-    radial-gradient(circle at top left, rgba(91, 163, 255, 0.15), transparent 38%),
-    radial-gradient(circle at bottom right, rgba(77, 234, 178, 0.1), transparent 42%),
-    linear-gradient(180deg, rgba(14, 17, 28, 0.96), rgba(7, 9, 16, 0.96));
-  box-shadow:
-    0 24px 64px rgba(0, 0, 0, 0.36),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  gap: 10px;
+  padding: 8px 8px 12px;
+  border-radius: var(--response-radius-card, 12px);
+  border: 0;
+  background: var(--response-fill-tertiary, rgba(255, 255, 255, 0.055));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
 }
 
 .assistant-inline-map-frame {
   position: relative;
   overflow: hidden;
-  border-radius: 22px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--response-radius-inner, 9px);
+  border: 0;
   background: rgba(8, 10, 17, 0.94);
   height: clamp(280px, 42vw, 420px);
 }
@@ -3057,26 +3041,15 @@ kbd {
 .assistant-inline-image-frame {
   position: relative;
   overflow: hidden;
-  border-radius: 22px;
-  padding: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background:
-    radial-gradient(circle at top right, rgba(87, 140, 255, 0.14), transparent 34%),
-    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.015)),
-    rgba(8, 10, 17, 0.94);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    inset 0 -26px 52px rgba(0, 0, 0, 0.28);
+  border-radius: var(--response-radius-inner, 9px);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .assistant-inline-image-frame::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 26%),
-    linear-gradient(135deg, transparent 58%, rgba(255, 255, 255, 0.035) 100%);
+  content: none;
 }
 
 .assistant-inline-image {
@@ -3085,15 +3058,13 @@ kbd {
   max-height: min(68vh, 560px);
   height: auto;
   object-fit: contain;
-  border-radius: 16px;
-  background: rgba(5, 7, 12, 0.96);
-  box-shadow:
-    0 16px 40px rgba(0, 0, 0, 0.28),
-    0 0 0 1px rgba(255, 255, 255, 0.03);
+  border-radius: var(--response-radius-inner, 9px);
+  background: transparent;
+  box-shadow: none;
 }
 
 .assistant-inline-image-card.is-chart .assistant-inline-image {
-  max-height: min(62vh, 520px);
+  max-height: min(72vh, 680px);
 }
 
 .assistant-inline-image-placeholder {
@@ -3112,8 +3083,8 @@ kbd {
 .assistant-inline-image-meta {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 0 6px 4px;
+  gap: 4px;
+  padding: 2px 6px 2px;
 }
 
 .assistant-inline-image-topline {
@@ -3150,14 +3121,27 @@ kbd {
 
 .assistant-inline-image-name,
 .assistant-inline-file-name {
-  font-size: 16px;
   font-weight: 600;
   color: #fff;
   line-height: 1.38;
+}
+
+.assistant-inline-image-name {
+  font-size: 14px;
+  letter-spacing: -0.012em;
+}
+
+.assistant-inline-file-name {
+  font-size: 16px;
   letter-spacing: -0.015em;
 }
 
-.assistant-inline-image-subtitle,
+.assistant-inline-image-subtitle {
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(232, 241, 246, 0.52);
+}
+
 .assistant-inline-file-meta {
   font-size: 13px;
   line-height: 1.55;
@@ -3209,19 +3193,20 @@ kbd {
 
 @media (max-width: 640px) {
   .assistant-inline-visual-slot {
-    padding: 12px;
+    padding: 8px;
   }
 
   .assistant-inline-visual-slot-shell {
-    min-height: 220px;
+    min-height: 180px;
   }
 
-  .assistant-inline-image-card {
-    padding: 12px;
+  .assistant-inline-image-card,
+  .assistant-inline-map-card {
+    padding: 6px 6px 10px;
   }
 
   .assistant-inline-image-frame {
-    padding: 10px;
+    padding: 0;
   }
 }
 

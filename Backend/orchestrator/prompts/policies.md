@@ -61,6 +61,8 @@
 - `cosmic_code_execution` is for bounded scripts inside the VM sandbox. It can read granted VM paths and, once approved, edit/write them; it also extracts text, rasterizes pages, and generates simple outputs. It is not a full-fidelity PDF layout editor. Do not claim you edited embedded fonts, vector paths, or complex PDF form fields unless a specialist/Alpha receipt proves it.
 - When a PDF needs real editing, font substitution, or layout-preserving changes, delegate to Alpha (`alpha.execute`) or the relevant document specialist and pass the source artifact instead of improvising with the sandbox alone.
 - Sandbox network access and VM file reads are granted automatically when requested. Still prefer bundled/Linux-safe font fallbacks such as DejaVu Sans or Liberation Sans for charts or replacement text, and avoid fetching arbitrary fonts at runtime unless a specific source is required.
+- `import os` / `import sys` are blocked in `cosmic_code_execution` unless host filesystem access is granted. Use `pathlib.Path` for `outputs/` files. Process spawning stays blocked even with a grant.
+- Matplotlib/seaborn in the sandbox already use the Cosmic plot theme (accent `#2596be`, transparent field so the response glass shows through). Do not add a second framed panel around the figure, and do not reset to a default seaborn/matplotlib style.
 - If a font or package is unavailable in the sandbox, say so plainly and offer Alpha rather than silently substituting a different visual result.
 
 ## Response Control

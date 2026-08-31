@@ -675,6 +675,18 @@ class TestPlanExecutionBehavior:
         original_render = diagram_graph.render_mermaid
         original_render_d2 = diagram_graph.render_d2
         original_validate = diagram_graph.validate_diagram_render
+        original_preview = diagram_graph.maybe_write_svg_preview
+
+        def fake_svg_preview(svg_path, png_path=None):
+            from PIL import Image
+
+            dest = (
+                Path(png_path)
+                if png_path is not None
+                else Path(svg_path).with_name(f"{Path(svg_path).stem}_preview.png")
+            )
+            Image.new("RGB", (32, 32), "#2596be").save(dest)
+            return dest
 
         try:
             diagram_graph.analyze_diagram_request = fake_analyze_diagram_request
@@ -682,6 +694,7 @@ class TestPlanExecutionBehavior:
             diagram_graph.render_mermaid = fake_render_mermaid
             diagram_graph.render_d2 = fake_render_d2
             diagram_graph.validate_diagram_render = fake_validate_diagram_render
+            diagram_graph.maybe_write_svg_preview = fake_svg_preview
 
             result = asyncio.run(run_diagram_langgraph(agent=fake_agent, task=task))
         finally:
@@ -690,6 +703,7 @@ class TestPlanExecutionBehavior:
             diagram_graph.render_mermaid = original_render
             diagram_graph.render_d2 = original_render_d2
             diagram_graph.validate_diagram_render = original_validate
+            diagram_graph.maybe_write_svg_preview = original_preview
             shutil.rmtree(temp_root, ignore_errors=True)
 
         assert result.status == "completed"
@@ -699,7 +713,11 @@ class TestPlanExecutionBehavior:
             "Auth sequence",
             "Deployment topology",
         ]
-        assert len(result.artifacts) == 4
+        assert len(result.artifacts) == 6
+        mimes = [artifact.mime for artifact in result.artifacts]
+        assert mimes.count("image/png") == 2
+        assert mimes.count("image/svg+xml") == 2
+        assert mimes.count("text/plain") == 2
         assert fake_agent.step_plan.created == [
             "draw auth sequence",
             "draw deployment topology",

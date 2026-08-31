@@ -8,6 +8,8 @@ import pytest
 from gateway.sandbox_permission_store import SandboxPermissionStore
 from orchestrator.local_code_sandbox import (
     LocalCodeSandboxSettings,
+    _FONT_FALLBACK_PRELUDE,
+    _write_matplotlibrc,
     run_local_code_sandbox,
 )
 from orchestrator.sandbox_permissions import (
@@ -291,6 +293,33 @@ def test_local_sandbox_network_blocks_hosts_outside_allowlist(tmp_path: Path) ->
     stdout = str(result.get("stdout"))
     assert "ALLOWED:example.com" in stdout
     assert "BLOCKED:blocked.example" in stdout
+
+
+def test_sandbox_writes_cosmic_matplotlibrc(tmp_path: Path) -> None:
+    _write_matplotlibrc(tmp_path)
+    rc = (tmp_path / "matplotlibrc").read_text(encoding="utf-8")
+    assert "2596be" in rc
+    assert "figure.facecolor: none" in rc
+    assert "0B1216" not in rc
+    assert "_cosmic_builtins.__import__" in _FONT_FALLBACK_PRELUDE
+    assert 'setdefault("cmap", "cosmic")' in _FONT_FALLBACK_PRELUDE
+
+
+def test_local_sandbox_allows_pathlib_outputs_without_os(tmp_path: Path) -> None:
+    result = run_local_code_sandbox(
+        code=(
+            "from pathlib import Path\n"
+            "Path('outputs/note.txt').write_text('ok', encoding='utf-8')\n"
+            "print('wrote')\n"
+        ),
+        artifacts_root=tmp_path / "artifacts",
+        task_id="task_pathlib",
+        settings=LocalCodeSandboxSettings(),
+    )
+    assert result.get("status") == "completed", result
+    assert "wrote" in str(result.get("stdout"))
+    artifacts = result.get("artifacts") or []
+    assert any(str(item.get("filename")) == "note.txt" for item in artifacts)
 
 
 def test_session_grant_covers_network_host_subset() -> None:

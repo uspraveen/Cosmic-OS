@@ -26,6 +26,34 @@ def test_build_response_blocks_splits_markdown_code_and_appends_artifacts() -> N
     assert blocks[3]["filename"] == "plot.png"
 
 
+def test_build_response_blocks_keeps_svg_as_file_and_png_preview_as_image() -> None:
+    blocks = build_response_blocks(
+        "Diagram ready.",
+        [
+            {
+                "artifact_id": "art_preview",
+                "filename": "diagram_preview.png",
+                "mime_type": "image/png",
+                "kind": "output",
+            },
+            {
+                "artifact_id": "art_svg",
+                "filename": "diagram.svg",
+                "mime_type": "image/svg+xml",
+                "kind": "output",
+            },
+        ],
+    )
+
+    assert [block["type"] for block in blocks] == [
+        "markdown",
+        "image_artifact",
+        "file_artifact",
+    ]
+    assert blocks[1]["filename"] == "diagram_preview.png"
+    assert blocks[2]["filename"] == "diagram.svg"
+
+
 def test_build_response_blocks_places_artifact_marker_inline() -> None:
     blocks = build_response_blocks(
         "Here is the chart:\n\n[[artifact:plot.png]]\n\nAfter the figure.",
