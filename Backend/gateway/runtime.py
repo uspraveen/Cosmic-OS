@@ -3008,13 +3008,14 @@ class GatewayRuntime:
             path = getattr(getattr(self, "config", None), "heartbeat_notes_path", None)
             if path is not None and path.exists():
                 try:
-                    old_size = path.stat().st_size
-                    if old_size > HEARTBEAT_NOTES_CHAR_LIMIT:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                    # One-time cleanup of the old compact suppress log only.
+                    if "Suppression log (recent only)" in text:
                         path.write_text("# COSMIC Heartbeat Notes\n\n", encoding="utf-8")
                         logger.info(
                             "gateway.heartbeat_notes_file_stubbed path=%s old_bytes=%s",
                             path,
-                            old_size,
+                            len(text.encode("utf-8")),
                         )
                 except OSError:
                     logger.exception("gateway.heartbeat_notes_file_stub_failed")
