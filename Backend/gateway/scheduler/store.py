@@ -133,6 +133,74 @@ class SchedulerStore:
                 CREATE INDEX IF NOT EXISTS idx_heartbeat_calendar_seen
                     ON heartbeat_calendar_events(last_seen_at DESC);
 
+                CREATE TABLE IF NOT EXISTS heartbeat_watchpoints (
+                    watchpoint_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    created_by TEXT NOT NULL DEFAULT 'orchestrator',
+                    check_kind TEXT NOT NULL DEFAULT 'manual',
+                    check_config_json TEXT NOT NULL DEFAULT '{}',
+                    baseline_state_json TEXT NOT NULL DEFAULT '{}',
+                    notify_policy TEXT NOT NULL DEFAULT 'on_new',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    status_reason TEXT,
+                    status_changed_at TEXT,
+                    status_changed_by TEXT,
+                    last_checked_at TEXT,
+                    last_check_status TEXT,
+                    last_check_detail TEXT,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    last_delivered_at TEXT,
+                    delivery_count INTEGER NOT NULL DEFAULT 0,
+                    created_request_id TEXT,
+                    created_session_id TEXT,
+                    created_channel TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_heartbeat_watchpoints_status
+                    ON heartbeat_watchpoints(status, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS heartbeat_watchpoint_events (
+                    event_id TEXT PRIMARY KEY,
+                    watchpoint_id TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    status TEXT,
+                    reason TEXT,
+                    actor TEXT,
+                    source TEXT,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(watchpoint_id)
+                        REFERENCES heartbeat_watchpoints(watchpoint_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_heartbeat_watchpoint_events_wp
+                    ON heartbeat_watchpoint_events(watchpoint_id, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS heartbeat_beat_notes (
+                    note_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL DEFAULT 'note',
+                    outcome TEXT,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    stale_reason TEXT,
+                    stale_at TEXT,
+                    stale_by TEXT,
+                    author TEXT NOT NULL DEFAULT 'orchestrator',
+                    request_id TEXT,
+                    session_id TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_heartbeat_beat_notes_created
+                    ON heartbeat_beat_notes(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_heartbeat_beat_notes_status
+                    ON heartbeat_beat_notes(status, created_at DESC);
+
                 CREATE TABLE IF NOT EXISTS heartbeat_consumptions (
                     consumption_id TEXT PRIMARY KEY,
                     session_id TEXT,
@@ -786,6 +854,13 @@ class SchedulerStore:
                 ),
             )
             connection.commit()
+        note_content = (summary or "").strip() or f"Heartbeat {normalized_status}."
+        self.append_heartbeat_beat_note(
+            content=note_content,
+            kind="beat",
+            outcome=normalized_status,
+            author="gateway",
+        )
         return self.get_heartbeat()
 
     def pause_heartbeat(self, *, reason: str | None = None) -> dict[str, Any]:
@@ -1105,6 +1180,707 @@ class SchedulerStore:
                     (bounded_limit,),
                 ).fetchall()
         return [self._heartbeat_consumption_record(row) for row in rows if row is not None]
+
+    # ── Heartbeat watchpoints: durable standing commitments ─────────────
+    #
+    # Replaces the free-text "Active watchpoints" section of the old
+    # heartbeat_notes.md. Rows are never hard-deleted; staleness/deactivation
+    # is a soft status transition with a reason, so "what happened to this
+    # watch?" stays queryable forever.
+
+    HEARTBEAT_WATCHPOINT_STATUSES = frozenset(
+        {"active", "stale", "inactive", "superseded", "completed"}
+    )
+    HEARTBEAT_CHECK_STATUSES = frozenset({"ok", "inconclusive", "failed"})
+    HEARTBEAT_BEAT_NOTE_KINDS = frozenset(
+        {"note", "plan", "watchpoint", "beat", "legacy_import"}
+    )
+
+    def upsert_heartbeat_watchpoint(
+        self,
+        *,
+        watchpoint_id: str | None = None,
+        name: str,
+        description: str | None = None,
+        created_by: str = "orchestrator",
+        check_kind: str = "manual",
+        check_config: dict[str, Any] | None = None,
+        baseline_state: dict[str, Any] | None = None,
+        notify_policy: str = "on_new",
+        request_id: str | None = None,
+        session_id: str | None = None,
+        channel: str | None = None,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a durable heartbeat watchpoint.
+
+        Watchpoints are never hard-deleted; deactivation goes through
+        :meth:`set_heartbeat_watchpoint_status` so the history of "what happened
+        to this watch?" stays queryable.
+        """
+        normalized_name = str(name or "").strip()
+        normalized_notify = str(notify_policy or "on_new").strip() or "on_new"
+        if normalized_notify not in {"on_new", "on_every_check", "manual"}:
+            raise ValueError("notify_policy must be one of: on_new, on_every_check, manual")
+        check_config_json = json.dumps(
+            check_config if isinstance(check_config, dict) else {},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        baseline_state_json = json.dumps(
+            baseline_state if isinstance(baseline_state, dict) else {},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            existing = None
+            if watchpoint_id:
+                existing = connection.execute(
+                    "SELECT * FROM heartbeat_watchpoints WHERE watchpoint_id = ?",
+                    (watchpoint_id,),
+                    ).fetchone()
+            if existing is not None and not normalized_name:
+                normalized_name = str(existing["name"] or "").strip()
+            if not normalized_name:
+                raise ValueError("watchpoint name is required")
+            if existing is not None:
+                connection.execute(
+                    """
+                    UPDATE heartbeat_watchpoints
+                    SET name = ?,
+                        description = COALESCE(?, description),
+                        check_kind = ?,
+                        check_config_json = ?,
+                        baseline_state_json = COALESCE(?, baseline_state_json),
+                        notify_policy = ?,
+                        updated_at = ?
+                    WHERE watchpoint_id = ?
+                    """,
+                    (
+                        normalized_name,
+                        description,
+                        str(check_kind or "manual").strip() or "manual",
+                        check_config_json,
+                        baseline_state_json,
+                        normalized_notify,
+                        now,
+                        watchpoint_id,
+                    ),
+                )
+            else:
+                watchpoint_id = watchpoint_id or f"hbwp_{uuid4().hex[:12]}"
+                connection.execute(
+                    """
+                    INSERT INTO heartbeat_watchpoints (
+                        watchpoint_id,
+                        name,
+                        description,
+                        created_by,
+                        check_kind,
+                        check_config_json,
+                        baseline_state_json,
+                        notify_policy,
+                        created_request_id,
+                        created_session_id,
+                        created_channel,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        watchpoint_id,
+                        normalized_name,
+                        description,
+                        created_by or "orchestrator",
+                        check_kind or "manual",
+                        check_config_json,
+                        baseline_state_json,
+                        normalized_notify,
+                        request_id,
+                        session_id,
+                        channel,
+                        now,
+                        now,
+                    ),
+                )
+            connection.commit()
+            row = self._get_heartbeat_watchpoint_row(connection, watchpoint_id)
+        return self._heartbeat_watchpoint_record(row)
+
+    def get_heartbeat_watchpoint(self, watchpoint_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM heartbeat_watchpoints WHERE watchpoint_id = ?",
+                (watchpoint_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._heartbeat_watchpoint_record(row)
+
+    def list_heartbeat_watchpoints(
+        self,
+        *,
+        include_inactive: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List active watchpoints; pass include_inactive=True for forensics.
+
+        Inactive watchpoints are kept forever (soft state) and sorted after
+        active ones, so a later "where did my visitor notification go?" question
+        is answerable from the registry alone.
+        """
+        bounded_limit = max(1, min(int(limit or 100), 500))
+        with self._lock, self._connect() as connection:
+            if include_inactive:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                    FROM heartbeat_watchpoints
+                    ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END ASC,
+                             updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded_limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                    FROM heartbeat_watchpoints
+                    WHERE status = 'active'
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (bounded_limit,),
+                ).fetchall()
+        return [self._heartbeat_watchpoint_record(row) for row in rows if row is not None]
+
+    def set_heartbeat_watchpoint_status(
+        self,
+        watchpoint_id: str,
+        *,
+        status: str,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Soft-transition a watchpoint; rows are never hard-deleted here."""
+        normalized_status = str(status or "").strip()
+        if normalized_status not in self.HEARTBEAT_WATCHPOINT_STATUSES:
+            raise ValueError(
+                "watchpoint status must be one of: "
+                + ", ".join(sorted(self.HEARTBEAT_WATCHPOINT_STATUSES))
+            )
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM heartbeat_watchpoints WHERE watchpoint_id = ?",
+                (watchpoint_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            previous_status = str(row["status"] or "active")
+            if previous_status == normalized_status and not (reason or "").strip():
+                return self._heartbeat_watchpoint_record(row)
+            connection.execute(
+                """
+                UPDATE heartbeat_watchpoints
+                SET status = ?,
+                    status_reason = ?,
+                    status_changed_at = ?,
+                    status_changed_by = ?,
+                    updated_at = ?
+                WHERE watchpoint_id = ?
+                """,
+                (
+                    normalized_status,
+                    (reason or "").strip() or None,
+                    now,
+                    actor or "user",
+                    now,
+                    watchpoint_id,
+                ),
+            )
+            self._insert_heartbeat_watchpoint_event(
+                connection,
+                watchpoint_id=watchpoint_id,
+                event="status_changed",
+                status=normalized_status,
+                reason=reason,
+                actor=actor or "user",
+                details={"previous_status": previous_status},
+            )
+            connection.commit()
+        return self.get_heartbeat_watchpoint(watchpoint_id)
+
+    def record_heartbeat_watchpoint_check(
+        self,
+        *,
+        watchpoint_id: str,
+        check_status: str,
+        detail: str | None = None,
+        baseline_state: dict[str, Any] | None = None,
+        delivered: bool = False,
+    ) -> dict[str, Any] | None:
+        """Record a gateway-side check outcome for a watchpoint."""
+        normalized_status = str(check_status or "").strip() or "ok"
+        if normalized_status not in self.HEARTBEAT_CHECK_STATUSES:
+            raise ValueError("check_status must be one of: ok, inconclusive, failed")
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM heartbeat_watchpoints WHERE watchpoint_id = ?",
+                (watchpoint_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            baseline_json = (
+                json.dumps(baseline_state, sort_keys=True, separators=(",", ":"))
+                if isinstance(baseline_state, dict)
+                else None
+            )
+            connection.execute(
+                """
+                UPDATE heartbeat_watchpoints
+                SET last_checked_at = ?,
+                    last_check_status = ?,
+                    last_check_detail = ?,
+                    consecutive_failures = CASE
+                        WHEN ? = 'ok' THEN 0
+                        ELSE consecutive_failures + 1
+                    END,
+                    last_delivered_at = CASE WHEN ? THEN ? ELSE last_delivered_at END,
+                    delivery_count = delivery_count + CASE WHEN ? THEN 1 ELSE 0 END,
+                    baseline_state_json = COALESCE(?, baseline_state_json),
+                    updated_at = ?
+                WHERE watchpoint_id = ?
+                """,
+                (
+                    now,
+                    normalized_status,
+                    self._clean_optional_text(detail),
+                    normalized_status,
+                    bool(delivered),
+                    now if delivered else None,
+                    bool(delivered),
+                    baseline_json,
+                    now,
+                    watchpoint_id,
+                ),
+            )
+            connection.commit()
+        return self.get_heartbeat_watchpoint(watchpoint_id)
+
+    def list_heartbeat_watchpoint_history(
+        self,
+        watchpoint_id: str,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM heartbeat_watchpoint_events
+                WHERE watchpoint_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (watchpoint_id, max(1, min(200, int(limit or 20)))),
+            ).fetchall()
+        entries: list[dict[str, Any]] = []
+        for row in rows:
+            entry = dict(row)
+            details_json = entry.pop("details_json", None)
+            try:
+                entry["details"] = json.loads(details_json) if details_json else {}
+            except (TypeError, ValueError):
+                entry["details"] = {}
+            entries.append(entry)
+        return entries
+
+
+    # ── Heartbeat beat notes (the notes markdown, as rows) ──────────────
+    #
+    # Replaces the free-text suppression log of heartbeat_notes.md. Appends
+    # never rewrite existing rows, so notes can no longer be silently
+    # amputated the way the 32K markdown file was.
+
+    def append_heartbeat_beat_note(
+        self,
+        *,
+        content: str,
+        kind: str = "note",
+        outcome: str | None = None,
+        author: str = "orchestrator",
+        request_id: str | None = None,
+        session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append one note row. Appends never rewrite existing rows."""
+        normalized_content = str(content or "").strip()
+        if not normalized_content:
+            raise ValueError("heartbeat beat note content is required")
+        normalized_kind = str(kind or "").strip() or "note"
+        if normalized_kind not in self.HEARTBEAT_BEAT_NOTE_KINDS:
+            raise ValueError(
+                "heartbeat beat note kind must be one of: "
+                + ", ".join(sorted(self.HEARTBEAT_BEAT_NOTE_KINDS))
+            )
+        now = utcnow_iso()
+        note_id = f"hbnote_{uuid4().hex[:16]}"
+        metadata_json = json.dumps(
+            metadata if isinstance(metadata, dict) else {},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO heartbeat_beat_notes (
+                    note_id, kind, outcome, content, status, author,
+                    request_id, session_id, metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    note_id,
+                    normalized_kind,
+                    outcome,
+                    normalized_content,
+                    author or "orchestrator",
+                    request_id,
+                    session_id,
+                    metadata_json,
+                    now,
+                    now,
+                ),
+            )
+            if normalized_kind == "beat":
+                self._prune_heartbeat_beat_notes(connection)
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM heartbeat_beat_notes WHERE note_id = ?",
+                (note_id,),
+            ).fetchone()
+        return self._heartbeat_beat_note_record(row)
+
+    def list_heartbeat_beat_notes(
+        self,
+        *,
+        limit: int = 50,
+        include_stale: bool = False,
+        kind: str | None = None,
+        outcome: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List beat notes oldest-first (render order for the beat prompt)."""
+        bounded_limit = max(1, min(int(limit or 50), 500))
+        clauses: list[str] = []
+        params: list[Any] = []
+        if not include_stale:
+            clauses.append("status = 'active'")
+        if kind:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if outcome:
+            clauses.append("outcome = ?")
+            params.append(outcome)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(bounded_limit)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM heartbeat_beat_notes
+                {where}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        records = [self._heartbeat_beat_note_record(row) for row in rows]
+        records.reverse()
+        return records
+
+    def mark_heartbeat_beat_note_stale(
+        self,
+        *,
+        note_id: str | None = None,
+        match: str | None = None,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> int:
+        """Soft-invalidate notes by id or content substring (history survives)."""
+        normalized_match = (match or "").strip()
+        normalized_note_id = (note_id or "").strip()
+        if not normalized_note_id and not normalized_match:
+            raise ValueError("requires note_id or match text")
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            if normalized_note_id:
+                cursor = connection.execute(
+                    """
+                    UPDATE heartbeat_beat_notes
+                    SET status = 'stale',
+                        stale_reason = ?,
+                        stale_at = ?,
+                        stale_by = ?,
+                        updated_at = ?
+                    WHERE note_id = ? AND status = 'active'
+                    """,
+                    (
+                        reason or "Removed via heartbeat_notes tool",
+                        now,
+                        actor or "orchestrator",
+                        now,
+                        normalized_note_id,
+                    ),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE heartbeat_beat_notes
+                    SET status = 'stale',
+                        stale_reason = ?,
+                        stale_at = ?,
+                        stale_by = ?,
+                        updated_at = ?
+                    WHERE status = 'active' AND instr(content, ?) > 0
+                    """,
+                    (
+                        reason or "Removed via heartbeat_notes tool",
+                        now,
+                        actor or "orchestrator",
+                        now,
+                        normalized_match,
+                    ),
+                )
+            connection.commit()
+            return int(cursor.rowcount)
+
+    def replace_heartbeat_beat_notes(
+        self,
+        *,
+        content: str,
+        author: str = "orchestrator",
+        request_id: str | None = None,
+        session_id: str | None = None,
+        reason: str | None = None,
+    ) -> int:
+        """Soft-replace: mark every active note stale, then insert new content."""
+        normalized_content = str(content or "").strip()
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE heartbeat_beat_notes
+                SET status = 'stale',
+                    stale_reason = ?,
+                    stale_at = ?,
+                    stale_by = ?,
+                    updated_at = ?
+                WHERE status = 'active'
+                """,
+                (
+                    reason or "Replaced by newer heartbeat notes",
+                    now,
+                    author or "orchestrator",
+                    now,
+                ),
+            )
+            if normalized_content:
+                connection.execute(
+                    """
+                    INSERT INTO heartbeat_beat_notes (
+                        note_id, kind, content, status, author,
+                        request_id, session_id, created_at, updated_at
+                    ) VALUES (?, 'note', ?, 'active', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"hbnote_{uuid4().hex[:16]}",
+                        normalized_content,
+                        author or "orchestrator",
+                        request_id,
+                        session_id,
+                        now,
+                        now,
+                    ),
+                )
+            connection.commit()
+        return 1
+
+    def render_heartbeat_notes(
+        self,
+        *,
+        limit_items: int = 60,
+        include_stale: bool = False,
+    ) -> str:
+        """Render beat notes oldest-first as plain lines for a beat prompt.
+
+        The gateway runtime applies the head+tail excerpt on this text; the
+        store only renders rows and never trims content.
+        """
+        items = self.list_heartbeat_beat_notes(
+            limit=max(20, min(int(limit_items or 60), 200)),
+            include_stale=include_stale,
+        )
+        lines: list[str] = []
+        for item in items:
+            created_at = item.get("created_at") or "?"
+            kind = str(item.get("kind") or "note")
+            outcome = item.get("outcome") or ""
+            label = f"{kind}/{outcome}" if outcome else kind
+            content = " ".join(str(item.get("content") or "").split())
+            stamp = self._format_note_stamp(created_at)
+            lines.append(f"- [{stamp} | {label}] {content}")
+        return "\n".join(lines).strip()
+
+    # ── internal helpers ────────────────────────────────────────────────
+
+    def _get_heartbeat_watchpoint_row(
+        self,
+        connection: sqlite3.Connection,
+        watchpoint_id: str,
+    ):
+        return connection.execute(
+            "SELECT * FROM heartbeat_watchpoints WHERE watchpoint_id = ? LIMIT 1",
+            (watchpoint_id,),
+        ).fetchone()
+
+    def _insert_heartbeat_watchpoint_event(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        watchpoint_id: str,
+        event: str,
+        status: str | None = None,
+        reason: str | None = None,
+        actor: str | None = None,
+        source: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO heartbeat_watchpoint_events (
+                event_id, watchpoint_id, event, status, reason, actor, source,
+                details_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"hbwe_{uuid4().hex[:16]}",
+                watchpoint_id,
+                event,
+                status,
+                reason,
+                actor,
+                source or "orchestrator",
+                json.dumps(details or {}, sort_keys=True, separators=(",", ":")),
+                utcnow_iso(),
+            ),
+        )
+
+    @staticmethod
+    def _prune_heartbeat_beat_notes(connection: sqlite3.Connection) -> None:
+        """Deterministic retention — SQL, not prose parsing.
+
+        - Suppress beats: keep all for 48h, then 1 newest per UTC day for 14 days.
+        - Delivered/failed/completed beats: 30 days.
+        - Stale model notes: 14 days.
+        Watchpoint rows are not pruned here.
+        """
+        now = datetime.now(timezone.utc)
+        cutoff_30d = (now - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+        cutoff_14d = (now - timedelta(days=14)).isoformat().replace("+00:00", "Z")
+        cutoff_48h = (now - timedelta(hours=48)).isoformat().replace("+00:00", "Z")
+        connection.execute(
+            """
+            DELETE FROM heartbeat_beat_notes
+            WHERE kind = 'beat'
+              AND IFNULL(outcome, '') != 'suppressed'
+              AND created_at < ?
+            """,
+            (cutoff_30d,),
+        )
+        connection.execute(
+            """
+            DELETE FROM heartbeat_beat_notes
+            WHERE kind = 'beat'
+              AND outcome = 'suppressed'
+              AND created_at < ?
+            """,
+            (cutoff_14d,),
+        )
+        connection.execute(
+            """
+            DELETE FROM heartbeat_beat_notes
+            WHERE kind = 'beat'
+              AND outcome = 'suppressed'
+              AND created_at < ?
+              AND note_id NOT IN (
+                  SELECT note_id FROM (
+                      SELECT note_id,
+                             ROW_NUMBER() OVER (
+                                 PARTITION BY substr(created_at, 1, 10)
+                                 ORDER BY created_at DESC
+                             ) AS rn
+                      FROM heartbeat_beat_notes
+                      WHERE kind = 'beat' AND outcome = 'suppressed'
+                  )
+                  WHERE rn = 1
+              )
+            """,
+            (cutoff_48h,),
+        )
+        connection.execute(
+            """
+            DELETE FROM heartbeat_beat_notes
+            WHERE status = 'stale'
+              AND stale_at IS NOT NULL
+              AND stale_at < ?
+            """,
+            (cutoff_14d,),
+        )
+
+    @staticmethod
+    def _heartbeat_watchpoint_record(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        record = dict(row)
+        for column, key in (
+            ("check_config_json", "check_config"),
+            ("baseline_state_json", "baseline_state"),
+        ):
+            raw = record.pop(column, None)
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except (TypeError, ValueError):
+                parsed = {}
+            record[key] = parsed if isinstance(parsed, dict) else {}
+        return record
+
+    @staticmethod
+    def _heartbeat_beat_note_record(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        record = dict(row)
+        try:
+            metadata = json.loads(record.get("metadata_json") or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        record["metadata"] = metadata if isinstance(metadata, dict) else {}
+        record.pop("metadata_json", None)
+        return record
+
+    @staticmethod
+    def _format_note_stamp(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "?"
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).strftime("%m/%d %H:%M UTC")
 
     @contextlib.contextmanager
     def _connect(self):

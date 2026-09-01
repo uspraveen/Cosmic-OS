@@ -648,6 +648,7 @@ class GatewayRuntime:
             default_timezone=self.config.user_timezone_fallback,
             default_heartbeat_interval_sec=self.config.heartbeat_interval_sec,
         )
+        self._migrate_heartbeat_notes_file()
         self.agent_email_integration_store.initialize()
         self.agent_auth_store.initialize()
         self._orchestrator_task_ledger.initialize()
@@ -2849,8 +2850,15 @@ class GatewayRuntime:
             "guesses when deciding whether the user already got a Cosmic Mail note about that item. "
             "You know this is a repeating heartbeat; use the runtime state to avoid repeating yourself "
             "and to reason about the last beat, this beat, and the next one. "
-            "Use heartbeat_notes as your private scratchpad for compact self-notes across beats: "
-            "read it when continuity matters, append or replace short watchpoints, and remove stale notes. "
+            "Heartbeat standing commitments live in heartbeat_watchpoints (SQLite). "
+            "Create/update/deactivate them with the heartbeat_watchpoints tool — never as prose in notes. "
+            "User-created watchpoints must not be silently dropped; if a check cannot run, say so in notes "
+            "and leave the row active. Deactivate with status=inactive and a reason when the user asks to stop. "
+            "Inactive rows stay queryable so you can later answer 'what happened to that watch?'. "
+            "Use heartbeat_notes as your private scratchpad for compact self-notes across beats "
+            "(kind=note|plan). Gateway already records each beat's suppress/deliver outcome as kind=beat — "
+            "do not re-log identical suppression envelopes. "
+            "read notes when continuity matters, append short judgments, and remove (soft-stale) outdated notes. "
             "The scratchpad owns self-observation only - what you delivered, suppressed, or plan to check. "
             "It does not own facts about the world; durable memory does. When a note restates a world fact "
             "(a deadline, a status, a commitment), that copy can go stale the moment the user corrects the "
@@ -2970,6 +2978,49 @@ class GatewayRuntime:
             logger.exception("gateway.heartbeat_notes_read_failed path=%s", path)
             return ""
 
+    def _migrate_heartbeat_notes_file(self) -> None:
+        """Seed standing watchpoints once. Do not import the markdown suppress log."""
+        try:
+            existing = self.scheduler_store.list_heartbeat_watchpoints(
+                include_inactive=True,
+                limit=200,
+            )
+            already = any(
+                "dhinakaran" in str(item.get("name") or "").lower()
+                and "offer letter" in str(item.get("name") or "").lower()
+                for item in existing
+            )
+            if not already:
+                created = self.scheduler_store.upsert_heartbeat_watchpoint(
+                    name="Dhinakaran offer letter (TriZ AI)",
+                    description="Start 7/13 passed. Ball in user's court.",
+                    created_by="gateway",
+                    check_kind="manual",
+                    notify_policy="manual",
+                )
+                self.scheduler_store.set_heartbeat_watchpoint_status(
+                    created["watchpoint_id"],
+                    status="stale",
+                    reason="Start date passed; already surfaced 3x+. Do not re-nudge unless the user asks.",
+                    actor="gateway",
+                )
+                logger.info("gateway.heartbeat_watchpoint_seeded name=%s", created.get("name"))
+            path = getattr(getattr(self, "config", None), "heartbeat_notes_path", None)
+            if path is not None and path.exists():
+                try:
+                    old_size = path.stat().st_size
+                    if old_size > HEARTBEAT_NOTES_CHAR_LIMIT:
+                        path.write_text("# COSMIC Heartbeat Notes\n\n", encoding="utf-8")
+                        logger.info(
+                            "gateway.heartbeat_notes_file_stubbed path=%s old_bytes=%s",
+                            path,
+                            old_size,
+                        )
+                except OSError:
+                    logger.exception("gateway.heartbeat_notes_file_stub_failed")
+        except Exception:
+            logger.exception("gateway.heartbeat_notes_migration_failed")
+
     def _watchpoint_corrections_path(self) -> Path | None:
         notes_path = getattr(getattr(self, "config", None), "heartbeat_notes_path", None)
         if notes_path is None:
@@ -3050,6 +3101,21 @@ class GatewayRuntime:
             logger.exception(
                 "gateway.heartbeat_notes_retraction_persist_failed path=%s", path
             )
+        retractions = self._load_watchpoint_retractions()
+        for item in retractions:
+            if not isinstance(item, dict):
+                continue
+            invalidates = self._safe_text(item.get("invalidates"))
+            if not invalidates:
+                continue
+            try:
+                self.scheduler_store.mark_heartbeat_beat_note_stale(
+                    match=invalidates,
+                    reason="watchpoint retraction",
+                    actor="gateway",
+                )
+            except Exception:
+                logger.exception("gateway.heartbeat_notes_db_retraction_failed")
 
     def _enforce_heartbeat_notes_retractions(
         self, notes_text: str
@@ -7392,7 +7458,26 @@ class GatewayRuntime:
                 ],
             },
         }
-        heartbeat_notes = self._read_heartbeat_notes_document()
+        db_notes = ""
+        try:
+            db_notes = self.scheduler_store.render_heartbeat_notes() or ""
+        except Exception:
+            logger.exception("gateway.heartbeat_notes_db_render_failed")
+        heartbeat_notes = db_notes.strip()
+        if not heartbeat_notes:
+            md_notes = self._read_heartbeat_notes_document()
+            if md_notes and len(md_notes) <= HEARTBEAT_NOTES_CHAR_LIMIT:
+                heartbeat_notes = md_notes
+        try:
+            watchpoints = self.scheduler_store.list_heartbeat_watchpoints(
+                include_inactive=True,
+                limit=50,
+            )
+        except Exception:
+            logger.exception("gateway.heartbeat_watchpoints_list_failed")
+            watchpoints = []
+        if watchpoints:
+            packet["heartbeat_watchpoints"] = watchpoints
         applied_retractions: list[dict[str, str]] = []
         if heartbeat_notes:
             heartbeat_notes, applied_retractions = (
@@ -7611,6 +7696,42 @@ class GatewayRuntime:
                 line = f"- {label}: " + "; ".join(details)
                 if summary:
                     line += f"; summary={summary}"
+                lines.append(line)
+        watchpoints = (
+            context_packet.get("heartbeat_watchpoints")
+            if isinstance(context_packet.get("heartbeat_watchpoints"), list)
+            else []
+        )
+        if watchpoints:
+            lines.extend(
+                [
+                    "",
+                    "### Heartbeat Watchpoints (registry)",
+                    "Durable standing commitments. Source of truth is SQLite, not the notes scratchpad. "
+                    "status=inactive/stale/superseded/completed rows are history — do not resurrect them unless the user asks. "
+                    "Use heartbeat_watchpoints to create, update, or deactivate.",
+                ]
+            )
+            for item in watchpoints:
+                if not isinstance(item, dict):
+                    continue
+                wp_id = self._safe_text(item.get("watchpoint_id")) or ""
+                name = self._safe_text(item.get("name")) or "(unnamed)"
+                wp_status = self._safe_text(item.get("status")) or "active"
+                reason = self._safe_text(item.get("status_reason")) or ""
+                desc = self._safe_text(item.get("description")) or ""
+                check_kind = self._safe_text(item.get("check_kind")) or "manual"
+                last_check = self._safe_text(item.get("last_check_status")) or ""
+                failures = item.get("consecutive_failures") or 0
+                line = f"- {wp_id} [{wp_status}] {name} ({check_kind})"
+                if desc:
+                    line += f" — {desc}"
+                if last_check:
+                    line += f"; last_check={last_check}"
+                if failures:
+                    line += f"; consecutive_failures={failures}"
+                if reason:
+                    line += f"; reason={reason}"
                 lines.append(line)
         heartbeat_notes = self._safe_text(context_packet.get("heartbeat_notes"))
         retractions = (
@@ -8608,6 +8729,143 @@ class GatewayRuntime:
             "heartbeat": self.scheduler_store.get_heartbeat(),
             "manual_overrides": self.scheduler_store.list_manual_overrides(limit=30),
         }
+
+    def heartbeat_notes_overview(
+        self,
+        *,
+        include_stale: bool = False,
+        include_inactive_watchpoints: bool = True,
+        limit: int = 80,
+    ) -> dict[str, Any]:
+        notes = self.scheduler_store.list_heartbeat_beat_notes(
+            limit=limit,
+            include_stale=include_stale,
+        )
+        rendered = self.scheduler_store.render_heartbeat_notes(
+            limit_items=limit,
+            include_stale=include_stale,
+        )
+        watchpoints = self.scheduler_store.list_heartbeat_watchpoints(
+            include_inactive=include_inactive_watchpoints,
+            limit=50,
+        )
+        return {
+            "storage": "scheduler.db",
+            "content": rendered,
+            "notes": notes,
+            "watchpoints": watchpoints,
+            "bytes": len(rendered.encode("utf-8")),
+        }
+
+    def mutate_heartbeat_notes(
+        self,
+        *,
+        action: str,
+        content: str | None = None,
+        match: str | None = None,
+        note_id: str | None = None,
+        kind: str | None = None,
+        reason: str | None = None,
+        request_id: str | None = None,
+        session_id: str | None = None,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_action = str(action or "").strip().lower()
+        author = str(actor or "orchestrator").strip() or "orchestrator"
+        updated = False
+        message = "Heartbeat notes unchanged."
+        if normalized_action == "append":
+            note = self.scheduler_store.append_heartbeat_beat_note(
+                content=str(content or "").strip(),
+                kind=str(kind or "note").strip() or "note",
+                author=author,
+                request_id=request_id,
+                session_id=session_id,
+            )
+            updated = True
+            message = "Heartbeat notes appended."
+            _ = note
+        elif normalized_action == "replace":
+            self.scheduler_store.replace_heartbeat_beat_notes(
+                content=str(content or "").strip(),
+                author=author,
+                request_id=request_id,
+                session_id=session_id,
+                reason=reason,
+            )
+            updated = True
+            message = "Heartbeat notes replaced."
+        elif normalized_action == "remove":
+            count = self.scheduler_store.mark_heartbeat_beat_note_stale(
+                note_id=note_id,
+                match=match,
+                reason=reason or "Removed via heartbeat_notes tool",
+                actor=author,
+            )
+            updated = count > 0
+            message = (
+                "Heartbeat notes removed matching text."
+                if updated
+                else "No matching heartbeat note text found."
+            )
+        elif normalized_action == "clear":
+            self.scheduler_store.replace_heartbeat_beat_notes(
+                content="",
+                author=author,
+                reason=reason or "Cleared via heartbeat_notes tool",
+            )
+            updated = True
+            message = "Heartbeat notes cleared."
+        else:
+            raise ValueError("Unsupported heartbeat_notes action. Use append, replace, remove, or clear.")
+        overview = self.heartbeat_notes_overview()
+        overview["updated"] = updated
+        overview["message"] = message
+        return overview
+
+    def create_heartbeat_watchpoint(
+        self,
+        *,
+        watchpoint_id: str | None = None,
+        name: str,
+        description: str | None = None,
+        check_kind: str = "manual",
+        check_config: dict[str, Any] | None = None,
+        baseline_state: dict[str, Any] | None = None,
+        notify_policy: str = "on_new",
+        request_id: str | None = None,
+        session_id: str | None = None,
+        channel: str | None = None,
+        created_by: str = "orchestrator",
+    ) -> dict[str, Any]:
+        return self.scheduler_store.upsert_heartbeat_watchpoint(
+            watchpoint_id=watchpoint_id,
+            name=name,
+            description=description,
+            created_by=created_by,
+            check_kind=check_kind,
+            check_config=check_config,
+            baseline_state=baseline_state,
+            notify_policy=notify_policy,
+            request_id=request_id,
+            session_id=session_id,
+            channel=channel,
+        )
+
+    def set_heartbeat_watchpoint_status(
+        self,
+        watchpoint_id: str,
+        *,
+        status: str,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> dict[str, Any] | None:
+        return self.scheduler_store.set_heartbeat_watchpoint_status(
+            watchpoint_id,
+            status=status,
+            reason=reason,
+            actor=actor,
+        )
 
     def list_scheduler_crons(
         self, *, include_system: bool = True, active_only: bool = False

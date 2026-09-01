@@ -1756,14 +1756,86 @@ class ToolExecutor:
         *,
         context: ToolExecutionContext | None = None,
     ) -> dict[str, Any]:
-        del context
         action = str(tool_input.get("action") or "read").strip().lower() or "read"
         if action not in {"read", "append", "replace", "remove", "clear"}:
             return {
                 "error": True,
                 "message": "Unsupported heartbeat_notes action. Use read, append, replace, remove, or clear.",
             }
+        if self.gateway_url:
+            return await self._heartbeat_notes_via_gateway(action, tool_input, context=context)
+        return await self._heartbeat_notes_via_markdown(action, tool_input)
 
+    async def _heartbeat_notes_via_gateway(
+        self,
+        action: str,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        if action == "read":
+            payload = await self._request_gateway_json(
+                "GET",
+                "/internal/scheduler/heartbeat-notes",
+                params={"include_stale": False},
+            ) or {}
+            content = str(payload.get("content") or "")
+            return {
+                "updated": False,
+                "message": "Heartbeat notes read.",
+                "content": content,
+                "notes": payload.get("notes") or [],
+                "watchpoints": payload.get("watchpoints") or [],
+                "bytes": int(payload.get("bytes") or len(content.encode("utf-8"))),
+                "storage": "scheduler.db",
+            }
+        body: dict[str, Any] = {"action": action, "source": "orchestrator"}
+        if action in {"append", "replace"}:
+            content = self._normalize_heartbeat_notes_fragment(tool_input.get("content"))
+            if not content:
+                return {"error": True, "message": f"content is required for {action}"}
+            body["content"] = content
+            kind = str(tool_input.get("kind") or "").strip()
+            if kind:
+                body["kind"] = kind
+        elif action == "remove":
+            match = str(tool_input.get("match") or "").strip()
+            note_id = str(tool_input.get("note_id") or "").strip()
+            if not match and not note_id:
+                return {"error": True, "message": "match or note_id is required for remove"}
+            if match:
+                body["match"] = match
+            if note_id:
+                body["note_id"] = note_id
+        reason = str(tool_input.get("reason") or "").strip()
+        if reason:
+            body["reason"] = reason
+        if context:
+            if context.request_id:
+                body["request_id"] = context.request_id
+            if context.session_id:
+                body["session_id"] = context.session_id
+        payload = await self._request_gateway_json(
+            "POST",
+            "/internal/scheduler/heartbeat-notes",
+            json_body=body,
+        ) or {}
+        content = str(payload.get("content") or "")
+        return {
+            "updated": bool(payload.get("updated")),
+            "message": str(payload.get("message") or "Heartbeat notes updated."),
+            "content": content,
+            "notes": payload.get("notes") or [],
+            "watchpoints": payload.get("watchpoints") or [],
+            "bytes": int(payload.get("bytes") or len(content.encode("utf-8"))),
+            "storage": "scheduler.db",
+        }
+
+    async def _heartbeat_notes_via_markdown(
+        self,
+        action: str,
+        tool_input: dict[str, Any],
+    ) -> dict[str, Any]:
         current = self._read_heartbeat_notes_text()
         changed = False
         message = "Heartbeat notes read."
@@ -1810,6 +1882,87 @@ class ToolExecutor:
             "content": current,
             "bytes": len(current.encode("utf-8")),
             "path": str(self.heartbeat_notes_path),
+        }
+
+    async def _heartbeat_watchpoints(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        action = str(tool_input.get("action") or "list").strip().lower() or "list"
+        if not self.gateway_url:
+            return {"error": True, "message": "Gateway scheduler is not configured."}
+        if action == "list":
+            include_inactive = self._coerce_bool(
+                tool_input.get("include_inactive"),
+                default=True,
+            )
+            payload = await self._request_gateway_json(
+                "GET",
+                "/internal/scheduler/heartbeat-watchpoints",
+                params={"include_inactive": include_inactive},
+            ) or {}
+            return {"watchpoints": payload.get("watchpoints") or []}
+        if action in {"create", "update"}:
+            name = str(tool_input.get("name") or "").strip()
+            watchpoint_id = str(tool_input.get("watchpoint_id") or "").strip()
+            if action == "create" and not name:
+                return {"error": True, "message": "name is required to create a watchpoint"}
+            if action == "update" and not watchpoint_id:
+                return {"error": True, "message": "watchpoint_id is required to update a watchpoint"}
+            body: dict[str, Any] = {
+                "name": name,
+                "created_by": "orchestrator",
+            }
+            if watchpoint_id:
+                body["watchpoint_id"] = watchpoint_id
+            description = str(tool_input.get("description") or "").strip()
+            if description:
+                body["description"] = description
+            check_kind = str(tool_input.get("check_kind") or "").strip()
+            if check_kind:
+                body["check_kind"] = check_kind
+            notify_policy = str(tool_input.get("notify_policy") or "").strip()
+            if notify_policy:
+                body["notify_policy"] = notify_policy
+            check_config = tool_input.get("check_config")
+            if isinstance(check_config, dict):
+                body["check_config"] = check_config
+            baseline_state = tool_input.get("baseline_state")
+            if isinstance(baseline_state, dict):
+                body["baseline_state"] = baseline_state
+            if context:
+                if context.request_id:
+                    body["request_id"] = context.request_id
+                if context.session_id:
+                    body["session_id"] = context.session_id
+                if context.channel:
+                    body["channel"] = context.channel
+            created = await self._request_gateway_json(
+                "POST",
+                "/internal/scheduler/heartbeat-watchpoints",
+                json_body=body,
+            ) or {}
+            return {"updated": True, "watchpoint": created}
+        if action == "set_status":
+            watchpoint_id = str(tool_input.get("watchpoint_id") or "").strip()
+            status_value = str(tool_input.get("status") or "").strip()
+            if not watchpoint_id or not status_value:
+                return {"error": True, "message": "watchpoint_id and status are required"}
+            payload = await self._request_gateway_json(
+                "POST",
+                f"/internal/scheduler/heartbeat-watchpoints/{watchpoint_id}/status",
+                json_body={
+                    "status": status_value,
+                    "reason": str(tool_input.get("reason") or "").strip() or None,
+                    "actor": "orchestrator",
+                },
+            ) or {}
+            return {"updated": True, "watchpoint": payload}
+        return {
+            "error": True,
+            "message": "Unsupported heartbeat_watchpoints action. Use list, create, update, or set_status.",
         }
 
     async def _memory_write_core_fact(

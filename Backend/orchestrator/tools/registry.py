@@ -319,6 +319,18 @@ def _heartbeat_notes_progress(tool_input: dict[str, Any]) -> str:
     return "Reading heartbeat notes..."
 
 
+def _heartbeat_watchpoints_progress(tool_input: dict[str, Any]) -> str:
+    action = str(tool_input.get("action") or "list").strip().lower()
+    label = str(tool_input.get("name") or tool_input.get("watchpoint_id") or "").strip()
+    if action == "create":
+        return f"Creating watchpoint: {label}" if label else "Creating heartbeat watchpoint..."
+    if action == "set_status":
+        return f"Updating watchpoint status: {label}" if label else "Updating heartbeat watchpoint..."
+    if action == "update":
+        return f"Updating watchpoint: {label}" if label else "Updating heartbeat watchpoint..."
+    return "Reading heartbeat watchpoints..."
+
+
 def _memory_core_fact_progress(tool_input: dict[str, Any]) -> str:
     title = str(tool_input.get("title") or "").strip()
     if title:
@@ -1951,9 +1963,13 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "heartbeat_notes",
             "description": (
-                "Read or maintain COSMIC's private heartbeat notes markdown file. Use this during heartbeat turns as a compact self-scratchpad "
-                "for watchpoints, future checks, project improvement ideas, and stale notes to remove. Also use it on any turn — including email — "
-                "when the user corrects a watchpoint so the stale line cannot survive to the next beat. Keep notes short and do not expose them verbatim."
+                "Read or maintain COSMIC's private heartbeat notes in SQLite (scheduler.db table heartbeat_beat_notes). "
+                "Use during heartbeat turns as a compact self-scratchpad for judgments, plans, and continuity — not for standing watch commitments. "
+                "Standing watches belong in heartbeat_watchpoints. Gateway already stores each beat's suppress/deliver envelope as kind=beat; "
+                "do not append duplicate suppression logs. remove/clear soft-stale rows (status=stale) so history remains queryable. "
+                "Also use on any turn — including email — when the user corrects a note. Keep notes short; do not expose them verbatim. "
+                "Schema: note_id, kind (note|plan|watchpoint|beat|legacy_import), outcome, content, status (active|stale), "
+                "stale_reason, author, created_at."
             ),
             "input_schema": {
                 "type": "object",
@@ -1966,19 +1982,99 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "content": {
                         "type": "string",
-                        "description": "Markdown content for append or replace. For append, write only the new concise note(s). For replace, provide the complete notes body.",
+                        "description": "Note text for append or replace. For append, write only the new concise note(s).",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "Row kind for append: note (default), plan, or watchpoint. Do not write kind=beat; Gateway owns those.",
+                        "enum": ["note", "plan", "watchpoint"],
                     },
                     "match": {
                         "type": "string",
-                        "description": "Exact text to remove when action=remove.",
+                        "description": "Substring to soft-stale when action=remove.",
+                    },
+                    "note_id": {
+                        "type": "string",
+                        "description": "Optional note_id to soft-stale when action=remove.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why a note is being replaced, removed, or cleared.",
                     },
                 },
             },
         },
         group="memory",
-        prompt_summary="Private heartbeat self-notes markdown. Use during heartbeat turns, and on any turn when the user corrects a watchpoint, to read, append, replace, or remove compact watchpoints without polluting chat history.",
+        prompt_summary="Private heartbeat self-notes in SQLite. Use during heartbeat turns, and on any turn when the user corrects a note, to read, append, replace, or soft-stale compact judgments without polluting chat history.",
         progress_builder=_heartbeat_notes_progress,
         handler_method="_heartbeat_notes",
+    ),
+    ToolSpec(
+        name="heartbeat_watchpoints",
+        api_definition={
+            "name": "heartbeat_watchpoints",
+            "description": (
+                "Create, list, update, or deactivate durable heartbeat watchpoints in SQLite "
+                "(scheduler.db table heartbeat_watchpoints). This is the source of truth for standing "
+                "'keep an eye on X' commitments. Never hard-delete; set_status to inactive/stale/superseded/completed "
+                "with a reason so a later 'where did that watch go?' question is answerable. "
+                "Schema: watchpoint_id, name, description, created_by, check_kind (manual|url_probe|api_diff), "
+                "check_config (JSON), baseline_state (JSON), notify_policy (on_new|on_every_check|manual), "
+                "status (active|stale|inactive|superseded|completed), status_reason, last_check_status "
+                "(ok|inconclusive|failed), consecutive_failures, last_delivered_at."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "create", "update", "set_status"],
+                        "default": "list",
+                    },
+                    "watchpoint_id": {
+                        "type": "string",
+                        "description": "Required for update and set_status.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Required for create. Short label, e.g. portfolio_visitors.",
+                    },
+                    "description": {"type": "string"},
+                    "check_kind": {
+                        "type": "string",
+                        "enum": ["manual", "url_probe", "api_diff"],
+                    },
+                    "check_config": {
+                        "type": "object",
+                        "description": "Probe config JSON, e.g. {\"url\": \"https://...\"}.",
+                    },
+                    "baseline_state": {
+                        "type": "object",
+                        "description": "Comparison snapshot JSON, e.g. {\"known_ips\": [\"...\"]}.",
+                    },
+                    "notify_policy": {
+                        "type": "string",
+                        "enum": ["on_new", "on_every_check", "manual"],
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "stale", "inactive", "superseded", "completed"],
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Required in spirit for set_status so later forensics work.",
+                    },
+                    "include_inactive": {
+                        "type": "boolean",
+                        "description": "For list. Default true so you can see stopped watches.",
+                    },
+                },
+            },
+        },
+        group="memory",
+        prompt_summary="Durable heartbeat watchpoint registry. Create/list/update/deactivate standing checks; never hard-delete.",
+        progress_builder=_heartbeat_watchpoints_progress,
+        handler_method="_heartbeat_watchpoints",
     ),
     ToolSpec(
         name="memory_write_core_fact",

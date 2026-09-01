@@ -194,6 +194,38 @@ class HeartbeatConsumeRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class HeartbeatNotesMutateRequest(BaseModel):
+    action: str = Field(..., min_length=1, max_length=32)
+    content: str | None = Field(default=None, max_length=32000)
+    match: str | None = Field(default=None, max_length=4000)
+    note_id: str | None = Field(default=None, max_length=80)
+    kind: str | None = Field(default=None, max_length=32)
+    reason: str | None = Field(default=None, max_length=500)
+    request_id: str | None = Field(default=None, max_length=120)
+    session_id: str | None = Field(default=None, max_length=120)
+    source: str | None = Field(default=None, max_length=120)
+
+
+class HeartbeatWatchpointCreateRequest(BaseModel):
+    watchpoint_id: str | None = Field(default=None, max_length=80)
+    name: str = Field(default="", max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    check_kind: str = Field(default="manual", max_length=64)
+    check_config: dict[str, Any] = Field(default_factory=dict)
+    baseline_state: dict[str, Any] = Field(default_factory=dict)
+    notify_policy: str = Field(default="on_new", max_length=32)
+    request_id: str | None = Field(default=None, max_length=120)
+    session_id: str | None = Field(default=None, max_length=120)
+    channel: str | None = Field(default=None, max_length=128)
+    created_by: str | None = Field(default=None, max_length=80)
+
+
+class HeartbeatWatchpointStatusRequest(BaseModel):
+    status: str = Field(..., min_length=1, max_length=32)
+    reason: str | None = Field(default=None, max_length=500)
+    actor: str | None = Field(default=None, max_length=80)
+
+
 class SchedulerCreateRequest(BaseModel):
     cron_id: str | None = Field(default=None, max_length=80)
     label: str = Field(..., min_length=1, max_length=200)
@@ -1667,6 +1699,96 @@ async def resume_scheduler_cron(
     )
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown cron")
+    return payload
+
+
+@router.get("/internal/scheduler/heartbeat-notes")
+async def get_internal_heartbeat_notes(
+    include_stale: bool = False,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return runtime.heartbeat_notes_overview(include_stale=include_stale)
+
+
+@router.post("/internal/scheduler/heartbeat-notes")
+async def mutate_internal_heartbeat_notes(
+    body: HeartbeatNotesMutateRequest,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return runtime.mutate_heartbeat_notes(
+            action=body.action,
+            content=body.content,
+            match=body.match,
+            note_id=body.note_id,
+            kind=body.kind,
+            reason=body.reason,
+            request_id=body.request_id,
+            session_id=body.session_id,
+            actor=body.source or "orchestrator",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/internal/scheduler/heartbeat-watchpoints")
+async def list_internal_heartbeat_watchpoints(
+    include_inactive: bool = True,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return {
+        "watchpoints": runtime.scheduler_store.list_heartbeat_watchpoints(
+            include_inactive=include_inactive,
+            limit=100,
+        )
+    }
+
+
+@router.post("/internal/scheduler/heartbeat-watchpoints")
+async def create_internal_heartbeat_watchpoint(
+    body: HeartbeatWatchpointCreateRequest,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return runtime.create_heartbeat_watchpoint(
+            watchpoint_id=body.watchpoint_id,
+            name=body.name,
+            description=body.description,
+            check_kind=body.check_kind,
+            check_config=body.check_config,
+            baseline_state=body.baseline_state,
+            notify_policy=body.notify_policy,
+            request_id=body.request_id,
+            session_id=body.session_id,
+            channel=body.channel,
+            created_by=body.created_by or "orchestrator",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/internal/scheduler/heartbeat-watchpoints/{watchpoint_id}/status")
+async def set_internal_heartbeat_watchpoint_status(
+    watchpoint_id: str,
+    body: HeartbeatWatchpointStatusRequest,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        payload = runtime.set_heartbeat_watchpoint_status(
+            watchpoint_id,
+            status=body.status,
+            reason=body.reason,
+            actor=body.actor or "orchestrator",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown watchpoint")
     return payload
 
 

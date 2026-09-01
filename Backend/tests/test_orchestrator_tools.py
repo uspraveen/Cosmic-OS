@@ -17,6 +17,7 @@ def test_cosmic_code_execution_is_registered_as_local_tool() -> None:
     tool_names = {tool.get("name") for tool in get_local_tool_definitions()}
     assert "cosmic_code_execution" in tool_names
     assert "heartbeat_notes" in tool_names
+    assert "heartbeat_watchpoints" in tool_names
 
 
 def test_cosmic_code_execution_warns_maps_must_use_map_specialist() -> None:
