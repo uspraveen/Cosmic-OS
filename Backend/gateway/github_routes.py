@@ -1,12 +1,18 @@
 """GitHub webhook ingestion for the connected-repository registry.
 
 The GitHub App can deliver `installation`, `installation_repositories`, and
-`repository` events to the Gateway. Those events are the only timely way to
-learn that the user changed an installation's repository selection, renamed a
-repo, or uninstalled the App - each of which changes what Cosmic is allowed to
-touch. Events are applied to the ``github_repositories`` registry immediately
-(removals/revocations) or via a background re-enumeration (additions, renames,
-edits).
+`repository` events to the Gateway, keeping the authorization registry
+truthful within seconds of the user changing an installation's repository
+selection, renaming a repo, or uninstalling the App.
+
+This is strictly an optional accelerator, not a dependency. A GitHub App has
+exactly one webhook URL, so a fleet of per-user gateways can never each
+receive it. The primary freshness model is pull-based instead: registry reads
+re-enumerate the installation when the stored grant is stale
+(`CredentialManager.ensure_github_registry_fresh`), and a resolve miss
+triggers one bounded refresh — so correctness never depends on this endpoint
+being configured. Where it is configured (single-user or relayed
+deployments), it makes revocations land in seconds rather than on next read.
 
 Unlike the generic webhook surface in the architecture spec (§26), these
 events do not create TaskEnvelopes: they only keep the authorization registry

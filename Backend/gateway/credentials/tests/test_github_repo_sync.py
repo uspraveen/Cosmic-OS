@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import time
 from pathlib import Path
 
 from gateway.credentials.manager import CredentialManager
@@ -290,3 +291,111 @@ def test_sync_survives_a_metadata_lookup_failure(tmp_path: Path) -> None:
 
     assert summary["synced"] is True
     assert summary["repo_count"] == 1
+
+
+# ── Webhook-free registry freshness ──────────────────────────────────────────
+
+
+def _age_registry(store: CredentialStore, account_id: str, *, seconds_ago: float) -> None:
+    store.update_account(
+        account_id,
+        metadata_patch={"github_repos_synced_at": time.time() - seconds_ago},
+    )
+
+
+def test_never_synced_registry_counts_as_stale(tmp_path: Path) -> None:
+    """A fresh connect with an empty registry must refresh on first read."""
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+    fake = _FakeGitHubClient(repositories=[])
+    mgr = CredentialManager(store=store, github_api_client=fake)
+
+    asyncio.run(mgr.ensure_github_registry_fresh(blocking=True))
+
+    assert fake.repo_calls == ["42"]
+
+
+def test_fresh_registry_skips_revalidation(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+    fake = _FakeGitHubClient(repositories=[])
+    mgr = CredentialManager(store=store, github_api_client=fake)
+
+    asyncio.run(mgr.sync_github_repositories(account_id))
+    asyncio.run(mgr.ensure_github_registry_fresh(blocking=True))
+
+    assert fake.repo_calls == ["42"]
+
+
+def test_stale_registry_refreshes_on_read(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+    fake = _FakeGitHubClient(repositories=[])
+    mgr = CredentialManager(store=store, github_api_client=fake)
+
+    asyncio.run(mgr.sync_github_repositories(account_id))
+    _age_registry(store, account_id, seconds_ago=3600)
+    asyncio.run(mgr.ensure_github_registry_fresh(blocking=True))
+
+    assert fake.repo_calls == ["42", "42"]
+
+
+def test_min_refresh_interval_guards_against_retry_storm(tmp_path: Path) -> None:
+    """A persistently failing sync must not retry on every single read."""
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+
+    class FailingClient:
+        async def list_user_installations(self, token: str) -> list[dict]:
+            return [{"id": 42, "app_slug": "cosmic-dev"}]
+
+        async def list_installation_repositories(self, token, installation_id, *, max_pages=10):
+            del token, max_pages
+            raise RuntimeError("GitHub API error (status=502)")
+
+    fake_calls: list[str] = []
+
+    class CountingClient(FailingClient):
+        async def list_installation_repositories(self, token, installation_id, *, max_pages=10):
+            del token, max_pages
+            fake_calls.append(str(installation_id))
+            raise RuntimeError("GitHub API error (status=502)")
+
+    mgr = CredentialManager(store=store, github_api_client=CountingClient())
+    _age_registry(store, account_id, seconds_ago=3600)
+
+    asyncio.run(mgr.ensure_github_registry_fresh(blocking=True))
+    asyncio.run(mgr.ensure_github_registry_fresh(blocking=True))
+
+    assert len(fake_calls) == 1
+    # A GitHub outage is not a revoked grant; the account stays active.
+    assert store.get_account(account_id)["status"] == "active"
+
+
+def test_sync_permission_error_condemns_account(tmp_path: Path) -> None:
+    """GitHub rejecting the token is definitive: the account needs reconnect."""
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+
+    class RejectedClient:
+        async def list_user_installations(self, token: str) -> list[dict]:
+            return [{"id": 42, "app_slug": "cosmic-dev"}]
+
+        async def list_installation_repositories(self, token, installation_id, *, max_pages=10):
+            del token, max_pages
+            raise PermissionError("GitHub rejected the credential (status=401)")
+
+    mgr = CredentialManager(store=store, github_api_client=RejectedClient())
+
+    summary = asyncio.run(mgr.sync_github_repositories(account_id))
+
+    assert summary["synced"] is False
+    assert "401" in str(summary.get("error") or "")
+    account = store.get_account(account_id)
+    assert account["status"] == "needs_auth"
+    assert "401" in str(account["_metadata"].get("last_auth_error") or "")

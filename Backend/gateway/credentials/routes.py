@@ -1399,8 +1399,13 @@ async def list_github_repositories_route(
     The orchestrator uses this to resolve repo references and report where a
     repository lives on the VM and what the last Alpha progress was; the
     desktop settings panel uses it to show which repositories are connected.
+    Reads also nudge a background re-enumeration when the registry is stale —
+    the webhook-free freshness model (a GitHub App has exactly one webhook
+    URL, so per-user gateways pull instead).
     """
     _check_local_or_internal_token(request)
+    mgr = _get_manager(request)
+    await mgr.ensure_github_registry_fresh(blocking=False)
     mgr = _get_manager(request)
     statuses = ["all"] if status in ("all", "*") else [item.strip() for item in status.split(",") if item.strip()] or ["active"]
     repositories = mgr.list_github_repositories(
@@ -1419,10 +1424,19 @@ async def resolve_github_repository_route(
     request: Request,
     ref: str = Query(""),
 ):
-    """Resolve a repo id, owner/name, or clone/html/ssh URL to one repository."""
+    """Resolve a repo id, owner/name, or clone/html/ssh URL to one repository.
+
+    A miss first triggers one bounded re-enumeration of the installation, so
+    a repository added on GitHub moments ago resolves without a webhook:
+    this is the pull-model replacement for push freshness, at the exact
+    moment freshness matters (a task is about to use the repo).
+    """
     _check_internal_token(request)
     mgr = _get_manager(request)
     repo = mgr.find_github_repository(ref) if ref else None
+    if repo is None and ref:
+        await mgr.ensure_github_registry_fresh(blocking=True)
+        repo = mgr.find_github_repository(ref)
     if repo is None:
         raise HTTPException(
             status_code=404,

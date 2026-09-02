@@ -61,6 +61,16 @@ _REFRESH_RETRY_BACKOFF_SEC = (0.5, 1.5)
 # How long a needs_auth account waits between self-heal attempts.
 _RECOVERY_COOLDOWN_SEC = 900.0
 
+# Webhook-free registry freshness for GitHub repository grants. A GitHub App
+# has exactly one webhook URL, so per-user VMs can never each receive push
+# events. Instead, every gateway re-enumerates its own installation when a
+# registry read finds the stored grant older than this.
+GITHUB_REGISTRY_FRESHNESS_SEC = 600.0
+
+# Floor between re-enumerations of the same account, so a persistently failing
+# sync (dead credential, GitHub outage) cannot turn every read into a retry.
+GITHUB_REGISTRY_MIN_REFRESH_INTERVAL_SEC = 60.0
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -292,6 +302,9 @@ class CredentialManager:
         self._github_api = github_api_client
         # In-flight OAuth flows: state -> OAuthFlowState
         self._pending_flows: dict[str, OAuthFlowState] = {}
+        # Webhook-free registry freshness bookkeeping.
+        self._inflight_github_syncs: set[str] = set()
+        self._github_freshen_attempted_at: dict[str, float] = {}
 
     def _github_api_client(self):
         """Lazily construct the GitHub enumeration client.
@@ -819,7 +832,14 @@ class CredentialManager:
                     installation_id,
                     max_pages=max_pages,
                 )
-        except PermissionError:
+        except PermissionError as exc:
+            # GitHub rejected the credential at the API level: the grant is
+            # dead right now, not merely stale. Condemn the account so health
+            # reads show reauth_required instead of retrying a dead token all
+            # day; the auth-health probe remains the throttled self-heal path.
+            self.mark_account_auth_error(
+                account_id, str(exc).strip() or "GitHub rejected the credential."
+            )
             self._store.log_audit(
                 action="github_repo_sync",
                 provider="github",
@@ -979,6 +999,98 @@ class CredentialManager:
             patch["github_permissions"] = permissions
         if patch:
             self.update_account_metadata(account_id, patch)
+
+    def _github_registry_age(self, account_id: str) -> float | None:
+        """Seconds since the registry was last reconciled, or None if never."""
+        metadata = self._store.get_account(account_id)
+        metadata = metadata.get("_metadata") if isinstance(metadata, dict) else None
+        if not isinstance(metadata, dict):
+            return None
+        try:
+            synced_at = float(metadata.get("github_repos_synced_at") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if synced_at <= 0:
+            return None
+        return max(0.0, time.time() - synced_at)
+
+    async def _freshen_github_registry(self, account_id: str, *, blocking: bool) -> None:
+        """Re-enumerate one account's installation if the registry went stale.
+
+        Single-flight per account, with a minimum interval between attempts so
+        a persistently failing sync cannot turn every read into a retry. The
+        blocking variant awaits the refresh (resolve-miss retries); the
+        background variant returns immediately. sync_github_repositories
+        already contains its own failures, so callers never see exceptions
+        from the refresh itself.
+        """
+        age = self._github_registry_age(account_id)
+        if age is not None and age < GITHUB_REGISTRY_FRESHNESS_SEC:
+            return
+        now = time.time()
+        if now - self._github_freshen_attempted_at.get(account_id, 0.0) < (
+            GITHUB_REGISTRY_MIN_REFRESH_INTERVAL_SEC
+        ):
+            return
+        if account_id in self._inflight_github_syncs:
+            if not blocking:
+                return
+            # Someone else is refreshing this account; wait for the registry
+            # to settle rather than doing the work twice.
+            while account_id in self._inflight_github_syncs:
+                await asyncio.sleep(0.1)
+            return
+        self._github_freshen_attempted_at[account_id] = now
+        self._inflight_github_syncs.add(account_id)
+        try:
+            if blocking:
+                await self.sync_github_repositories(account_id)
+            else:
+                asyncio.get_running_loop().create_task(
+                    self._background_freshen(account_id)
+                )
+        finally:
+            if blocking:
+                self._inflight_github_syncs.discard(account_id)
+
+    async def _background_freshen(self, account_id: str) -> None:
+        try:
+            await self.sync_github_repositories(account_id)
+        except Exception:
+            logger.exception(
+                "credentials.github_registry_refresh_failed account_id=%s",
+                account_id,
+            )
+        finally:
+            self._inflight_github_syncs.discard(account_id)
+
+    async def ensure_github_registry_fresh(
+        self, account_id: str | None = None, *, blocking: bool = False
+    ) -> None:
+        """Keep the repository registry truthful by pulling, not by push.
+
+        Reads call this: anything past the freshness TTL triggers one bounded
+        re-enumeration of the user's own installation. That is what lets a
+        per-user VM stay correct without a webhook — a GitHub App has exactly
+        one webhook URL and could never deliver to every user's gateway.
+        """
+        accounts = self._store.list_accounts("github")
+        candidates = [
+            str(account.get("account_id") or "")
+            for account in accounts
+            if account.get("status") == "active"
+            and (not account_id or account.get("account_id") == account_id)
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                await self._freshen_github_registry(candidate, blocking=blocking)
+            except Exception:
+                logger.exception(
+                    "credentials.github_registry_refresh_failed account_id=%s",
+                    candidate,
+                )
 
     async def probe_github_account_health(self, account_id: str) -> dict[str, Any]:
         """Actively verify one GitHub account's credential against the API.
