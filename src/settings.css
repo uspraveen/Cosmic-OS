@@ -6516,50 +6516,334 @@
   color: rgba(200, 255, 220, 0.85);
 }
 
-/* Repository rows and grant chips (GitHub integration panel).
-   Rows are sometimes real buttons so a click can open the repo on GitHub;
-   buttons carry their own font, so re-anchor it to the page's. */
-.cosmic-agents-detail-mode:where(button) {
-  font-family: inherit;
-  width: 100%;
+/* ── GitHub integration: account cards with nested repositories ─────────── */
+
+.cosmic-agents-detail-acct-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.cosmic-agents-detail-mode-stack {
+.cosmic-agents-detail-acct {
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.008)),
+    rgba(10, 14, 20, 0.45);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+  transition: border-color 0.2s ease;
+}
+
+.cosmic-agents-detail-acct:hover {
+  border-color: rgba(255, 255, 255, 0.13);
+}
+
+.cosmic-agents-detail-acct.open {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.cosmic-agents-detail-acct.degraded {
+  border-color: rgba(255, 214, 10, 0.22);
+}
+
+.cosmic-agents-detail-acct-headrow {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding-right: 8px;
+}
+
+.cosmic-agents-detail-acct-head {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  flex: 1;
+  min-width: 0;
+  padding: 13px 6px 13px 14px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.cosmic-agents-detail-acct-head:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.cosmic-agents-detail-acct-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.6);
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.cosmic-agents-detail-acct-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.cosmic-agents-detail-acct-id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.cosmic-agents-detail-acct-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cosmic-agents-detail-acct-sub {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cosmic-agents-detail-acct-caret {
+  flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.35);
+  transition: transform 0.25s cubic-bezier(0.2, 0, 0, 1), color 0.2s ease;
+}
+
+.cosmic-agents-detail-acct.open .cosmic-agents-detail-acct-caret {
+  transform: rotate(180deg);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* Destructive action stays quiet until the row is hovered or focused. */
+.cosmic-agents-detail-acct-trash {
+  align-self: center;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.18s ease, color 0.18s ease, background 0.18s ease;
+}
+
+.cosmic-agents-detail-acct-headrow:hover .cosmic-agents-detail-acct-trash,
+.cosmic-agents-detail-acct-trash:focus-visible,
+.cosmic-agents-detail-acct-trash:disabled {
+  opacity: 1;
+}
+
+.cosmic-agents-detail-acct-trash:hover:not(:disabled) {
+  color: #ff6b61;
+  background: rgba(255, 69, 58, 0.12);
+}
+
+.cosmic-agents-detail-acct-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.28s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.cosmic-agents-detail-acct-body.open {
+  grid-template-rows: 1fr;
+}
+
+.cosmic-agents-detail-acct-body-clip {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.cosmic-agents-detail-acct-panel {
+  margin: 2px 12px 12px;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cosmic-agents-detail-acct-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 214, 10, 0.22);
+  background: rgba(255, 214, 10, 0.07);
+  color: #ffd97a;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.cosmic-agents-detail-acct-alert span {
+  flex: 1;
+  min-width: 0;
+}
+
+.cosmic-agents-detail-acct-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.cosmic-agents-detail-btn.sm {
+  padding: 6px 11px;
+  font-size: 11.5px;
+  border-radius: 9px;
+  gap: 5px;
+}
+
+.cosmic-agents-detail-grant-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.cosmic-agents-detail-repos-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cosmic-agents-detail-repos-head .cosmic-agents-detail-kicker {
+  letter-spacing: 0.06em;
+}
+
+.cosmic-agents-detail-repos-meta {
+  flex: 1;
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.35);
+  font-weight: 500;
+}
+
+.cosmic-agents-detail-repos-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 11px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+}
+
+.cosmic-agents-detail-repos-empty p {
+  margin: 0;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.5);
+  line-height: 1.5;
+}
+
+.cosmic-agents-detail-repo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.cosmic-agents-detail-repo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.004)),
+    rgba(0, 0, 0, 0.16);
+  color: rgba(255, 255, 255, 0.78);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease,
+    transform 0.18s ease,
+    color 0.18s ease;
+}
+
+.cosmic-agents-detail-repo:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.01)),
+    rgba(0, 0, 0, 0.2);
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.cosmic-agents-detail-repo.removed {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.cosmic-agents-detail-repo.removed:hover {
+  transform: none;
+  border-color: rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.004)),
+    rgba(0, 0, 0, 0.16);
+}
+
+.cosmic-agents-detail-repo-stack {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
 }
 
-.cosmic-agents-detail-mode-stack small {
-  white-space: normal;
-  flex-shrink: 1;
+.cosmic-agents-detail-repo-name {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.cosmic-agents-detail-mode span.cosmic-agents-detail-repo-name,
-.cosmic-agents-detail-repo-name {
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  font-size: 13px;
-  letter-spacing: -0.01em;
+.cosmic-agents-detail-repo-owner {
+  color: rgba(255, 255, 255, 0.45);
 }
 
-.cosmic-agents-detail-mode.removed {
-  opacity: 0.55;
+.cosmic-agents-detail-repo-sub {
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.38);
+  font-weight: 500;
 }
 
-.cosmic-agents-detail-mode.removed:hover {
-  border-color: rgba(255, 255, 255, 0.06);
-  color: rgba(255, 255, 255, 0.6);
-}
-
+/* Grant and repository attribute chips. */
 .cosmic-agents-detail-chip-row {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
   flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 .cosmic-agents-detail-chip {
@@ -6582,6 +6866,12 @@
   color: #9ce1a0;
 }
 
+.cosmic-agents-detail-chip.warn {
+  border-color: rgba(255, 214, 10, 0.25);
+  background: rgba(255, 214, 10, 0.08);
+  color: #ffd97a;
+}
+
 .cosmic-agents-detail-chip.danger {
   border-color: rgba(255, 69, 58, 0.28);
   background: rgba(255, 69, 58, 0.1);
@@ -6591,14 +6881,6 @@
 .cosmic-agents-detail-chip-note {
   font-size: 11px;
   color: rgba(255, 255, 255, 0.35);
-  font-weight: 500;
-}
-
-.cosmic-agents-detail-section-sub {
-  display: block;
-  margin-top: 3px;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.4);
   font-weight: 500;
 }
 

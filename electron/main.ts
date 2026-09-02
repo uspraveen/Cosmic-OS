@@ -2781,14 +2781,14 @@ app.whenReady().then(() => {
 
   // Refreshing repositories is a live re-enumeration on the gateway (paged
   // GitHub API calls), so it gets a longer timeout than a plain list read.
-  ipcMain.handle('gateway:github-repositories-sync', async () => {
+  ipcMain.handle('gateway:github-repositories-sync', async (_, payload: { accountId?: string } = {}) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {
       throw new Error('Gateway connection is not configured.')
     }
     const sync = (await callGatewayJson(config, '/internal/github/repositories/sync', {
       method: 'POST',
-      body: {},
+      body: { account_id: payload?.accountId || null },
       timeoutMs: 60000,
     })) as { synced?: boolean; error?: string; reason?: string }
     const list = (await callGatewayJson(

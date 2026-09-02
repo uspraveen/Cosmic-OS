@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { CheckCircle2, ExternalLink, Github, LogIn, RefreshCw, Trash2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
+import {
+  AlertTriangle,
+  ChevronDown,
+  ExternalLink,
+  Github,
+  LogIn,
+  RefreshCw,
+  Trash2,
+} from 'lucide-react'
 
 interface GitHubIntegrationSettingsProps {
   active: boolean
@@ -50,23 +58,18 @@ const accountName = (account: GitHubAccount): string =>
       'GitHub account',
   ).trim()
 
-const accountLogin = (account: GitHubAccount): string =>
-  String((account._metadata?.github_login as string | undefined) || '').trim()
+const metaString = (account: GitHubAccount, key: string): string =>
+  String((account._metadata?.[key] as string | undefined) || '').trim()
+
+const accountLogin = (account: GitHubAccount): string => metaString(account, 'github_login')
 
 const accountPermissions = (account: GitHubAccount): Record<string, unknown> => {
   const perms = account._metadata?.github_permissions
   return perms && typeof perms === 'object' ? (perms as Record<string, unknown>) : {}
 }
 
-const lastSyncedAt = (accounts: GitHubAccount[]): number => {
-  for (const account of accounts) {
-    const syncedAt = Number(
-      (account._metadata?.github_repos_synced_at as number | undefined) || 0,
-    )
-    if (syncedAt > 0) return syncedAt
-  }
-  return 0
-}
+const accountSyncedAt = (account: GitHubAccount): number =>
+  Number((account._metadata?.github_repos_synced_at as number | undefined) || 0)
 
 /**
  * A connected account is not the same as a usable one. GitHub App tokens are
@@ -111,14 +114,31 @@ const timeAgo = (epochSeconds: number): string => {
   return `${Math.round(elapsed / 86400)}d ago`
 }
 
+type AccountState = 'healthy' | 'reconnect' | 'unreachable' | 'inactive'
+
+const accountState = (account: GitHubAccount, health: GitHubHealthAccount | undefined): AccountState => {
+  if (health?.status === 'reauth_required' || !isConnected(account)) return 'reconnect'
+  if (health?.status === 'provider_error') return 'unreachable'
+  if (health && health.status === 'healthy') return 'healthy'
+  return isConnected(account) ? 'healthy' : 'reconnect'
+}
+
+const STATE_LABELS: Record<AccountState, string> = {
+  healthy: 'Connected',
+  reconnect: 'Reconnect needed',
+  unreachable: 'Unreachable',
+  inactive: 'Inactive',
+}
+
 export default function GitHubIntegrationSettings({ active }: GitHubIntegrationSettingsProps) {
   const [accounts, setAccounts] = useState<GitHubAccount[]>([])
   const [repositories, setRepositories] = useState<GitHubRepository[]>([])
   const [health, setHealth] = useState<GitHubHealthAccount[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [connecting, setConnecting] = useState(false)
-  const [syncing, setSyncing] = useState(false)
+  const [syncingId, setSyncingId] = useState('')
   const [disconnectingId, setDisconnectingId] = useState('')
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [banner, setBanner] = useState('')
   const [error, setError] = useState('')
 
@@ -146,14 +166,16 @@ export default function GitHubIntegrationSettings({ active }: GitHubIntegrationS
     }
     if (reposResult.status === 'fulfilled') {
       const payload = reposResult.value
-      setRepositories(Array.isArray(payload?.repositories) ? (payload.repositories as GitHubRepository[]) : [])
+      setRepositories(
+        Array.isArray(payload?.repositories) ? (payload.repositories as GitHubRepository[]) : [],
+      )
     }
     if (healthResult.status === 'fulfilled') {
       const payload = healthResult.value
       setHealth(Array.isArray(payload?.accounts) ? (payload.accounts as GitHubHealthAccount[]) : [])
     } else {
       // Older gateway without the probe route — fall back to the stored
-      // account status for the pill rather than nagging the user.
+      // account status rather than nagging the user.
       setHealth(null)
     }
     setLoading(false)
@@ -163,6 +185,28 @@ export default function GitHubIntegrationSettings({ active }: GitHubIntegrationS
     if (!active) return
     void refresh()
   }, [active, refresh])
+
+  // Default every card open: with one account — the overwhelmingly common
+  // case — the repositories should be visible without a click.
+  useEffect(() => {
+    if (accounts.length === 0) return
+    setExpanded((current) => {
+      if (current.size > 0) return current
+      return new Set(accounts.map((account) => account.account_id))
+    })
+  }, [accounts])
+
+  const toggleExpanded = (accountId: string) => {
+    setExpanded((current) => {
+      const next = new Set(current)
+      if (next.has(accountId)) {
+        next.delete(accountId)
+      } else {
+        next.add(accountId)
+      }
+      return next
+    })
+  }
 
   const connect = async () => {
     setConnecting(true)
@@ -199,24 +243,26 @@ export default function GitHubIntegrationSettings({ active }: GitHubIntegrationS
     }
   }
 
-  const syncRepositories = async () => {
-    setSyncing(true)
+  const verifyAccount = async (account: GitHubAccount) => {
+    setSyncingId(account.account_id)
     setError('')
     try {
-      const result = await window.cosmic?.syncGitHubRepositories()
+      const result = await window.cosmic?.syncGitHubRepositories(account.account_id)
       if (result?.sync && result.sync.synced === false) {
         setError(
           result.sync.error ||
             'GitHub would not refresh the repository list. Try reconnecting the account.',
         )
       } else {
-        setRepositories(Array.isArray(result?.repositories) ? (result.repositories as GitHubRepository[]) : [])
-        setBanner('Repository list verified with GitHub.')
+        setRepositories(
+          Array.isArray(result?.repositories) ? (result.repositories as GitHubRepository[]) : [],
+        )
+        setBanner(`Verified ${accountName(account)} with GitHub.`)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to refresh repositories.')
     } finally {
-      setSyncing(false)
+      setSyncingId('')
     }
   }
 
@@ -239,62 +285,58 @@ export default function GitHubIntegrationSettings({ active }: GitHubIntegrationS
   // hopes is true. When the probe is unavailable (older gateway), fall back
   // to the stored account status.
   const pill = useMemo(() => {
-    if (accounts.length === 0) return { className: 'warn', label: 'Setup', title: 'Connect a GitHub account to begin.' }
+    if (accounts.length === 0)
+      return { className: 'warn', label: 'Setup', title: 'Connect a GitHub account to begin.' }
     if (!health) {
       return accounts.some(isConnected)
-        ? { className: 'ready', label: 'Ready', title: 'Connected (live check unavailable).'
+        ? {
+            className: 'ready',
+            label: 'Ready',
+            title: 'Connected (live check unavailable).',
           }
         : { className: 'warn', label: 'Setup', title: 'Connect a GitHub account to begin.' }
     }
-    const anyHealthy = health.some((item) => item.status === 'healthy')
-    if (anyHealthy) {
-      const degraded = health.find((item) => item.status !== 'healthy')
+    // A single degraded account must not hide behind a green pill: reconnect
+    // beats healthy, provider outage beats both.
+    if (health.some((item) => item.status === 'reauth_required')) {
       return {
-        className: 'ready',
-        label: 'Ready',
-        title: degraded
-          ? 'Verified live. Another connected account needs attention below.'
-          : 'Verified live: token resolved and confirmed with GitHub.',
+        className: 'warn',
+        label: 'Reconnect',
+        title: 'GitHub rejected the credential. Reconnect the account.',
       }
     }
-    if (health.some((item) => item.status === 'reauth_required')) {
-      return { className: 'warn', label: 'Reconnect', title: 'GitHub rejected the credential. Reconnect the account.' }
+    if (health.some((item) => item.status !== 'healthy')) {
+      return {
+        className: 'warn',
+        label: 'Unreachable',
+        title: 'The gateway could not reach GitHub. Check the connection.',
+      }
     }
-    return { className: 'warn', label: 'Unreachable', title: 'The gateway could not reach GitHub. Check the connection.' }
+    return {
+      className: 'ready',
+      label: 'Ready',
+      title: 'Verified live: token resolved and confirmed with GitHub.',
+    }
   }, [accounts, health])
 
-  const activeRepos = repositories.filter((repo) => repo.status === 'active')
-  const removedRepos = repositories.filter((repo) => repo.status !== 'active')
-  const syncedAt = lastSyncedAt(accounts)
-  const permissionLabels = useMemo(() => {
-    for (const account of accounts) {
-      if (isConnected(account)) {
-        const chips = permissionChips(accountPermissions(account))
-        if (chips.length) return chips
-      }
+  const reposForAccount = useMemo(() => {
+    const map = new Map<string, GitHubRepository[]>()
+    for (const repo of repositories) {
+      const key = repo.account_id || ''
+      const list = map.get(key) || []
+      list.push(repo)
+      map.set(key, list)
     }
-    return []
-  }, [accounts])
+    return map
+  }, [repositories])
 
   const manageInstallationsUrl = useMemo(() => {
     for (const account of accounts) {
-      const installationId = String(
-        (account._metadata?.github_installation_id as string | undefined) || '',
-      ).trim()
+      const installationId = metaString(account, 'github_installation_id')
       if (installationId) return `https://github.com/settings/installations/${installationId}`
     }
     return 'https://github.com/settings/installations'
   }, [accounts])
-
-  const accountStatusText = (account: GitHubAccount): string => {
-    const probe = healthByAccount.get(account.account_id)
-    if (probe?.status === 'reauth_required') return probe.error || 'Needs reconnect'
-    if (probe?.status === 'provider_error') return 'Health check failed'
-    if (isConnected(account)) {
-      return account.has_refresh_token ? 'Connected' : 'Connected · no refresh token'
-    }
-    return account.last_auth_error || 'Needs reconnect'
-  }
 
   return (
     <div className="cosmic-agents-detail-page">
@@ -345,7 +387,7 @@ export default function GitHubIntegrationSettings({ active }: GitHubIntegrationS
               className="cosmic-agents-detail-btn ghost icon"
               onClick={refresh}
               disabled={loading || connecting}
-              title="Refresh and re-check access live"
+              title="Refresh accounts and re-check access live"
             >
               <RefreshCw size={15} className={loading ? 'spinning' : undefined} />
             </button>
@@ -367,33 +409,203 @@ export default function GitHubIntegrationSettings({ active }: GitHubIntegrationS
             access — that selection is the boundary Alpha works inside, so pick deliberately.
           </p>
         ) : (
-          <div className="cosmic-agents-detail-mode-list">
+          <div className="cosmic-agents-detail-acct-list">
             {accounts.map((account) => {
+              const isOpen = expanded.has(account.account_id)
+              const state = accountState(account, healthByAccount.get(account.account_id))
               const login = accountLogin(account)
+              const syncedAt = accountSyncedAt(account)
+              const accountRepos = reposForAccount.get(account.account_id) || []
+              const activeRepos = accountRepos.filter((repo) => repo.status === 'active')
+              const removedRepos = accountRepos.filter((repo) => repo.status !== 'active')
+              const grants = permissionChips(accountPermissions(account))
+              const syncing = syncingId === account.account_id
+              const disconnecting = disconnectingId === account.account_id
               return (
-                <div key={account.account_id} className="cosmic-agents-detail-mode">
-                  <div className="cosmic-agents-detail-mode-left">
-                    {isConnected(account) ? (
-                      <CheckCircle2 size={16} className="cosmic-agents-detail-model-check-icon" />
-                    ) : (
-                      <span className="cosmic-agents-detail-mode-dot" aria-hidden="true" />
-                    )}
-                    <span className="cosmic-agents-detail-mode-stack">
-                      <span>{accountName(account)}</span>
-                      {login ? <small>Connected as {login}</small> : null}
-                    </span>
-                  </div>
-                  <div className="cosmic-agents-detail-actions">
-                    <small>{accountStatusText(account)}</small>
+                <div
+                  key={account.account_id}
+                  className={`cosmic-agents-detail-acct ${isOpen ? 'open' : ''} ${state === 'reconnect' ? 'degraded' : ''}`}
+                >
+                  <div className="cosmic-agents-detail-acct-headrow">
                     <button
                       type="button"
-                      className="cosmic-agents-detail-btn danger icon"
+                      className="cosmic-agents-detail-acct-head"
+                      onClick={() => toggleExpanded(account.account_id)}
+                      aria-expanded={isOpen}
+                    >
+                      <span className="cosmic-agents-detail-acct-avatar" aria-hidden="true">
+                        {account.avatar_url ? (
+                          <img src={account.avatar_url} alt="" />
+                        ) : (
+                          <Github size={20} />
+                        )}
+                      </span>
+                      <span className="cosmic-agents-detail-acct-id">
+                        <span className="cosmic-agents-detail-acct-name">
+                          {accountName(account)}
+                        </span>
+                        <span className="cosmic-agents-detail-acct-sub">
+                          {login ? `${login} · ` : ''}GitHub App
+                        </span>
+                      </span>
+                      <span
+                        className={`cosmic-agents-detail-chip ${
+                          state === 'healthy' ? 'accent' : state === 'unreachable' ? '' : 'warn'
+                        }`}
+                        title={healthByAccount.get(account.account_id)?.error || STATE_LABELS[state]}
+                      >
+                        {STATE_LABELS[state]}
+                      </span>
+                      <ChevronDown size={16} className="cosmic-agents-detail-acct-caret" />
+                    </button>
+                    <button
+                      type="button"
+                      className="cosmic-agents-detail-acct-trash"
                       onClick={() => disconnect(account)}
-                      disabled={Boolean(disconnectingId)}
+                      disabled={disconnecting}
                       title="Disconnect"
                     >
-                      <Trash2 size={15} />
+                      <Trash2 size={14} />
                     </button>
+                  </div>
+
+                  <div className={`cosmic-agents-detail-acct-body ${isOpen ? 'open' : ''}`}>
+                    <div className="cosmic-agents-detail-acct-body-clip">
+                      <div className="cosmic-agents-detail-acct-panel">
+                        {state === 'reconnect' ? (
+                          <div className="cosmic-agents-detail-acct-alert">
+                            <AlertTriangle size={14} />
+                            <span>
+                              {healthByAccount.get(account.account_id)?.error ||
+                                'GitHub rejected this connection.'}{' '}
+                              Reconnect to restore access.
+                            </span>
+                            <button
+                              type="button"
+                              className="cosmic-agents-detail-btn sm"
+                              onClick={connect}
+                              disabled={connecting}
+                            >
+                              <LogIn size={13} />
+                              Reconnect
+                            </button>
+                          </div>
+                        ) : null}
+
+                        {grants.length ? (
+                          <div className="cosmic-agents-detail-grant-row">
+                            {grants.map((label) => (
+                              <span key={label} className="cosmic-agents-detail-chip accent">
+                                {label}
+                              </span>
+                            ))}
+                            <small className="cosmic-agents-detail-chip-note">
+                              granted to cosmic-agents at install
+                            </small>
+                          </div>
+                        ) : null}
+
+                        <div className="cosmic-agents-detail-repos-head">
+                          <span className="cosmic-agents-detail-kicker">
+                            Repositories · {activeRepos.length}
+                          </span>
+                          <span className="cosmic-agents-detail-repos-meta">
+                            {syncedAt ? `synced ${timeAgo(syncedAt)}` : 'not verified yet'}
+                          </span>
+                          <button
+                            type="button"
+                            className="cosmic-agents-detail-btn ghost sm"
+                            onClick={() => verifyAccount(account)}
+                            disabled={syncing || state === 'reconnect'}
+                            title="Re-check the repository selection with GitHub"
+                          >
+                            <RefreshCw size={12} className={syncing ? 'spinning' : undefined} />
+                            {syncing ? 'Verifying…' : 'Verify'}
+                          </button>
+                        </div>
+
+                        {activeRepos.length === 0 && removedRepos.length === 0 ? (
+                          <div className="cosmic-agents-detail-repos-empty">
+                            <p>
+                              No repositories in this installation yet. Add one on GitHub, then
+                              verify here.
+                            </p>
+                            <button
+                              type="button"
+                              className="cosmic-agents-detail-btn ghost sm"
+                              onClick={() => openOnGitHub(manageInstallationsUrl)}
+                            >
+                              <ExternalLink size={12} />
+                              Manage on GitHub
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="cosmic-agents-detail-repo-list">
+                            {activeRepos.map((repo) => (
+                              <button
+                                key={repo.repo_row_id}
+                                type="button"
+                                className="cosmic-agents-detail-repo"
+                                onClick={() => openOnGitHub(repo.html_url)}
+                                title={`Open ${repo.full_name} on GitHub`}
+                              >
+                                <span className="cosmic-agents-detail-repo-stack">
+                                  <span className="cosmic-agents-detail-repo-name">
+                                    {splitRepoName(repo.full_name)}
+                                  </span>
+                                  <span className="cosmic-agents-detail-repo-sub">
+                                    {repo.branch || repo.default_branch || 'default branch'}
+                                    {repo.local_path ? ' · cloned on VM' : ' · not cloned yet'}
+                                  </span>
+                                </span>
+                                <span className="cosmic-agents-detail-chip-row">
+                                  <span className="cosmic-agents-detail-chip">
+                                    {repo.private ? 'Private' : 'Public'}
+                                  </span>
+                                  {repo.can_push ? (
+                                    <span className="cosmic-agents-detail-chip accent">Push</span>
+                                  ) : null}
+                                </span>
+                              </button>
+                            ))}
+                            {removedRepos.map((repo) => (
+                              <div
+                                key={repo.repo_row_id}
+                                className="cosmic-agents-detail-repo removed"
+                              >
+                                <span className="cosmic-agents-detail-repo-stack">
+                                  <span className="cosmic-agents-detail-repo-name">
+                                    {splitRepoName(repo.full_name)}
+                                  </span>
+                                  <span className="cosmic-agents-detail-repo-sub">
+                                    {repo.sync_error || 'No longer in the installation.'}
+                                  </span>
+                                </span>
+                                <span className="cosmic-agents-detail-chip-row">
+                                  <span className="cosmic-agents-detail-chip danger">
+                                    Access removed
+                                  </span>
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {activeRepos.length > 0 ? (
+                          <div className="cosmic-agents-detail-acct-foot">
+                            <button
+                              type="button"
+                              className="cosmic-agents-detail-btn ghost sm"
+                              onClick={() => openOnGitHub(manageInstallationsUrl)}
+                              title="Change which repositories Cosmic may access"
+                            >
+                              <ExternalLink size={12} />
+                              Manage on GitHub
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
                   </div>
                 </div>
               )
@@ -402,106 +614,26 @@ export default function GitHubIntegrationSettings({ active }: GitHubIntegrationS
         )}
       </div>
 
-      <div className="cosmic-agents-detail-section">
-        <div className="cosmic-agents-detail-section-head">
-          <div>
-            <span className="cosmic-agents-detail-kicker">Repository access</span>
-            <h4>Connected repositories</h4>
-            <small className="cosmic-agents-detail-section-sub">
-              {loading
-                ? 'Checking the installation…'
-                : `${activeRepos.length} repositor${activeRepos.length === 1 ? 'y' : 'ies'} available${
-                    syncedAt ? ` · synced ${timeAgo(syncedAt)}` : ''
-                  }`}
-            </small>
-          </div>
-          <div className="cosmic-agents-detail-actions">
-            <button
-              type="button"
-              className="cosmic-agents-detail-btn ghost icon"
-              onClick={syncRepositories}
-              disabled={syncing || loading || accounts.length === 0}
-              title="Re-check the repository selection with GitHub"
-            >
-              <RefreshCw size={15} className={syncing ? 'spinning' : undefined} />
-            </button>
-            <button
-              type="button"
-              className="cosmic-agents-detail-btn ghost"
-              onClick={() => openOnGitHub(manageInstallationsUrl)}
-              title="Change which repositories Cosmic may access"
-            >
-              <ExternalLink size={14} />
-              Manage on GitHub
-            </button>
-          </div>
-        </div>
-
-        {permissionLabels.length ? (
-          <div className="cosmic-agents-detail-chip-row">
-            {permissionLabels.map((label) => (
-              <span key={label} className="cosmic-agents-detail-chip accent">
-                {label}
-              </span>
-            ))}
-            <small className="cosmic-agents-detail-chip-note">granted to cosmic-agents at install</small>
-          </div>
-        ) : null}
-
-        {loading && repositories.length === 0 ? (
-          <p className="cosmic-agents-detail-section-copy">Reading the repository registry…</p>
-        ) : activeRepos.length === 0 && removedRepos.length === 0 ? (
-          <p className="cosmic-agents-detail-section-copy">
-            {accounts.length === 0
-              ? 'Connect an account to see which repositories Cosmic can work in.'
-              : 'No repositories in this installation yet. Add one on GitHub, then refresh here.'}
-          </p>
-        ) : (
-          <div className="cosmic-agents-detail-mode-list">
-            {activeRepos.map((repo) => (
-              <button
-                key={repo.repo_row_id}
-                type="button"
-                className="cosmic-agents-detail-mode"
-                onClick={() => openOnGitHub(repo.html_url)}
-                title={`Open ${repo.full_name} on GitHub`}
-              >
-                <span className="cosmic-agents-detail-mode-stack">
-                  <span className="cosmic-agents-detail-repo-name">{repo.full_name}</span>
-                  <small>
-                    {repo.branch || repo.default_branch || 'default branch'}
-                    {repo.local_path ? ' · cloned on VM' : ' · not cloned yet'}
-                  </small>
-                </span>
-                <span className="cosmic-agents-detail-chip-row">
-                  <span className="cosmic-agents-detail-chip">{repo.private ? 'Private' : 'Public'}</span>
-                  {repo.can_push ? <span className="cosmic-agents-detail-chip accent">Push</span> : null}
-                </span>
-              </button>
-            ))}
-            {removedRepos.map((repo) => (
-              <div key={repo.repo_row_id} className="cosmic-agents-detail-mode removed">
-                <span className="cosmic-agents-detail-mode-stack">
-                  <span className="cosmic-agents-detail-repo-name">{repo.full_name}</span>
-                  <small>{repo.sync_error || 'No longer in the installation.'}</small>
-                </span>
-                <span className="cosmic-agents-detail-chip-row">
-                  <span className="cosmic-agents-detail-chip danger">Access removed</span>
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
       <div className="cosmic-agents-detail-footnote">
         <Github size={14} />
         <span>
           Repository access is granted per repository when you install, not by this connection —
-          the list above mirrors that selection, and GitHub keeps it current via webhooks. Change
-          it any time from the app's page on GitHub.
+          each account above mirrors its installation, and GitHub keeps it current. Change it any
+          time from the app's page on GitHub.
         </span>
       </div>
     </div>
+  )
+}
+
+/** Owner dimmed, repo name bright: "acme/ makes /site" reads at a glance. */
+const splitRepoName = (fullName: string): ReactElement => {
+  const slash = fullName.indexOf('/')
+  if (slash <= 0) return <>{fullName}</>
+  return (
+    <>
+      <span className="cosmic-agents-detail-repo-owner">{fullName.slice(0, slash + 1)}</span>
+      {fullName.slice(slash + 1)}
+    </>
   )
 }

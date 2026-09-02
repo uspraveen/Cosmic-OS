@@ -230,7 +230,7 @@ interface Window {
     }>
     disconnectGitHubAccount: (accountId: string) => Promise<any>
     getGitHubRepositories: () => Promise<{ repositories?: any[]; count?: number }>
-    syncGitHubRepositories: () => Promise<{
+    syncGitHubRepositories: (accountId?: string) => Promise<{
       sync?: { synced?: boolean; error?: string; reason?: string }
       repositories?: any[]
     }>
