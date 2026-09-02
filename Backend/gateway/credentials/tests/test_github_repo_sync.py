@@ -153,3 +153,140 @@ def test_signature_verification_matches_github_scheme() -> None:
     assert not _verify_github_signature("secret", b"tampered", good)
     assert not _verify_github_signature("secret", body, "sha256=deadbeef")
     assert _verify_github_signature("", b"{}", "")
+
+
+class _HealthGitHubClient:
+    """Fake API client whose ``GET /user`` behavior is scripted per test."""
+
+    def __init__(self, *, user: dict | None = None, error: Exception | None = None) -> None:
+        self._user = dict(user or {"login": "tester"})
+        self._error = error
+
+    async def get_authenticated_user(self, token: str) -> dict:
+        assert token
+        if self._error is not None:
+            raise self._error
+        return dict(self._user)
+
+
+def test_probe_reports_healthy_and_stamps_login(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+    mgr = CredentialManager(
+        store=store, github_api_client=_HealthGitHubClient(user={"login": "uspraveen"})
+    )
+
+    result = asyncio.run(mgr.probe_github_account_health(account_id))
+
+    assert result["status"] == "healthy"
+    assert result["needs_reconnect"] is False
+    assert result["login"] == "uspraveen"
+    account = store.get_account(account_id)
+    assert account["status"] == "active"
+    assert account["_metadata"]["github_login"] == "uspraveen"
+
+
+def test_probe_reports_reauth_when_github_rejects_credential(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+    mgr = CredentialManager(
+        store=store,
+        github_api_client=_HealthGitHubClient(
+            error=PermissionError("GitHub rejected the credential (status=401)")
+        ),
+    )
+
+    result = asyncio.run(mgr.probe_github_account_health(account_id))
+
+    assert result["status"] == "reauth_required"
+    assert result["needs_reconnect"] is True
+    assert "401" in result["error"]
+    assert store.get_account(account_id)["status"] == "needs_auth"
+
+
+def test_probe_reports_provider_error_without_condemning_account(tmp_path: Path) -> None:
+    """A GitHub outage is not a revoked grant; the account must stay active."""
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+    mgr = CredentialManager(
+        store=store,
+        github_api_client=_HealthGitHubClient(error=RuntimeError("GitHub API error (status=500)")),
+    )
+
+    result = asyncio.run(mgr.probe_github_account_health(account_id))
+
+    assert result["status"] == "provider_error"
+    assert result["needs_reconnect"] is False
+    assert store.get_account(account_id)["status"] == "active"
+
+
+def test_probe_unknown_account_is_not_a_crash(tmp_path: Path) -> None:
+    mgr = CredentialManager(CredentialStore(tmp_path / "credentials.db"))
+
+    result = asyncio.run(mgr.probe_github_account_health("missing"))
+
+    assert result["status"] == "unknown"
+    assert result["error"]
+
+
+def test_sync_captures_installation_login_and_permissions(tmp_path: Path) -> None:
+    """The settings panel's connected-as / grant chips come from this metadata."""
+
+    class MetadataClient:
+        async def list_user_installations(self, token: str) -> list[dict]:
+            return [
+                {
+                    "id": 555,
+                    "app_slug": "cosmic-dev",
+                    "account": {"login": "uspraveen"},
+                    "permissions": {
+                        "contents": "write",
+                        "pull_requests": "write",
+                        "metadata": "read",
+                    },
+                }
+            ]
+
+        async def list_installation_repositories(self, token, installation_id, *, max_pages=10):
+            del token, max_pages
+            return []
+
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="555")
+    mgr = CredentialManager(store=store, github_api_client=MetadataClient())
+
+    summary = asyncio.run(mgr.sync_github_repositories(account_id))
+
+    assert summary["synced"] is True
+    metadata = store.get_account(account_id)["_metadata"]
+    assert metadata["github_login"] == "uspraveen"
+    assert metadata["github_permissions"]["contents"] == "write"
+    assert metadata["github_permissions"]["pull_requests"] == "write"
+
+
+def test_sync_survives_a_metadata_lookup_failure(tmp_path: Path) -> None:
+    """The grant chips are cosmetic; enumeration must not depend on them."""
+
+    class BrokenMetadataClient:
+        async def list_user_installations(self, token: str) -> list[dict]:
+            raise RuntimeError("GitHub API error (status=502)")
+
+        async def list_installation_repositories(self, token, installation_id, *, max_pages=10):
+            del token, max_pages
+            return [
+                {"id": 1, "full_name": "acme/site", "clone_url": "https://github.com/acme/site.git"}
+            ]
+
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+    mgr = CredentialManager(store=store, github_api_client=BrokenMetadataClient())
+
+    summary = asyncio.run(mgr.sync_github_repositories(account_id))
+
+    assert summary["synced"] is True
+    assert summary["repo_count"] == 1

@@ -6516,6 +6516,103 @@
   color: rgba(200, 255, 220, 0.85);
 }
 
+/* Repository rows and grant chips (GitHub integration panel).
+   Rows are sometimes real buttons so a click can open the repo on GitHub;
+   buttons carry their own font, so re-anchor it to the page's. */
+.cosmic-agents-detail-mode:where(button) {
+  font-family: inherit;
+  width: 100%;
+}
+
+.cosmic-agents-detail-mode-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cosmic-agents-detail-mode-stack small {
+  white-space: normal;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cosmic-agents-detail-mode span.cosmic-agents-detail-repo-name,
+.cosmic-agents-detail-repo-name {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 13px;
+  letter-spacing: -0.01em;
+}
+
+.cosmic-agents-detail-mode.removed {
+  opacity: 0.55;
+}
+
+.cosmic-agents-detail-mode.removed:hover {
+  border-color: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.cosmic-agents-detail-chip-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.cosmic-agents-detail-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.cosmic-agents-detail-chip.accent {
+  border-color: rgba(48, 209, 88, 0.28);
+  background: rgba(48, 209, 88, 0.1);
+  color: #9ce1a0;
+}
+
+.cosmic-agents-detail-chip.danger {
+  border-color: rgba(255, 69, 58, 0.28);
+  background: rgba(255, 69, 58, 0.1);
+  color: #ff8b84;
+}
+
+.cosmic-agents-detail-chip-note {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.35);
+  font-weight: 500;
+}
+
+.cosmic-agents-detail-section-sub {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  font-weight: 500;
+}
+
+.cosmic-agents-detail-btn .spinning,
+.spinning {
+  animation: cosmic-detail-spin 0.9s linear infinite;
+}
+
+@keyframes cosmic-detail-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* Runner defaults section spacing */
 .cosmic-agents-detail-runner {
   gap: 18px;

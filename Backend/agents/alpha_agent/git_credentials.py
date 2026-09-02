@@ -32,6 +32,17 @@ RESOLVE_TIMEOUT_SEC = 10.0
 GIT_USERNAME = "x-access-token"
 
 
+def _warn(reason: str) -> None:
+    """Explain a failed resolve on stderr without breaking git's protocol.
+
+    stdout must stay empty on failure so git falls through to its next helper
+    and fails with a normal authentication error. stderr, however, passes
+    straight through to the task log, which is what makes "the connector is
+    down" readable instead of a bare auth failure someone has to decode.
+    """
+    print(f"cosmic: {reason}", file=sys.stderr)
+
+
 def resolve_github_token(
     *,
     gateway_url: str | None = None,
@@ -42,11 +53,16 @@ def resolve_github_token(
 
     Returns "" rather than raising: a missing token must surface as git's own
     authentication error, not as a traceback from inside a credential helper,
-    where it would be far harder to read.
+    where it would be far harder to read. Every failure mode also explains
+    itself on stderr so task logs say *why* the credential was missing.
     """
     base = (gateway_url or os.getenv("GATEWAY_URL") or "http://127.0.0.1:8080").rstrip("/")
     token = internal_token or os.getenv("GATEWAY_INTERNAL_TOKEN") or ""
     if not token:
+        _warn(
+            "GitHub connector is not configured (GATEWAY_INTERNAL_TOKEN is unset); "
+            "cannot resolve a git credential."
+        )
         return ""
 
     request = urllib.request.Request(
@@ -67,11 +83,37 @@ def resolve_github_token(
     try:
         with urllib.request.urlopen(request, timeout=timeout_sec) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            _warn(f"Gateway at {base} rejected the internal token for credential resolution.")
+        elif exc.code == 404:
+            _warn(
+                "Gateway has no usable GitHub credential — "
+                "reconnect GitHub in Cosmic settings."
+            )
+        elif exc.code == 409:
+            _warn(
+                "Gateway matched multiple GitHub accounts and could not pick one; "
+                "set a primary account in Cosmic settings."
+            )
+        elif exc.code == 503:
+            _warn("Gateway's GitHub OAuth client is not configured.")
+        else:
+            _warn(f"Gateway returned HTTP {exc.code} resolving the GitHub credential.")
+        return ""
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
+        _warn(
+            f"GitHub connector is unreachable at {base} ({exc}); "
+            "git will fail this operation with an authentication error until it returns."
+        )
         return ""
     if not isinstance(payload, dict):
+        _warn(f"Gateway at {base} returned a malformed credential response.")
         return ""
-    return str(payload.get("access_token") or "").strip()
+    resolved = str(payload.get("access_token") or "").strip()
+    if not resolved:
+        _warn("Gateway returned no GitHub token — reconnect GitHub in Cosmic settings.")
+    return resolved
 
 
 def _read_request(stream) -> dict[str, str]:

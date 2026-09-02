@@ -229,6 +229,17 @@ interface Window {
       flow?: string
     }>
     disconnectGitHubAccount: (accountId: string) => Promise<any>
+    getGitHubRepositories: () => Promise<{ repositories?: any[]; count?: number }>
+    syncGitHubRepositories: () => Promise<{
+      sync?: { synced?: boolean; error?: string; reason?: string }
+      repositories?: any[]
+    }>
+    getGitHubAuthHealth: () => Promise<{
+      status?: string
+      healthy?: boolean
+      available?: boolean
+      accounts?: any[]
+    }>
     getGatewayCursorStatus: () => Promise<any>
     saveGatewayCursorConfig: (payload: {
       preferredModel?: string

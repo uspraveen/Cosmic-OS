@@ -48,6 +48,15 @@ class GitHubApiClient:
         if self._owns_client:
             await self._client.aclose()
 
+    async def get_authenticated_user(self, access_token: str) -> dict[str, Any]:
+        """Identity behind this token — the cheapest live liveness check.
+
+        A token can look valid in the store yet be revoked or expired on
+        GitHub's side; only an authenticated call settles it. ``GET /user``
+        is one read-only round trip with no side effects.
+        """
+        return await self._get_json(access_token, "/user")
+
     async def list_user_installations(self, access_token: str) -> list[dict[str, Any]]:
         """Installations of GitHub Apps visible to the authenticated user."""
         payload = await self._get_json(access_token, "/user/installations")

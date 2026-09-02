@@ -118,6 +118,21 @@ def _check_internal_token(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Invalid internal token")
 
 
+def _check_local_or_internal_token(request: Request) -> None:
+    """Accept either trusted caller of the auth-health probes.
+
+    The desktop settings panel authenticates with the local API token, while
+    agent heartbeats on the VM carry the internal token. Both are
+    gateway-configured secrets, so either one may read credential health.
+    """
+    try:
+        _check_local_token(request)
+        return
+    except HTTPException:
+        pass
+    _check_internal_token(request)
+
+
 def _gmail_was_disabled(before: dict[str, Any] | None, after: dict[str, Any] | None) -> bool:
     if not before or not after:
         return False
@@ -525,8 +540,8 @@ async def resolve_credential(body: ResolveRequest, request: Request):
                 detail={
                     "error": "credential_unavailable",
                     "message": (
-                        "No usable Google credential matched the requested account. "
-                        "The account may need reconnecting with the required scopes."
+                        f"No usable {body.provider} credential matched the requested "
+                        "account. The account may need reconnecting with the required scopes."
                     ),
                 },
             )
@@ -1382,9 +1397,10 @@ async def list_github_repositories_route(
     """List connected GitHub repositories with their local progress.
 
     The orchestrator uses this to resolve repo references and report where a
-    repository lives on the VM and what the last Alpha progress was.
+    repository lives on the VM and what the last Alpha progress was; the
+    desktop settings panel uses it to show which repositories are connected.
     """
-    _check_internal_token(request)
+    _check_local_or_internal_token(request)
     mgr = _get_manager(request)
     statuses = ["all"] if status in ("all", "*") else [item.strip() for item in status.split(",") if item.strip()] or ["active"]
     repositories = mgr.list_github_repositories(
@@ -1420,8 +1436,12 @@ async def resolve_github_repository_route(
 
 @router.post("/internal/github/repositories/sync")
 async def sync_github_repositories_route(body: GitHubRepoSyncRequest, request: Request):
-    """Re-enumerate installation repositories from GitHub on demand."""
-    _check_internal_token(request)
+    """Re-enumerate installation repositories from GitHub on demand.
+
+    Called by agent tooling with the internal token and by the desktop
+    settings panel's refresh action with the local token.
+    """
+    _check_local_or_internal_token(request)
     mgr = _get_manager(request)
     max_pages = max(1, min(int(body.max_pages or 10), 30))
     try:
@@ -1432,6 +1452,71 @@ async def sync_github_repositories_route(body: GitHubRepoSyncRequest, request: R
         logger.exception("credentials.github_repo_sync_route_failed")
         raise HTTPException(status_code=502, detail=str(exc)[:300]) from exc
     return result
+
+
+@router.post("/internal/credentials/github/auth-health")
+async def github_auth_health(request: Request):
+    """Probe GitHub auth health for every connected account, actively.
+
+    The GitHub counterpart of /internal/credentials/google/auth-health. Each
+    account's credential is resolved (refreshing if near expiry) and then
+    verified with one ``GET /user`` call, so a revoked or expired grant is
+    reported as ``reauth_required`` before a user-visible task hits it.
+    The desktop settings panel calls this on open; agent heartbeats may call
+    it with the internal token.
+    """
+    _check_local_or_internal_token(request)
+    mgr = _get_manager(request)
+    accounts = [
+        account
+        for account in mgr.list_accounts("github")
+        if account.get("status") != "revoked"
+    ]
+    if not accounts:
+        return {
+            "status": "healthy",
+            "healthy": True,
+            "available": False,
+            "provider": "github",
+            "reason": "no_connected_accounts",
+            "account_count": 0,
+            "accounts": [],
+        }
+    account_results: list[dict[str, Any]] = []
+    for account in accounts:
+        account_id = str(account.get("account_id") or "").strip()
+        try:
+            account_results.append(await mgr.probe_github_account_health(account_id))
+        except Exception as exc:
+            # The probe itself must never take the gateway down; a crashing
+            # probe reports provider_error like any other API failure.
+            logger.exception(
+                "github_auth_health.probe_failed account_id=%s", account_id
+            )
+            account_results.append(
+                {
+                    "account_id": account_id,
+                    "login": "",
+                    "status": "provider_error",
+                    "needs_reconnect": False,
+                    "error": str(exc)[:300] or "Health probe failed.",
+                }
+            )
+    statuses = {str(item.get("status") or "") for item in account_results}
+    if "reauth_required" in statuses:
+        overall = "reauth_required"
+    elif "provider_error" in statuses or "unknown" in statuses:
+        overall = "provider_error"
+    else:
+        overall = "healthy"
+    return {
+        "status": overall,
+        "healthy": overall == "healthy",
+        "available": any(item.get("status") == "healthy" for item in account_results),
+        "provider": "github",
+        "account_count": len(account_results),
+        "accounts": account_results,
+    }
 
 
 @router.post("/internal/github/repositories/{repo_row_id}/progress")

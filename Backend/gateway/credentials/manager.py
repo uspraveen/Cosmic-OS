@@ -811,6 +811,7 @@ class CredentialManager:
                     self.update_account_metadata(
                         account_id, {"github_installation_id": installation_id}
                     )
+            await self._capture_github_installation_metadata(account_id, token)
             repositories = []
             if installation_id:
                 repositories = await self._github_api_client().list_installation_repositories(
@@ -910,6 +911,26 @@ class CredentialManager:
                 str(exc)[:200],
             )
             return ""
+        installation = self._match_owned_installation(installations)
+        if installation is not None:
+            return str(installation.get("id") or "").strip()
+        logger.warning(
+            "credentials.github_installation_ambiguous account_id=%s installations=%d",
+            account_id,
+            len(installations),
+        )
+        return ""
+
+    def _match_owned_installation(
+        self, installations: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """Pick our App's installation out of ``/user/installations`` output.
+
+        That endpoint returns installations across every App the user has
+        authorized, so a bare count of one is only safe to trust when it is
+        genuinely the only one. Anything ambiguous yields None rather than a
+        guess.
+        """
         owned = [
             item
             for item in installations
@@ -918,14 +939,156 @@ class CredentialManager:
         ]
         if not owned and len(installations) == 1:
             owned = installations
-        if len(owned) == 1:
-            return str(owned[0].get("id") or "").strip()
-        logger.warning(
-            "credentials.github_installation_ambiguous account_id=%s installations=%d",
-            account_id,
-            len(installations),
+        return owned[0] if len(owned) == 1 else None
+
+    async def _capture_github_installation_metadata(
+        self, account_id: str, access_token: str
+    ) -> None:
+        """Best-effort refresh of the connection facts the settings panel shows.
+
+        Records the GitHub login this account connected as and the
+        installation's permission grant. A lookup failure logs and returns:
+        the repository enumeration around it must not depend on this
+        succeeding.
+        """
+        try:
+            installations = await self._github_api_client().list_user_installations(
+                access_token
+            )
+        except Exception as exc:
+            logger.warning(
+                "credentials.github_installation_metadata_lookup_failed account_id=%s error=%s",
+                account_id,
+                str(exc)[:200],
+            )
+            return
+        installation = self._match_owned_installation(installations)
+        if installation is None:
+            return
+        patch: dict[str, Any] = {}
+        account_info = installation.get("account")
+        login = (
+            str(account_info.get("login") or "").strip()
+            if isinstance(account_info, dict)
+            else ""
         )
-        return ""
+        if login:
+            patch["github_login"] = login
+        permissions = installation.get("permissions")
+        if isinstance(permissions, dict) and permissions:
+            patch["github_permissions"] = permissions
+        if patch:
+            self.update_account_metadata(account_id, patch)
+
+    async def probe_github_account_health(self, account_id: str) -> dict[str, Any]:
+        """Actively verify one GitHub account's credential against the API.
+
+        GitHub health otherwise only surfaces lazily — on the next refresh,
+        sync, or API call. This is the GitHub counterpart of the Google auth
+        health probe: resolve (which refreshes a near-expiry token), then one
+        ``GET /user``. A revoked or expired credential comes back as
+        ``reauth_required`` before a user-visible task hits it.
+        """
+        acct = self._store.get_account(account_id)
+        if acct is None or acct.get("provider") != "github":
+            return {
+                "account_id": account_id,
+                "login": "",
+                "status": "unknown",
+                "needs_reconnect": False,
+                "error": "No such GitHub account.",
+            }
+        metadata = acct.get("_metadata") if isinstance(acct.get("_metadata"), dict) else {}
+        result: dict[str, Any] = {
+            "account_id": account_id,
+            "login": str(metadata.get("github_login") or "").strip(),
+            "status": "unknown",
+            "needs_reconnect": False,
+            "error": "",
+        }
+        if acct.get("status") == "needs_auth" and acct.get("has_refresh_token"):
+            # Same self-heal the Google probe grants: one throttled refresh
+            # settles whether needs_auth was a real revocation or a transient
+            # failure that condemned the account unfairly.
+            try:
+                if await self.attempt_account_recovery(account_id):
+                    acct = self._store.get_account(account_id) or acct
+            except Exception:
+                logger.exception(
+                    "github_auth_health.recovery_failed account_id=%s", account_id
+                )
+        if acct.get("status") != "active":
+            result.update(
+                {
+                    "status": "reauth_required",
+                    "needs_reconnect": True,
+                    "error": "GitHub account is not active. Reconnect it in Cosmic settings.",
+                }
+            )
+            return result
+        try:
+            resolved = await self.resolve_credential(
+                provider="github",
+                required_scopes=[],
+                account_id=account_id,
+                allow_primary_fallback=True,
+            )
+            token = str((resolved or {}).get("access_token") or "")
+            if not token:
+                # GitHub App tokens may be non-expiring (no refresh token); the
+                # resolve path demands one, so fall back to the stored token
+                # when it is present and unexpired.
+                cred = self._store.get_active_credential(account_id)
+                expires_at = cred.get("access_token_expires_at") if cred else None
+                if cred and cred.get("access_token") and (
+                    not expires_at or float(expires_at) > time.time() + 90
+                ):
+                    token = str(cred["access_token"])
+            if not token:
+                result.update(
+                    {
+                        "status": "reauth_required",
+                        "needs_reconnect": True,
+                        "error": "No usable GitHub credential. Reconnect in Cosmic settings.",
+                    }
+                )
+                return result
+        except Exception as exc:
+            result.update(
+                {
+                    "status": "reauth_required",
+                    "needs_reconnect": True,
+                    "error": str(exc)[:300] or "Unable to resolve the GitHub credential.",
+                }
+            )
+            return result
+        try:
+            user = await self._github_api_client().get_authenticated_user(token)
+        except PermissionError as exc:
+            message = str(exc).strip() or "GitHub rejected the credential."
+            self.mark_account_auth_error(account_id, message)
+            result.update(
+                {
+                    "status": "reauth_required",
+                    "needs_reconnect": True,
+                    "error": message,
+                }
+            )
+            return result
+        except Exception as exc:
+            result.update(
+                {
+                    "status": "provider_error",
+                    "needs_reconnect": False,
+                    "error": str(exc)[:300] or "GitHub API call failed.",
+                }
+            )
+            return result
+        login = str(user.get("login") or "").strip()
+        if login:
+            self.update_account_metadata(account_id, {"github_login": login})
+        result.update({"login": login or result["login"], "status": "healthy"})
+        return result
 
     async def disconnect_account(self, account_id: str) -> dict[str, Any]:
         """Revoke tokens and mark account as revoked."""

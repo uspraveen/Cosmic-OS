@@ -2769,6 +2769,48 @@ app.whenReady().then(() => {
     )
   })
 
+  ipcMain.handle('gateway:github-repositories', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/internal/github/repositories?status=all&limit=100', {
+      timeoutMs: 20000,
+    })
+  })
+
+  // Refreshing repositories is a live re-enumeration on the gateway (paged
+  // GitHub API calls), so it gets a longer timeout than a plain list read.
+  ipcMain.handle('gateway:github-repositories-sync', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const sync = (await callGatewayJson(config, '/internal/github/repositories/sync', {
+      method: 'POST',
+      body: {},
+      timeoutMs: 60000,
+    })) as { synced?: boolean; error?: string; reason?: string }
+    const list = (await callGatewayJson(
+      config,
+      '/internal/github/repositories?status=all&limit=100',
+      { timeoutMs: 20000 },
+    )) as { repositories?: unknown[] }
+    return { sync, repositories: list?.repositories || [] }
+  })
+
+  ipcMain.handle('gateway:github-auth-health', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/internal/credentials/github/auth-health', {
+      method: 'POST',
+      body: {},
+      timeoutMs: 30000,
+    })
+  })
+
   ipcMain.handle('gateway:get-cursor-status', async () => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

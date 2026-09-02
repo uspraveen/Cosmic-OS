@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,78 @@ class TestResolve:
         monkeypatch.setattr(git_credentials.urllib.request, "urlopen", explode)
         monkeypatch.delenv("GATEWAY_INTERNAL_TOKEN", raising=False)
         assert git_credentials.resolve_github_token() == ""
+
+
+class TestResolveDiagnostics:
+    """Every failure explains itself on stderr; stdout stays protocol-clean.
+
+    A bare git authentication error once cost days of debugging (the expired
+    PAT incident). The helper now names the actual failure — connector down,
+    not configured, credential revoked — in the task log where it happens.
+    """
+
+    def test_unreachable_gateway_says_connector_down(self, monkeypatch, capsys) -> None:
+        def fake_urlopen(request, timeout=None):
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(git_credentials.urllib.request, "urlopen", fake_urlopen)
+        assert git_credentials.resolve_github_token(internal_token="x") == ""
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "unreachable" in captured.err
+        assert "connector" in captured.err
+
+    def test_missing_internal_token_explains_itself(self, monkeypatch, capsys) -> None:
+        monkeypatch.delenv("GATEWAY_INTERNAL_TOKEN", raising=False)
+        assert git_credentials.resolve_github_token() == ""
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "not configured" in captured.err
+
+    def test_missing_credential_points_at_reconnect(self, monkeypatch, capsys) -> None:
+        def fake_urlopen(request, timeout=None):
+            raise urllib.error.HTTPError(
+                "http://gw/internal/credentials/resolve", 404, "Not Found", None, None
+            )
+
+        monkeypatch.setattr(git_credentials.urllib.request, "urlopen", fake_urlopen)
+        assert git_credentials.resolve_github_token(internal_token="x") == ""
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "reconnect GitHub" in captured.err
+
+    def test_rejected_internal_token_names_the_token_problem(self, monkeypatch, capsys) -> None:
+        def fake_urlopen(request, timeout=None):
+            raise urllib.error.HTTPError(
+                "http://gw/internal/credentials/resolve", 403, "Forbidden", None, None
+            )
+
+        monkeypatch.setattr(git_credentials.urllib.request, "urlopen", fake_urlopen)
+        assert git_credentials.resolve_github_token(internal_token="wrong") == ""
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "internal token" in captured.err
+
+    def test_success_is_quiet_on_stderr(self, monkeypatch, capsys) -> None:
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+            def read(self):
+                return json.dumps({"access_token": "ghu_live"}).encode()
+
+        monkeypatch.setattr(
+            git_credentials.urllib.request, "urlopen", lambda request, timeout=None: _Response()
+        )
+        assert git_credentials.resolve_github_token(internal_token="x") == "ghu_live"
+        captured = capsys.readouterr()
+        # resolve() returns the token to its caller; only main() speaks the
+        # git protocol on stdout. Quiet on both channels is the healthy path.
+        assert captured.out == ""
+        assert captured.err == ""
 
 
 class TestEnvironmentInjection:
