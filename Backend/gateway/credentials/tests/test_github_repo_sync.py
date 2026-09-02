@@ -399,3 +399,78 @@ def test_sync_permission_error_condemns_account(tmp_path: Path) -> None:
     account = store.get_account(account_id)
     assert account["status"] == "needs_auth"
     assert "401" in str(account["_metadata"].get("last_auth_error") or "")
+
+
+# ── Commit identity: pushes land as the connected user ──────────────────────
+
+
+def test_git_identity_uses_noreply_email_and_display_name(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github", display_name="Praveen Raj")["account_id"]
+    store.update_account(
+        account_id,
+        metadata_patch={"github_login": "uspraveen", "github_user_id": "12345"},
+    )
+    mgr = CredentialManager(store=store)
+
+    identity = mgr.github_git_identity(account_id)
+
+    assert identity == {
+        "name": "Praveen Raj",
+        "email": "12345+uspraveen@users.noreply.github.com",
+    }
+
+
+def test_git_identity_falls_back_to_login(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    store.update_account(account_id, metadata_patch={"github_login": "uspraveen"})
+    mgr = CredentialManager(store=store)
+
+    identity = mgr.github_git_identity(account_id)
+
+    assert identity == {
+        "name": "uspraveen",
+        "email": "uspraveen@users.noreply.github.com",
+    }
+
+
+def test_git_identity_is_none_without_a_login(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    mgr = CredentialManager(store=store)
+
+    assert mgr.github_git_identity(account_id) is None
+    assert mgr.github_git_identity("missing") is None
+
+
+def test_probe_stamps_the_numeric_user_id(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+    mgr = CredentialManager(
+        store=store,
+        github_api_client=_HealthGitHubClient(user={"login": "uspraveen", "id": 12345}),
+    )
+
+    asyncio.run(mgr.probe_github_account_health(account_id))
+
+    metadata = store.get_account(account_id)["_metadata"]
+    assert metadata["github_login"] == "uspraveen"
+    assert metadata["github_user_id"] == "12345"
+
+
+def test_public_repo_payload_carries_identity_when_given() -> None:
+    from gateway.credentials.routes import _public_github_repo
+
+    repo = {"repo_row_id": "ghr_1", "full_name": "uspraveen/site", "status": "active"}
+
+    with_identity = _public_github_repo(
+        repo, {"name": "Praveen Raj", "email": "1+uspraveen@users.noreply.github.com"}
+    )
+    assert with_identity["git_author_name"] == "Praveen Raj"
+    assert with_identity["git_author_email"] == "1+uspraveen@users.noreply.github.com"
+
+    without_identity = _public_github_repo(repo)
+    assert "git_author_name" not in without_identity
+    assert "git_author_email" not in without_identity

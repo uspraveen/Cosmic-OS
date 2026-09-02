@@ -994,6 +994,13 @@ class CredentialManager:
         )
         if login:
             patch["github_login"] = login
+        user_id = (
+            str(account_info.get("id") or "").strip()
+            if isinstance(account_info, dict)
+            else ""
+        )
+        if user_id:
+            patch["github_user_id"] = user_id
         permissions = installation.get("permissions")
         if isinstance(permissions, dict) and permissions:
             patch["github_permissions"] = permissions
@@ -1198,9 +1205,39 @@ class CredentialManager:
             return result
         login = str(user.get("login") or "").strip()
         if login:
-            self.update_account_metadata(account_id, {"github_login": login})
+            patch_user: dict[str, Any] = {"github_login": login}
+            user_id = str(user.get("id") or "").strip()
+            if user_id:
+                patch_user["github_user_id"] = user_id
+            self.update_account_metadata(account_id, patch_user)
         result.update({"login": login or result["login"], "status": "healthy"})
         return result
+
+    def github_git_identity(self, account_id: str) -> dict[str, str] | None:
+        """The commit identity Alpha must use for this account's checkouts.
+
+        Commits have to land as the connected user, never as a bot name the
+        registry invented. GitHub attributes commits by email, so the
+        account's noreply address keeps the work linked to the user's profile
+        without exposing a real inbox; the ID-prefixed form is what modern
+        GitHub issues, with the bare-login legacy form as fallback when only
+        the login is known.
+        """
+        acct = self._store.get_account(account_id)
+        if acct is None or acct.get("provider") != "github":
+            return None
+        metadata = acct.get("_metadata") if isinstance(acct.get("_metadata"), dict) else {}
+        login = str(metadata.get("github_login") or "").strip()
+        if not login:
+            return None
+        name = str(acct.get("display_name") or "").strip() or login
+        user_id = str(metadata.get("github_user_id") or "").strip()
+        email = (
+            f"{user_id}+{login}@users.noreply.github.com"
+            if user_id
+            else f"{login}@users.noreply.github.com"
+        )
+        return {"name": name, "email": email}
 
     async def disconnect_account(self, account_id: str) -> dict[str, Any]:
         """Revoke tokens and mark account as revoked."""

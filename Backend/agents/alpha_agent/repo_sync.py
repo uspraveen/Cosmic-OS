@@ -132,12 +132,23 @@ class RepoWorktree:
                 f"Path already exists and is not a git repository: {path}",
             )
 
+        author_name = str(repo.get("git_author_name") or "").strip()
+        author_email = str(repo.get("git_author_email") or "").strip()
+
         try:
             if not path.exists():
                 self._run(["clone", "--origin", "origin", clone_url, str(path)])
                 action = _CLONED
             else:
                 action = self._refresh(path, default_branch)
+            # Commits in this checkout must land as the connected user, never
+            # as the VM's default identity. Repo-local config covers every
+            # writer here — Alpha's shell and the Cursor/OpenCode runners —
+            # and is re-asserted on every ensure so it cannot drift.
+            if author_name:
+                self._run(["config", "user.name", author_name], cwd=path)
+            if author_email:
+                self._run(["config", "user.email", author_email], cwd=path)
             snapshot = self.snapshot(path)
             return RepoCheckout(repo_row_id, full_name, str(path), action, snapshot, snapshot.error)
         except Exception as exc:

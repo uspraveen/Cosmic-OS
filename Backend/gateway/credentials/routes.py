@@ -1354,9 +1354,11 @@ class GitHubRepoProgressRequest(BaseModel):
 # ── GitHub repository registry (internal — orchestrator / alpha) ────────────
 
 
-def _public_github_repo(repo: dict[str, Any]) -> dict[str, Any]:
+def _public_github_repo(
+    repo: dict[str, Any], git_identity: dict[str, str] | None = None
+) -> dict[str, Any]:
     """Projection for tool-facing payloads: no token material, ids and state only."""
-    return {
+    payload = {
         "repo_row_id": repo.get("repo_row_id"),
         "account_id": repo.get("account_id"),
         "github_repo_id": repo.get("github_repo_id"),
@@ -1385,6 +1387,12 @@ def _public_github_repo(repo: dict[str, Any]) -> dict[str, Any]:
         "sync_error": repo.get("sync_error"),
         "synced_at": repo.get("synced_at"),
     }
+    if git_identity:
+        # Commits in this checkout must land as the connected user; Alpha
+        # applies these as repo-local git config at checkout time.
+        payload["git_author_name"] = git_identity.get("name") or ""
+        payload["git_author_email"] = git_identity.get("email") or ""
+    return payload
 
 
 @router.get("/internal/github/repositories")
@@ -1413,8 +1421,19 @@ async def list_github_repositories_route(
         query=query,
         limit=limit,
     )
+    identity_cache: dict[str, dict[str, str] | None] = {}
+
+    def _identity_for(account_id: Any) -> dict[str, str] | None:
+        key = str(account_id or "")
+        if key not in identity_cache:
+            identity_cache[key] = mgr.github_git_identity(key) if key else None
+        return identity_cache[key]
+
     return {
-        "repositories": [_public_github_repo(item) for item in repositories],
+        "repositories": [
+            _public_github_repo(item, _identity_for(item.get("account_id")))
+            for item in repositories
+        ],
         "count": len(repositories),
     }
 
@@ -1434,9 +1453,12 @@ async def resolve_github_repository_route(
     _check_internal_token(request)
     mgr = _get_manager(request)
     repo = mgr.find_github_repository(ref) if ref else None
+    identity: dict[str, str] | None = None
     if repo is None and ref:
         await mgr.ensure_github_registry_fresh(blocking=True)
         repo = mgr.find_github_repository(ref)
+    if repo is not None:
+        identity = mgr.github_git_identity(str(repo.get("account_id") or ""))
     if repo is None:
         raise HTTPException(
             status_code=404,
@@ -1445,7 +1467,7 @@ async def resolve_github_repository_route(
                 "message": "No connected GitHub repository matched that reference.",
             },
         )
-    return {"found": True, "repository": _public_github_repo(repo)}
+    return {"found": True, "repository": _public_github_repo(repo, identity)}
 
 
 @router.post("/internal/github/repositories/sync")
