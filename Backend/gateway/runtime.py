@@ -2852,12 +2852,19 @@ class GatewayRuntime:
             "and to reason about the last beat, this beat, and the next one. "
             "Heartbeat standing commitments live in heartbeat_watchpoints (SQLite). "
             "Create/update/deactivate them with the heartbeat_watchpoints tool — never as prose in notes. "
+            "After you perform a watchpoint check, record its outcome with action=record_check "
+            "(check_status ok|inconclusive|failed, delivered=true if you notified the user, and pass "
+            "baseline_state to merge newly-seen values so each is reported once). "
+            "If a watchpoint shows consecutive_failures >= 3 or its last checks were inconclusive, do not stay "
+            "silent: deliver a short 'this watch is currently blind' notice instead of pretending the watch is healthy. "
             "User-created watchpoints must not be silently dropped; if a check cannot run, say so in notes "
             "and leave the row active. Deactivate with status=inactive and a reason when the user asks to stop. "
             "Inactive rows stay queryable so you can later answer 'what happened to that watch?'. "
             "Use heartbeat_notes as your private scratchpad for compact self-notes across beats "
             "(kind=note|plan). Gateway already records each beat's suppress/deliver outcome as kind=beat — "
-            "do not re-log identical suppression envelopes. "
+            "do not re-log identical suppression envelopes, and do not append a per-beat 'checked X, nothing "
+            "changed' note: the record_check row already preserves that. Only write a note when it carries "
+            "something the rows do not (a plan change, a correction, an anomaly worth remembering). "
             "read notes when continuity matters, append short judgments, and remove (soft-stale) outdated notes. "
             "The scratchpad owns self-observation only - what you delivered, suppressed, or plan to check. "
             "It does not own facts about the world; durable memory does. When a note restates a world fact "
@@ -7710,6 +7717,9 @@ class GatewayRuntime:
                     "### Heartbeat Watchpoints (registry)",
                     "Durable standing commitments. Source of truth is SQLite, not the notes scratchpad. "
                     "status=inactive/stale/superseded/completed rows are history — do not resurrect them unless the user asks. "
+                    "Run each active watch's check, then record the outcome with heartbeat_watchpoints action=record_check "
+                    "(check_status ok|inconclusive|failed; delivered=true if you notified; pass baseline_state to merge new values). "
+                    "consecutive_failures >= 3 means the watch is blind: deliver a short 'watch is blind' notice instead of suppressing silently. "
                     "Use heartbeat_watchpoints to create, update, or deactivate.",
                 ]
             )
@@ -8866,6 +8876,23 @@ class GatewayRuntime:
             status=status,
             reason=reason,
             actor=actor,
+        )
+
+    def record_heartbeat_watchpoint_check(
+        self,
+        watchpoint_id: str,
+        *,
+        check_status: str,
+        detail: str | None = None,
+        baseline_state: dict[str, Any] | None = None,
+        delivered: bool = False,
+    ) -> dict[str, Any] | None:
+        return self.scheduler_store.record_heartbeat_watchpoint_check(
+            watchpoint_id,
+            check_status=check_status,
+            detail=detail,
+            baseline_state=baseline_state,
+            delivered=delivered,
         )
 
     def list_scheduler_crons(

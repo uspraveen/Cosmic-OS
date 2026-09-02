@@ -1304,6 +1304,33 @@ class SchedulerStore:
                         now,
                     ),
                 )
+                self._insert_heartbeat_watchpoint_event(
+                    connection,
+                    watchpoint_id=watchpoint_id,
+                    event="created",
+                    status="active",
+                    reason="Watchpoint registered.",
+                    actor=actor or created_by or "orchestrator",
+                    source="orchestrator",
+                    details={
+                        "name": normalized_name,
+                        "check_kind": str(check_kind or "manual").strip() or "manual",
+                        "notify_policy": normalized_notify,
+                    },
+                )
+            if existing is not None:
+                self._insert_heartbeat_watchpoint_event(
+                    connection,
+                    watchpoint_id=watchpoint_id,
+                    event="updated",
+                    actor=actor or "orchestrator",
+                    details={
+                        "name": normalized_name,
+                        "check_kind": str(check_kind or "manual").strip() or "manual",
+                        "notify_policy": normalized_notify,
+                        "baseline_state_replaced": isinstance(baseline_state, dict),
+                    },
+                )
             connection.commit()
             row = self._get_heartbeat_watchpoint_row(connection, watchpoint_id)
         return self._heartbeat_watchpoint_record(row)
@@ -1415,8 +1442,8 @@ class SchedulerStore:
 
     def record_heartbeat_watchpoint_check(
         self,
-        *,
         watchpoint_id: str,
+        *,
         check_status: str,
         detail: str | None = None,
         baseline_state: dict[str, Any] | None = None,
@@ -1468,6 +1495,16 @@ class SchedulerStore:
                     watchpoint_id,
                 ),
             )
+            if normalized_status != "ok" or delivered:
+                self._insert_heartbeat_watchpoint_event(
+                    connection,
+                    watchpoint_id=watchpoint_id,
+                    event="check",
+                    status=normalized_status,
+                    reason=self._clean_optional_text(detail),
+                    actor="orchestrator",
+                    details={"delivered": bool(delivered)},
+                )
             connection.commit()
         return self.get_heartbeat_watchpoint(watchpoint_id)
 
@@ -1483,7 +1520,7 @@ class SchedulerStore:
                 SELECT *
                 FROM heartbeat_watchpoint_events
                 WHERE watchpoint_id = ?
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT ?
                 """,
                 (watchpoint_id, max(1, min(200, int(limit or 20)))),

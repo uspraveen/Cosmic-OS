@@ -31,6 +31,54 @@ def test_heartbeat_watchpoint_survives_deactivation(tmp_path: Path) -> None:
     events = store.list_heartbeat_watchpoint_history(watchpoint_id)
     assert events[0]["event"] == "status_changed"
     assert events[0]["details"]["previous_status"] == "active"
+    assert any(event["event"] == "created" for event in events)
+
+
+def test_record_check_updates_health_and_writes_events(tmp_path: Path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.db")
+    store.initialize(default_timezone="America/Chicago")
+    created = store.upsert_heartbeat_watchpoint(name="portfolio_visitors")
+    watchpoint_id = created["watchpoint_id"]
+
+    blind = store.record_heartbeat_watchpoint_check(
+        watchpoint_id,
+        check_status="inconclusive",
+        detail="approval pending",
+    )
+    assert blind is not None
+    assert blind["last_check_status"] == "inconclusive"
+    assert blind["consecutive_failures"] == 1
+    blind = store.record_heartbeat_watchpoint_check(
+        watchpoint_id,
+        check_status="inconclusive",
+    )
+    assert blind is not None
+    assert blind["consecutive_failures"] == 2
+
+    delivered = store.record_heartbeat_watchpoint_check(
+        watchpoint_id,
+        check_status="ok",
+        detail="1 new visitor",
+        baseline_state={"known_ips": ["1.2.3.4"]},
+        delivered=True,
+    )
+    assert delivered is not None
+    assert delivered["last_check_status"] == "ok"
+    assert delivered["consecutive_failures"] == 0
+    assert delivered["delivery_count"] == 1
+    assert delivered["last_delivered_at"] is not None
+    assert delivered["baseline_state"]["known_ips"] == ["1.2.3.4"]
+
+    events = store.list_heartbeat_watchpoint_history(watchpoint_id)
+    check_events = [event for event in events if event["event"] == "check"]
+    assert [event["status"] for event in check_events] == ["ok", "inconclusive", "inconclusive"]
+    assert check_events[0]["details"]["delivered"] is True
+    assert "created" in [event["event"] for event in events]
+    assert "updated" not in [event["event"] for event in events]
+
+    assert store.record_heartbeat_watchpoint_check(
+        "hbwp_missing", check_status="ok"
+    ) is None
 
 
 def test_heartbeat_beat_notes_soft_stale_and_render(tmp_path: Path) -> None:

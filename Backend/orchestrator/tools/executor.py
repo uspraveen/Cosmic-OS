@@ -1960,9 +1960,36 @@ class ToolExecutor:
                 },
             ) or {}
             return {"updated": True, "watchpoint": payload}
+        if action == "record_check":
+            watchpoint_id = str(tool_input.get("watchpoint_id") or "").strip()
+            check_status = str(tool_input.get("check_status") or "").strip()
+            if not watchpoint_id or not check_status:
+                return {
+                    "error": True,
+                    "message": "watchpoint_id and check_status (ok|inconclusive|failed) are required",
+                }
+            body: dict[str, Any] = {
+                "check_status": check_status,
+                "delivered": self._coerce_bool(tool_input.get("delivered"), default=False),
+            }
+            detail = str(tool_input.get("check_detail") or tool_input.get("reason") or "").strip()
+            if detail:
+                body["detail"] = detail[:2000]
+            baseline_state = tool_input.get("baseline_state")
+            if isinstance(baseline_state, dict):
+                body["baseline_state"] = baseline_state
+            payload = await self._request_gateway_json(
+                "POST",
+                f"/internal/scheduler/heartbeat-watchpoints/{watchpoint_id}/checks",
+                json_body=body,
+            ) or {}
+            return {"recorded": True, "watchpoint": payload}
         return {
             "error": True,
-            "message": "Unsupported heartbeat_watchpoints action. Use list, create, update, or set_status.",
+            "message": (
+                "Unsupported heartbeat_watchpoints action. Use list, create, update, "
+                "set_status, or record_check."
+            ),
         }
 
     async def _memory_write_core_fact(

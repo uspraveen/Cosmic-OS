@@ -2014,10 +2014,13 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "heartbeat_watchpoints",
             "description": (
-                "Create, list, update, or deactivate durable heartbeat watchpoints in SQLite "
-                "(scheduler.db table heartbeat_watchpoints). This is the source of truth for standing "
+                "Create, list, update, deactivate, or record checks for durable heartbeat watchpoints "
+                "in SQLite (scheduler.db table heartbeat_watchpoints). This is the source of truth for standing "
                 "'keep an eye on X' commitments. Never hard-delete; set_status to inactive/stale/superseded/completed "
                 "with a reason so a later 'where did that watch go?' question is answerable. "
+                "After every watchpoint check you perform, call action=record_check with check_status "
+                "(ok|inconclusive|failed) so health accrues; set delivered=true when you notified the user, and pass "
+                "baseline_state to merge newly-seen values so each is reported once. "
                 "Schema: watchpoint_id, name, description, created_by, check_kind (manual|url_probe|api_diff), "
                 "check_config (JSON), baseline_state (JSON), notify_policy (on_new|on_every_check|manual), "
                 "status (active|stale|inactive|superseded|completed), status_reason, last_check_status "
@@ -2028,12 +2031,12 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "create", "update", "set_status"],
+                        "enum": ["list", "create", "update", "set_status", "record_check"],
                         "default": "list",
                     },
                     "watchpoint_id": {
                         "type": "string",
-                        "description": "Required for update and set_status.",
+                        "description": "Required for update, set_status, and record_check.",
                     },
                     "name": {
                         "type": "string",
@@ -2063,6 +2066,19 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     "reason": {
                         "type": "string",
                         "description": "Required in spirit for set_status so later forensics work.",
+                    },
+                    "check_status": {
+                        "type": "string",
+                        "enum": ["ok", "inconclusive", "failed"],
+                        "description": "For record_check: outcome of the check you just ran.",
+                    },
+                    "check_detail": {
+                        "type": "string",
+                        "description": "For record_check: one-line detail, e.g. '28 visits, 0 new IPs'.",
+                    },
+                    "delivered": {
+                        "type": "boolean",
+                        "description": "For record_check: true when this check resulted in notifying the user.",
                     },
                     "include_inactive": {
                         "type": "boolean",
