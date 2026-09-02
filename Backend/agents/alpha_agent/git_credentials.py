@@ -45,6 +45,7 @@ def _warn(reason: str) -> None:
 
 def resolve_github_token(
     *,
+    account_hint: str = "",
     gateway_url: str | None = None,
     internal_token: str | None = None,
     timeout_sec: float = RESOLVE_TIMEOUT_SEC,
@@ -55,6 +56,10 @@ def resolve_github_token(
     authentication error, not as a traceback from inside a credential helper,
     where it would be far harder to read. Every failure mode also explains
     itself on stderr so task logs say *why* the credential was missing.
+
+    ``account_hint`` pins the request to one connected account — with several
+    GitHub accounts connected, a checkout that declares ``credential.username``
+    must push as that account, not as whichever one happens to be primary.
     """
     base = (gateway_url or os.getenv("GATEWAY_URL") or "http://127.0.0.1:8080").rstrip("/")
     token = internal_token or os.getenv("GATEWAY_INTERNAL_TOKEN") or ""
@@ -71,6 +76,7 @@ def resolve_github_token(
             {
                 "provider": "github",
                 "required_scopes": [],
+                "account_hint": account_hint or "",
                 "allow_primary_fallback": True,
             }
         ).encode("utf-8"),
@@ -145,7 +151,10 @@ def main(argv: list[str] | None = None) -> int:
         # would leak it to whoever that remote belongs to.
         return 0
 
-    token = resolve_github_token()
+    # git forwards credential.username (or a user@host remote) as `username`.
+    # Treat it as an account hint so a multi-account setup pushes as the
+    # account that owns this checkout.
+    token = resolve_github_token(account_hint=fields.get("username", ""))
     if not token:
         # Silence makes git fall through to its next helper and then fail with
         # a normal authentication error.

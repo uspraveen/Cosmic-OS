@@ -1389,9 +1389,11 @@ def _public_github_repo(
     }
     if git_identity:
         # Commits in this checkout must land as the connected user; Alpha
-        # applies these as repo-local git config at checkout time.
+        # applies these as repo-local git config at checkout time. The login
+        # additionally pins which connected account's token performs pushes.
         payload["git_author_name"] = git_identity.get("name") or ""
         payload["git_author_email"] = git_identity.get("email") or ""
+        payload["git_author_login"] = git_identity.get("login") or ""
     return payload
 
 

@@ -63,6 +63,7 @@ def test_ensure_configures_the_connected_user_identity(tmp_path: Path) -> None:
             "default_branch": "main",
             "git_author_name": "Praveen Raj Uma Maheswari Shyam Sundar",
             "git_author_email": "12345+uspraveen@users.noreply.github.com",
+            "git_author_login": "uspraveen",
         }
     )
 
@@ -76,6 +77,8 @@ def test_ensure_configures_the_connected_user_identity(tmp_path: Path) -> None:
         _config(Path(checkout.local_path), "user.email")
         == "12345+uspraveen@users.noreply.github.com"
     )
+    # Pins pushes to this account when several are connected.
+    assert _config(Path(checkout.local_path), "credential.username") == "uspraveen"
 
 
 def test_ensure_without_identity_leaves_config_alone(tmp_path: Path) -> None:

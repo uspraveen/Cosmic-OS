@@ -134,6 +134,7 @@ class RepoWorktree:
 
         author_name = str(repo.get("git_author_name") or "").strip()
         author_email = str(repo.get("git_author_email") or "").strip()
+        author_login = str(repo.get("git_author_login") or "").strip()
 
         try:
             if not path.exists():
@@ -149,6 +150,11 @@ class RepoWorktree:
                 self._run(["config", "user.name", author_name], cwd=path)
             if author_email:
                 self._run(["config", "user.email", author_email], cwd=path)
+            if author_login:
+                # Pin pushes to the owning account: git offers this username
+                # to credential helpers, and the helper resolves that exact
+                # account's token instead of a primary-account fallback.
+                self._run(["config", "credential.username", author_login], cwd=path)
             snapshot = self.snapshot(path)
             return RepoCheckout(repo_row_id, full_name, str(path), action, snapshot, snapshot.error)
         except Exception as exc:

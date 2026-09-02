@@ -1237,7 +1237,7 @@ class CredentialManager:
             if user_id
             else f"{login}@users.noreply.github.com"
         )
-        return {"name": name, "email": email}
+        return {"name": name, "email": email, "login": login}
 
     async def disconnect_account(self, account_id: str) -> dict[str, Any]:
         """Revoke tokens and mark account as revoked."""
@@ -1750,6 +1750,13 @@ class CredentialManager:
                 str(account.get("email") or "").strip(),
                 str(account.get("provider_account_id") or "").strip(),
                 platform_key,
+                # GitHub's login lives in metadata (the OAuth profile carries
+                # the numeric id and display name instead), and it is exactly
+                # what the git credential helper hints with via
+                # credential.username — so a checkout can pin pushes to the
+                # account that actually owns the repository.
+                str(metadata.get("github_login") or "").strip(),
+                str(metadata.get("github_user_id") or "").strip(),
             ]
             stored_label = str(account.get("account_label") or "").strip()
             if stored_label and not _is_generic_account_label(stored_label):

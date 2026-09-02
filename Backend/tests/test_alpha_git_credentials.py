@@ -31,7 +31,7 @@ def _stdin(text: str):
 
 class TestHelperProtocol:
     def test_it_answers_github_with_a_live_token(self, monkeypatch, capsys) -> None:
-        monkeypatch.setattr(git_credentials, "resolve_github_token", lambda: "ghu_live")
+        monkeypatch.setattr(git_credentials, "resolve_github_token", lambda **kwargs: "ghu_live")
         monkeypatch.setattr(sys, "stdin", _stdin("protocol=https\nhost=github.com\n\n"))
 
         assert git_credentials.main(["get"]) == 0
@@ -41,7 +41,7 @@ class TestHelperProtocol:
 
     def test_it_stays_silent_for_other_hosts(self, monkeypatch, capsys) -> None:
         """Answering here would hand a GitHub token to whoever owns that remote."""
-        monkeypatch.setattr(git_credentials, "resolve_github_token", lambda: "ghu_live")
+        monkeypatch.setattr(git_credentials, "resolve_github_token", lambda **kwargs: "ghu_live")
         monkeypatch.setattr(sys, "stdin", _stdin("protocol=https\nhost=gitlab.com\n\n"))
 
         assert git_credentials.main(["get"]) == 0
@@ -49,7 +49,7 @@ class TestHelperProtocol:
 
     def test_no_token_produces_silence_not_a_crash(self, monkeypatch, capsys) -> None:
         """Git should report a normal auth failure, not a helper traceback."""
-        monkeypatch.setattr(git_credentials, "resolve_github_token", lambda: "")
+        monkeypatch.setattr(git_credentials, "resolve_github_token", lambda **kwargs: "")
         monkeypatch.setattr(sys, "stdin", _stdin("protocol=https\nhost=github.com\n\n"))
 
         assert git_credentials.main(["get"]) == 0
@@ -63,7 +63,7 @@ class TestHelperProtocol:
         assert capsys.readouterr().out == ""
 
     def test_a_request_with_no_host_is_still_answered(self, monkeypatch, capsys) -> None:
-        monkeypatch.setattr(git_credentials, "resolve_github_token", lambda: "ghu_live")
+        monkeypatch.setattr(git_credentials, "resolve_github_token", lambda **kwargs: "ghu_live")
         monkeypatch.setattr(sys, "stdin", _stdin("protocol=https\n\n"))
         assert git_credentials.main(["get"]) == 0
         assert "ghu_live" in capsys.readouterr().out
@@ -233,3 +233,54 @@ class TestEnvironmentInjection:
         env = cursor_cli_env(tmp_path / "cursor-home", base_env={})
         assert not (tmp_path / "cursor-home" / ".gitconfig").exists()
         assert "credential.helper" not in env.get("HOME", "")
+
+    def test_the_offered_username_pins_the_account(self, monkeypatch) -> None:
+        """credential.username must reach the gateway as the account hint."""
+        seen: dict[str, object] = {}
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+            def read(self):
+                return json.dumps({"access_token": "ghu_work"}).encode()
+
+        def fake_urlopen(request, timeout=None):
+            seen["body"] = json.loads(request.data.decode())
+            return _Response()
+
+        monkeypatch.setattr(git_credentials.urllib.request, "urlopen", fake_urlopen)
+        token = git_credentials.resolve_github_token(
+            account_hint="uspraveen-work", internal_token="x"
+        )
+        assert token == "ghu_work"
+        assert seen["body"]["account_hint"] == "uspraveen-work"
+
+    def test_main_forwards_gits_username_as_the_hint(self, monkeypatch, capsys) -> None:
+        seen: dict[str, object] = {}
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+            def read(self):
+                return json.dumps({"access_token": "ghu_work"}).encode()
+
+        def fake_urlopen(request, timeout=None):
+            seen["body"] = json.loads(request.data.decode())
+            return _Response()
+
+        monkeypatch.setattr(git_credentials.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setenv("GATEWAY_INTERNAL_TOKEN", "x")
+        monkeypatch.setattr(
+            sys, "stdin", _stdin("protocol=https\nhost=github.com\nusername=uspraveen-work\n\n")
+        )
+        assert git_credentials.main(["get"]) == 0
+        assert "password=ghu_work" in capsys.readouterr().out
+        assert seen["body"]["account_hint"] == "uspraveen-work"

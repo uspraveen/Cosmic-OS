@@ -418,6 +418,7 @@ def test_git_identity_uses_noreply_email_and_display_name(tmp_path: Path) -> Non
     assert identity == {
         "name": "Praveen Raj",
         "email": "12345+uspraveen@users.noreply.github.com",
+        "login": "uspraveen",
     }
 
 
@@ -432,6 +433,7 @@ def test_git_identity_falls_back_to_login(tmp_path: Path) -> None:
     assert identity == {
         "name": "uspraveen",
         "email": "uspraveen@users.noreply.github.com",
+        "login": "uspraveen",
     }
 
 
@@ -474,3 +476,50 @@ def test_public_repo_payload_carries_identity_when_given() -> None:
     without_identity = _public_github_repo(repo)
     assert "git_author_name" not in without_identity
     assert "git_author_email" not in without_identity
+
+
+def test_hint_matching_matches_by_github_login(tmp_path: Path) -> None:
+    """A checkout pinned via credential.username must resolve that account."""
+    store = CredentialStore(tmp_path / "credentials.db")
+    personal = store.create_account(provider="github", display_name="Personal")["account_id"]
+    work = store.create_account(provider="github", display_name="Work")["account_id"]
+    store.update_account(personal, metadata_patch={"github_login": "uspraveen"})
+    store.update_account(work, metadata_patch={"github_login": "uspraveen-work"})
+    for account_id in (personal, work):
+        store.store_credential(
+            account_id=account_id,
+            granted_scopes=[],
+            access_token=f"token-{account_id}",
+            refresh_token="refresh",
+            expires_at_ts=9999999999.0,
+        )
+    store.update_account(work, is_primary=True)
+    mgr = CredentialManager(store=store)
+
+    matches = mgr.account_hint_candidates(provider="github", account_hint="uspraveen-work")
+
+    assert [item["account_id"] for item in matches] == [work]
+
+
+def test_git_identity_carries_the_login_for_push_pinning(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github", display_name="Praveen Raj")["account_id"]
+    store.update_account(
+        account_id,
+        metadata_patch={"github_login": "uspraveen", "github_user_id": "12345"},
+    )
+    mgr = CredentialManager(store=store)
+
+    identity = mgr.github_git_identity(account_id)
+
+    assert identity["login"] == "uspraveen"
+
+
+def test_public_repo_payload_carries_login_for_pinning() -> None:
+    from gateway.credentials.routes import _public_github_repo
+
+    payload = _public_github_repo(
+        {"repo_row_id": "ghr_1", "full_name": "uspraveen/site"},
+        {"name": "Praveen Raj", "email": "1+uspraveen@users.noreply.github.com", "login": "uspraveen"},
+    )
+    assert payload["git_author_login"] == "uspraveen"
