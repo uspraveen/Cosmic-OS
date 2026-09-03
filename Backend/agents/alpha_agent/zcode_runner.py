@@ -88,10 +88,18 @@ class ZcodeRunResult:
 class ZcodeWorkspaceRunner:
     """Runs `zcode --prompt` headlessly inside an Alpha workspace.
 
-    Sessions: ZCode persists one per run and reports it as `sessionId` in the
-    `--json` payload; resume passes `--resume <sess_…>`. COSMIC records both
-    directions in the project registry (`alpha_harness_sessions`) like it does
-    for Cursor and OpenCode.
+    Streaming: runs use `--output-format stream-json`, which emits one JSON
+    event per line (turns, model requests, tool calls) and a final flat
+    `{"type": "result", …}` carrying the same shape as the old `--json`
+    payload. Mapped events are forwarded through `event_callback` so the
+    Alpha card shows live progress instead of silence; older CLIs without
+    stream-json get one legacy `--json` retry when the stream attempt dies
+    without a single event.
+
+    Sessions: ZCode persists one per run and reports it as `sessionId` in
+    the result event; resume passes `--resume <sess_…>`. COSMIC records both
+    directions in the project registry (`alpha_harness_sessions`) like it
+    does for Cursor and OpenCode.
 
     Auth and the thinking default live in the ZCode home's
     `.zcode/cli/config.json` (the gateway and `zcode login` own that file);
@@ -114,7 +122,7 @@ class ZcodeWorkspaceRunner:
         prompt: str,
         model: str | None = None,
         resume_session_id: str | None = None,
-        json_format: bool = True,
+        stream_format: bool = True,
     ) -> list[str]:
         binary = self.zcode_binary() or "zcode"
         command = [
@@ -130,7 +138,9 @@ class ZcodeWorkspaceRunner:
         normalized_resume = str(resume_session_id or "").strip()
         if normalized_resume:
             command.extend(["--resume", normalized_resume])
-        if json_format:
+        if stream_format:
+            command.extend(["--output-format", "stream-json"])
+        else:
             command.append("--json")
         return command
 
@@ -173,7 +183,7 @@ class ZcodeWorkspaceRunner:
             prompt=prompt,
             model=requested_model,
             resume_session_id=resume_session_id,
-            json_format=True,
+            stream_format=True,
         )
         started_at = asyncio.get_running_loop().time()
         if not self.is_available():
@@ -191,42 +201,50 @@ class ZcodeWorkspaceRunner:
                 resume_used=bool(str(resume_session_id or "").strip()),
             )
 
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(paths.workspace),
-            env=self._env(requested_model),
-            **self._process_group_kwargs(),
+        outcome = await self._spawn_and_communicate(
+            command,
+            paths=paths,
+            requested_model=requested_model,
+            timeout_sec=timeout_sec,
+            event_callback=event_callback,
+            cancel_check=cancel_check,
         )
-        timed_out = False
-        cancelled = False
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
-        try:
-            stdout_parts, stderr_parts, stream_state = await self._communicate_streaming(
-                process,
-                timeout_sec=timeout_sec or self.config.zcode_timeout_sec,
+        # Legacy CLIs without stream-json die on the unknown flag with an
+        # empty stream; retry once in the old whole-payload `--json` mode so
+        # a stale CLI degrades to silent-but-working instead of broken.
+        if (
+            outcome["final_payload"] is None
+            and outcome["stream_event_count"] == 0
+            and outcome["process"].returncode not in (0, None)
+        ):
+            await outcome["emit"]({
+                "stream": "system",
+                "event_type": "zcode.stream_fallback",
+                "text": "ZCode CLI did not answer in stream-json mode; retrying once in legacy mode.",
+                "detail": f"returncode={outcome['process'].returncode}; stderr_tail={_tail(outcome['stderr'], 300)}",
+            })
+            legacy_command = self.build_command(
+                paths=paths,
+                prompt=prompt,
+                model=requested_model,
+                resume_session_id=resume_session_id,
+                stream_format=False,
+            )
+            outcome = await self._spawn_and_communicate(
+                legacy_command,
+                paths=paths,
+                requested_model=requested_model,
+                timeout_sec=timeout_sec,
                 event_callback=event_callback,
                 cancel_check=cancel_check,
             )
-            timed_out = bool(stream_state.get("timed_out"))
-            cancelled = bool(stream_state.get("cancelled"))
-        except asyncio.CancelledError:
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.communicate(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.communicate()
-            raise
+            command = legacy_command
 
+        process = outcome["process"]
         duration_sec = asyncio.get_running_loop().time() - started_at
-        stdout = "".join(stdout_parts)
-        stderr = "".join(stderr_parts)
-        payload = self._extract_json_payload(stdout)
+        stdout = "".join(outcome["stdout_parts"])
+        stderr = "".join(outcome["stderr_parts"])
+        payload = outcome["final_payload"] or self._extract_json_payload(stdout)
         if payload is not None:
             last_message = str(payload.get("response") or "").strip()
         else:
@@ -242,7 +260,7 @@ class ZcodeWorkspaceRunner:
             returncode=process.returncode,
             stdout=stdout,
             stderr=stderr,
-            timed_out=timed_out,
+            timed_out=outcome["timed_out"],
             command=command,
             last_message_path=output_path,
             last_message=last_message,
@@ -251,8 +269,79 @@ class ZcodeWorkspaceRunner:
             native_session_id=native_session_id,
             resume_session_id=str(resume_session_id or "").strip() or None,
             resume_used=bool(str(resume_session_id or "").strip()),
-            cancelled=cancelled,
+            cancelled=outcome["cancelled"],
         )
+
+    async def _spawn_and_communicate(
+        self,
+        command: list[str],
+        *,
+        paths: WorkspacePaths,
+        requested_model: str | None,
+        timeout_sec: float | None,
+        event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None,
+        cancel_check: Callable[[], Awaitable[bool]] | None,
+    ) -> dict[str, Any]:
+        """Spawn one CLI attempt and drain its stream.
+
+        Returns the process, raw stdout/stderr parts, the stream-json final
+        `result` payload when seen, a count of mapped stream events, and the
+        cancel/timeout state — everything `run` needs to assemble the result
+        or decide on a legacy retry.
+        """
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(paths.workspace),
+            env=self._env(requested_model),
+            **self._process_group_kwargs(),
+        )
+        timed_out = False
+        cancelled = False
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+        try:
+            stdout_parts, stderr_parts, stream_state, final_payload, event_count = (
+                await self._communicate_streaming(
+                    process,
+                    timeout_sec=timeout_sec or self.config.zcode_timeout_sec,
+                    event_callback=event_callback,
+                    cancel_check=cancel_check,
+                )
+            )
+            timed_out = bool(stream_state.get("timed_out"))
+            cancelled = bool(stream_state.get("cancelled"))
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.communicate(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.communicate()
+            raise
+
+        async def emit(entry: dict[str, Any]) -> None:
+            if event_callback is None:
+                return
+            try:
+                await event_callback(entry)
+            except Exception:
+                return
+
+        return {
+            "process": process,
+            "stdout_parts": stdout_parts,
+            "stderr_parts": stderr_parts,
+            "timed_out": timed_out,
+            "cancelled": cancelled,
+            "final_payload": final_payload,
+            "stream_event_count": event_count,
+            "stderr": "".join(stderr_parts),
+            "emit": emit,
+        }
 
     async def _communicate_streaming(
         self,
@@ -261,9 +350,11 @@ class ZcodeWorkspaceRunner:
         timeout_sec: float,
         event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         cancel_check: Callable[[], Awaitable[bool]] | None = None,
-    ) -> tuple[list[str], list[str], dict[str, bool]]:
+    ) -> tuple[list[str], list[str], dict[str, bool], dict[str, Any] | None, int]:
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
+        final_payload: dict[str, Any] | None = None
+        stream_event_count = 0
         loop = asyncio.get_running_loop()
         started_at = loop.time()
         state = {
@@ -288,6 +379,7 @@ class ZcodeWorkspaceRunner:
             state["last_output_at"] = now
 
         async def read_stdout() -> None:
+            nonlocal final_payload, stream_event_count
             if process.stdout is None:
                 return
             async for text in iter_stream_lines(
@@ -296,11 +388,36 @@ class ZcodeWorkspaceRunner:
             ):
                 note_output()
                 stdout_parts.append(compact_for_memory(text))
-                if event_callback is not None:
+                stripped = text.strip()
+                parsed: Any = None
+                if stripped.startswith("{"):
+                    try:
+                        parsed = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        parsed = None
+                if isinstance(parsed, dict):
+                    if parsed.get("type") == "result":
+                        # The final flat payload — same shape as `--json`.
+                        # Stash the parsed object (not the possibly-compacted
+                        # line) so a long response survives memory trimming.
+                        final_payload = parsed
+                        continue
+                    payload = parsed.get("payload")
+                    if isinstance(payload, dict) and payload.get("type"):
+                        stream_event_count += 1
+                        progress_line = _progress_line_for_event(payload)
+                        if progress_line is not None:
+                            await emit({
+                                "stream": "stdout",
+                                "event_type": f"zcode.{payload.get('type')}",
+                                "text": _tail(progress_line, 2000),
+                            })
+                        continue
+                if stripped:
                     await emit({
                         "stream": "stdout",
                         "event_type": "stdout",
-                        "text": _tail(text.strip(), 2000),
+                        "text": _tail(stripped, 500),
                     })
 
         async def read_stderr() -> None:
@@ -381,7 +498,7 @@ class ZcodeWorkspaceRunner:
         return stdout_parts, stderr_parts, {
             "cancelled": bool(state["cancelled"]),
             "timed_out": bool(state["timed_out"]),
-        }
+        }, final_payload, stream_event_count
 
     async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:
@@ -516,6 +633,76 @@ def strip_json_noise(stdout: str) -> str:
         if line.strip() and not line.lstrip().startswith("{")
     ]
     return "\n".join(lines[-80:]).strip()
+
+
+_PROGRESS_TOOL_TARGET_KEYS = ("file_path", "command", "url", "path", "query", "pattern")
+
+
+def _tool_target_label(tool_input: Any) -> str:
+    """A short human target for a tool call input (`Write app.py`)."""
+    if not isinstance(tool_input, dict):
+        return ""
+    for key in _PROGRESS_TOOL_TARGET_KEYS:
+        value = tool_input.get(key)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            return str(value).strip()[:80]
+    return ""
+
+
+def _progress_line_for_event(payload: dict[str, Any]) -> str | None:
+    """Map one stream-json payload to a concise terminal line.
+
+    Deltas, checkpoints, session bookkeeping, and recovery noise are skipped —
+    the card wants turn/request/tool rhythm, not hundreds of token fragments.
+    """
+    event_type = str(payload.get("type") or "")
+    if event_type == "turn.started":
+        turn_number = int(payload.get("turnNumber") or 0) + 1
+        return f"── turn {turn_number} started ──"
+    if event_type == "model_request_started":
+        model_ref = payload.get("model")
+        model_id = ""
+        if isinstance(model_ref, dict):
+            model_id = str(model_ref.get("modelId") or "")
+        return f"▲ model request {model_id}".rstrip()
+    if event_type == "model_request_completed":
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        bits = [
+            f"in {usage.get('inputTokens', '?')} tok",
+            f"out {usage.get('outputTokens', '?')} tok",
+        ]
+        duration_ms = payload.get("durationMs")
+        if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+            bits.append(f"{duration_ms / 1000:.1f}s")
+        return "● model request done · " + " · ".join(bits)
+    if event_type == "tool.updated":
+        tool_name = str(payload.get("toolName") or "tool")
+        if str(payload.get("kind") or "") == "tool_input_start":
+            target = _tool_target_label(payload.get("input"))
+            return f"→ {tool_name}{(' ' + target) if target else ''}"
+        if str(payload.get("status") or "") == "tool_result_committed":
+            return f"✓ {tool_name}"
+        return None
+    if event_type == "turn.completed":
+        result_type = str(payload.get("resultType") or "success")
+        if result_type not in ("", "success"):
+            return f"⚠ turn ended: {result_type}"
+        bits = []
+        token_count = payload.get("tokenCount")
+        if isinstance(token_count, (int, float)) and token_count > 0:
+            bits.append(f"{int(token_count)} tok")
+        duration_ms = payload.get("duration")
+        if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+            bits.append(f"{duration_ms / 1000:.1f}s")
+        tool_calls = payload.get("toolCallCount")
+        if isinstance(tool_calls, (int, float)) and tool_calls > 0:
+            bits.append(f"{int(tool_calls)} tools")
+        summary = f"── turn completed · {' · '.join(bits)}" if bits else "── turn completed"
+        response = str(payload.get("response") or "").strip()
+        if response:
+            summary += f" — {response[:240]}"
+        return summary
+    return None
 
 
 def find_zcode_binary_wrapper(zcode_home: Any) -> str | None:

@@ -162,7 +162,7 @@ def test_zcode_runner_builds_headless_yolo_command(tmp_path: Path) -> None:
     assert command[command.index("--prompt") + 1] == "Do the thing"
     assert command[command.index("--mode") + 1] == "yolo"
     assert command[command.index("--cwd") + 1] == str(paths.workspace)
-    assert "--json" in command
+    assert command[command.index("--output-format") + 1] == "stream-json"
     assert "--no-color" in command
 
     resumed = runner.build_command(
@@ -171,6 +171,11 @@ def test_zcode_runner_builds_headless_yolo_command(tmp_path: Path) -> None:
         resume_session_id="sess_12345678",
     )
     assert resumed[resumed.index("--resume") + 1] == "sess_12345678"
+
+    # Pre-stream-json CLIs get the legacy whole-payload mode instead.
+    legacy = runner.build_command(paths=paths, prompt="Legacy", stream_format=False)
+    assert "--json" in legacy
+    assert "--output-format" not in legacy
 
 
 def test_zcode_runner_env_scopes_home_and_overrides_model(tmp_path: Path) -> None:
@@ -368,3 +373,71 @@ def test_ensure_zcode_cli_config_creates_missing_home(tmp_path: Path) -> None:
     assert result["has_api_key"] is True
     state = read_zcode_auth_state(home)
     assert state["has_api_key"] is True
+
+
+def test_zcode_progress_lines_map_stream_events() -> None:
+    from agents.alpha_agent.zcode_runner import _progress_line_for_event
+
+    assert _progress_line_for_event({"type": "turn.started", "turnNumber": 0}) == "── turn 1 started ──"
+    request_line = _progress_line_for_event({
+        "type": "model_request_completed",
+        "usage": {"inputTokens": 22561, "outputTokens": 360},
+        "durationMs": 13065,
+    })
+    assert "in 22561 tok" in request_line
+    assert "out 360 tok" in request_line
+    assert "13.1s" in request_line
+
+    started_tool = _progress_line_for_event({
+        "type": "tool.updated",
+        "kind": "tool_input_start",
+        "toolName": "Write",
+        "input": {"file_path": "/tmp/zz.txt", "content": "hi"},
+    })
+    assert started_tool == "→ Write /tmp/zz.txt"
+    assert _progress_line_for_event({
+        "type": "tool.updated",
+        "status": "tool_result_committed",
+        "toolName": "Write",
+    }) == "✓ Write"
+    # queued/closed transitions stay silent
+    assert _progress_line_for_event({"type": "tool.updated", "status": "tool_queued"}) is None
+
+    completed = _progress_line_for_event({
+        "type": "turn.completed",
+        "resultType": "success",
+        "tokenCount": 22921,
+        "toolCallCount": 3,
+        "response": "All finished properly.",
+    })
+    assert "22921 tok" in completed
+    assert "3 tools" in completed
+    assert "All finished properly." in completed
+
+    # Streaming deltas and bookkeeping events never reach the card.
+    for skipped in (
+        {"type": "model.streaming", "kind": "delta", "delta": "abc"},
+        {"type": "checkpoint.created", "checkpointId": "cp_1"},
+        {"type": "session.titleUpdated", "title": "x"},
+    ):
+        assert _progress_line_for_event(skipped) is None
+
+
+def test_zcode_runner_extracts_result_from_stream_stdout(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    runner = ZcodeWorkspaceRunner(config)
+    events = [
+        json.dumps({"eventId": "e1", "payload": {"type": "turn.started", "turnNumber": 0}}),
+        json.dumps({"eventId": "e2", "payload": {"type": "model.streaming", "delta": "hi", "kind": "delta"}}),
+        json.dumps({
+            "type": "result",
+            "sessionId": "sess_stream999",
+            "response": "Streamed answer.",
+            "usage": {"totalTokens": 7},
+        }),
+    ]
+    stdout = "\n".join(events) + "\n"
+    payload = runner._extract_json_payload(stdout)
+    assert payload is not None
+    assert payload.get("response") == "Streamed answer."
+    assert runner._extract_native_session_id(stdout, payload) == "sess_stream999"
