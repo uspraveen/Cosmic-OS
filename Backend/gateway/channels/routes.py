@@ -140,6 +140,13 @@ class OpenCodeProviderConnectRequest(BaseModel):
     api_key: str = Field(..., min_length=1, max_length=4096)
 
 
+class ZcodeAgentConfigRequest(BaseModel):
+    preferred_model: str | None = Field(default=None, max_length=80)
+    thinking: str | None = Field(default=None, max_length=32)
+    api_key: str | None = Field(default=None, max_length=4096)
+    vm_sync_enabled: bool | None = None
+
+
 class AlphaAgentConfigRequest(BaseModel):
     preferred_harness: str | None = Field(default=None, max_length=32)
 
@@ -2152,6 +2159,52 @@ async def start_desktop_codex_login(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     return await runtime.start_desktop_codex_login()
+
+
+@router.get("/desktop/agents/zcode/status")
+async def get_desktop_zcode_status(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_zcode_status()
+
+
+@router.get("/internal/agents/zcode/status")
+async def get_internal_zcode_status(
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.get_desktop_zcode_status()
+
+
+@router.post("/desktop/agents/zcode/config")
+async def save_desktop_zcode_config(
+    body: ZcodeAgentConfigRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.save_desktop_zcode_config(
+        preferred_model=body.preferred_model,
+        thinking=body.thinking,
+        api_key=body.api_key,
+        vm_sync_enabled=body.vm_sync_enabled,
+    )
+
+
+@router.post("/desktop/agents/zcode/login/start")
+async def start_desktop_zcode_login(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.start_desktop_zcode_login()
+
+
+@router.delete("/desktop/agents/zcode/auth")
+async def logout_desktop_zcode(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.logout_desktop_zcode()
 
 
 @router.post("/desktop/agents/cursor/login/start")

@@ -15,6 +15,7 @@ from .credentials.encryption import decrypt_token, encrypt_token_str
 PROVIDER_CODEX = "codex"
 PROVIDER_CURSOR = "cursor"
 PROVIDER_OPENCODE = "opencode"
+PROVIDER_ZCODE = "zcode"
 _CODEX_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
 DEFAULT_CODEX_MODEL = "gpt-5.6-terra"
 _CURSOR_MODEL_ALIASES = {
@@ -69,6 +70,30 @@ _OPENCODE_MODEL_ALIASES = {
     "mimov2.5": "mimo-v2.5-free",
     "bigpickle": "big-pickle",
 }
+# ZCode ships exactly two user-facing models (GLM-5.3 family). Unlike OpenCode
+# this is a real allowlist: the ids are stable product names, and the settings
+# panel offers nothing else.
+_ZCODE_MODELS = {"glm-5.3", "glm-5.3-flash"}
+DEFAULT_ZCODE_MODEL = "glm-5.3-flash"
+_ZCODE_MODEL_ALIASES = {
+    "glm": "glm-5.3",
+    "glm 5.3": "glm-5.3",
+    "glm5.3": "glm-5.3",
+    "glm-5p3": "glm-5.3",
+    "glm 5p3": "glm-5.3",
+    "glm53": "glm-5.3",
+    "glm-53": "glm-5.3",
+    "glm 5.3 flash": "glm-5.3-flash",
+    "glm5.3flash": "glm-5.3-flash",
+    "glm 5.3-flash": "glm-5.3-flash",
+    "glm-5.3flash": "glm-5.3-flash",
+    "glm53flash": "glm-5.3-flash",
+    "glm-53-flash": "glm-5.3-flash",
+    "flash": "glm-5.3-flash",
+    "5.3 flash": "glm-5.3-flash",
+    "5.3": "glm-5.3",
+}
+_ZCODE_THINKING_MODES = {"auto", "low", "high", "max"}
 
 
 class OpenCodeProviderId:
@@ -306,6 +331,121 @@ class AgentAuthStore:
         last_cli_status: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self.disconnect_opencode_provider(provider_id="opencode")
+
+    # ── ZCode (Z.ai GLM harness) ───────────────────────────────────────────
+
+    def get_zcode(self, *, include_secret: bool = False) -> dict[str, Any]:
+        payload = self._get_provider(
+            PROVIDER_ZCODE,
+            include_secret=include_secret,
+            default_auth_mode="api_key",
+            default_preferred_model=DEFAULT_ZCODE_MODEL,
+        )
+        # The API key lives inside the ZCode home's cli/config.json (written
+        # by `zcode login` or a manual save) — the store only tracks settings
+        # and state, so a stored key column would be a second source of truth.
+        payload["has_api_key"] = bool(payload.get("has_api_key"))
+        if include_secret:
+            payload["api_key"] = ""
+        return payload
+
+    def save_zcode(
+        self,
+        *,
+        auth_mode: str | None = None,
+        preferred_model: str | None = None,
+        thinking: str | None = None,
+        vm_sync_enabled: bool | None = None,
+        has_api_key: bool | None = None,
+        status: str | None = None,
+        login_required_reason: str | None = None,
+        last_cli_status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        current = self.get_zcode(include_secret=False)
+        next_auth_mode = _normalize_choice(
+            auth_mode,
+            allowed={"api_key", "oauth"},
+            fallback=str(current.get("auth_mode") or "api_key"),
+        )
+        next_model = _normalize_zcode_model(
+            preferred_model,
+            fallback=str(current.get("preferred_model") or DEFAULT_ZCODE_MODEL),
+        )
+        next_thinking = _normalize_choice(
+            thinking,
+            allowed=_ZCODE_THINKING_MODES,
+            fallback=str(current.get("reasoning_effort") or "auto"),
+        )
+        next_sync_enabled = (
+            bool(vm_sync_enabled)
+            if vm_sync_enabled is not None
+            else bool(current.get("vm_sync_enabled", True))
+        )
+        next_has_key = (
+            bool(has_api_key)
+            if has_api_key is not None
+            else bool(current.get("has_api_key", False))
+        )
+        cli_status = (
+            last_cli_status
+            if isinstance(last_cli_status, dict)
+            else current.get("last_cli_status")
+            if isinstance(current.get("last_cli_status"), dict)
+            else {}
+        )
+        now = _utcnow_iso()
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO agent_provider_auth
+               (provider, auth_mode, preferred_model, reasoning_effort, approval_mode, vm_sync_enabled,
+                encrypted_api_key, has_api_key, status, login_required_reason,
+                last_cli_status_json, updated_at)
+               VALUES (?, ?, ?, ?, 'suggest', ?, '', ?, ?, ?, ?, ?)
+               ON CONFLICT(provider) DO UPDATE SET
+                 auth_mode = excluded.auth_mode,
+                 preferred_model = excluded.preferred_model,
+                 reasoning_effort = excluded.reasoning_effort,
+                 vm_sync_enabled = excluded.vm_sync_enabled,
+                 has_api_key = excluded.has_api_key,
+                 status = excluded.status,
+                 login_required_reason = excluded.login_required_reason,
+                 last_cli_status_json = excluded.last_cli_status_json,
+                 updated_at = excluded.updated_at""",
+            [
+                PROVIDER_ZCODE,
+                next_auth_mode,
+                next_model,
+                next_thinking,
+                1 if next_sync_enabled else 0,
+                1 if next_has_key else 0,
+                (status or str(current.get("status") or "not_configured")).strip()
+                or "not_configured",
+                (
+                    login_required_reason
+                    if login_required_reason is not None
+                    else str(current.get("login_required_reason") or "")
+                ),
+                json.dumps(cli_status),
+                now,
+            ],
+        )
+        conn.commit()
+        return self.get_zcode(include_secret=False)
+
+    def clear_zcode_auth(
+        self,
+        *,
+        status: str = "logged_out",
+        login_required_reason: str = "user_logged_out",
+        last_cli_status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self.save_zcode(
+            auth_mode="api_key",
+            has_api_key=False,
+            status=status,
+            login_required_reason=login_required_reason,
+            last_cli_status=last_cli_status or {},
+        )
 
     def save_codex(
         self,
@@ -651,6 +791,11 @@ class AgentAuthStore:
                 str(payload.get("preferred_model") or ""),
                 fallback=default_preferred_model,
             )
+        if provider == PROVIDER_ZCODE:
+            payload["preferred_model"] = _normalize_zcode_model(
+                str(payload.get("preferred_model") or ""),
+                fallback=default_preferred_model,
+            )
         if include_secret:
             api_key = ""
             if row["encrypted_api_key"]:
@@ -708,3 +853,26 @@ def _normalize_opencode_model(value: str | None, *, fallback: str) -> str:
         return aliased
     sanitized = "".join(ch for ch in normalized if ch.isalnum() or ch in "/.-_")[:120]
     return sanitized or (fallback or "mimo-v2.5-free")
+
+
+def _normalize_zcode_model(value: str | None, *, fallback: str) -> str:
+    """Strict allowlist: GLM-5.3 and GLM-5.3-Flash are the whole catalog.
+
+    Alias spellings ("flash", "GLM 5.3") canonicalize; anything else falls
+    back so a stray id can never reach the CLI.
+    """
+    normalized = str(value or "").strip()
+    if not normalized or normalized.lower() == "auto":
+        normalized = (fallback or "").strip() or DEFAULT_ZCODE_MODEL
+    bare = normalized.split("/")[-1].strip().lower()
+    aliased = _ZCODE_MODEL_ALIASES.get(bare) or _ZCODE_MODEL_ALIASES.get(
+        " ".join(bare.replace("_", " ").split())
+    )
+    if aliased:
+        return aliased
+    if bare in _ZCODE_MODELS:
+        return bare
+    fallback_normalized = (fallback or DEFAULT_ZCODE_MODEL).split("/")[-1].strip().lower()
+    if fallback_normalized in _ZCODE_MODELS:
+        return fallback_normalized
+    return DEFAULT_ZCODE_MODEL

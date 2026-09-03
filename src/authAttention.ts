@@ -12,7 +12,7 @@ export const AUTH_ATTENTION_PREFS_KEY = 'cosmic.authAttentionPrefs.v1'
 export const AUTH_ATTENTION_REMINDER_INTERVAL_MS = 2 * 60 * 60 * 1000
 export const AUTH_ATTENTION_SNOOZE_MS = 2 * 60 * 60 * 1000
 
-export type AuthAttentionProvider = 'google' | 'codex' | 'cursor' | 'opencode'
+export type AuthAttentionProvider = 'google' | 'codex' | 'cursor' | 'opencode' | 'zcode'
 
 export interface AuthAttentionItem {
   key: string
@@ -143,7 +143,7 @@ function agentAttentionDetail(
   status: AgentGatewayStatus | null | undefined,
 ): string {
   const reason = String(status?.login_required_reason || '').trim()
-  if (reason === 'codex_cli_missing' || reason === 'cursor_cli_missing' || reason === 'opencode_cli_missing') {
+  if (reason === 'codex_cli_missing' || reason === 'cursor_cli_missing' || reason === 'opencode_cli_missing' || reason === 'zcode_cli_missing') {
     return `${providerLabel} CLI is missing on the VM. Open Cosmic Agents settings to reinstall or sign in.`
   }
   if (reason === 'api_key_relogin_required') {
@@ -222,6 +222,27 @@ export function getOpenCodeAuthAttentionItems(status: AgentGatewayStatus | null 
       : 'Paste an OpenCode Zen API key so the default Alpha runner can execute.',
     detail: agentAttentionDetail('Alpha OpenCode', status),
     settingsView: 'agents-opencode',
+  }]
+}
+
+export function getZcodeAuthAttentionItems(status: AgentGatewayStatus | null | undefined): AuthAttentionItem[] {
+  if (!agentStatusNeedsAttention(status)) {
+    return []
+  }
+  const reason = String(status?.login_required_reason || '').trim().toLowerCase()
+  const missingCli = reason === 'zcode_cli_missing'
+  return [{
+    key: 'zcode:alpha',
+    provider: 'zcode',
+    accountId: 'zcode',
+    accountLabel: 'Alpha ZCode',
+    email: '',
+    title: missingCli ? 'ZCode CLI is missing on the VM' : 'Alpha ZCode needs sign-in',
+    message: missingCli
+      ? 'Re-run VM bootstrap (setup-zcode-cli) so ZCode installs, or pick another Alpha runner.'
+      : 'Connect your Z.ai account so Alpha can run GLM-5.3 through ZCode.',
+    detail: agentAttentionDetail('Alpha ZCode', status),
+    settingsView: 'agents-zcode',
   }]
 }
 

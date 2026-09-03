@@ -35,6 +35,7 @@ def _config(tmp_path: Path) -> AlphaAgentConfig:
         codex_home=tmp_path / "alpha" / "homes" / "codex",
         cursor_home=tmp_path / "alpha" / "homes" / "cursor",
         opencode_home=tmp_path / "alpha" / "homes" / "opencode",
+        zcode_home=tmp_path / "alpha" / "homes" / "zcode",
         codex_sandbox="workspace-write",
         codex_timeout_sec=14400.0,
         codex_default_model="",
@@ -43,6 +44,9 @@ def _config(tmp_path: Path) -> AlphaAgentConfig:
         cursor_init_timeout_sec=180.0,
         opencode_timeout_sec=14400.0,
         opencode_default_model="mimo-v2.5-free",
+        zcode_timeout_sec=14400.0,
+        zcode_default_model="glm-5.3-flash",
+        zcode_default_thinking="auto",
         zen_api_key="",
         cli_idle_check_sec=300.0,
     )

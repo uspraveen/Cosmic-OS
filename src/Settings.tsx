@@ -12,7 +12,7 @@ import {
   SquareTerminal,
   type LucideIcon,
 } from 'lucide-react'
-import { CursorMark, OpenAIMark, OpenCodeMark } from './brandIcons'
+import { CursorMark, OpenAIMark, OpenCodeMark, ZCodeMark } from './brandIcons'
 import LiquidGlass from './LiquidGlass'
 import { SPACES_BLACK_GLASS_BACKGROUND, SPACES_BLACK_GLASS_BACKDROP } from './glassTones'
 import MonitorSelector from './MonitorSelector'
@@ -26,16 +26,18 @@ import GatewayPreferencesSettings from './GatewayPreferencesSettings'
 import CodexAgentSettings from './CodexAgentSettings'
 import CursorAgentSettings from './CursorAgentSettings'
 import OpenCodeAgentSettings from './OpenCodeAgentSettings'
+import ZCodeAgentSettings from './ZCodeAgentSettings'
 import { GOOGLE_TOOL_DEFINITIONS } from './integrations'
 import type { SearchPosition } from './App'
 import './settings.css'
 
-export type AlphaPreferredHarness = 'opencode' | 'codex' | 'cursor'
+export type AlphaPreferredHarness = 'opencode' | 'codex' | 'cursor' | 'zcode'
 
 function normalizeAlphaHarness(value: unknown): AlphaPreferredHarness {
   const normalized = String(value ?? '').trim().toLowerCase()
   if (normalized === 'cursor') return 'cursor'
   if (normalized === 'codex') return 'codex'
+  if (normalized === 'zcode') return 'zcode'
   return 'opencode'
 }
 
@@ -159,6 +161,7 @@ export type SettingsView =
   | 'agents-codex'
   | 'agents-cursor'
   | 'agents-opencode'
+  | 'agents-zcode'
   | 'integrations'
   | 'integrations-google'
   | 'integrations-whatsapp'
@@ -184,7 +187,7 @@ export default function Settings({
   authAttentionCount = 0,
 }: SettingsProps) {
   const [currentView, setCurrentView] = useState<SettingsView>(initialView || 'main')
-  const [alphaPreferredHarness, setAlphaPreferredHarness] = useState<'opencode' | 'codex' | 'cursor'>('opencode')
+  const [alphaPreferredHarness, setAlphaPreferredHarness] = useState<AlphaPreferredHarness>('opencode')
   const [alphaConfigLoading, setAlphaConfigLoading] = useState(false)
   const [alphaConfigError, setAlphaConfigError] = useState('')
 
@@ -258,6 +261,8 @@ export default function Settings({
               ? 'Cursor'
             : currentView === 'agents-opencode'
               ? 'OpenCode'
+            : currentView === 'agents-zcode'
+              ? 'ZCode'
             : currentView === 'integrations'
               ? 'Integrations'
               : currentView === 'integrations-whatsapp'
@@ -278,7 +283,7 @@ export default function Settings({
       setCurrentView('integrations')
       return
     }
-    if (currentView === 'agents-codex' || currentView === 'agents-cursor' || currentView === 'agents-opencode') {
+    if (currentView === 'agents-codex' || currentView === 'agents-cursor' || currentView === 'agents-opencode' || currentView === 'agents-zcode') {
       setCurrentView('agents')
       return
     }
@@ -297,7 +302,7 @@ export default function Settings({
       : gatewayConnection?.state === 'error'
         ? 'Gateway unavailable'
         : 'Signed in to VM'
-  const saveAlphaPreferredHarness = async (preferredHarness: 'opencode' | 'codex' | 'cursor') => {
+  const saveAlphaPreferredHarness = async (preferredHarness: AlphaPreferredHarness) => {
     setAlphaPreferredHarness(preferredHarness)
     setAlphaConfigError('')
     setAlphaConfigLoading(true)
@@ -540,7 +545,9 @@ export default function Settings({
                         ? 'Cursor CLI'
                         : alphaPreferredHarness === 'codex'
                           ? 'Codex'
-                          : 'OpenCode'}
+                          : alphaPreferredHarness === 'zcode'
+                            ? 'ZCode'
+                            : 'OpenCode'}
                     </strong>
                     <small>Used when the orchestrator delegates `alpha.execute` without an explicit harness.</small>
                   </div>
@@ -571,6 +578,15 @@ export default function Settings({
                     >
                       <CursorMark size={13} mono={alphaPreferredHarness === 'cursor'} />
                       Cursor
+                    </button>
+                    <button
+                      type="button"
+                      className={alphaPreferredHarness === 'zcode' ? 'active' : ''}
+                      onClick={() => void saveAlphaPreferredHarness('zcode')}
+                      disabled={alphaConfigLoading}
+                    >
+                      <ZCodeMark size={13} />
+                      ZCode
                     </button>
                   </div>
                 </div>
@@ -637,6 +653,26 @@ export default function Settings({
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
                   </div>
                 </button>
+
+                <button className="cosmic-agents-provider-card" onClick={() => setCurrentView('agents-zcode')}>
+                  <div className="cosmic-agents-provider-icon" aria-hidden="true">
+                    <ZCodeMark size={22} />
+                  </div>
+                  <div className="cosmic-agents-provider-body">
+                    <div className="cosmic-agents-provider-head">
+                      <strong>ZCode</strong>
+                      <div className="cosmic-agents-provider-badges">
+                        <span className={`cosmic-agents-provider-tag ${alphaPreferredHarness === 'zcode' ? 'ready' : 'pending'}`}>
+                          {alphaPreferredHarness === 'zcode' ? 'Selected' : 'Available'}
+                        </span>
+                      </div>
+                    </div>
+                    <span className="cosmic-agents-provider-desc">Connect your Z.ai account for GLM-5.3 and 5.3 Flash.</span>
+                  </div>
+                  <div className="cosmic-agents-provider-arrow" aria-hidden="true">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
+                  </div>
+                </button>
               </div>
             )}
 
@@ -650,6 +686,10 @@ export default function Settings({
 
             {currentView === 'agents-opencode' && (
               <OpenCodeAgentSettings active={currentView === 'agents-opencode'} />
+            )}
+
+            {currentView === 'agents-zcode' && (
+              <ZCodeAgentSettings active={currentView === 'agents-zcode'} />
             )}
 
             {currentView === 'integrations-google' && (

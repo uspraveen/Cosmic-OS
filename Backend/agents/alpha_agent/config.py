@@ -52,6 +52,7 @@ class AlphaAgentConfig:
     codex_home: Path
     cursor_home: Path
     opencode_home: Path
+    zcode_home: Path
     codex_sandbox: str
     codex_timeout_sec: float
     codex_default_model: str
@@ -61,6 +62,9 @@ class AlphaAgentConfig:
     opencode_timeout_sec: float
     opencode_default_model: str
     zen_api_key: str
+    zcode_timeout_sec: float
+    zcode_default_model: str
+    zcode_default_thinking: str
     cli_idle_check_sec: float
     # Connected GitHub repositories are cloned into a canonical checkout root
     # so the orchestrator and Alpha agree on one stable path per repo.
@@ -127,6 +131,12 @@ class AlphaAgentConfig:
                 / "homes"
                 / "opencode"
             ),
+            zcode_home=(
+                _optional_path(os.getenv("ALPHA_ZCODE_HOME"))
+                or alpha_root
+                / "homes"
+                / "zcode"
+            ),
             codex_sandbox=codex_sandbox,
             codex_timeout_sec=max(
                 30.0,
@@ -150,6 +160,15 @@ class AlphaAgentConfig:
             opencode_default_model=os.getenv("ALPHA_OPENCODE_MODEL", "mimo-v2.5-free").strip()
             or "mimo-v2.5-free",
             zen_api_key=(os.getenv("ALPHA_OPENCODE_ZEN_API_KEY") or "").strip(),
+            zcode_timeout_sec=max(
+                30.0,
+                float(os.getenv("ALPHA_ZCODE_TIMEOUT_SEC", "14400") or "14400"),
+            ),
+            # Only a pre-settings fallback; the gateway preference wins.
+            zcode_default_model=os.getenv("ALPHA_ZCODE_MODEL", "glm-5.3-flash").strip()
+            or "glm-5.3-flash",
+            zcode_default_thinking=os.getenv("ALPHA_ZCODE_THINKING", "auto").strip()
+            or "auto",
             cli_idle_check_sec=max(
                 30.0,
                 float(os.getenv("ALPHA_CLI_IDLE_CHECK_SEC", "60") or "60"),

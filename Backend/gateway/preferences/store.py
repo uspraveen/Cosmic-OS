@@ -560,7 +560,7 @@ class GatewayPreferenceStore:
             and normalized not in {"opencode"}
         ):
             return "opencode"
-        return normalized if normalized in {"codex", "cursor", "opencode"} else "opencode"
+        return normalized if normalized in {"codex", "cursor", "opencode", "zcode"} else "opencode"
 
     def _normalize_cosmic_orchestrator_provider(self, value: str) -> str:
         normalized = str(value or "").strip().lower().replace("-", "_")

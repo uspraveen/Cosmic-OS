@@ -30,8 +30,11 @@ const REASON_MESSAGES: Record<string, string> = {
     'The Cursor CLI is not installed on the VM, so there is nothing to sign in to. Re-run the VM bootstrap to install cursor-agent.',
   codex_cli_missing:
     'The Codex CLI is not installed on the VM, so there is nothing to sign in to. Re-run the VM bootstrap to install codex.',
+  zcode_cli_missing:
+    'The ZCode CLI is not installed on the VM, so there is nothing to sign in to. Re-run the VM bootstrap (setup-zcode-cli) to install it.',
   cursor_oauth_login_failed: 'The Cursor sign-in on the VM exited before it completed.',
   chatgpt_login_failed: 'The ChatGPT sign-in on the VM exited before it completed.',
+  zcode_login_failed: 'The Z.ai sign-in on the VM exited before it completed.',
   api_key_relogin_required: 'The saved API key was rejected. Save a new key or switch to browser sign-in.',
   auth_not_configured: 'No sign-in method is configured for this agent yet.',
 }

@@ -14,6 +14,7 @@ import {
   getCodexAuthAttentionItems,
   getCursorAuthAttentionItems,
   getOpenCodeAuthAttentionItems,
+  getZcodeAuthAttentionItems,
   getGoogleAuthAttentionItems,
   loadAuthAttentionPrefs,
   mergeAuthAttentionItems,
@@ -523,19 +524,22 @@ export default function DynamicIsland({
     let codexItems: AuthAttentionItem[] = []
     let cursorItems: AuthAttentionItem[] = []
     let opencodeItems: AuthAttentionItem[] = []
+    let zcodeItems: AuthAttentionItem[] = []
     try {
-      const [codexStatus, cursorStatus, opencodeStatus] = await Promise.all([
+      const [codexStatus, cursorStatus, opencodeStatus, zcodeStatus] = await Promise.all([
         window.cosmic?.getGatewayCodexStatus?.(),
         window.cosmic?.getGatewayCursorStatus?.(),
         window.cosmic?.getGatewayOpenCodeStatus?.(),
+        window.cosmic?.getGatewayZcodeStatus?.(),
       ])
       codexItems = getCodexAuthAttentionItems(codexStatus as AgentGatewayStatus | null | undefined)
       cursorItems = getCursorAuthAttentionItems(cursorStatus as AgentGatewayStatus | null | undefined)
       opencodeItems = getOpenCodeAuthAttentionItems(opencodeStatus as AgentGatewayStatus | null | undefined)
+      zcodeItems = getZcodeAuthAttentionItems(zcodeStatus as AgentGatewayStatus | null | undefined)
     } catch {
       // Keep Google-only attention items when the VM is offline.
     }
-    setAuthAttentionItems(mergeAuthAttentionItems(googleItems, opencodeItems, codexItems, cursorItems))
+    setAuthAttentionItems(mergeAuthAttentionItems(googleItems, opencodeItems, zcodeItems, codexItems, cursorItems))
   }, [])
 
   const openCalendarEventDetail = useCallback((event: CalendarAgendaEvent) => {

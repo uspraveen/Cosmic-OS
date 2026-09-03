@@ -248,6 +248,15 @@ interface Window {
     }) => Promise<any>
     startGatewayCursorLogin: () => Promise<any>
     logoutGatewayCursor: () => Promise<any>
+    getGatewayZcodeStatus: () => Promise<any>
+    saveGatewayZcodeConfig: (payload: {
+      preferredModel?: string
+      thinking?: string
+      apiKey?: string
+      vmSyncEnabled?: boolean
+    }) => Promise<any>
+    startGatewayZcodeLogin: () => Promise<any>
+    logoutGatewayZcode: () => Promise<any>
     getGatewayAlphaAgentConfig: () => Promise<any>
     saveGatewayAlphaAgentConfig: (payload: {
       preferredHarness?: string

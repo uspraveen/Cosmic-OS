@@ -91,6 +91,12 @@ except (
 
 from shared.cursor_cli import cursor_cli_env, find_cursor_agent_binary
 from shared.opencode_cli import find_opencode_binary, opencode_cli_env
+from shared.zcode_cli import (
+    ensure_zcode_cli_config,
+    find_zcode_binary,
+    read_zcode_auth_state,
+    zcode_cli_env,
+)
 from shared.scratchpad import (
     derive_reconciliation_query,
     excerpt_head_and_tail,
@@ -618,6 +624,7 @@ class GatewayRuntime:
         self._recent_google_reauth_broadcasts: dict[str, float] = {}
         self._codex_login_session: dict[str, Any] | None = None
         self._cursor_login_session: dict[str, Any] | None = None
+        self._zcode_login_session: dict[str, Any] | None = None
         self._opencode_models_cache: dict[str, Any] | None = None
         self._opencode_catalog_cache: dict[str, Any] | None = None
         self._opencode_registry_cache: dict[str, Any] | None = None
@@ -805,6 +812,7 @@ class GatewayRuntime:
         await self.registry.stop_all()
         await self._stop_codex_login_session()
         await self._stop_cursor_login_session()
+        await self._stop_zcode_login_session()
         await self.model_router.stop()
         await self.orchestrator.stop()
         await self.memory_client.stop()
@@ -21641,6 +21649,328 @@ class GatewayRuntime:
             }
         )
 
+    # ── Alpha ZCode harness (Z.ai GLM) ─────────────────────────────────────
+
+    async def get_desktop_zcode_status(self) -> dict[str, Any]:
+        settings = self.agent_auth_store.get_zcode(include_secret=False)
+        cli_status = await self._zcode_cli_status()
+        pending_login = self._zcode_login_session_snapshot()
+        effective_status = self._effective_zcode_status(settings, cli_status, pending_login)
+        updated = self.agent_auth_store.save_zcode(
+            status=effective_status["status"],
+            login_required_reason=effective_status["login_required_reason"],
+            last_cli_status=cli_status,
+        )
+        return self._apply_alpha_cli_update_maintenance(
+            "zcode",
+            self._redact_codex_status(
+                {
+                    **updated,
+                    "cli": cli_status,
+                    "login_session": pending_login,
+                    "zcode_home": str(self.config.alpha_zcode_home),
+                }
+            ),
+        )
+
+    async def save_desktop_zcode_config(
+        self,
+        *,
+        preferred_model: str | None = None,
+        thinking: str | None = None,
+        api_key: str | None = None,
+        vm_sync_enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        key_value = self._safe_text(api_key)
+        # The CLI's own config file is the credential store — write auth and
+        # model/thinking defaults there (login wrote the key to the same
+        # place), then mirror state into the settings store.
+        config_result = ensure_zcode_cli_config(
+            self.config.alpha_zcode_home,
+            api_key=key_value if api_key is not None else None,
+            preferred_model=preferred_model,
+            thinking=thinking,
+        )
+        settings = self.agent_auth_store.save_zcode(
+            preferred_model=preferred_model,
+            thinking=thinking,
+            vm_sync_enabled=vm_sync_enabled,
+            has_api_key=config_result.get("has_api_key"),
+            status="stored" if config_result.get("has_api_key") else None,
+            login_required_reason=(
+                "" if config_result.get("has_api_key")
+                else ("api_key_required" if api_key is not None else None)
+            ),
+        )
+        return await self.get_desktop_zcode_status()
+
+    async def start_desktop_zcode_login(self) -> dict[str, Any]:
+        self.agent_auth_store.save_zcode(
+            status="login_required",
+            login_required_reason="zcode_login_required",
+        )
+        binary = self._zcode_binary()
+        if not binary:
+            settings = self.agent_auth_store.save_zcode(
+                status="relogin_required",
+                login_required_reason="zcode_cli_missing",
+                last_cli_status={"ok": False, "reason": "zcode_cli_missing"},
+            )
+            return self._redact_codex_status(
+                {
+                    **settings,
+                    "cli": {"available": False, "reason": "zcode_cli_missing"},
+                    "login_session": None,
+                    "zcode_home": str(self.config.alpha_zcode_home),
+                }
+            )
+
+        session = self._zcode_login_session_snapshot()
+        if session and session.get("state") == "running":
+            return await self.get_desktop_zcode_status()
+
+        await self._stop_zcode_login_session()
+        self.config.alpha_zcode_home.mkdir(parents=True, exist_ok=True)
+        # Best-effort: seed the global ~/.zcode/AGENTS.md so the user's Day-1
+        # ZCode session already has the operator instructions. The per-run
+        # hook in zcode_runner regenerates this from current VM state.
+        try:
+            from agents.alpha_agent.instructions import (
+                ensure_zcode_global_instructions,
+            )
+
+            ensure_zcode_global_instructions(
+                zcode_home=self.config.alpha_zcode_home,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.alpha_zcode_instructions_seed_failed zcode_home=%s",
+                self.config.alpha_zcode_home,
+            )
+        process = await asyncio.create_subprocess_exec(
+            binary,
+            "login",
+            "--no-browser",
+            stdin=subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._zcode_env(),
+        )
+        session_id = f"zcode_login_{uuid4().hex[:12]}"
+        session_state: dict[str, Any] = {
+            "session_id": session_id,
+            "state": "running",
+            "started_at": utcnow_iso(),
+            "stdout": [],
+            "stderr": [],
+            "returncode": None,
+        }
+        session_state["stdout_task"] = asyncio.create_task(
+            self._capture_codex_stream(process.stdout, session_state["stdout"]),
+            name=f"{session_id}-stdout",
+        )
+        session_state["stderr_task"] = asyncio.create_task(
+            self._capture_codex_stream(process.stderr, session_state["stderr"]),
+            name=f"{session_id}-stderr",
+        )
+        session_state["watch_task"] = asyncio.create_task(
+            self._watch_zcode_login_process(process, session_state),
+            name=f"{session_id}-watch",
+        )
+        session_state["process"] = process
+        self._zcode_login_session = session_state
+        await asyncio.sleep(1.25)
+        return await self.get_desktop_zcode_status()
+
+    async def logout_desktop_zcode(self) -> dict[str, Any]:
+        await self._stop_zcode_login_session()
+        logout_result = await self._run_zcode_command(["logout"], timeout_sec=20.0)
+        # Drop the key the login flow wrote into cli/config.json so the file
+        # cannot keep authenticating runs after a logout.
+        try:
+            ensure_zcode_cli_config(self.config.alpha_zcode_home, api_key="")
+        except OSError:
+            logger.exception(
+                "gateway.zcode_logout_config_reset_failed zcode_home=%s",
+                self.config.alpha_zcode_home,
+            )
+        settings = self.agent_auth_store.clear_zcode_auth(
+            status="logged_out",
+            login_required_reason="user_logged_out",
+            last_cli_status=logout_result,
+        )
+        cli_status = await self._zcode_cli_status()
+        return self._redact_codex_status(
+            {
+                **settings,
+                "cli": cli_status,
+                "login_session": None,
+                "zcode_home": str(self.config.alpha_zcode_home),
+            }
+        )
+
+    def _effective_zcode_status(
+        self,
+        settings: dict[str, Any],
+        cli_status: dict[str, Any],
+        pending_login: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        if pending_login and pending_login.get("state") == "running":
+            return {"status": "login_pending", "login_required_reason": "zcode_login_pending"}
+        if cli_status.get("authenticated"):
+            return {"status": "authenticated", "login_required_reason": ""}
+        if not cli_status.get("available", True):
+            return {"status": "relogin_required", "login_required_reason": "zcode_cli_missing"}
+        if cli_status.get("has_api_key"):
+            return {"status": "authenticated", "login_required_reason": ""}
+        if settings.get("has_api_key"):
+            # The store remembers a key the config file no longer has.
+            return {"status": "relogin_required", "login_required_reason": "api_key_relogin_required"}
+        if settings.get("auth_mode") == "oauth":
+            return {"status": "login_required", "login_required_reason": "zcode_login_required"}
+        return {"status": "not_configured", "login_required_reason": "auth_not_configured"}
+
+    def _zcode_binary(self) -> str | None:
+        return find_zcode_binary(self.config.alpha_zcode_home)
+
+    def _zcode_env(self) -> dict[str, str]:
+        return zcode_cli_env(self.config.alpha_zcode_home)
+
+    async def _run_zcode_command(
+        self,
+        args: list[str],
+        *,
+        timeout_sec: float,
+    ) -> dict[str, Any]:
+        binary = self._zcode_binary()
+        if not binary:
+            return {
+                "ok": False,
+                "available": False,
+                "returncode": None,
+                "stdout": "",
+                "stderr": "",
+                "reason": "zcode_cli_missing",
+            }
+        self.config.alpha_zcode_home.mkdir(parents=True, exist_ok=True)
+        process = await asyncio.create_subprocess_exec(
+            binary,
+            *args,
+            stdin=subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(self.config.alpha_zcode_home),
+            env=self._zcode_env(),
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout_sec,
+            )
+            return {
+                "ok": process.returncode == 0,
+                "available": True,
+                "returncode": process.returncode,
+                "stdout": stdout_bytes.decode("utf-8", errors="replace").strip(),
+                "stderr": stderr_bytes.decode("utf-8", errors="replace").strip(),
+            }
+        except TimeoutError:
+            process.kill()
+            stdout_bytes, stderr_bytes = await process.communicate()
+            return {
+                "ok": False,
+                "available": True,
+                "returncode": process.returncode,
+                "stdout": stdout_bytes.decode("utf-8", errors="replace").strip(),
+                "stderr": stderr_bytes.decode("utf-8", errors="replace").strip(),
+                "reason": "timeout",
+            }
+
+    async def _zcode_cli_status(self) -> dict[str, Any]:
+        result = await self._run_zcode_command(["--version"], timeout_sec=20.0)
+        version = ""
+        if result.get("ok"):
+            version = self._extract_semver(result.get("stdout") or "")
+        auth_state = read_zcode_auth_state(self.config.alpha_zcode_home)
+        return {
+            **result,
+            "version": version,
+            "authenticated": bool(result.get("available", False)) and bool(auth_state.get("has_api_key")),
+            "has_api_key": bool(auth_state.get("has_api_key")),
+            "main_model": auth_state.get("main_model") or "",
+            "zcode_home": str(self.config.alpha_zcode_home),
+        }
+
+    async def _watch_zcode_login_process(
+        self,
+        process: asyncio.subprocess.Process,
+        session_state: dict[str, Any],
+    ) -> None:
+        returncode = await process.wait()
+        session_state["returncode"] = returncode
+        session_state["state"] = "completed" if returncode == 0 else "failed"
+        session_state["completed_at"] = utcnow_iso()
+        # A successful login writes the coding-plan API key into
+        # cli/config.json; fold that into the store's view of the world.
+        auth_state = read_zcode_auth_state(self.config.alpha_zcode_home)
+        main_model = str(auth_state.get("main_model") or "").strip()
+        preferred_model = main_model.split("/", 1)[1] if "/" in main_model else ""
+        self.agent_auth_store.save_zcode(
+            status="authenticated" if returncode == 0 and auth_state.get("has_api_key") else "relogin_required",
+            login_required_reason=(
+                "" if returncode == 0 and auth_state.get("has_api_key") else "zcode_login_failed"
+            ),
+            has_api_key=bool(auth_state.get("has_api_key")),
+            preferred_model=preferred_model or None,
+            last_cli_status=self._zcode_login_session_snapshot() or {},
+        )
+
+    def _zcode_login_session_snapshot(self) -> dict[str, Any] | None:
+        session = self._zcode_login_session
+        if not session:
+            return None
+        process = session.get("process")
+        returncode = process.returncode if process is not None else session.get("returncode")
+        state = session.get("state")
+        if returncode is not None and state == "running":
+            state = "completed" if returncode == 0 else "failed"
+        return {
+            "session_id": session.get("session_id"),
+            "state": state,
+            "started_at": session.get("started_at"),
+            "completed_at": session.get("completed_at"),
+            "returncode": returncode,
+            "stdout": list(session.get("stdout") or []),
+            "stderr": list(session.get("stderr") or []),
+        }
+
+    async def _stop_zcode_login_session(self) -> None:
+        session = self._zcode_login_session
+        if not session:
+            return
+        process = session.get("process")
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3.0)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        tasks = [
+            task
+            for task in (
+                session.get("stdout_task"),
+                session.get("stderr_task"),
+                session.get("watch_task"),
+            )
+            if isinstance(task, asyncio.Task)
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._zcode_login_session = None
+
     async def get_desktop_alpha_agent_config(self) -> dict[str, Any]:
         return self.preference_store.get_alpha_execution_provider()
 
@@ -21975,12 +22305,14 @@ class GatewayRuntime:
         preference = self.preference_store.get_alpha_execution_provider()
         providers: dict[str, Any] = {}
         update_outcomes = self._alpha_cli_update_state.get("providers") or {}
-        for provider in ("opencode", "codex", "cursor"):
+        for provider in ("opencode", "codex", "cursor", "zcode"):
             try:
                 if provider == "opencode":
                     status = await self.get_desktop_opencode_status()
                 elif provider == "cursor":
                     status = await self.get_desktop_cursor_status()
+                elif provider == "zcode":
+                    status = await self.get_desktop_zcode_status()
                 else:
                     status = await self.get_desktop_codex_status()
                 outcome = update_outcomes.get(provider) or {}
@@ -22385,6 +22717,26 @@ class GatewayRuntime:
             "checked_at": utcnow_iso(),
         }
 
+    async def _update_zcode_cli(self) -> dict[str, Any]:
+        # The zcode.cjs runtime never self-updates; bootstrap replaces it from
+        # the official AppImage on VM fast-forwards. Record freshness only —
+        # a 200 MB download is not something the daily loop should race into
+        # an active harness.
+        probe = await self._run_zcode_command(["--version"], timeout_sec=20.0)
+        version = (
+            self._extract_semver(probe.get("stdout") or probe.get("stderr") or "")
+            if probe.get("ok")
+            else ""
+        )
+        if not probe.get("available", False):
+            return {"provider": "zcode", "action": "skipped", "reason": "zcode_cli_missing"}
+        return {
+            "provider": "zcode",
+            "action": "self_managed",
+            "installed": version or None,
+            "checked_at": utcnow_iso(),
+        }
+
     async def _alpha_cli_update_loop(self) -> None:
         # Sleep toward ~04:10 local before the first sweep: the gateway may
         # boot at any moment of day, and rushing an npm install into a fresh
@@ -22404,6 +22756,7 @@ class GatewayRuntime:
                 ("codex", self._update_codex_cli()),
                 ("opencode", self._update_opencode_cli()),
                 ("cursor", self._update_cursor_cli()),
+                ("zcode", self._update_zcode_cli()),
             ):
                 if provider in self._alpha_cli_update_in_flight:
                     continue
@@ -22804,7 +23157,9 @@ class GatewayRuntime:
         if not value:
             return ""
         redacted = re.sub(r"sk-[^\s\"']{4,}", "sk-...redacted", value)
-        return re.sub(r"cursor_[^\s\"']{8,}", "cursor_...redacted", redacted, flags=re.IGNORECASE)
+        redacted = re.sub(r"cursor_[^\s\"']{8,}", "cursor_...redacted", redacted, flags=re.IGNORECASE)
+        # Z.ai login material (JWT access tokens) must never reach a panel.
+        return re.sub(r"eyJ[A-Za-z0-9._-]{16,}", "<redacted-jwt>", redacted)
 
     def _normalize_codex_auth_mode(self, value: str | None) -> str:
         normalized = self._safe_text(value)

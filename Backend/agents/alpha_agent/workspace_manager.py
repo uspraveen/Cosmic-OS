@@ -13,6 +13,7 @@ class WorkspacePaths:
     codex_home: Path
     opencode_home: Path
     cursor_home: Path
+    zcode_home: Path
     deployments: Path
     caches: Path
 
@@ -25,6 +26,7 @@ class WorkspacePaths:
             "codex_home": str(self.codex_home),
             "opencode_home": str(self.opencode_home),
             "cursor_home": str(self.cursor_home),
+            "zcode_home": str(self.zcode_home),
             "deployments": str(self.deployments),
             "caches": str(self.caches),
         }
@@ -38,6 +40,7 @@ class WorkspaceManager:
         codex_home: str | Path | None = None,
         cursor_home: str | Path | None = None,
         opencode_home: str | Path | None = None,
+        zcode_home: str | Path | None = None,
     ) -> None:
         self.alpha_root = Path(alpha_root).expanduser()
         self.codex_home = Path(codex_home).expanduser() if codex_home else self.alpha_root / "homes" / "codex"
@@ -45,6 +48,7 @@ class WorkspaceManager:
         self.opencode_home = (
             Path(opencode_home).expanduser() if opencode_home else self.alpha_root / "homes" / "opencode"
         )
+        self.zcode_home = Path(zcode_home).expanduser() if zcode_home else self.alpha_root / "homes" / "zcode"
 
     def ensure_base_layout(self) -> None:
         for child in (
@@ -53,6 +57,7 @@ class WorkspaceManager:
             "homes/codex",
             "homes/opencode",
             "homes/cursor",
+            "homes/zcode",
             "deployments",
             "caches",
         ):
@@ -70,6 +75,7 @@ class WorkspaceManager:
             codex_home=self.codex_home,
             opencode_home=self.opencode_home,
             cursor_home=self.cursor_home,
+            zcode_home=self.zcode_home,
             deployments=self.alpha_root / "deployments",
             caches=self.alpha_root / "caches",
         )
@@ -79,6 +85,7 @@ class WorkspaceManager:
             paths.codex_home,
             paths.opencode_home,
             paths.cursor_home,
+            paths.zcode_home,
             paths.deployments,
             paths.caches,
         ):

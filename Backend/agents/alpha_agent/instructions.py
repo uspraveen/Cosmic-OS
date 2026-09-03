@@ -419,6 +419,13 @@ def _cli_identity_line(cli: str) -> str:
             "model; tool calls stream as JSON events. Keep going until the "
             "goal is finished — there is no human to approve anything mid-run."
         )
+    if cli == "zcode":
+        return (
+            "You are running as the **ZCode CLI** (`zcode --prompt` in headless "
+            "yolo mode) on a GLM-5.3-family model. Keep going until the goal is "
+            "finished — there is no human to approve anything mid-run. The "
+            "final `response` field of your run is what the operator reads."
+        )
     return ""
 
 
@@ -609,6 +616,7 @@ def render_workspace_instructions(
 CODEX_GLOBAL_INSTRUCTIONS_RELATIVE = "AGENTS.md"
 CURSOR_GLOBAL_INSTRUCTIONS_RELATIVE = Path(".cursor") / "rules" / "cosmic.md"
 OPENCODE_GLOBAL_INSTRUCTIONS_RELATIVE = Path(".config") / "opencode" / "AGENTS.md"
+ZCODE_GLOBAL_INSTRUCTIONS_RELATIVE = Path(".zcode") / "AGENTS.md"
 WORKSPACE_INSTRUCTIONS_FILENAME = "AGENTS.md"
 
 
@@ -679,11 +687,32 @@ def ensure_opencode_global_instructions(
     return {"path": str(target), "wrote": wrote, "bytes": len(content.encode("utf-8"))}
 
 
+def ensure_zcode_global_instructions(
+    *,
+    zcode_home: Path,
+) -> dict[str, object]:
+    """Idempotently write the Alpha AGENTS.md into the ZCode home.
+
+    The CLI reads the user-level `~/.zcode/AGENTS.md` on top of the AGENTS.md
+    walk from the working directory; the Alpha home overrides HOME, so this
+    lives inside the ZCode home.
+    """
+    content = render_global_instructions(cli="zcode")
+    target = Path(zcode_home).expanduser() / ZCODE_GLOBAL_INSTRUCTIONS_RELATIVE
+    try:
+        wrote = _atomic_write_if_changed(target, content)
+    except OSError:
+        logger.exception("alpha.instructions.zcode_write_failed path=%s", target)
+        return {"path": str(target), "wrote": False, "error": True}
+    return {"path": str(target), "wrote": wrote, "bytes": len(content.encode("utf-8"))}
+
+
 def ensure_alpha_global_instructions(
     *,
     codex_home: Path | None = None,
     cursor_home: Path | None = None,
     opencode_home: Path | None = None,
+    zcode_home: Path | None = None,
     codex_sandbox: str | None = None,
 ) -> dict[str, dict[str, object]]:
     """Write whichever home(s) the caller passes. Idempotent and never raises.
@@ -703,6 +732,8 @@ def ensure_alpha_global_instructions(
         result["opencode"] = ensure_opencode_global_instructions(
             opencode_home=opencode_home
         )
+    if zcode_home is not None:
+        result["zcode"] = ensure_zcode_global_instructions(zcode_home=zcode_home)
     return result
 
 

@@ -2861,6 +2861,58 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:get-zcode-status', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/zcode/status', { timeoutMs: 25000 })
+  })
+
+  ipcMain.handle('gateway:save-zcode-config', async (_, payload: {
+    preferredModel?: string
+    thinking?: string
+    apiKey?: string
+    vmSyncEnabled?: boolean
+  }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/zcode/config', {
+      method: 'POST',
+      body: {
+        preferred_model: payload?.preferredModel,
+        thinking: payload?.thinking,
+        api_key: payload?.apiKey,
+        vm_sync_enabled: payload?.vmSyncEnabled,
+      },
+      timeoutMs: 45000,
+    })
+  })
+
+  ipcMain.handle('gateway:start-zcode-login', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/zcode/login/start', {
+      method: 'POST',
+      timeoutMs: 30000,
+    })
+  })
+
+  ipcMain.handle('gateway:logout-zcode', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/agents/zcode/auth', {
+      method: 'DELETE',
+      timeoutMs: 30000,
+    })
+  })
+
   ipcMain.handle('gateway:get-alpha-agent-config', async () => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

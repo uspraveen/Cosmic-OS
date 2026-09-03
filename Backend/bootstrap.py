@@ -71,6 +71,7 @@ DEFAULT_DIAGRAM_PUPPETEER_CACHE_DIR = Path("/var/lib/cosmic/diagram-agent/puppet
 DEFAULT_MEMORY_DATA_DIR = Path("/var/lib/cosmic/memory")
 DEFAULT_ALPHA_CURSOR_HOME = Path("/var/lib/cosmic/alpha/homes/cursor")
 DEFAULT_ALPHA_OPENCODE_HOME = Path("/var/lib/cosmic/alpha/homes/opencode")
+DEFAULT_ALPHA_ZCODE_HOME = Path("/var/lib/cosmic/alpha/homes/zcode")
 DEFAULT_NEO4J_APT_KEY_URL = "https://debian.neo4j.com/neotechnology.gpg.key"
 DEFAULT_NEO4J_APT_KEYRING_PATH = Path("/etc/apt/keyrings/neotechnology.gpg")
 DEFAULT_NEO4J_APT_SOURCE_PATH = Path("/etc/apt/sources.list.d/neo4j.list")
@@ -185,6 +186,28 @@ MERMAID_CLI_PACKAGE = "@mermaid-js/mermaid-cli"
 OPENAI_CODEX_CLI_PACKAGE = "@openai/codex"
 OPENCODE_CLI_PACKAGE = "opencode-ai"
 CURSOR_CLI_INSTALL_URL = "https://cursor.com/install"
+# ZCode has no npm package; the CLI ships inside the official desktop
+# AppImage. Bootstrap downloads it, extracts the glm/ runtime with the
+# AppImage's own `--appimage-extract` (no FUSE required), and installs a
+# `zcode` wrapper on PATH. Pin via ZCODE_CLI_VERSION; override the CDN with
+# ZCODE_CLI_DOWNLOAD_BASE if Z.ai ever moves it.
+ZCODE_CLI_VERSION = (os.getenv("ZCODE_CLI_VERSION") or "3.10.2").strip()
+ZCODE_CLI_DOWNLOAD_BASE = (
+    os.getenv("ZCODE_CLI_DOWNLOAD_BASE")
+    or "https://cdn-zcode.z.ai/zcode/electron/releases"
+).rstrip("/")
+ZCODE_CLI_INSTALL_ROOT = Path("/usr/local/lib/cosmic/zcode")
+ZCODE_CLI_WRAPPER_PATH = Path("/usr/local/bin/zcode")
+# The zcode.cjs runtime uses the built-in `node:sqlite` module, available
+# unflagged only from Node 22.13. VMs provisioned today ship Node 20, and
+# upgrading the system toolchain would churn every other service — so bootstrap
+# installs a dedicated runtime under the ZCode install root and the wrapper
+# prefers it. The system `node` remains the fallback for boxes that qualify.
+ZCODE_MIN_NODE_TUPLE = (22, 13, 0)
+ZCODE_NODE_VERSION = (os.getenv("ZCODE_NODE_VERSION") or "v22.23.2").strip()
+ZCODE_NODE_DIST_BASE = (
+    os.getenv("ZCODE_NODE_DIST_BASE") or "https://nodejs.org/dist"
+).rstrip("/")
 DEFAULT_RETRY_ATTEMPTS = 4
 DEFAULT_RETRY_INITIAL_DELAY_SEC = 1.5
 PACKAGE_NAMES: Dict[str, Dict[str, str]] = {
@@ -3360,12 +3383,18 @@ def build_alpha_agent_env_rendered(
             "ALPHA_OPENCODE_HOME", "/var/lib/cosmic/alpha/homes/opencode"
         )
         or "/var/lib/cosmic/alpha/homes/opencode",
+        "ALPHA_ZCODE_HOME": pick_env(
+            "ALPHA_ZCODE_HOME", "/var/lib/cosmic/alpha/homes/zcode"
+        )
+        or "/var/lib/cosmic/alpha/homes/zcode",
         "ALPHA_CODEX_MODEL": pick_env("ALPHA_CODEX_MODEL", "gpt-5.6-terra")
         or "gpt-5.6-terra",
         "ALPHA_CURSOR_MODEL": pick_env("ALPHA_CURSOR_MODEL", "cursor-grok-4.6-high")
         or "cursor-grok-4.6-high",
         "ALPHA_OPENCODE_MODEL": pick_env("ALPHA_OPENCODE_MODEL", "mimo-v2.5-free")
         or "mimo-v2.5-free",
+        "ALPHA_ZCODE_MODEL": pick_env("ALPHA_ZCODE_MODEL", "glm-5.3-flash")
+        or "glm-5.3-flash",
         "ALPHA_CODEX_SANDBOX": pick_env("ALPHA_CODEX_SANDBOX", "danger-full-access")
         or "danger-full-access",
         "ALPHA_CODEX_TIMEOUT_SEC": pick_env("ALPHA_CODEX_TIMEOUT_SEC", "14400") or "14400",
@@ -4553,6 +4582,212 @@ def ensure_opencode_cli_layout() -> None:
         DEFAULT_ALPHA_OPENCODE_HOME.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         log("WARNING: unable to create Alpha OpenCode home: {0}".format(exc))
+
+
+def ensure_zcode_cli() -> None:
+    """Install/refresh the ZCode CLI used by the Alpha agent runner.
+
+    ZCode (Z.ai's GLM harness) ships its CLI as a self-contained zcode.cjs
+    inside the desktop AppImage — there is no npm package. We download the
+    official AppImage, extract just `resources/glm` with the AppImage runtime's
+    built-in `--appimage-extract` (works without FUSE), install it under
+    /usr/local/lib/cosmic/zcode, and put a `zcode` wrapper on PATH. Because
+    zcode.cjs needs Node >= 22.13 (`node:sqlite`), a dedicated Node runtime is
+    installed alongside it when the system Node is too old; the system
+    toolchain is never touched. Existing installs are left alone unless
+    missing, so a working box never churns.
+    """
+    ensure_node_toolchain()
+    zcode_version = executable_version(["zcode", "--version"])
+    if zcode_version:
+        log("ZCode CLI available: {0}".format(zcode_version))
+        ensure_zcode_cli_layout()
+        return
+
+    node_binary = _ensure_zcode_node_runtime()
+    arch = {"x86_64": "x64", "aarch64": "arm64", "armv7l": "arm64"}.get(
+        (os.uname().machine if hasattr(os, "uname") else "").lower(),
+        "x64",
+    )
+    appimage_name = "ZCode-{0}-linux-{1}.AppImage".format(ZCODE_CLI_VERSION, arch)
+    download_url = "{0}/{1}/linux-{2}/{3}".format(
+        ZCODE_CLI_DOWNLOAD_BASE, ZCODE_CLI_VERSION, arch, appimage_name
+    )
+    log("Installing ZCode CLI {0} from the official AppImage.".format(ZCODE_CLI_VERSION))
+    with tempfile.TemporaryDirectory(prefix="cosmic-zcode-") as workdir:
+        appimage_path = Path(workdir) / appimage_name
+        try:
+            run_with_retry(
+                [
+                    "bash",
+                    "-lc",
+                    "curl {0} -fsSL --retry 3 -o '{1}' '{2}'".format(
+                        "-sS", shlex.quote(str(appimage_path)), download_url
+                    ),
+                ],
+                capture_output=False,
+            )
+        except Exception as exc:
+            raise BootstrapError(
+                "ZCode CLI AppImage download failed ({0}): {1}".format(download_url, exc)
+            )
+        try:
+            appimage_path.chmod(0o755)
+            subprocess.run(
+                [str(appimage_path), "--appimage-extract", "resources/glm"],
+                cwd=workdir,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise BootstrapError(
+                "ZCode CLI extraction failed — the AppImage runtime refused "
+                "`--appimage-extract`: {0}".format(exc)
+            )
+        source = Path(workdir) / "squashfs-root" / "resources" / "glm"
+        zcode_cjs = source / "zcode.cjs"
+        if not zcode_cjs.is_file():
+            raise BootstrapError(
+                "ZCode CLI payload missing after extraction (no resources/glm/zcode.cjs)."
+            )
+        try:
+            install_root = ZCODE_CLI_INSTALL_ROOT
+            install_root.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(zcode_cjs, install_root / "zcode.cjs")
+            packages_dir = source / "packages"
+            if packages_dir.is_dir():
+                target_packages = install_root / "packages"
+                if target_packages.exists():
+                    shutil.rmtree(target_packages, ignore_errors=True)
+                shutil.copytree(packages_dir, target_packages)
+        except OSError as exc:
+            raise BootstrapError("ZCode CLI install failed: {0}".format(exc))
+
+    wrapper = (
+        "#!/usr/bin/env bash\n"
+        "# Installed by COSMIC bootstrap — the ZCode CLI runtime for Alpha.\n"
+        "# Prefers the dedicated Node runtime; falls back to system node.\n"
+        'ZCODE_NODE="{0}"\n'
+        'if [ ! -x "$ZCODE_NODE" ]; then ZCODE_NODE="$(command -v node)"; fi\n'
+        'exec "$ZCODE_NODE" "{1}" "$@"\n'.format(
+            ZCODE_CLI_INSTALL_ROOT / "node" / "bin" / "node",
+            ZCODE_CLI_INSTALL_ROOT / "zcode.cjs",
+        )
+    )
+    try:
+        ZCODE_CLI_WRAPPER_PATH.write_text(wrapper, encoding="utf-8")
+        ZCODE_CLI_WRAPPER_PATH.chmod(0o755)
+    except OSError as exc:
+        raise BootstrapError(
+            "Unable to write the zcode wrapper at {0}: {1}".format(ZCODE_CLI_WRAPPER_PATH, exc)
+        )
+
+    zcode_version = executable_version(["zcode", "--version"])
+    if not zcode_version:
+        raise BootstrapError("ZCode CLI is still unavailable after install.")
+    log("ZCode CLI available: {0}".format(zcode_version))
+    ensure_zcode_cli_layout()
+
+
+def _node_version_tuple(node_binary: str) -> tuple[int, ...]:
+    try:
+        completed = subprocess.run(
+            [node_binary, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    match = re.match(r"v?(\d+)\.(\d+)\.(\d+)", (completed.stdout or "").strip())
+    if not match:
+        return ()
+    return tuple(int(part) for part in match.groups())
+
+
+def _ensure_zcode_node_runtime() -> str:
+    """Return a node binary path that satisfies zcode.cjs's runtime floor.
+
+    The system node is used as-is when new enough. Otherwise a pinned Node
+    runtime is downloaded under the ZCode install root — completely separate
+    from the system toolchain that codex/opencode/cursor and the COSMIC
+    services rely on.
+    """
+    system_node = shutil.which("node")
+    if system_node and _node_version_tuple(system_node) >= ZCODE_MIN_NODE_TUPLE:
+        return system_node
+
+    dedicated = ZCODE_CLI_INSTALL_ROOT / "node" / "bin" / "node"
+    if dedicated.exists() and _node_version_tuple(str(dedicated)) >= ZCODE_MIN_NODE_TUPLE:
+        return str(dedicated)
+
+    arch = {"x86_64": "x64", "aarch64": "arm64"}.get(
+        (os.uname().machine if hasattr(os, "uname") else "").lower(),
+        "x64",
+    )
+    tarball = "{0}-linux-{1}.tar.xz".format(ZCODE_NODE_VERSION, arch)
+    download_url = "{0}/{1}/{2}".format(ZCODE_NODE_DIST_BASE, ZCODE_NODE_VERSION, tarball)
+    log(
+        "System node is too old for zcode.cjs (need >= {0}); installing dedicated {1}.".format(
+            ".".join(str(part) for part in ZCODE_MIN_NODE_TUPLE),
+            ZCODE_NODE_VERSION,
+        )
+    )
+    with tempfile.TemporaryDirectory(prefix="cosmic-zcode-node-") as workdir:
+        tarball_path = Path(workdir) / tarball
+        try:
+            run_with_retry(
+                [
+                    "bash",
+                    "-lc",
+                    "curl -sS -fSL --retry 3 -o '{0}' '{1}'".format(
+                        shlex.quote(str(tarball_path)), download_url
+                    ),
+                ],
+                capture_output=False,
+            )
+            tarball_path.chmod(0o644)
+            subprocess.run(
+                ["tar", "-xJf", str(tarball_path), "-C", workdir],
+                check=True,
+                capture_output=True,
+                timeout=300,
+            )
+        except Exception as exc:
+            raise BootstrapError(
+                "Dedicated Node {0} download/extract failed ({1}): {2}".format(
+                    ZCODE_NODE_VERSION, download_url, exc
+                )
+            )
+        extracted = Path(workdir) / "{0}-linux-{1}".format(ZCODE_NODE_VERSION, arch)
+        if not (extracted / "bin" / "node").is_file():
+            raise BootstrapError(
+                "Dedicated Node archive did not contain the expected layout."
+            )
+        try:
+            target = ZCODE_CLI_INSTALL_ROOT / "node"
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(extracted, target)
+        except OSError as exc:
+            raise BootstrapError(
+                "Unable to install the dedicated ZCode Node runtime: {0}".format(exc)
+            )
+    if not dedicated.exists():
+        raise BootstrapError("Dedicated ZCode Node runtime is missing after install.")
+    return str(dedicated)
+
+
+def ensure_zcode_cli_layout() -> None:
+    """Pre-create the Alpha ZCode home so Day-1 runs never hit ENOENT."""
+    try:
+        DEFAULT_ALPHA_ZCODE_HOME.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log("WARNING: unable to create Alpha ZCode home: {0}".format(exc))
 
 
 def load_package_json(package_json: Path) -> dict:
@@ -6254,6 +6489,11 @@ def doctor(
         )
     )
     print(
+        "  zcode cli          : {0}".format(
+            executable_version(["zcode", "--version"]) or "no"
+        )
+    )
+    print(
         "  bridge dir         : {0}".format(
             bridge_dir if bridge_dir.exists() else "missing"
         )
@@ -7842,6 +8082,7 @@ def bootstrap(
     ensure_openai_codex_cli()
     ensure_cursor_cli()
     ensure_opencode_cli()
+    ensure_zcode_cli()
     if not skip_edge and edge_setup_script is not None and gateway_env_path is not None:
         setup_vm_edge(
             edge_setup_script,
@@ -8282,6 +8523,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install/refresh the OpenCode CLI used by the Alpha agent runner.",
     )
     subparsers.add_parser(
+        "setup-zcode-cli",
+        help="Install/refresh the ZCode CLI used by the Alpha agent runner.",
+    )
+    subparsers.add_parser(
         "setup-env",
         help="Create missing env files from committed *.env.example templates.",
     )
@@ -8420,6 +8665,8 @@ def main() -> int:
             ensure_cursor_cli()
         elif command == "setup-opencode-cli":
             ensure_opencode_cli()
+        elif command == "setup-zcode-cli":
+            ensure_zcode_cli()
         elif command == "setup-edge":
             setup_vm_edge(
                 edge_setup_script,

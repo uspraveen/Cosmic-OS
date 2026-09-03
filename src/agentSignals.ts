@@ -249,7 +249,7 @@ const LABEL_GLYPHS: Array<[RegExp, GlyphId, string]> = [
   [/\bslide(s|deck)?\b|\bpresentation\b/, 'slides', 'Slides'],
   [/\bdiagram\b/, 'diagram', 'Diagrams'],
   [/\bimage\b|\bpicture\b|\bcollage\b/, 'image', 'Images'],
-  [/\bterminal\b|\bcursor cli\b|\bcodex\b|\balpha agent\b/, 'terminal', 'Alpha agent'],
+  [/\bterminal\b|\bcursor cli\b|\bcodex\b|\bzcode\b|\balpha agent\b/, 'terminal', 'Alpha agent'],
   [/\breason(ing|ed)?\b|\bthinking\b|\bthought\b/, 'think', 'Reasoning'],
   [/\bwrit(ing|es|e) the response\b|\bcomposing\b/, 'cosmic', 'Cosmic'],
 ]

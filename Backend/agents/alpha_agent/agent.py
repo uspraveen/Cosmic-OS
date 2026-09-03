@@ -24,13 +24,14 @@ from .opencode_runner import OpenCodeRunResult, OpenCodeWorkspaceRunner
 from .project_registry import HarnessSessionRecord, ProjectCandidate, ProjectRecord, ProjectRegistry
 from .repo_sync import RepoCheckout, RepoWorktree
 from .workspace_manager import WorkspaceManager, WorkspacePaths
+from .zcode_runner import ZcodeRunResult, ZcodeWorkspaceRunner
 
 logger = logging.getLogger(__name__)
 
 
 # Canonical provider order: "auto" and cross-provider fallback resolve in
 # this order (OpenCode first — it is the COSMIC default harness).
-ALPHA_HARNESSES: tuple[str, ...] = ("opencode", "codex", "cursor")
+ALPHA_HARNESSES: tuple[str, ...] = ("opencode", "codex", "cursor", "zcode")
 
 
 class AlphaAgent(AgentRuntime):
@@ -49,11 +50,13 @@ class AlphaAgent(AgentRuntime):
             codex_home=self.config.codex_home,
             cursor_home=self.config.cursor_home,
             opencode_home=self.config.opencode_home,
+            zcode_home=self.config.zcode_home,
         )
         self.docker_runner = DockerWorkspaceRunner(self.config)
         self.codex_runner = CodexWorkspaceRunner(self.config)
         self.cursor_runner = CursorWorkspaceRunner(self.config)
         self.opencode_runner = OpenCodeWorkspaceRunner(self.config)
+        self.zcode_runner = ZcodeWorkspaceRunner(self.config)
         self.repo_worktree = RepoWorktree(
             self.config.repos_dir,
             timeout_sec=self.config.repo_sync_timeout_sec,
@@ -261,7 +264,7 @@ class AlphaAgent(AgentRuntime):
             return self._fail(
                 code="UNSUPPORTED_OPERATION",
                 message=(
-                    "Alpha supports Codex, Cursor CLI and OpenCode execution. "
+                    "Alpha supports Codex, Cursor CLI, OpenCode and ZCode execution. "
                     f"Set preferred_harness to one of: {', '.join(ALPHA_HARNESSES)}."
                 ),
                 next_action="ask_user",
@@ -292,7 +295,7 @@ class AlphaAgent(AgentRuntime):
         all_artifacts: list[Any] = []
         attempt_outputs: dict[str, Any] = {}
         fallback_from: dict[str, Any] | None = None
-        last_result: CodexRunResult | CursorRunResult | OpenCodeRunResult | None = None
+        last_result: CodexRunResult | CursorRunResult | OpenCodeRunResult | ZcodeRunResult | None = None
         last_provider = candidate_harnesses[0]
         # Harnesses beyond the original attempt plan exist only so the
         # pre-execution auth walk can rotate to a logged-in provider when the
@@ -434,6 +437,37 @@ class AlphaAgent(AgentRuntime):
                     resume_session_id=native_session.native_session_id if native_session else None,
                     variant=selected_variant,
                     timeout_sec=self.config.opencode_timeout_sec,
+                    event_callback=emit_alpha_terminal,
+                    cancel_check=cancel_check,
+                )
+            elif active_harness == "zcode":
+                selected_model = self._select_zcode_model(task, provider_status)
+                selected_thinking = self._select_zcode_thinking(task, provider_status)
+                await emit_alpha_terminal(
+                    {
+                        "stream": "system",
+                        "event_type": "zcode.model.selected",
+                        "text": (
+                            f"ZCode model selected: {selected_model or 'auto'}"
+                            + (f" · thinking {selected_thinking}" if selected_thinking else "")
+                        ),
+                        "detail": "Model rides ZCODE_MODEL per run; the thinking default is ensured in the ZCode home config.",
+                    }
+                )
+                native_session = await self._prepare_zcode_native_session(
+                    task=task,
+                    project=project,
+                    paths=paths,
+                    model=selected_model,
+                    emit=emit_alpha_terminal,
+                )
+                run_result = await self.zcode_runner.run(
+                    paths=paths,
+                    prompt=prompt,
+                    model=selected_model,
+                    thinking=selected_thinking,
+                    resume_session_id=native_session.native_session_id if native_session else None,
+                    timeout_sec=self.config.zcode_timeout_sec,
                     event_callback=emit_alpha_terminal,
                     cancel_check=cancel_check,
                 )
@@ -937,7 +971,7 @@ class AlphaAgent(AgentRuntime):
         base_prompt: str,
         *,
         fallback_from: dict[str, Any] | None,
-        previous_result: CodexRunResult | CursorRunResult | OpenCodeRunResult | None,
+        previous_result: CodexRunResult | CursorRunResult | OpenCodeRunResult | ZcodeRunResult | None,
     ) -> str:
         if not fallback_from:
             return base_prompt
@@ -962,12 +996,12 @@ class AlphaAgent(AgentRuntime):
                 details.append(f"- previous_last_message_tail: {last_message[-2000:]}")
         return base_prompt + "\n" + "\n".join(details)
 
-    def _should_try_next_harness(self, result: CodexRunResult | CursorRunResult | OpenCodeRunResult) -> bool:
+    def _should_try_next_harness(self, result: CodexRunResult | CursorRunResult | OpenCodeRunResult | ZcodeRunResult) -> bool:
         if getattr(result, "cancelled", False):
             return False
         return not result.ok
 
-    def _failure_reason(self, provider: str, result: CodexRunResult | CursorRunResult | OpenCodeRunResult) -> str:
+    def _failure_reason(self, provider: str, result: CodexRunResult | CursorRunResult | OpenCodeRunResult | ZcodeRunResult) -> str:
         if getattr(result, "cancelled", False):
             return f"{self._harness_label(provider)} was cancelled."
         if getattr(result, "init_timed_out", False):
@@ -1028,7 +1062,25 @@ class AlphaAgent(AgentRuntime):
                 if isinstance(keys, dict) else {}
             )
             return status
+        if provider == "zcode":
+            return await self._fetch_zcode_status()
         return await self._fetch_codex_status()
+
+    async def _fetch_zcode_status(self) -> dict[str, Any]:
+        if not self.gateway_internal_token:
+            return {
+                "status": "unknown",
+                "login_required_reason": "gateway_internal_token_missing",
+                "cli": {"authenticated": False},
+            }
+        response = await self._http_client.get(
+            f"{self.gateway_url.rstrip('/')}/internal/agents/zcode/status",
+            headers={"Authorization": f"Bearer {self.gateway_internal_token}"},
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
 
     async def _fetch_opencode_status(self) -> dict[str, Any]:
         if not self.gateway_internal_token:
@@ -1089,6 +1141,7 @@ class AlphaAgent(AgentRuntime):
             "codex": "Codex",
             "cursor": "Cursor",
             "opencode": "OpenCode",
+            "zcode": "ZCode",
         }.get(provider, provider.title())
         return (
             f"{label} is not ready for Alpha execution. "
@@ -1100,6 +1153,8 @@ class AlphaAgent(AgentRuntime):
             return "Cursor CLI"
         if provider == "opencode":
             return "OpenCode"
+        if provider == "zcode":
+            return "ZCode"
         return "Codex"
 
     def _harness_start_message(self, provider: str) -> str:
@@ -1107,6 +1162,8 @@ class AlphaAgent(AgentRuntime):
             return "cursor-agent --print --force --trust --sandbox disabled --output-format stream-json started"
         if provider == "opencode":
             return "opencode run --auto started"
+        if provider == "zcode":
+            return "zcode --prompt --mode yolo --json started"
         return "codex exec --json started"
 
     async def _prepare_cursor_native_session(
@@ -1224,7 +1281,7 @@ class AlphaAgent(AgentRuntime):
         paths: WorkspacePaths,
         task: TaskEnvelope,
         model: str | None,
-        result: CodexRunResult | CursorRunResult | OpenCodeRunResult,
+        result: CodexRunResult | CursorRunResult | OpenCodeRunResult | ZcodeRunResult,
         existing: HarnessSessionRecord | None,
     ) -> HarnessSessionRecord | None:
         observed = self._optional_string(getattr(result, "native_session_id", None))
@@ -1253,7 +1310,7 @@ class AlphaAgent(AgentRuntime):
         *,
         session: HarnessSessionRecord | None,
         task: TaskEnvelope,
-        result: CodexRunResult | CursorRunResult | OpenCodeRunResult,
+        result: CodexRunResult | CursorRunResult | OpenCodeRunResult | ZcodeRunResult,
         provider: str,
     ) -> HarnessSessionRecord | None:
         if session is None:
@@ -1294,6 +1351,8 @@ class AlphaAgent(AgentRuntime):
             keys.extend(["codex_session_id"])
         elif harness == "opencode":
             keys.extend(["opencode_session_id"])
+        elif harness == "zcode":
+            keys.extend(["zcode_session_id"])
         for key in keys:
             value = self._optional_string(task.input.get(key))
             if value:
@@ -1390,6 +1449,103 @@ class AlphaAgent(AgentRuntime):
                     }
                 )
                 return session
+        return None
+
+    async def _prepare_zcode_native_session(
+        self,
+        *,
+        task: TaskEnvelope,
+        project: ProjectRecord,
+        paths: WorkspacePaths,
+        model: str | None,
+        emit: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> HarnessSessionRecord | None:
+        policy = self._native_resume_policy(task)
+        if policy == "disabled":
+            return None
+
+        forced_native_id = self._forced_native_session_id(task, harness="zcode")
+        if forced_native_id:
+            session = self.registry.record_harness_session(
+                project_id=project.project_id,
+                harness="zcode",
+                native_session_id=forced_native_id,
+                workspace_path=str(paths.workspace),
+                task_id=task.task_id,
+                model=model,
+                status="active",
+                metadata={"source": "task_input", "policy": policy},
+            )
+            await emit(
+                {
+                    "stream": "system",
+                    "event_type": "zcode.native_session.resuming",
+                    "text": f"Resuming ZCode session {forced_native_id}.",
+                    "detail": f"project_id={project.project_id}; session_id={session.session_id}",
+                }
+            )
+            return session
+
+        if policy != "fresh":
+            existing = self.registry.best_harness_session(
+                project.project_id,
+                harness="zcode",
+                workspace_path=str(paths.workspace),
+                model=model,
+            )
+            if existing is not None:
+                session = self.registry.record_harness_session(
+                    project_id=project.project_id,
+                    harness="zcode",
+                    native_session_id=existing.native_session_id,
+                    workspace_path=str(paths.workspace),
+                    task_id=task.task_id,
+                    model=model or existing.model,
+                    status="active",
+                    metadata={**existing.metadata, "source": "registry_resume", "policy": policy},
+                )
+                await emit(
+                    {
+                        "stream": "system",
+                        "event_type": "zcode.native_session.resuming",
+                        "text": f"Resuming ZCode session {session.native_session_id}.",
+                        "detail": f"project_id={project.project_id}; session_id={session.session_id}",
+                    }
+                )
+                return session
+        return None
+
+    def _select_zcode_model(self, task: TaskEnvelope, zcode_status: dict[str, Any]) -> str | None:
+        for value in (
+            task.input.get("model"),
+            task.input.get("preferred_model"),
+            zcode_status.get("preferred_model"),
+            self.config.zcode_default_model,
+        ):
+            normalized = self._optional_string(value)
+            if normalized and normalized.lower() != "auto":
+                return normalized
+        return None
+
+    def _select_zcode_thinking(
+        self,
+        task: TaskEnvelope,
+        zcode_status: dict[str, Any],
+    ) -> str | None:
+        """Thinking effort for the GLM-5.3 family (auto defers to config)."""
+        for value in (
+            task.input.get("thinking"),
+            task.input.get("thought_level"),
+            # The auth store persists the thinking pick in the shared
+            # reasoning_effort column; accept both spellings.
+            zcode_status.get("thinking"),
+            zcode_status.get("reasoning_effort"),
+        ):
+            normalized = self._optional_string(value)
+            if normalized and normalized.lower() != "auto":
+                lowered = normalized.lower()
+                if lowered in {"low", "high", "max"}:
+                    return lowered
         return None
 
     def _select_codex_model(self, task: TaskEnvelope, codex_status: dict[str, Any]) -> str | None:
@@ -1661,7 +1817,7 @@ class AlphaAgent(AgentRuntime):
     def _cli_failure(
         self,
         provider: str,
-        result: CodexRunResult | CursorRunResult | OpenCodeRunResult,
+        result: CodexRunResult | CursorRunResult | OpenCodeRunResult | ZcodeRunResult,
         *,
         artifacts: list[Any] | None = None,
     ) -> AgentResult:
@@ -1671,6 +1827,7 @@ class AlphaAgent(AgentRuntime):
             code = {
                 "cursor": "CURSOR_INIT_TIMEOUT",
                 "opencode": "OPENCODE_INIT_TIMEOUT",
+                "zcode": "ZCODE_INIT_TIMEOUT",
             }.get(provider, "CLI_INIT_TIMEOUT")
         else:
             code = "TIMEOUT" if result.timed_out else f"{provider.upper()}_EXECUTION_FAILED"
@@ -1682,7 +1839,7 @@ class AlphaAgent(AgentRuntime):
             artifacts=artifacts or [],
             error=AgentError(
                 code=code,
-                retryable=code in {"TIMEOUT", "OPENCODE_INIT_TIMEOUT", "CURSOR_INIT_TIMEOUT", "CLI_INIT_TIMEOUT", "DOCKER_UNAVAILABLE", "WORKSPACE_BUSY"},
+                retryable=code in {"TIMEOUT", "OPENCODE_INIT_TIMEOUT", "CURSOR_INIT_TIMEOUT", "ZCODE_INIT_TIMEOUT", "CLI_INIT_TIMEOUT", "DOCKER_UNAVAILABLE", "WORKSPACE_BUSY"},
                 message=stderr[-1000:],
                 next_action="skip" if code == "CANCELLED" else "retry" if result.timed_out else "escalate",
             ),

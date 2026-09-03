@@ -65,6 +65,12 @@ def _default_alpha_opencode_home() -> Path:
     return _default_alpha_workspace_root() / "homes" / "opencode"
 
 
+def _default_alpha_zcode_home() -> Path:
+    if os.name == "nt":
+        return BACKEND_ROOT / "agents" / "alpha_agent" / "runtime" / "alpha" / "homes" / "zcode"
+    return _default_alpha_workspace_root() / "homes" / "zcode"
+
+
 def _default_alpha_workspace_root() -> Path:
     if os.name == "nt":
         return BACKEND_ROOT / "agents" / "alpha_agent" / "runtime" / "alpha"
@@ -107,6 +113,7 @@ class GatewayConfig:
     alpha_codex_home: Path = _default_alpha_codex_home()
     alpha_cursor_home: Path = _default_alpha_cursor_home()
     alpha_opencode_home: Path = _default_alpha_opencode_home()
+    alpha_zcode_home: Path = _default_alpha_zcode_home()
     preferences_db_path: Path = BACKEND_ROOT / "gateway" / "preferences.db"
     sessions_db_path: Path = BACKEND_ROOT / "gateway" / "sessions.db"
     mobile_devices_db_path: Path = BACKEND_ROOT / "gateway" / "mobile_devices.db"
@@ -367,6 +374,12 @@ class GatewayConfig:
                 os.getenv(
                     "ALPHA_OPENCODE_HOME",
                     str(_default_alpha_opencode_home()),
+                )
+            ).expanduser(),
+            alpha_zcode_home=Path(
+                os.getenv(
+                    "ALPHA_ZCODE_HOME",
+                    os.getenv("ZCODE_HOME", str(_default_alpha_zcode_home())),
                 )
             ).expanduser(),
             preferences_db_path=Path(
