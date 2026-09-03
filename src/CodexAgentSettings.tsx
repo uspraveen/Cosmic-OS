@@ -293,27 +293,30 @@ export default function CodexAgentSettings({ active }: CodexAgentSettingsProps) 
     setBanner('Device code copied.')
   }
 
+  const heroTone = needsReauth
+    ? 'warn'
+    : gatewayStatus?.status === 'login_pending'
+      ? 'pending'
+      : cliMissing || (authMode === 'api_key' && !hasApiKey)
+        ? 'warn'
+        : 'ready'
+
   return (
     <div className="cosmic-agents-detail-page">
       <div className="cosmic-agents-detail-hero">
         <div className="cosmic-agents-detail-hero-top">
           <div className="cosmic-agents-detail-hero-icon" aria-hidden="true">
             <OpenAIMark size={26} />
+            <i className={`cosmic-agents-detail-presence ${heroTone}`} />
           </div>
           <div className="cosmic-agents-detail-hero-text">
             <h3>Codex for Alpha</h3>
-            <p>{connectionLabel}</p>
+            <p>
+              <i className={`cosmic-agents-detail-state-dot ${heroTone}`} aria-hidden="true" />
+              {connectionLabel}
+            </p>
             <span>Feeds the VM Alpha agent runner when backend handoff is enabled.</span>
           </div>
-        </div>
-        <div className={`cosmic-agents-detail-status-pill ${needsReauth ? 'warn' : gatewayStatus?.status === 'login_pending' ? 'pending' : authMode === 'api_key' && !hasApiKey ? 'warn' : 'ready'}`}>
-          {needsReauth
-            ? 'Reauth'
-            : gatewayStatus?.status === 'login_pending'
-              ? 'Pending'
-              : authMode === 'api_key' && !hasApiKey
-                ? 'Setup'
-                : 'Ready'}
         </div>
       </div>
 

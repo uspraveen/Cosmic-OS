@@ -181,8 +181,6 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
     return 'OAuth sign-in required'
   }, [cliMissing, gatewayStatus, loading])
 
-  const needsReauth = gatewayStatus?.status === 'relogin_required' || gatewayStatus?.status === 'login_required'
-
   const loginOutput = loginSessionLines(gatewayStatus?.login_session).slice(-8)
   const loginUrl = extractLoginUrl(loginOutput)
 
@@ -259,29 +257,29 @@ export default function CursorAgentSettings({ active }: CursorAgentSettingsProps
     }
   }
 
+  const heroTone =
+    gatewayStatus?.status === 'authenticated'
+      ? 'ready'
+      : gatewayStatus?.status === 'login_pending'
+        ? 'pending'
+        : 'warn'
+
   return (
     <div className="cosmic-agents-detail-page">
       <div className="cosmic-agents-detail-hero provider-cursor">
         <div className="cosmic-agents-detail-hero-top">
           <div className="cosmic-agents-detail-hero-icon cursor" aria-hidden="true">
             <CursorMark size={26} />
+            <i className={`cosmic-agents-detail-presence ${heroTone}`} />
           </div>
           <div className="cosmic-agents-detail-hero-text">
             <h3>Cursor CLI for Alpha</h3>
-            <p>{connectionLabel}</p>
+            <p>
+              <i className={`cosmic-agents-detail-state-dot ${heroTone}`} aria-hidden="true" />
+              {connectionLabel}
+            </p>
             <span>Runs Cursor Agent headless on your VM through OAuth-only login.</span>
           </div>
-        </div>
-        <div className={`cosmic-agents-detail-status-pill ${gatewayStatus?.status === 'authenticated' ? 'ready' : gatewayStatus?.status === 'login_pending' ? 'pending' : 'warn'}`}>
-          {cliMissing
-            ? 'Setup'
-            : gatewayStatus?.status === 'authenticated'
-              ? 'Ready'
-              : gatewayStatus?.status === 'login_pending'
-                ? 'Pending'
-                : needsReauth
-                  ? 'Reauth'
-                  : 'Setup'}
         </div>
       </div>
 

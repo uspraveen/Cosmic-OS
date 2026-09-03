@@ -353,25 +353,25 @@ export default function OpenCodeAgentSettings({ active }: OpenCodeAgentSettingsP
     else openProviderGroup(groupId)
   }
 
+  const heroTone =
+    gatewayStatus?.status === 'update_in_progress' ? 'pending' : cliMissing ? 'warn' : 'ready'
+
   return (
     <div className="cosmic-agents-detail-page">
       <div className="cosmic-agents-detail-hero">
         <div className="cosmic-agents-detail-hero-top">
           <div className="cosmic-agents-detail-hero-icon" aria-hidden="true">
             <OpenCodeMark size={26} />
+            <i className={`cosmic-agents-detail-presence ${heroTone}`} />
           </div>
           <div className="cosmic-agents-detail-hero-text">
             <h3>OpenCode for Alpha</h3>
-            <p>{connectionLabel}</p>
+            <p>
+              <i className={`cosmic-agents-detail-state-dot ${heroTone}`} aria-hidden="true" />
+              {connectionLabel}
+            </p>
             <span>The GUI for `/models` and `/connect` — live from your VM's OpenCode.</span>
           </div>
-        </div>
-        <div className={`cosmic-agents-detail-status-pill ${gatewayStatus?.status === 'update_in_progress' ? 'pending' : cliMissing ? 'warn' : 'ready'}`}>
-          {cliMissing
-            ? 'Setup'
-            : gatewayStatus?.status === 'update_in_progress'
-              ? 'Updating'
-              : 'Ready'}
         </div>
       </div>
 

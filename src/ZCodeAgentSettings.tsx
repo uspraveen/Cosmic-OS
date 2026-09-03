@@ -285,27 +285,28 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
       : []
   const currentModel = MODEL_OPTIONS.find((option) => option.value === preferredModel) ?? MODEL_OPTIONS[1]
 
+  const heroTone = authenticated
+    ? 'ready'
+    : gatewayStatus?.status === 'login_pending' || gatewayStatus?.status === 'update_in_progress'
+      ? 'pending'
+      : 'warn'
+
   return (
     <div className="cosmic-agents-detail-page">
       <div className="cosmic-agents-detail-hero">
         <div className="cosmic-agents-detail-hero-top">
           <div className="cosmic-agents-detail-hero-icon" aria-hidden="true">
             <ZCodeMark size={26} />
+            <i className={`cosmic-agents-detail-presence ${heroTone}`} />
           </div>
           <div className="cosmic-agents-detail-hero-text">
             <h3>ZCode for Alpha</h3>
-            <p>{connectionLabel}</p>
+            <p>
+              <i className={`cosmic-agents-detail-state-dot ${heroTone}`} aria-hidden="true" />
+              {connectionLabel}
+            </p>
             <span>Z.ai&apos;s official GLM-5.3 agent, headless on your VM.</span>
           </div>
-        </div>
-        <div className={`cosmic-agents-detail-status-pill ${authenticated ? 'ready' : cliMissing || gatewayStatus?.status !== 'login_pending' && gatewayStatus?.status !== 'update_in_progress' ? 'warn' : 'pending'}`}>
-          {cliMissing
-            ? 'Setup'
-            : authenticated
-              ? 'Ready'
-              : gatewayStatus?.status === 'login_pending' || gatewayStatus?.status === 'update_in_progress'
-                ? 'Pending'
-                : 'Setup'}
         </div>
       </div>
 

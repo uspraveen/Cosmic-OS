@@ -6046,6 +6046,7 @@
 }
 
 .cosmic-agents-detail-hero-icon {
+  position: relative;
   width: 56px;
   height: 56px;
   border-radius: 16px;
@@ -6056,6 +6057,65 @@
   background: #fff;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
   color: #111;
+}
+
+/* Connection presence: a badge on the tile instead of a pill floating
+   under the title — status belongs to the identity, in one glance. */
+.cosmic-agents-detail-presence {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 3px solid #0d1219;
+}
+
+.cosmic-agents-detail-presence.ready {
+  background: #30d158;
+  box-shadow: 0 0 9px rgba(48, 209, 88, 0.55);
+}
+
+.cosmic-agents-detail-presence.warn {
+  background: #ff9f0a;
+  box-shadow: 0 0 9px rgba(255, 159, 10, 0.5);
+}
+
+.cosmic-agents-detail-presence.pending {
+  background: #0a84ff;
+  box-shadow: 0 0 9px rgba(10, 132, 255, 0.55);
+  animation: cosmicPresencePulse 1.7s ease-in-out infinite;
+}
+
+@keyframes cosmicPresencePulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.cosmic-agents-detail-state-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 7px;
+  vertical-align: middle;
+}
+
+.cosmic-agents-detail-state-dot.ready {
+  background: #30d158;
+}
+
+.cosmic-agents-detail-state-dot.warn {
+  background: #ff9f0a;
+}
+
+.cosmic-agents-detail-state-dot.pending {
+  background: #0a84ff;
 }
 
 .cosmic-agents-detail-hero-text {
