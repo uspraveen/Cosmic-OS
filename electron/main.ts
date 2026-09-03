@@ -2870,6 +2870,7 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('gateway:save-zcode-config', async (_, payload: {
+    authMode?: string
     preferredModel?: string
     thinking?: string
     apiKey?: string
@@ -2882,6 +2883,7 @@ app.whenReady().then(() => {
     return callGatewayJson(config, '/desktop/agents/zcode/config', {
       method: 'POST',
       body: {
+        auth_mode: payload?.authMode,
         preferred_model: payload?.preferredModel,
         thinking: payload?.thinking,
         api_key: payload?.apiKey,

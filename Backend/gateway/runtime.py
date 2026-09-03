@@ -21676,6 +21676,7 @@ class GatewayRuntime:
     async def save_desktop_zcode_config(
         self,
         *,
+        auth_mode: str | None = None,
         preferred_model: str | None = None,
         thinking: str | None = None,
         api_key: str | None = None,
@@ -21691,16 +21692,31 @@ class GatewayRuntime:
             preferred_model=preferred_model,
             thinking=thinking,
         )
+        has_key = bool(config_result.get("has_api_key"))
+        next_status: str | None = None
+        next_reason: str | None = None
+        if auth_mode is not None:
+            # A mode switch is a preference for how the NEXT connection is
+            # made; get_status re-derives the honest state from the CLI
+            # config right after the save.
+            normalized_mode = str(auth_mode).strip().lower()
+            if normalized_mode == "oauth":
+                next_status = "login_required"
+                next_reason = "zcode_login_required"
+            elif has_key:
+                next_status = "stored"
+                next_reason = ""
+            else:
+                next_status = "login_required"
+                next_reason = "api_key_required"
         settings = self.agent_auth_store.save_zcode(
+            auth_mode=auth_mode,
             preferred_model=preferred_model,
             thinking=thinking,
             vm_sync_enabled=vm_sync_enabled,
-            has_api_key=config_result.get("has_api_key"),
-            status="stored" if config_result.get("has_api_key") else None,
-            login_required_reason=(
-                "" if config_result.get("has_api_key")
-                else ("api_key_required" if api_key is not None else None)
-            ),
+            has_api_key=has_key,
+            status=next_status,
+            login_required_reason=next_reason,
         )
         return await self.get_desktop_zcode_status()
 
@@ -21916,6 +21932,7 @@ class GatewayRuntime:
         main_model = str(auth_state.get("main_model") or "").strip()
         preferred_model = main_model.split("/", 1)[1] if "/" in main_model else ""
         self.agent_auth_store.save_zcode(
+            auth_mode="oauth",
             status="authenticated" if returncode == 0 and auth_state.get("has_api_key") else "relogin_required",
             login_required_reason=(
                 "" if returncode == 0 and auth_state.get("has_api_key") else "zcode_login_failed"

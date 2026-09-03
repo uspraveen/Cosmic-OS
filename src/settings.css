@@ -5711,7 +5711,7 @@
 
 .cosmic-alpha-provider-toggle {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 4px;
   width: 100%;
   padding: 4px;
@@ -7447,7 +7447,8 @@
 
 /* Active-model strip: solid black card with a provider chip — the same
    "selected item = black pill" language as the rail. */
-.opencode-current {
+.opencode-current,
+.zcode-current {
   display: flex;
   align-items: center;
   gap: 11px;
@@ -7463,7 +7464,8 @@
     0 8px 20px rgba(0, 0, 0, 0.35);
 }
 
-.opencode-current-chip {
+.opencode-current-chip,
+.zcode-current-chip {
   flex: none;
   width: 36px;
   height: 36px;
@@ -7486,7 +7488,8 @@
   letter-spacing: 0.02em;
 }
 
-.opencode-current-main {
+.opencode-current-main,
+.zcode-current-main {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -7494,7 +7497,8 @@
   flex: 1;
 }
 
-.opencode-current-label {
+.opencode-current-label,
+.zcode-current-label {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -7507,7 +7511,8 @@
   text-overflow: ellipsis;
 }
 
-.opencode-current-main small {
+.opencode-current-main small,
+.zcode-current-main small {
   color: rgba(255, 255, 255, 0.45);
   font-size: 10.5px;
   white-space: nowrap;
@@ -7515,7 +7520,8 @@
   text-overflow: ellipsis;
 }
 
-.opencode-current-change {
+.opencode-current-change,
+.zcode-current-change {
   flex: none;
   padding: 5px 13px;
   border: 1px solid rgba(255, 255, 255, 0.16);
@@ -7527,7 +7533,8 @@
   cursor: pointer;
 }
 
-.opencode-current-change:hover {
+.opencode-current-change:hover,
+.zcode-current-change:hover {
   background: rgba(255, 255, 255, 0.14);
 }
 
@@ -7876,7 +7883,8 @@
   flex: none;
 }
 
-.opencode-free-pill {
+.opencode-free-pill,
+.zcode-free-pill {
   font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -7923,7 +7931,8 @@
 
 
 /* Reasoning effort: one Apple-style segmented control instead of cards. */
-.opencode-variant-seg {
+.opencode-variant-seg,
+.zcode-variant-seg {
   display: flex;
   gap: 3px;
   padding: 3px;
@@ -7932,7 +7941,8 @@
   background: rgba(0, 0, 0, 0.24);
 }
 
-.opencode-variant-seg button {
+.opencode-variant-seg button,
+.zcode-variant-seg button {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -7947,28 +7957,33 @@
   cursor: pointer;
 }
 
-.opencode-variant-seg button strong {
+.opencode-variant-seg button strong,
+.zcode-variant-seg button strong {
   font-size: 11.5px;
   font-weight: 700;
 }
 
-.opencode-variant-seg button small {
+.opencode-variant-seg button small,
+.zcode-variant-seg button small {
   font-size: 9px;
   color: rgba(255, 255, 255, 0.35);
   white-space: nowrap;
 }
 
-.opencode-variant-seg button.active {
+.opencode-variant-seg button.active,
+.zcode-variant-seg button.active {
   background: rgba(255, 255, 255, 0.94);
   color: #0b0f14;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
-.opencode-variant-seg button.active small {
+.opencode-variant-seg button.active small,
+.zcode-variant-seg button.active small {
   color: rgba(11, 15, 20, 0.55);
 }
 
-.opencode-variant-seg button:disabled {
+.opencode-variant-seg button:disabled,
+.zcode-variant-seg button:disabled {
   cursor: default;
   opacity: 0.6;
 }

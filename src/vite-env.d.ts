@@ -250,6 +250,7 @@ interface Window {
     logoutGatewayCursor: () => Promise<any>
     getGatewayZcodeStatus: () => Promise<any>
     saveGatewayZcodeConfig: (payload: {
+      authMode?: string
       preferredModel?: string
       thinking?: string
       apiKey?: string

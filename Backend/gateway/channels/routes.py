@@ -141,6 +141,7 @@ class OpenCodeProviderConnectRequest(BaseModel):
 
 
 class ZcodeAgentConfigRequest(BaseModel):
+    auth_mode: str | None = Field(default=None, max_length=32)
     preferred_model: str | None = Field(default=None, max_length=80)
     thinking: str | None = Field(default=None, max_length=32)
     api_key: str | None = Field(default=None, max_length=4096)
@@ -2184,6 +2185,7 @@ async def save_desktop_zcode_config(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     return await runtime.save_desktop_zcode_config(
+        auth_mode=body.auth_mode,
         preferred_model=body.preferred_model,
         thinking=body.thinking,
         api_key=body.api_key,

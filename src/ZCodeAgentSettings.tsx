@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, CheckCircle2, ExternalLink, KeyRound, LogIn, RefreshCw, ShieldCheck, Sparkles, Terminal, Trash2 } from 'lucide-react'
+import { Bot, CheckCircle2, ExternalLink, KeyRound, LogIn, RefreshCw, ShieldCheck, Terminal, Trash2 } from 'lucide-react'
 import {
   describeLoginReason,
   extractLoginUrl,
@@ -9,20 +9,22 @@ import {
 } from './agentLogin'
 import { ZCodeMark } from './brandIcons'
 
+type ZcodeAuthMode = 'oauth' | 'api_key'
 type ZcodeThinkingMode = 'auto' | 'low' | 'high' | 'max'
 
-// The GLM-5.3 family's own thinking ladder — low/high/max — plus Auto, which
-// leaves whatever default the ZCode config carries in place.
+// GLM-5.3 and GLM-5.3-Flash are the whole catalog ZCode ships. Thinking
+// follows the family's own low/high/max ladder; Auto leaves the model's
+// default (max) in place.
+const MODEL_OPTIONS = [
+  { value: 'glm-5.3', label: 'GLM-5.3', note: 'Flagship · stable 1M context' },
+  { value: 'glm-5.3-flash', label: 'GLM-5.3 Flash', note: 'Fast · multimodal input' },
+]
+
 const THINKING_MODES: Array<{ value: ZcodeThinkingMode; label: string; note: string }> = [
   { value: 'auto', label: 'Auto', note: "Model's default" },
   { value: 'low', label: 'Low', note: 'Fastest' },
-  { value: 'high', label: 'High', note: 'Balanced depth' },
-  { value: 'max', label: 'Max', note: 'Deepest reasoning' },
-]
-
-const MODEL_OPTIONS = [
-  { value: 'glm-5.3', label: 'GLM-5.3', note: 'Flagship · 1M context' },
-  { value: 'glm-5.3-flash', label: 'GLM-5.3 Flash', note: 'Fast · multimodal input' },
+  { value: 'high', label: 'High', note: 'Balanced' },
+  { value: 'max', label: 'Max', note: 'Deepest' },
 ]
 
 interface ZcodeAgentSettingsProps {
@@ -30,6 +32,7 @@ interface ZcodeAgentSettingsProps {
 }
 
 interface ZcodeGatewayStatus {
+  auth_mode?: string
   preferred_model?: string
   reasoning_effort?: string
   thinking?: string
@@ -54,6 +57,10 @@ interface ZcodeGatewayStatus {
   } | null
 }
 
+function normalizeAuthMode(value: unknown): ZcodeAuthMode {
+  return value === 'oauth' ? 'oauth' : 'api_key'
+}
+
 function normalizeZcodeModelOption(value: unknown): string {
   const normalized = String(value ?? '').trim().toLowerCase()
   const bare = normalized.includes('/') ? normalized.split('/')[1] : normalized
@@ -68,16 +75,18 @@ function normalizeThinking(value: unknown): ZcodeThinkingMode {
 }
 
 export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) {
+  const [authMode, setAuthMode] = useState<ZcodeAuthMode>('oauth')
   const [preferredModel, setPreferredModel] = useState('glm-5.3-flash')
   const [thinking, setThinking] = useState<ZcodeThinkingMode>('auto')
   const [vmSyncEnabled, setVmSyncEnabled] = useState(true)
+  const [hasApiKey, setHasApiKey] = useState(false)
   const [apiKeyDraft, setApiKeyDraft] = useState('')
-  const [keyEntryOpen, setKeyEntryOpen] = useState(false)
   const [gatewayStatus, setGatewayStatus] = useState<ZcodeGatewayStatus | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [banner, setBanner] = useState('')
   const [error, setError] = useState('')
+  const modelsSectionRef = useRef<HTMLDivElement | null>(null)
   const openedLoginUrlRef = useRef('')
 
   useEffect(() => {
@@ -150,29 +159,29 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
     if (gatewayStatus?.status === 'login_pending') return 'Waiting for Z.ai sign-in approval'
     if (gatewayStatus?.status === 'update_in_progress') return 'ZCode is updating — Alpha routes around it'
     if (gatewayStatus?.status === 'relogin_required') return 'ZCode needs re-authentication on the VM'
-    return 'Sign in with your Z.ai account to use GLM-5.3'
-  }, [cliMissing, gatewayStatus, loading])
+    if (authMode === 'api_key') return hasApiKey ? 'API key saved on VM' : 'API key needed'
+    return 'Connect your Z.ai account to use GLM-5.3'
+  }, [authMode, cliMissing, gatewayStatus, hasApiKey, loading])
 
-  const needsAuth = gatewayStatus?.status !== 'authenticated'
-
-  const loginOutput = loginSessionLines(gatewayStatus?.login_session).slice(-8)
-  const loginUrl = extractLoginUrl(loginOutput)
+  const authenticated = gatewayStatus?.status === 'authenticated'
 
   function applyGatewayStatus(rawStatus: unknown) {
     const status = (rawStatus && typeof rawStatus === 'object' ? rawStatus : {}) as ZcodeGatewayStatus
     setGatewayStatus(status)
+    setAuthMode(normalizeAuthMode(status.auth_mode))
     setPreferredModel(normalizeZcodeModelOption(status.preferred_model))
-    const effort = String(status.thinking ?? status.reasoning_effort ?? 'auto')
-    setThinking(normalizeThinking(effort))
+    setThinking(normalizeThinking(status.thinking ?? status.reasoning_effort))
     setVmSyncEnabled(status.vm_sync_enabled !== false)
+    setHasApiKey(Boolean(status.has_api_key))
   }
 
   const saveRemoteConfig = async (
     payload: {
+      authMode?: ZcodeAuthMode
+      apiKey?: string
       preferredModel?: string
       thinking?: ZcodeThinkingMode
       vmSyncEnabled?: boolean
-      apiKey?: string
     },
     successMessage?: string,
   ) => {
@@ -187,6 +196,26 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
     } finally {
       setSaving(false)
     }
+  }
+
+  const saveAuthMode = (nextMode: ZcodeAuthMode) => {
+    setAuthMode(nextMode)
+    void saveRemoteConfig(
+      { authMode: nextMode },
+      nextMode === 'oauth'
+        ? 'Z.ai sign-in selected for Alpha ZCode.'
+        : 'API key mode selected for Alpha ZCode.',
+    )
+  }
+
+  const saveApiKey = () => {
+    const nextKey = apiKeyDraft.trim()
+    if (!nextKey) {
+      setBanner('Paste a Z.ai or BigModel API key before saving.')
+      return
+    }
+    setApiKeyDraft('')
+    void saveRemoteConfig({ apiKey: nextKey }, 'ZCode API key saved on the VM.')
   }
 
   const startZcodeLogin = async () => {
@@ -234,16 +263,9 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
     }
   }
 
-  const submitApiKey = async () => {
-    const key = apiKeyDraft.trim()
-    if (!key) {
-      setBanner('Paste your Z.ai or BigModel API key first.')
-      return
-    }
-    setKeyEntryOpen(false)
-    await saveRemoteConfig({ apiKey: key }, 'API key saved — ZCode is ready.')
-    setApiKeyDraft('')
-  }
+  const loginOutput = loginSessionLines(gatewayStatus?.login_session).slice(-8)
+  const loginUrl = extractLoginUrl(loginOutput)
+  const currentModel = MODEL_OPTIONS.find((option) => option.value === preferredModel) ?? MODEL_OPTIONS[1]
 
   return (
     <div className="cosmic-agents-detail-page">
@@ -255,56 +277,166 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
           <div className="cosmic-agents-detail-hero-text">
             <h3>ZCode for Alpha</h3>
             <p>{connectionLabel}</p>
-            <span>Z.ai&apos;s official GLM-5.3 agent, running headless on your VM.</span>
+            <span>Z.ai&apos;s official GLM-5.3 agent, headless on your VM.</span>
           </div>
         </div>
-        <div className={`cosmic-agents-detail-status-pill ${gatewayStatus?.status === 'authenticated' ? 'ready' : gatewayStatus?.status === 'login_pending' || gatewayStatus?.status === 'update_in_progress' ? 'pending' : 'warn'}`}>
+        <div className={`cosmic-agents-detail-status-pill ${authenticated ? 'ready' : cliMissing || gatewayStatus?.status !== 'login_pending' && gatewayStatus?.status !== 'update_in_progress' ? 'warn' : 'pending'}`}>
           {cliMissing
             ? 'Setup'
-            : gatewayStatus?.status === 'authenticated'
+            : authenticated
               ? 'Ready'
               : gatewayStatus?.status === 'login_pending' || gatewayStatus?.status === 'update_in_progress'
                 ? 'Pending'
-                : needsAuth
-                  ? 'Reauth'
-                  : 'Setup'}
+                : 'Setup'}
         </div>
       </div>
 
-      {banner ? <div className="cosmic-agents-detail-banner success" role="status"><span className="cosmic-agents-detail-banner-icon">✓</span>{banner}</div> : null}
-      {error ? <div className="cosmic-agents-detail-banner error" role="alert"><span className="cosmic-agents-detail-banner-icon">!</span>{error}</div> : null}
+      {banner ? (
+        <div className="cosmic-agents-detail-banner success" role="status">
+          <span className="cosmic-agents-detail-banner-icon">✓</span>
+          {banner}
+        </div>
+      ) : null}
+      {error ? (
+        <div className="cosmic-agents-detail-banner error" role="alert">
+          <span className="cosmic-agents-detail-banner-icon">!</span>
+          {error}
+        </div>
+      ) : null}
 
+      {/* ── Active model strip: what Alpha will actually run next ─────── */}
+      <div className="zcode-current">
+        <span className="zcode-current-chip" data-tone={authenticated ? 'on' : 'off'}>
+          <ZCodeMark size={17} />
+        </span>
+        <div className="zcode-current-main">
+          <span className="zcode-current-label">
+            {currentModel.label}
+            {thinking !== 'auto' ? <span className="zcode-free-pill">{thinking}</span> : null}
+          </span>
+          <small>
+            zai/{currentModel.value}
+            {authenticated ? '' : ' · connect Z.ai to run'}
+          </small>
+        </div>
+        <button
+          type="button"
+          className="zcode-current-change"
+          onClick={() => modelsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+        >
+          Change
+        </button>
+      </div>
+
+      {/* ── Default model + thinking ───────────────────────────────────── */}
+      <div className="cosmic-agents-detail-section cosmic-agents-detail-runner" ref={modelsSectionRef}>
+        <div className="cosmic-agents-detail-section-head">
+          <div>
+            <span className="cosmic-agents-detail-kicker">Default model</span>
+            <h4>Pick Alpha&apos;s GLM model</h4>
+          </div>
+        </div>
+
+        <div className="cosmic-agents-detail-model-grid codex">
+          {MODEL_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`cosmic-agents-detail-model-card ${preferredModel === option.value ? 'active' : ''}`}
+              onClick={() => {
+                setPreferredModel(option.value)
+                void saveRemoteConfig({ preferredModel: option.value })
+              }}
+              disabled={saving}
+            >
+              <span className="cosmic-agents-detail-model-name">{option.label}</span>
+              <small>{option.note}</small>
+              {preferredModel === option.value ? <CheckCircle2 size={16} className="cosmic-agents-detail-model-check-icon" /> : null}
+            </button>
+          ))}
+        </div>
+
+        <span className="cosmic-agents-detail-control-label">Thinking</span>
+        <div className="zcode-variant-seg" role="group" aria-label="Thinking mode">
+          {THINKING_MODES.map((mode) => (
+            <button
+              key={mode.value}
+              type="button"
+              className={thinking === mode.value ? 'active' : ''}
+              onClick={() => {
+                setThinking(mode.value)
+                void saveRemoteConfig({ thinking: mode.value })
+              }}
+              disabled={saving}
+              title="Applied as the GLM-5.3 family's thinking default on the VM."
+            >
+              <strong>{mode.label}</strong>
+              <small>{mode.note}</small>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Z.ai account: sign-in, or fall back to an API key ──────────── */}
       <div className="cosmic-agents-detail-section">
         <div className="cosmic-agents-detail-section-head">
           <div>
             <span className="cosmic-agents-detail-kicker">Z.ai account</span>
-            <h4>{gatewayStatus?.status === 'authenticated' ? 'Signed in on VM' : 'Connect your Z.ai account'}</h4>
+            <h4>
+              {authMode === 'api_key'
+                ? hasApiKey
+                  ? 'API key saved on VM'
+                  : 'Connect with an API key'
+                : authenticated
+                  ? 'Signed in on VM'
+                  : 'Connect your Z.ai account'}
+            </h4>
           </div>
           <div className="cosmic-agents-detail-actions">
             <button type="button" className="cosmic-agents-detail-btn ghost icon" onClick={refreshStatus} disabled={loading || saving} title="Refresh ZCode status">
               <RefreshCw size={15} />
             </button>
-            {gatewayStatus?.status === 'authenticated' ? (
+            {authMode === 'oauth' && authenticated ? (
               <button type="button" className="cosmic-agents-detail-btn danger icon" onClick={logoutZcode} disabled={saving} title="Log out ZCode">
                 <Trash2 size={15} />
               </button>
-            ) : (
-              <button
-                type="button"
-                className="cosmic-agents-detail-btn"
-                onClick={startZcodeLogin}
-                disabled={saving || cliMissing}
-                title={cliMissing ? 'Install the ZCode CLI on the VM first' : undefined}
-              >
-                <LogIn size={15} />
-                {gatewayStatus?.status === 'login_pending' ? 'Restart' : 'Connect'}
-              </button>
-            )}
+            ) : null}
           </div>
         </div>
 
-        {cliMissing ? (
-          <p className="cosmic-agents-detail-section-copy">{describeLoginReason(gatewayStatus)}</p>
+        {authMode === 'api_key' ? (
+          <>
+            <div className="cosmic-agents-detail-key-row">
+              <input
+                type="password"
+                value={apiKeyDraft}
+                onChange={(event) => setApiKeyDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') saveApiKey()
+                }}
+                placeholder="Z.ai or BigModel API key"
+                spellCheck={false}
+                autoComplete="off"
+              />
+              <button type="button" className="cosmic-agents-detail-btn" onClick={saveApiKey} disabled={saving}>
+                Save
+              </button>
+            </div>
+            <p className="cosmic-agents-detail-section-copy">
+              Uses platform billing instead of a Coding Plan.
+              <button type="button" onClick={() => saveAuthMode('oauth')} disabled={saving}>
+                Use Z.ai sign-in instead
+              </button>
+            </p>
+          </>
+        ) : cliMissing ? (
+          <>
+            <p className="cosmic-agents-detail-section-copy">{describeLoginReason(gatewayStatus)}</p>
+          </>
+        ) : authenticated && !loginOutput.length ? (
+          <p className="cosmic-agents-detail-section-copy">
+            Signed in with your Z.ai account. Your GLM Coding Plan quota applies automatically to Alpha runs.
+          </p>
         ) : loginOutput.length ? (
           <div className="cosmic-agents-detail-login-output">
             {loginUrl ? (
@@ -338,83 +470,24 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
           </p>
         )}
 
-        {!keyEntryOpen ? (
-          <button type="button" className="cosmic-agents-detail-btn ghost" onClick={() => setKeyEntryOpen(true)} disabled={saving}>
-            <KeyRound size={13} />
-            Use an API key instead
-          </button>
-        ) : (
-          <div className="opencode-provider-row" style={{ marginTop: 10 }}>
-            <input
-              autoFocus
-              type="password"
-              value={apiKeyDraft}
-              onChange={(event) => setApiKeyDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') void submitApiKey()
-                if (event.key === 'Escape') setKeyEntryOpen(false)
-              }}
-              placeholder="Z.ai or BigModel API key"
-              spellCheck={false}
-              autoComplete="off"
-              disabled={saving}
-              style={{ flex: 1 }}
-            />
-            <button type="button" className="cosmic-agents-detail-btn" onClick={() => void submitApiKey()} disabled={saving}>
-              Save
+        {authMode === 'oauth' && !authenticated ? (
+          <div className="cosmic-agents-detail-actions" style={{ marginTop: 12 }}>
+            <button
+              type="button"
+              className="cosmic-agents-detail-btn"
+              onClick={startZcodeLogin}
+              disabled={saving || cliMissing}
+              title={cliMissing ? 'Install the ZCode CLI on the VM first' : undefined}
+            >
+              <LogIn size={15} />
+              {gatewayStatus?.status === 'login_pending' ? 'Restart sign-in' : 'Connect'}
             </button>
-            <button type="button" className="cosmic-agents-detail-btn ghost icon" onClick={() => setKeyEntryOpen(false)} disabled={saving} title="Cancel">
-              ✕
+            <button type="button" className="cosmic-agents-detail-btn ghost" onClick={() => saveAuthMode('api_key')} disabled={saving}>
+              <KeyRound size={13} />
+              Use an API key instead
             </button>
           </div>
-        )}
-      </div>
-
-      <div className="cosmic-agents-detail-section cosmic-agents-detail-runner">
-        <div className="cosmic-agents-detail-section-head">
-          <div>
-            <span className="cosmic-agents-detail-kicker">Runner defaults</span>
-            <h4>Model and thinking</h4>
-          </div>
-        </div>
-
-        <div className="cosmic-agents-detail-model-grid compact">
-          {MODEL_OPTIONS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              className={`cosmic-agents-detail-model-card ${preferredModel === option.value ? 'active' : ''}`}
-              onClick={() => {
-                setPreferredModel(option.value)
-                void saveRemoteConfig({ preferredModel: option.value })
-              }}
-              disabled={saving}
-            >
-              <span className="cosmic-agents-detail-model-name">{option.label}</span>
-              <small>{option.note}</small>
-              {preferredModel === option.value ? <CheckCircle2 size={16} className="cosmic-agents-detail-model-check-icon" /> : null}
-            </button>
-          ))}
-        </div>
-
-        <div className="opencode-variant-seg" role="group" aria-label="Thinking mode">
-          {THINKING_MODES.map((mode) => (
-            <button
-              key={mode.value}
-              type="button"
-              className={thinking === mode.value ? 'active' : ''}
-              onClick={() => {
-                setThinking(mode.value)
-                void saveRemoteConfig({ thinking: mode.value })
-              }}
-              disabled={saving}
-              title="Applied as the GLM-5.3 family's thinking default on the VM."
-            >
-              <strong>{mode.label}</strong>
-              <small>{mode.note}</small>
-            </button>
-          ))}
-        </div>
+        ) : null}
       </div>
 
       <div className="cosmic-agents-detail-runtime">
@@ -425,15 +498,6 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
           <div>
             <strong>VM Alpha workspace</strong>
             <span>Headless `zcode --prompt --mode yolo --json` with session resume.</span>
-          </div>
-        </div>
-        <div className="cosmic-agents-detail-runtime-row">
-          <div className="cosmic-agents-detail-runtime-icon" aria-hidden="true">
-            <Sparkles size={18} />
-          </div>
-          <div>
-            <strong>GLM Coding Plan</strong>
-            <span>Signing in binds your plan quota — no separate billing setup.</span>
           </div>
         </div>
         <button

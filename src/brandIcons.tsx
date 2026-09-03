@@ -55,11 +55,15 @@ export function OpenCodeMark({
 }
 
 export function ZCodeMark({ size = 20 }: { size?: number }) {
-  // Z.ai's mark: a bold geometric "Z" with the signature angular cut. Drawn
-  // with currentColor so tiles/pills recolor it like the OpenAI mark.
+  // ZCode/Z.ai mark: an italic stencil "Z" in three pieces - top bar,
+  // diagonal, bottom bar - separated by thin negative-space cuts, traced
+  // from the official app icon. Drawn with currentColor so tiles and pills
+  // recolor it like the other marks.
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path d="M3.4 4.2c0-.66.54-1.2 1.2-1.2h14.1c.98 0 1.47 1.19.78 1.88L9.35 14.4h9.95c.66 0 1.2.54 1.2 1.2v3.4c0 .66-.54 1.2-1.2 1.2H4.6c-.98 0-1.47-1.19-.78-1.88L13.95 9H4.6c-.66 0-1.2-.54-1.2-1.2V4.2Z" />
+      <path d="M2.7 3h10L11.1 5.6H2.7V3Z" />
+      <path d="M12.7 18.4h8.1V21H11l1.7-2.6Z" />
+      <path d="M13.6 3h7.9L10.5 21H2.5L13.6 3Z" />
     </svg>
   )
 }
