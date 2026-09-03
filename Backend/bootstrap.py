@@ -4728,7 +4728,7 @@ def _ensure_zcode_node_runtime() -> str:
         (os.uname().machine if hasattr(os, "uname") else "").lower(),
         "x64",
     )
-    tarball = "{0}-linux-{1}.tar.xz".format(ZCODE_NODE_VERSION, arch)
+    tarball = "node-{0}-linux-{1}.tar.xz".format(ZCODE_NODE_VERSION, arch)
     download_url = "{0}/{1}/{2}".format(ZCODE_NODE_DIST_BASE, ZCODE_NODE_VERSION, tarball)
     log(
         "System node is too old for zcode.cjs (need >= {0}); installing dedicated {1}.".format(
@@ -4762,7 +4762,7 @@ def _ensure_zcode_node_runtime() -> str:
                     ZCODE_NODE_VERSION, download_url, exc
                 )
             )
-        extracted = Path(workdir) / "{0}-linux-{1}".format(ZCODE_NODE_VERSION, arch)
+        extracted = Path(workdir) / "node-{0}-linux-{1}".format(ZCODE_NODE_VERSION, arch)
         if not (extracted / "bin" / "node").is_file():
             raise BootstrapError(
                 "Dedicated Node archive did not contain the expected layout."
