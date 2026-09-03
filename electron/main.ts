@@ -96,6 +96,32 @@ async function openExternalAndAnnounce(url: string): Promise<void> {
   }
 }
 
+// GitHub sign-in runs in the system browser and its flow lives here in main
+// (the local 8086 relay), not in the settings bridge — so main owns the
+// island's progress story the way the bridge owns Google's. Same channel, same
+// event shapes, so DynamicIsland renders both providers from one code path.
+type GithubIslandEventType =
+  | 'auth_started'
+  | 'auth_success'
+  | 'auth_cancelled'
+  | 'auth_error'
+  | 'disconnect_started'
+  | 'disconnect_success'
+  | 'disconnect_error'
+
+function sendGithubIslandEvent(type: GithubIslandEventType, message: string, extra: Record<string, unknown> = {}): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) {
+      window.webContents.send('integration:event', { provider: 'github', type, message, ...extra })
+    }
+  }
+}
+
+// A sign-in that is still waiting on the browser can be ended from the island's
+// Cancel button. The in-flight connect handler registers this hook and clears
+// it once the flow settles.
+let activeGithubConnectCancel: (() => void) | null = null
+
 function zoomCenterCropPngToOriginalSize(img: Electron.NativeImage, zoom: number): Electron.NativeImage {
   if (zoom <= 1) return img
   const { width, height } = img.getSize()
@@ -2673,6 +2699,36 @@ app.whenReady().then(() => {
     })
   })
 
+  // Best-effort: only used to name the account in the island's success toast.
+  async function newestGithubAccountLabel(config: GatewayConnectionConfig): Promise<string> {
+    try {
+      const payload = (await callGatewayJson(config, '/internal/credentials/accounts?provider=github', {
+        timeoutMs: 10000,
+      })) as {
+        accounts?: Array<{
+          account_display_label?: string
+          account_label?: string
+          display_name?: string
+          email?: string
+          last_connected_at?: number
+          updated_at?: number
+        }>
+      }
+      const accounts = Array.isArray(payload?.accounts) ? payload.accounts : []
+      const newest = accounts
+        .slice()
+        .sort(
+          (a, b) =>
+            Number(b.last_connected_at || b.updated_at || 0) - Number(a.last_connected_at || a.updated_at || 0),
+        )[0]
+      return String(
+        newest?.account_display_label || newest?.account_label || newest?.display_name || newest?.email || '',
+      ).trim()
+    } catch {
+      return ''
+    }
+  }
+
   ipcMain.handle('gateway:github-connect', async (_, payload: { accountLabel?: string } = {}) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {
@@ -2759,24 +2815,58 @@ app.whenReady().then(() => {
     }
 
     const timeout = setTimeout(() => finish({ ok: false, error: 'timeout' }), 300_000)
+    const cancelHook = () => finish({ ok: false, error: 'cancelled' })
+    activeGithubConnectCancel = cancelHook
     try {
+      // Same story the Google bridge tells: the island takes over with a live
+      // countdown and a working Cancel while the browser has the user.
+      sendGithubIslandEvent('auth_started', 'Finish GitHub sign-in in your browser.', {
+        cancelable: true,
+        timeout_seconds: 300,
+        ...(String(payload?.accountLabel || '').trim()
+          ? { account_label: String(payload.accountLabel).trim() }
+          : {}),
+      })
       await openExternalAndAnnounce(authorizeUrl)
       const result = await outcome
       if (!result.ok) {
+        if (result.error === 'cancelled') {
+          sendGithubIslandEvent('auth_cancelled', 'GitHub sign-in cancelled.')
+          return { success: false, error: 'cancelled', message: 'GitHub sign-in cancelled.' }
+        }
+        const message =
+          result.error === 'timeout'
+            ? 'GitHub sign-in did not finish before the timeout window closed.'
+            : result.error || 'GitHub sign-in failed.'
+        sendGithubIslandEvent('auth_error', message)
         return {
           success: false,
           error: result.error === 'timeout' ? 'oauth_timeout' : 'oauth_failed',
-          message:
-            result.error === 'timeout'
-              ? 'GitHub sign-in did not finish before the timeout window closed.'
-              : result.error || 'GitHub sign-in failed.',
+          message,
         }
       }
+      // The gateway stores the account before it renders the success page, so
+      // the newest `last_connected_at` is the account that just finished.
+      const accountLabel = await newestGithubAccountLabel(config)
+      sendGithubIslandEvent(
+        'auth_success',
+        'GitHub account connected.',
+        accountLabel ? { account_label: accountLabel } : {},
+      )
       return { success: true, flow: start?.flow || 'authorize' }
     } finally {
+      if (activeGithubConnectCancel === cancelHook) {
+        activeGithubConnectCancel = null
+      }
       clearTimeout(timeout)
       await closeServer()
     }
+  })
+
+  // Ends a GitHub sign-in that is still waiting on the browser — the island's
+  // Cancel button routes here, mirroring integrations:cancel-google.
+  ipcMain.on('gateway:github-connect-cancel', () => {
+    activeGithubConnectCancel?.()
   })
 
   ipcMain.handle('gateway:github-disconnect', async (_, accountId: string) => {
@@ -2784,11 +2874,22 @@ app.whenReady().then(() => {
     if (!config) {
       throw new Error('Gateway connection is not configured.')
     }
-    return callGatewayJson(
-      config,
-      `/internal/credentials/accounts/${encodeURIComponent(String(accountId || ''))}`,
-      { method: 'DELETE', timeoutMs: 25000 },
-    )
+    sendGithubIslandEvent('disconnect_started', 'Disconnecting GitHub account.')
+    try {
+      const result = await callGatewayJson(
+        config,
+        `/internal/credentials/accounts/${encodeURIComponent(String(accountId || ''))}`,
+        { method: 'DELETE', timeoutMs: 25000 },
+      )
+      sendGithubIslandEvent('disconnect_success', 'GitHub account disconnected.')
+      return result
+    } catch (err) {
+      sendGithubIslandEvent(
+        'disconnect_error',
+        err instanceof Error && err.message ? err.message : 'We could not disconnect this GitHub account.',
+      )
+      throw err
+    }
   })
 
   ipcMain.handle('gateway:github-repositories', async () => {

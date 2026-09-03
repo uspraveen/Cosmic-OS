@@ -210,10 +210,12 @@ interface IntegrationToastState {
   id: number
   tone: IntegrationToastTone
   provider: string
+  /** Stable provider id the Cancel routing and settings reopen key off. */
+  providerId?: 'google' | 'github' | 'cosmic'
   title: string
   message: string
   statusLabel: string
-  /** Only a Google sign-in can be cancelled: it is the one flow that waits on the browser. */
+  /** Only browser-waiting flows (Google, GitHub) can be cancelled mid-sign-in. */
   cancelable?: boolean
   /** Epoch ms the bridge stops waiting. Drives the countdown and the stale-toast guard. */
   expiresAt?: number
@@ -475,6 +477,10 @@ export default function DynamicIsland({
   const integrationToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const authAttentionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const integrationToastIdRef = useRef(0)
+  // Cancel routing needs the in-flight provider without rebuilding the callback
+  // on every toast change.
+  const integrationToastProviderIdRef = useRef<'google' | 'github' | 'cosmic'>('google')
+  integrationToastProviderIdRef.current = integrationToast?.providerId ?? 'cosmic'
   const integrationDotsTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const burstPlayedRef = useRef(false)
   const previousIntegrationToastToneRef = useRef<IntegrationToastTone | null>(null)
@@ -1178,7 +1184,7 @@ export default function DynamicIsland({
       message: string,
       statusLabel: string,
       provider = 'Google',
-      extra: Pick<IntegrationToastState, 'cancelable' | 'expiresAt'> = {},
+      extra: Pick<IntegrationToastState, 'cancelable' | 'expiresAt' | 'providerId'> = {},
     ) => {
       if (integrationCancelFallbackTimerRef.current) {
         clearTimeout(integrationCancelFallbackTimerRef.current)
@@ -1188,6 +1194,7 @@ export default function DynamicIsland({
         id: ++integrationToastIdRef.current,
         tone,
         provider,
+        providerId: extra.providerId ?? 'cosmic',
         title,
         message,
         statusLabel,
@@ -1196,31 +1203,36 @@ export default function DynamicIsland({
       setIntegrationToast(nextToast)
     }
 
-    const scheduleSettingsReopen = () => {
+    const scheduleSettingsReopen = (reopenProviderId: 'google' | 'github') => {
       if (!reopenSettingsAfterAuthRef.current) return
       reopenSettingsAfterAuthRef.current = false
       if (reopenSettingsTimerRef.current) clearTimeout(reopenSettingsTimerRef.current)
       reopenSettingsTimerRef.current = setTimeout(() => {
         reopenSettingsTimerRef.current = null
-        setSettingsInitialView('integrations-google')
+        setSettingsInitialView(reopenProviderId === 'github' ? 'integrations-github' : 'integrations-google')
         setShowSettings(true)
       }, SETTINGS_REOPEN_AFTER_AUTH_MS)
     }
 
     const off = window.cosmic?.onIntegrationEvent((event: IntegrationToastEvent) => {
-      if (event.provider !== 'google') return
+      const providerId = String(event.provider || '').trim().toLowerCase()
+      if (providerId !== 'google' && providerId !== 'github') return
       const accountName = getIntegrationAccountName(event)
-      const provider = 'Google'
+      const provider = providerId === 'github' ? 'GitHub' : 'Google'
       const t = event.type
       if (t === 'auth_started') {
         const timeoutSeconds = Number(event.timeout_seconds)
         showToast(
           'progress',
-          accountName ? `Connecting ${accountName}` : 'Connecting Google',
-          compactToastMessage(event.message || 'Finish the Google sign-in flow in your browser.', 'Finish the Google sign-in flow in your browser.'),
+          accountName ? `Connecting ${accountName}` : `Connecting ${provider}`,
+          compactToastMessage(
+            event.message || `Finish the ${provider} sign-in flow in your browser.`,
+            `Finish the ${provider} sign-in flow in your browser.`,
+          ),
           'In Progress',
           provider,
           {
+            providerId,
             cancelable: event.cancelable !== false,
             expiresAt:
               Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
@@ -1239,59 +1251,71 @@ export default function DynamicIsland({
         }
         showToast(
           'success',
-          accountName ? `Connected ${accountName}` : 'Google connected',
+          accountName ? `Connected ${accountName}` : `${provider} connected`,
           compactToastMessage(
-            accountName ? `${accountName} is ready for Cosmic.` : 'This Google account is ready for Cosmic.',
-            'This Google account is ready for Cosmic.',
+            accountName ? `${accountName} is ready for Cosmic.` : `This ${provider} account is ready for Cosmic.`,
+            `This ${provider} account is ready for Cosmic.`,
           ),
           'Connected',
           provider,
+          { providerId },
         )
-        scheduleSettingsReopen()
+        scheduleSettingsReopen(providerId)
       } else if (t === 'auth_cancelled') {
         showToast(
           'error',
-          accountName ? `Cancelled ${accountName}` : 'Google sign-in cancelled',
-          compactToastMessage(event.message || 'Google sign-in cancelled.', 'Google sign-in cancelled.'),
+          accountName ? `Cancelled ${accountName}` : `${provider} sign-in cancelled`,
+          compactToastMessage(
+            event.message || `${provider} sign-in cancelled.`,
+            `${provider} sign-in cancelled.`,
+          ),
           'Cancelled',
           provider,
+          { providerId },
         )
-        scheduleSettingsReopen()
+        scheduleSettingsReopen(providerId)
       } else if (t === 'auth_error') {
         showToast(
           'error',
-          accountName ? `Could not connect ${accountName}` : 'Google connection failed',
-          compactToastMessage(event.message || 'We could not complete the Google sign-in flow.', 'We could not complete the Google sign-in flow.'),
+          accountName ? `Could not connect ${accountName}` : `${provider} connection failed`,
+          compactToastMessage(
+            event.message || `We could not complete the ${provider} sign-in flow.`,
+            `We could not complete the ${provider} sign-in flow.`,
+          ),
           'Action Needed',
           provider,
+          { providerId },
         )
-        scheduleSettingsReopen()
+        scheduleSettingsReopen(providerId)
       } else if (t === 'disconnect_started') {
         showToast(
           'progress',
-          accountName ? `Disconnecting ${accountName}` : 'Disconnecting Google',
+          accountName ? `Disconnecting ${accountName}` : `Disconnecting ${provider}`,
           compactToastMessage(event.message || 'Removing account access from Cosmic.', 'Removing account access from Cosmic.'),
           'In Progress',
           provider,
+          { providerId },
         )
       } else if (t === 'disconnect_success') {
         showToast(
           'success',
-          accountName ? `Disconnected ${accountName}` : 'Google disconnected',
+          accountName ? `Disconnected ${accountName}` : `${provider} disconnected`,
           compactToastMessage(
-            accountName ? `${accountName} is no longer available to Cosmic.` : 'This account is no longer available to Cosmic.',
-            'This account is no longer available to Cosmic.',
+            accountName ? `${accountName} is no longer available to Cosmic.` : `This ${provider} account is no longer available to Cosmic.`,
+            `This ${provider} account is no longer available to Cosmic.`,
           ),
           'Disconnected',
           provider,
+          { providerId },
         )
       } else if (t === 'disconnect_error') {
         showToast(
           'error',
-          accountName ? `Could not disconnect ${accountName}` : 'Google disconnection failed',
-          compactToastMessage(event.message || 'We could not disconnect this Google account.', 'We could not disconnect this Google account.'),
+          accountName ? `Could not disconnect ${accountName}` : `${provider} disconnection failed`,
+          compactToastMessage(event.message || `We could not disconnect this ${provider} account.`, `We could not disconnect this ${provider} account.`),
           'Action Needed',
           provider,
+          { providerId },
         )
       }
     })
@@ -2344,9 +2368,13 @@ export default function DynamicIsland({
   }
 
   // The system browser never tells us the sign-in tab was closed, so this is the
-  // user saying it on its behalf — and it really does end the bridge's wait.
+  // user saying it on its behalf — and it really does end the provider's wait.
   const cancelIntegrationAuth = useCallback(() => {
-    window.cosmic?.cancelGoogleAccountConnect?.()
+    if (integrationToastProviderIdRef.current === 'github') {
+      window.cosmic?.cancelGitHubConnect?.()
+    } else {
+      window.cosmic?.cancelGoogleAccountConnect?.()
+    }
     setIntegrationToast((current) =>
       current && current.tone === 'progress'
         ? { ...current, statusLabel: 'Cancelling', cancelable: false, expiresAt: undefined }
@@ -2355,7 +2383,7 @@ export default function DynamicIsland({
     if (integrationCancelFallbackTimerRef.current) {
       clearTimeout(integrationCancelFallbackTimerRef.current)
     }
-    // The bridge answers within one poll. If it cannot, the panel still leaves.
+    // The provider answers within a beat. If it cannot, the panel still leaves.
     integrationCancelFallbackTimerRef.current = setTimeout(() => {
       integrationCancelFallbackTimerRef.current = null
       setIntegrationToast((current) => (current?.tone === 'progress' ? null : current))

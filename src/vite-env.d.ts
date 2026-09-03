@@ -228,6 +228,7 @@ interface Window {
       message?: string
       flow?: string
     }>
+    cancelGitHubConnect: () => void
     disconnectGitHubAccount: (accountId: string) => Promise<any>
     getGitHubRepositories: () => Promise<{ repositories?: any[]; count?: number }>
     syncGitHubRepositories: (accountId?: string) => Promise<{

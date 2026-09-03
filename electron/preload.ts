@@ -115,6 +115,7 @@ contextBridge.exposeInMainWorld('cosmic', {
   getGitHubAccounts: () => ipcRenderer.invoke('gateway:github-accounts'),
   connectGitHubAccount: (payload?: { accountLabel?: string }) =>
     ipcRenderer.invoke('gateway:github-connect', payload || {}),
+  cancelGitHubConnect: () => ipcRenderer.send('gateway:github-connect-cancel'),
   disconnectGitHubAccount: (accountId: string) =>
     ipcRenderer.invoke('gateway:github-disconnect', accountId),
   getGitHubRepositories: () => ipcRenderer.invoke('gateway:github-repositories'),

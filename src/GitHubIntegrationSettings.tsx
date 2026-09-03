@@ -219,6 +219,9 @@ export default function GitHubIntegrationSettings({ active }: GitHubIntegrationS
       if (result?.success) {
         setBanner('GitHub connected.')
         await refresh()
+      } else if (result?.error === 'cancelled') {
+        // The user cancelled from the island; it already reported that, so the
+        // panel reopens quietly instead of flagging an error.
       } else {
         setError(result?.message || 'GitHub sign-in did not complete.')
       }
