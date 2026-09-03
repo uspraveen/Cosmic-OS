@@ -130,7 +130,7 @@ Every design decision flows from one mental model. Keep these three layers stric
 | **Desktop App** | Electron + React UI. Always-on background process registered at startup. Authenticates users via Cosmic API key against Supabase, auto-provisions Gateway URL and API token from the user's VM config (§3.5a). Maintains conversation history locally. Connects to Gateway via WebSocket. Reports the user's current IANA timezone to the Gateway on login/startup/resume and whenever the OS timezone changes; that timezone becomes the authoritative basis for daily session rollover and default cron scheduling. Settings panel triggers OAuth account connections via Gateway. One of several channel adapters — see §27. |
 | **Channel Adapters** | Normalize platform-specific messages into the unified TaskEnvelope format. Each adapter handles authentication, message parsing, and response delivery for its platform. Available adapters: Desktop (WebSocket), WhatsApp, Telegram, Slack, Discord, CLI. New platforms are added by implementing the adapter interface (§27). |
 | **Gateway** | Receives inputs from all five sources (messages, heartbeats, crons, hooks, webhooks), validates auth + schema, tags every input with `source`, `source_id`, and `channel`, assembles session context via the Session Manager (today's conversation + retrieved memories). Checks `awaiting_reply` for sticky routing (§3.7); otherwise calls Model Router for classification. Routes to appropriate backend, strips `<awaiting_reply/>` control tags from responses (§3.8), streams responses and task events via the originating channel adapter. Relays task input requests from `user_input:requests` to UI and user replies to `user_input:replies` (§3.12). Owns the Credential Manager (§22), Session Manager (§23), Scheduler / Cron Manager (§25), Webhook Handler (§26), Hooks Engine (§28), Channel Adapter Registry (§27), the Usage Ledger (`gateway/usage.db`) for append-only token/cost telemetry, and the Routing Audit store (`gateway/routing_audit.db`) for durable inspection of final route decisions. Persists the user-local timezone last reported by the desktop and uses it as the authoritative basis for 4 AM rollover and default cron scheduling. |
-| **Scheduler / Cron Manager** | Gateway module that manages crons and heartbeats. Stores cron definitions, execution history, pause state, and the persisted user timezone snapshot in SQLite. Runs a polling loop that fires TaskEnvelopes to the orchestrator when jobs are due. Exposes an internal API for orchestrator CRUD plus a desktop-facing management surface for future observability/UI control (list, inspect, pause, resume, edit, delete). See §25. |
+| **Scheduler / Cron Manager** | Gateway module that manages crons and heartbeats. Stores cron definitions, execution history, pause state, heartbeat notes/watchpoints, and the persisted user timezone snapshot in SQLite (`gateway/scheduler/scheduler.db`). Runs a polling loop that fires TaskEnvelopes to the orchestrator when jobs are due. Exposes an internal API for orchestrator CRUD plus a desktop-facing management surface for future observability/UI control (list, inspect, pause, resume, edit, delete). See §25. |
 | **Webhook Handler** | Gateway module that receives HTTP POST callbacks from external systems (Gmail, GitHub, Jira, Slack). Verifies provider-specific signatures, converts payloads into TaskEnvelopes tagged with `source='webhook'`, and dispatches to the orchestrator. See §26. |
 | **Hooks Engine** | Gateway module that fires TaskEnvelopes in response to internal state changes: gateway startup/shutdown, session reset, compaction, agent registration/deregistration. Configurable hook definitions stored alongside the Gateway. See §28. |
 | **Model Router** | Lightweight stateless classifier. Determines which backend handles a query: `opus` (orchestrator — tasks, continuations, ambiguous input), `haiku` (direct API), or `perplexity` (direct API). Called by Gateway after context assembly — unless `awaiting_reply` sticky routing triggers first (§3.7), which skips the classifier entirely. No `unknown` route — `opus` is the fallback. |
@@ -492,7 +492,7 @@ The Gateway is the single entry point for all input sources. It handles authenti
 | Rate limiting | Token-bucket rate limiting per session |
 | Credential management | Owns the Credential Manager: handles OAuth PKCE flows, stores encrypted refresh tokens, manages connected accounts, validates scopes, refreshes access tokens, and exposes internal-only endpoints for the orchestrator to resolve credentials at dispatch time (see §22) |
 | Usage monitoring | Owns the Usage Ledger: append-only token/cost telemetry in `gateway/usage.db`. Logs direct LLM route usage locally and accepts internal usage events from the orchestrator, agents, Session Manager, and Model Router. Stores `llm_call_placed_at` as the UTC timestamp of each metered call. |
-| Scheduling | Owns the Scheduler / Cron Manager module: manages cron job definitions, pause/resume state, heartbeat configuration, and the persisted user timezone snapshot in SQLite. Runs a polling loop that fires TaskEnvelopes when jobs are due. Exposes internal API for orchestrator CRUD plus a desktop-facing management surface for observability and future UI controls (see §25) |
+| Scheduling | Owns the Scheduler / Cron Manager module: manages cron job definitions, pause/resume state, heartbeat configuration, heartbeat notes/watchpoints (SQLite), and the persisted user timezone snapshot. Runs a polling loop that fires TaskEnvelopes when jobs are due. Exposes internal API for orchestrator CRUD plus a desktop-facing management surface for observability and future UI controls (see §25) |
 | Webhook ingestion | Owns the Webhook Handler: receives HTTP POST callbacks from external systems, verifies provider signatures, converts payloads to TaskEnvelopes tagged with `source='webhook'` (see §26) |
 | Channel management | Owns the Channel Adapter Registry: manages platform adapters (Desktop/WebSocket, WhatsApp, Telegram, Slack, Discord, CLI), normalizes incoming messages, routes responses back to originating channels (see §27) |
 | Internal hooks | Owns the Hooks Engine: fires TaskEnvelopes on internal state changes (startup, shutdown, session reset, compaction, agent registration) (see §28) |
@@ -721,6 +721,12 @@ The WebSocket is a **transport**, not the session. Reconnects do not create new 
 | `DELETE` | `/internal/scheduler/crons/{cron_id}` | Delete a cron job |
 | `POST` | `/internal/scheduler/heartbeat/config` | Update heartbeat configuration |
 | `GET` | `/internal/scheduler/heartbeat/config` | Get current heartbeat configuration |
+| `GET` | `/internal/scheduler/heartbeat-notes` | List heartbeat beat notes (model scratchpad + gateway beat envelopes) |
+| `POST` | `/internal/scheduler/heartbeat-notes` | Create/update heartbeat beat notes (`read`/`append`/`replace`/`remove`/`clear` via orchestrator tool) |
+| `GET` | `/internal/scheduler/heartbeat-watchpoints` | List standing heartbeat watchpoints (active and optionally inactive) |
+| `POST` | `/internal/scheduler/heartbeat-watchpoints` | Create or update a heartbeat watchpoint |
+| `POST` | `/internal/scheduler/heartbeat-watchpoints/{id}/status` | Change watchpoint status (`inactive`, `stale`, `superseded`, `completed`) — never hard-deleted |
+| `POST` | `/internal/scheduler/heartbeat-watchpoints/{id}/checks` | Record a watchpoint check outcome (`ok`/`inconclusive`/`failed`) with detail and optional baseline snapshot |
 | | | |
 | | **Webhooks (external systems)** | |
 | `POST` | `/webhooks/{webhook_id}` | Receive webhook callback from external system — signature verified per provider |
@@ -2245,7 +2251,7 @@ cosmic-agents/
 │   ├── scheduler/              # Scheduler module — Crons + Heartbeats (see §25)
 │   │   ├── __init__.py
 │   │   ├── store.py            # Canonical SchedulerStore implementation
-│   │   └── scheduler.db        # Cron definitions + heartbeat config (SQLite)
+│   │   └── scheduler.db        # Crons, heartbeat config, beat notes, watchpoints (SQLite)
 │   ├── webhooks/               # Webhook Handler module (see §26)
 │   │   ├── handler.py          # Receive, verify, convert to TaskEnvelope
 │   │   ├── providers.py        # Per-provider signature verification (Gmail, GitHub, Slack, Jira)
@@ -2329,7 +2335,7 @@ cosmic-agents/
     # gateway/credentials.db MUST also be on a persistent volume —
     # it contains encrypted refresh tokens and account bindings.
     # gateway/scheduler/scheduler.db MUST be on a persistent volume —
-    # it contains cron definitions and heartbeat configuration.
+    # it contains cron definitions, heartbeat configuration, beat notes, and watchpoints.
     # gateway/webhooks/webhooks.db MUST be on a persistent volume —
     # it contains webhook registrations.
     # memory/ and qdrant_data/ MUST be on persistent volumes —
@@ -6635,30 +6641,53 @@ SOURCE_PRIORITY_MAP = {
 
 Individual cron jobs can override this default via their `priority` field in the cron definition (see §25). For example, a "check for critical production alerts" cron might be set to `high`.
 
-### 24.4 Heartbeat Suppression
+### 24.4 Heartbeat Decision & Suppression
 
-When a heartbeat fires and nothing needs attention, the orchestrator responds with a special suppression token. The Gateway detects this and silently discards the response — the user never sees it. If something IS urgent, the response is delivered normally via the configured `delivery_channel`.
+When a heartbeat fires, the orchestrator returns a **structured decision envelope** as a single JSON object (see `cosmic_heartbeat_architecture.md` for the full product contract). The Gateway parses this before storage or delivery:
+
+```json
+{"decision":"suppress"|"deliver","message":"","reason":"","confidence":0.0,"pending_checks":[],"notes":""}
+```
+
+| `decision` | Gateway behavior |
+|---|---|
+| `suppress` | Silently discarded — not stored, streamed, pushed, or shown to the user. Gateway writes a `kind=beat`, `outcome=suppressed` row to `heartbeat_beat_notes` in `scheduler.db` for continuity and retention. |
+| `deliver` | The validated `message` field enters the normal response pipeline via the configured `delivery_channel`. Gateway writes `kind=beat`, `outcome=delivered`. |
+| Malformed / invalid | Suppressed by default (fail quiet). Gateway writes `outcome=failed` when appropriate. |
+
+**Legacy fallback:** The plain-text `heartbeat_ok` suppress token (`HEARTBEAT_SUPPRESS_TOKEN`) remains supported for backward compatibility, but new heartbeat turns should use the structured envelope.
 
 ```python
-HEARTBEAT_SUPPRESS_TOKEN = 'heartbeat_ok'
+HEARTBEAT_SUPPRESS_TOKEN = 'heartbeat_ok'  # legacy fallback only
 
 async def handle_heartbeat_response(response: str, delivery_channel: str | None):
-    if response.strip() == HEARTBEAT_SUPPRESS_TOKEN:
-        return  # suppress — nothing to report
-    # Something needs attention — deliver to user
-    adapter = channel_registry.get_adapter(delivery_channel or 'desktop')  # bare 'desktop' = primary desktop alias
-    await adapter.send({
-        'type': 'notification',
-        'source': 'heartbeat',
-        'content': response,
-    })
+    decision = parse_heartbeat_decision(response)  # JSON envelope first, then legacy token
+    if decision.should_suppress:
+        await scheduler_store.record_beat_note(
+            kind='beat', outcome='suppressed', content=decision.reason,
+        )
+        return
+    if decision.message:
+        await scheduler_store.record_beat_note(
+            kind='beat', outcome='delivered', content=decision.message,
+        )
+        adapter = channel_registry.get_adapter(delivery_channel or 'desktop')
+        await adapter.send({
+            'type': 'notification',
+            'source': 'heartbeat',
+            'content': decision.message,
+        })
 ```
+
+The model should **not** re-log suppress/deliver envelopes via `heartbeat_notes` — Gateway owns beat-level audit rows. Free-form continuity notes use the `heartbeat_notes` tool (§25.5).
 
 ---
 
 ## 25. Scheduler Module / Cron Manager (Crons & Heartbeats)
 
-The Scheduler is a Gateway module that manages cron jobs and heartbeats. It stores definitions in SQLite, runs a polling loop to check what's due, and fires TaskEnvelopes to the orchestrator when jobs trigger. The orchestrator creates and manages cron jobs via the Scheduler's internal API. The same module also serves as the **Cron Manager** for future desktop observability/control: it owns durable cron state, execution history, timezone handling, and pause/resume behavior so the desktop UI can inspect and manage scheduled work without talking to the orchestrator directly.
+The Scheduler is a Gateway module that manages cron jobs and heartbeats. It stores definitions in SQLite, runs a polling loop to check what's due, and fires TaskEnvelopes to the orchestrator when jobs trigger. The orchestrator creates and manages cron jobs via the Scheduler's internal API. The same module also owns **heartbeat notes and watchpoints** — the durable continuity store for ambient heartbeat state (see §25.5). It serves as the **Cron Manager** for future desktop observability/control: durable cron state, execution history, timezone handling, and pause/resume behavior so the desktop UI can inspect and manage scheduled work without talking to the orchestrator directly.
+
+> **Companion doc:** `cosmic_heartbeat_architecture.md` covers the full heartbeat product contract (context surface, prompt shape, delivery behavior, calendar digest). This section covers scheduler infrastructure and the SQLite notes/watchpoints store.
 
 **Design principle:** Scheduling is infrastructure, not AI. No LLM is involved in deciding "is it 9 AM yet?" — the Scheduler is a simple timer loop. The AI reasoning happens when the orchestrator receives the fired TaskEnvelope and processes it like any other input.
 
@@ -6730,6 +6759,72 @@ CREATE TABLE scheduler_profile (
     timezone_reported_at TIMESTAMP,
     updated_at TIMESTAMP NOT NULL
 );
+
+-- Heartbeat continuity store (see §25.5 — migrated from markdown Sep 2026)
+
+CREATE TABLE heartbeat_watchpoints (
+    watchpoint_id TEXT PRIMARY KEY,               -- e.g. 'hbwp_…'
+    name TEXT NOT NULL,                           -- short label
+    description TEXT,                             -- what to watch / current context
+    created_by TEXT,                              -- 'user' / 'orchestrator' / 'gateway'
+    check_kind TEXT,                              -- 'manual' / 'url_probe' / 'api_diff' (probes not wired yet)
+    check_config_json TEXT,                       -- JSON probe config (url, etc.)
+    baseline_state_json TEXT,                     -- JSON snapshot for diffs (e.g. known visitor IPs)
+    notify_policy TEXT,                           -- 'on_new' / 'on_every_check' / 'manual'
+    status TEXT NOT NULL,                         -- 'active' / 'stale' / 'inactive' / 'superseded' / 'completed'
+    status_reason TEXT,
+    status_changed_at TEXT,
+    status_changed_by TEXT,
+    last_checked_at TEXT,
+    last_check_status TEXT,                       -- 'ok' / 'inconclusive' / 'failed'
+    last_check_detail TEXT,
+    consecutive_failures INTEGER DEFAULT 0,
+    last_delivered_at TEXT,
+    delivery_count INTEGER DEFAULT 0,
+    created_request_id TEXT,
+    created_session_id TEXT,
+    created_channel TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_heartbeat_watchpoints_status
+    ON heartbeat_watchpoints(status, updated_at DESC);
+
+CREATE TABLE heartbeat_watchpoint_events (
+    event_id TEXT PRIMARY KEY,                    -- e.g. 'hbwe_…'
+    watchpoint_id TEXT NOT NULL,
+    event TEXT NOT NULL,                          -- 'status_changed', 'check', 'upserted', …
+    status TEXT,
+    reason TEXT,
+    actor TEXT,                                   -- 'user' / 'orchestrator' / 'gateway'
+    source TEXT,
+    details_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (watchpoint_id) REFERENCES heartbeat_watchpoints(watchpoint_id) ON DELETE CASCADE
+);
+
+CREATE TABLE heartbeat_beat_notes (
+    note_id TEXT PRIMARY KEY,                     -- e.g. 'hbnote_…'
+    kind TEXT NOT NULL,                           -- 'note' / 'plan' / 'watchpoint' / 'beat' / 'legacy_import'
+    outcome TEXT,                                 -- for kind='beat': 'suppressed' / 'delivered' / 'failed' / 'completed'
+    content TEXT,                                 -- free-form text (same role as old markdown body)
+    status TEXT DEFAULT 'active',                   -- 'active' / 'stale'
+    stale_reason TEXT,
+    stale_at TEXT,
+    stale_by TEXT,
+    author TEXT,                                  -- 'orchestrator' / 'gateway'
+    request_id TEXT,
+    session_id TEXT,
+    metadata_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_heartbeat_beat_notes_created
+    ON heartbeat_beat_notes(created_at DESC);
+CREATE INDEX idx_heartbeat_beat_notes_status
+    ON heartbeat_beat_notes(status, created_at DESC);
 ```
 
 ### 25.2 Scheduler Polling Loop
@@ -7003,6 +7098,37 @@ async def update_heartbeat_config(request: Request):
         body.get('suppress_token'), utcnow(),
     ])
     return {'updated': True}
+
+@app.get('/internal/scheduler/heartbeat-notes')
+async def list_heartbeat_notes(request: Request):
+    """List heartbeat beat notes. Called by orchestrator heartbeat_notes tool."""
+    await verify_internal_auth(request)
+    # Supports filtering by kind, status, limit — see gateway/scheduler/store.py
+    ...
+
+@app.post('/internal/scheduler/heartbeat-notes')
+async def mutate_heartbeat_notes(request: Request):
+    """read / append / replace / remove / clear heartbeat beat notes."""
+    await verify_internal_auth(request)
+    ...
+
+@app.get('/internal/scheduler/heartbeat-watchpoints')
+async def list_heartbeat_watchpoints(request: Request):
+    """List standing watchpoints. include_inactive=true for audit queries."""
+    await verify_internal_auth(request)
+    ...
+
+@app.post('/internal/scheduler/heartbeat-watchpoints')
+async def upsert_heartbeat_watchpoint(request: Request):
+    """Create or update a standing watchpoint."""
+    await verify_internal_auth(request)
+    ...
+
+@app.post('/internal/scheduler/heartbeat-watchpoints/{watchpoint_id}/status')
+async def set_watchpoint_status(watchpoint_id: str, request: Request):
+    """Change watchpoint status. Rows are never hard-deleted."""
+    await verify_internal_auth(request)
+    ...
 ```
 
 ### 25.3a Desktop-Facing Cron Manager Surface
@@ -7047,7 +7173,70 @@ async def on_schedule_request(self, task: TaskEnvelope):
     return resp.json()  # { cron_id, next_fire_at }
 ```
 
-### 25.5 Configuration
+### 25.5 Heartbeat Notes & Watchpoints (SQLite Store)
+
+**Cutover date:** 2026-09-01 (`033aa8d`). Heartbeat continuity state moved from a single markdown file into `gateway/scheduler/scheduler.db` — the same SQLite database as crons and heartbeat config.
+
+#### Why we upgraded
+
+The old design treated one markdown file as both a free-form notepad **and** the system of record for standing commitments. That dual use failed in production:
+
+| Problem | What happened |
+|---|---|
+| **Lossy log compaction** | `heartbeat_notes.md` grew ~2–4 KB/day from suppress lines (~48 beats/day). A 32,000-character cap with head+tail truncation amputated the middle. Watchpoints appended in late August vanished while Cosmic still believed they were live. |
+| **Unbounded suppress prose** | Suppress notes were appended as LLM-generated prose ("Suppressed. No material change since…"). You cannot safely dedupe or retain these with regex — the file was being parsed like a database. |
+| **Dual-use of one file** | Truncating a notepad is fine. Truncating commitments is not. Standing watches (e.g. "tell me about new portfolio visitors") were prose bullets with no durable registry. |
+| **Silent watch loss** | A portfolio-visitor watch was never reported because the watchpoint was lost after compaction and heartbeats had nothing telling them to check the stats API. |
+
+**Design principle after cutover:** separate concerns into typed SQLite tables with deterministic retention. Commitments (`heartbeat_watchpoints`) are never hard-deleted and never pruned by beat-note retention. Beat audit rows (`heartbeat_beat_notes`, `kind=beat`) use SQL retention, not LLM prose or file truncation.
+
+#### Before vs after
+
+| Concern | Before (markdown) | After (SQLite in `scheduler.db`) |
+|---|---|---|
+| Standing "keep an eye on X" | Prose bullets in `agents/orchestrator/store/heartbeat_notes.md` | `heartbeat_watchpoints` rows; never hard-deleted |
+| Suppress/deliver log | Appended markdown lines | Gateway writes `heartbeat_beat_notes` with `kind=beat` |
+| Model free-form notes | Same markdown file via `heartbeat_notes` tool | Same tool; `content` stored as TEXT in `heartbeat_beat_notes` |
+| Stopping a watch | Line deleted or lost in truncation | `status=inactive` + reason; row stays queryable |
+| Suppress spam | ~48 lines/day until 32k cap, then middle amputated | SQL retention: 48h full, then 1/day for 14 days, then drop |
+| Beat prompt context | 6,000-char head+tail excerpt of fat file | Watchpoint registry + rendered SQL notes; no import of old suppress log |
+
+**Production behavior:** When Gateway is up, Cosmic does **not** read or write `heartbeat_notes.md`. That file remains on disk as a stub for unit tests and offline fallback (when `gateway_url` is unset). On first deploy the 31k suppress log was **not** imported; the fat `.md` was replaced with a header-only stub.
+
+#### Orchestrator tools
+
+**`heartbeat_notes`** — free-form continuity text (same operations as the old file):
+
+- `read` / `append` / `replace` / `remove` / `clear`
+- `remove` / `clear` **soft-stale** (`status=stale`); history remains
+- Gateway already records suppress/deliver as `kind=beat` — model should not re-log those envelopes
+- `kind` for model appends: `note` (default), `plan`, `watchpoint` (rare; real watches go in the other tool)
+
+**`heartbeat_watchpoints`** — standing commitments:
+
+- `list` / `create` / `update` / `set_status`
+- Never hard-delete. Stop a watch with `set_status` + `reason` (`inactive`, `stale`, `superseded`, `completed`)
+- `include_inactive=true` on list so "where did that visitor notification go?" is answerable
+
+#### Retention (`heartbeat_beat_notes` only)
+
+Deterministic SQL on each beat write. No LLM, no regex on suppress prose. Watchpoints and `heartbeat_watchpoint_events` are **not** pruned by this job.
+
+| Row type | Retention |
+|---|---|
+| Suppress beats (`kind=beat`, `outcome=suppressed`) | All for 48h, then 1 newest per UTC day for 14 days, then drop |
+| Delivered / failed / completed beats | 30 days |
+| Stale model notes | 14 days after `stale_at` |
+| Active model notes (`kind=note`/`plan`) | Until marked stale |
+| Watchpoints + watchpoint events | Until status changed by user/orchestrator; not auto-pruned |
+
+#### Still not built (post-cutover gaps)
+
+- Automatic stats-API / URL probes (`check_kind=url_probe`) without sandbox approval per beat
+- Liveness: N consecutive `inconclusive` checks should force a delivery ("this watch has been blind")
+- These were the original visitor-miss failure modes; the notes amputation problem is what the SQLite cutover fixed
+
+### 25.6 Configuration
 
 ```ini
 # Scheduler configuration (gateway environment)
@@ -9914,7 +10103,7 @@ Default starter opportunities are seeded idempotently as examples and useful sta
 | `MemoryRead` | `shared/memory_tools.py` | Universal agent tool — shared memory search (§32.5) |
 | `MemoryWrite` | `shared/memory_tools.py` | Universal agent tool — shared memory write (§32.5) |
 
-**Note:** Credential data (accounts, credentials, resource_bindings, audit) is stored in SQLite tables in `gateway/credentials.db`, not as Pydantic models. The `input.auth` dict in TaskEnvelopes is a convention on the existing `input: dict` field (see §7.3), not a separate model. Scheduler data (cron_jobs, heartbeat_config) is in `gateway/scheduler/scheduler.db`. Webhook data (webhooks, webhook_log) is in `gateway/webhooks/webhooks.db`. Task Planner data (plans, plan_steps, tasks) is in `agents/orchestrator/store/data/task_ledger.db` (see §31.1).
+**Note:** Credential data (accounts, credentials, resource_bindings, audit) is stored in SQLite tables in `gateway/credentials.db`, not as Pydantic models. The `input.auth` dict in TaskEnvelopes is a convention on the existing `input: dict` field (see §7.3), not a separate model. Scheduler data (`cron_jobs`, `heartbeat_config`, `heartbeat_beat_notes`, `heartbeat_watchpoints`, `heartbeat_watchpoint_events`, `scheduler_profile`) is in `gateway/scheduler/scheduler.db`. Webhook data (webhooks, webhook_log) is in `gateway/webhooks/webhooks.db`. Task Planner data (plans, plan_steps, tasks) is in `agents/orchestrator/store/data/task_ledger.db` (see §31.1).
 
 ## Appendix C: Quick Reference — Event Type Enum
 

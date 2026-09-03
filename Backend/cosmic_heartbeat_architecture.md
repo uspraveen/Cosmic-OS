@@ -38,7 +38,7 @@ Each heartbeat receives a compact context packet rather than a replayed chat pro
 - Stable user preferences and interests from carry-forward/memory.
 - Passive memory recall for broad user priorities.
 - Heartbeat runtime state: interval, last fired time, last delivered note, last suppression, current scheduled fire, and projected next fire.
-- Private heartbeat notes from `Backend/agents/orchestrator/store/heartbeat_notes.md`.
+- Heartbeat watchpoint registry and rendered beat notes from `gateway/scheduler/scheduler.db` (see `cosmic_architecture.md` §25.5). Production Cosmic does not read `heartbeat_notes.md` when Gateway is up.
 - Calendar Digest: a bounded upcoming-event window from connected calendar accounts, including account/calendar identity and new/changed/seen markers.
 
 Future expansions should add first-class summaries for:
@@ -76,8 +76,8 @@ context changed.
 You know this is a repeating heartbeat; use the runtime state to reason about the
 last beat, this beat, and the next one.
 Use heartbeat_notes as your private scratchpad for compact self-notes across beats:
-read it when continuity matters, append or replace short watchpoints, and remove
-stale notes.
+read it when continuity matters, append or replace short notes, and soft-stale
+stale ones. Use heartbeat_watchpoints for standing commitments ("keep an eye on X").
 Never infer that a reminder, cron, email, or calendar item was missed from
 desktop inactivity, missing heartbeat consumption, lack of chat activity, or
 stale heartbeat notes. Use explicit delivery facts when present, and treat
@@ -111,26 +111,46 @@ Gateway owns the schedule because Gateway already owns sessions, delivery, prefe
 - `visual_response_enhancement_enabled` is disabled for heartbeat turns unless explicitly changed later.
 - Heartbeat response chunks and progress are not streamed live; useful final responses still retain their compact Flow/activity log for later inspection.
 - Gateway parses the final heartbeat JSON decision before storage or delivery.
-- `decision="suppress"` responses are suppressed before session storage, push, delivery queue, and UI display.
-- `decision="deliver"` responses are reduced to the validated `message` field before they enter the normal response pipeline.
+- `decision="suppress"` responses are suppressed before session storage, push, delivery queue, and UI display. Gateway writes `kind=beat`, `outcome=suppressed` to `heartbeat_beat_notes`.
+- `decision="deliver"` responses are reduced to the validated `message` field before they enter the normal response pipeline. Gateway writes `kind=beat`, `outcome=delivered`.
 - Malformed envelopes are suppressed. The legacy `heartbeat_ok` token remains supported only as a backward-compatibility fallback.
 
-## Heartbeat Notes
+## Heartbeat Notes & Watchpoints
 
-Heartbeat notes are COSMIC's private continuity scratchpad for recurring ambient thought. They are not chat history and should not be quoted to the user. The file lives at:
+Heartbeat continuity state lives in **SQLite** (`gateway/scheduler/scheduler.db`), not in a markdown file. See `cosmic_architecture.md` §25.5 for the full before/after cutover story (Sep 2026).
 
-```text
-Backend/agents/orchestrator/store/heartbeat_notes.md
-```
+### Storage model
 
-The orchestrator gets a `heartbeat_notes` tool that can read, append, replace, remove, or clear this markdown. This reuses the existing orchestrator tool execution path instead of creating a separate note service.
+| Table | Role |
+|---|---|
+| `heartbeat_watchpoints` | Standing commitments ("keep an eye on X"). Never hard-deleted. |
+| `heartbeat_watchpoint_events` | Audit log for watchpoint lifecycle (create, status change, check). |
+| `heartbeat_beat_notes` | Model free-form notes (`kind=note`/`plan`) + Gateway beat envelopes (`kind=beat`). |
 
-Expected use:
+`Backend/agents/orchestrator/store/heartbeat_notes.md` is a **stub only** when Gateway is up. It remains for unit tests and offline fallback when `gateway_url` is unset.
 
-- Keep notes compact: watchpoints, project follow-ups, future checks, and ideas worth revisiting on later beats.
-- Remove stale notes once acted on or no longer relevant.
-- Use durable memory/core facts for stable user preferences and identity-level facts; use heartbeat notes for ambient operational continuity.
-- Do not use heartbeat notes as proof that the user was offline, that a notification failed, or that a scheduled item was missed. Notes can be stale; delivery facts win.
+### Orchestrator tools
+
+**`heartbeat_notes`** — free-form continuity text (same operations as the old markdown file):
+
+- `read` / `append` / `replace` / `remove` / `clear`
+- `remove` / `clear` soft-stale (`status=stale`); history remains
+- Gateway already records suppress/deliver as `kind=beat` — model should not re-log those envelopes
+- `kind` for model appends: `note` (default), `plan`, `watchpoint` (rare; real watches go in the other tool)
+
+**`heartbeat_watchpoints`** — standing commitments:
+
+- `list` / `create` / `update` / `set_status`
+- Never hard-delete. Stop a watch with `set_status` + `reason` (`inactive`, `stale`, `superseded`, `completed`)
+- `include_inactive=true` on list for audit queries ("where did that watch go?")
+
+### Expected use
+
+- Keep notes compact: project follow-ups, future checks, and ideas worth revisiting on later beats.
+- Soft-stale notes once acted on or no longer relevant.
+- Use `heartbeat_watchpoints` for durable standing watches; use `heartbeat_notes` for ambient operational continuity.
+- Use durable memory/core facts for stable user preferences and identity-level facts.
+- Do not use beat notes as proof that the user was offline, that a notification failed, or that a scheduled item was missed. Notes can be stale; delivery facts win.
 - Do not append a note every beat. Silence is valid when there is nothing to remember.
 
 ## Recent Delivery Facts
@@ -195,7 +215,8 @@ Bad heartbeat notes are:
 - Add explicit inbox and Cosmic Mail approval summarizers into the heartbeat context packet.
 - Add a "quiet hours" policy once user preference UI exists.
 - Add deduplication against recently surfaced heartbeat insights.
-- Add a heartbeat insight ledger for analytics without polluting chat history.
+- Wire automatic stats-API / URL probes (`check_kind=url_probe`) without sandbox approval per beat.
+- Liveness: N consecutive `inconclusive` watchpoint checks should force a delivery ("this watch has been blind").
 - Add smarter salience scoring before calling the orchestrator, so some cycles can be skipped without an LLM call.
 - Add active task health checks for long-running Alpha/Cursor/Codex jobs.
 - Add user-tunable channels: desktop only, mobile push, both, or silent digest.
