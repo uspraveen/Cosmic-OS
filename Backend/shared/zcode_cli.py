@@ -20,6 +20,10 @@ Auth model, verified live against the CLI:
 - A key pasted by hand (Z.ai or BigModel) lands in the same place; per-run
   model selection then happens through `ZCODE_MODEL`/`ZCODE_BASE_URL` env
   overrides, never by editing the key.
+- `ZCODE_MODEL` makes the CLI synthesize the provider from env, which loses
+  the config file's key; `zcode_cli_env` therefore re-injects the config's
+  key as `ANTHROPIC_API_KEY` (the adapter's fallback for anthropic-kind
+  providers) whenever a model override is active.
 """
 
 from __future__ import annotations
@@ -372,6 +376,26 @@ def read_zcode_auth_state(zcode_home: str | Path) -> dict[str, Any]:
     }
 
 
+def zcode_provider_api_key(zcode_home: str | Path) -> str:
+    """The key stored in the CLI home's config for the `zai` provider.
+
+    This is the only credential source COSMIC reads back — used to satisfy
+    the CLI's env-key fallback when `ZCODE_MODEL` is active (see
+    `zcode_cli_env`). Never logged, never written anywhere else.
+    """
+    config = read_zcode_cli_config(zcode_home) or {}
+    providers = config.get("provider")
+    if not isinstance(providers, dict):
+        return ""
+    provider = providers.get(PROVIDER_ID)
+    if not isinstance(provider, dict):
+        return ""
+    options = provider.get("options")
+    if not isinstance(options, dict):
+        return ""
+    return str(options.get("apiKey", "") or "").strip()
+
+
 def zcode_cli_env(
     zcode_home: str | Path,
     *,
@@ -384,7 +408,9 @@ def zcode_cli_env(
     HOME (and USERPROFILE on Windows, which `os.homedir()` prefers there)
     anchor `$HOME/.zcode` — config, credentials, sessions, global AGENTS.md.
     `model` overrides the main model per run via `ZCODE_MODEL` (qualified
-    `zai/<id>`), keeping the config file free of per-run churn.
+    `zai/<id>`), keeping the config file free of per-run churn; the config's
+    own key rides along as `ANTHROPIC_API_KEY` because the env model spec
+    hides the config provider from the CLI's key resolution.
     """
     env = dict(base_env if base_env is not None else os.environ)
     home = Path(zcode_home).expanduser()
@@ -406,10 +432,22 @@ def zcode_cli_env(
     if model_id:
         env["ZCODE_MODEL"] = f"{PROVIDER_ID}/{model_id}"
         env["ZCODE_BASE_URL"] = (base_url or "").strip() or ZAI_ANTHROPIC_BASE_URL
+        # A ZCODE_MODEL env spec makes the CLI synthesize the provider from
+        # env — a record without the config file's key — and its anthropic
+        # adapter then falls back to ANTHROPIC_API_KEY. Inject the home
+        # config's own key there, or every overridden run dies with
+        # `provider_not_configured` the moment the turn starts.
+        provider_key = zcode_provider_api_key(home)
+        if provider_key:
+            env["ANTHROPIC_API_KEY"] = provider_key
+        else:
+            env.pop("ANTHROPIC_API_KEY", None)
     else:
         env.pop("ZCODE_MODEL", None)
         env.pop("ZCODE_BASE_URL", None)
     # Credentials ride inside cli/config.json — never through ambient env.
-    for key in ("ZCODE_API_KEY", "ZAI_API_KEY", "ANTHROPIC_API_KEY"):
+    for key in ("ZCODE_API_KEY", "ZAI_API_KEY"):
         env.pop(key, None)
+    if not model_id:
+        env.pop("ANTHROPIC_API_KEY", None)
     return apply_git_credentials(env)

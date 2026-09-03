@@ -300,7 +300,31 @@ def test_zcode_cli_env_model_override_and_key_stripping(tmp_path: Path, monkeypa
     assert env["HOME"] == str(tmp_path)
     assert env["ZCODE_MODEL"] == "zai/glm-5.3-flash"
     assert "ZAI_API_KEY" not in env
+    # No config in the home yet: the fallback key slot must stay empty rather
+    # than inherit an ambient value.
     assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_zcode_cli_env_injects_config_key_for_model_override(tmp_path: Path) -> None:
+    ensure_zcode_cli_config(tmp_path, api_key="config-stored-key")
+
+    override_env = zcode_cli_env(tmp_path, model="glm-5.3")
+    assert override_env["ANTHROPIC_API_KEY"] == "config-stored-key"
+    assert override_env["ZCODE_MODEL"] == "zai/glm-5.3"
+
+    # Without a model override the CLI reads the key from its own config, and
+    # ambient keys must not ride along.
+    plain_env = zcode_cli_env(tmp_path)
+    assert "ANTHROPIC_API_KEY" not in plain_env
+    assert "ZCODE_MODEL" not in plain_env
+
+
+def test_zcode_provider_api_key_reads_config_only(tmp_path: Path) -> None:
+    from shared.zcode_cli import zcode_provider_api_key
+
+    assert zcode_provider_api_key(tmp_path) == ""
+    ensure_zcode_cli_config(tmp_path, api_key="key-abc")
+    assert zcode_provider_api_key(tmp_path) == "key-abc"
 
 
 def test_ensure_zcode_home_writable_passes_on_fresh_dir(tmp_path: Path) -> None:
