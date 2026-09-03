@@ -382,43 +382,62 @@ class ZcodeWorkspaceRunner:
             nonlocal final_payload, stream_event_count
             if process.stdout is None:
                 return
-            async for text in iter_stream_lines(
-                process.stdout,
-                omitted_event_type="cosmic.zcode.large_event_omitted",
-            ):
+            # stream-json is NDJSON: split raw chunks on newlines ourselves.
+            # The shared iter_stream_lines helper replaces oversized lines
+            # with placeholders, which would tear long events mid-JSON.
+            buffer = b""
+            debug_parts = 0
+            while True:
+                chunk = await process.stdout.read(65536)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    raw_line, buffer = buffer.split(b"\n", 1)
+                    text = raw_line.decode("utf-8", errors="replace")
+                    note_output()
+                    if debug_parts < 200:
+                        stdout_parts.append(compact_for_memory(text))
+                        debug_parts += 1
+                    stripped = text.strip()
+                    parsed: Any = None
+                    if stripped.startswith("{"):
+                        try:
+                            parsed = json.loads(stripped)
+                        except json.JSONDecodeError:
+                            parsed = None
+                    if isinstance(parsed, dict):
+                        if parsed.get("type") == "result":
+                            # The final flat payload — same shape as `--json`.
+                            # Stash the parsed object (not the possibly-compacted
+                            # line) so a long response survives memory trimming.
+                            final_payload = parsed
+                            continue
+                        payload = parsed.get("payload")
+                        if isinstance(payload, dict) and payload.get("type"):
+                            stream_event_count += 1
+                            progress_line = _progress_line_for_event(payload)
+                            if progress_line is not None:
+                                await emit({
+                                    "stream": "stdout",
+                                    "event_type": f"zcode.{payload.get('type')}",
+                                    "text": _tail(progress_line, 2000),
+                                })
+                            continue
+                    if stripped:
+                        await emit({
+                            "stream": "stdout",
+                            "event_type": "stdout",
+                            "text": _tail(stripped, 500),
+                        })
+                if len(buffer) > 16 * 1024 * 1024:
+                    # Pathological single event beyond any real payload; drop
+                    # it rather than growing memory without bound.
+                    buffer = b""
+            if buffer.strip():
+                text = buffer.decode("utf-8", errors="replace")
                 note_output()
                 stdout_parts.append(compact_for_memory(text))
-                stripped = text.strip()
-                parsed: Any = None
-                if stripped.startswith("{"):
-                    try:
-                        parsed = json.loads(stripped)
-                    except json.JSONDecodeError:
-                        parsed = None
-                if isinstance(parsed, dict):
-                    if parsed.get("type") == "result":
-                        # The final flat payload — same shape as `--json`.
-                        # Stash the parsed object (not the possibly-compacted
-                        # line) so a long response survives memory trimming.
-                        final_payload = parsed
-                        continue
-                    payload = parsed.get("payload")
-                    if isinstance(payload, dict) and payload.get("type"):
-                        stream_event_count += 1
-                        progress_line = _progress_line_for_event(payload)
-                        if progress_line is not None:
-                            await emit({
-                                "stream": "stdout",
-                                "event_type": f"zcode.{payload.get('type')}",
-                                "text": _tail(progress_line, 2000),
-                            })
-                        continue
-                if stripped:
-                    await emit({
-                        "stream": "stdout",
-                        "event_type": "stdout",
-                        "text": _tail(stripped, 500),
-                    })
 
         async def read_stderr() -> None:
             if process.stderr is None:
