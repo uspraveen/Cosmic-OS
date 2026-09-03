@@ -2327,7 +2327,11 @@ export default function DynamicIsland({
       ? 'Alpha Codex'
       : item.provider === 'cursor'
         ? 'Alpha Cursor'
-        : 'Google Workspace'
+        : item.provider === 'opencode'
+          ? 'Alpha OpenCode'
+          : item.provider === 'zcode'
+            ? 'Alpha ZCode'
+            : 'Google Workspace'
     return (
       <motion.div
         key={item.key}
