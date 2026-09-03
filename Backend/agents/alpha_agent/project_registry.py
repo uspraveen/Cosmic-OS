@@ -12,6 +12,13 @@ from shared.contracts import utcnow
 from shared.sqlite_client import connect_sync
 
 
+# Harnesses allowed to persist native sessions. Keep in sync with
+# `ALPHA_HARNESSES` in agents.alpha_agent.agent — a harness missing here fails
+# the whole task AFTER its CLI run completed (the observed-session record is
+# written right behind a successful run).
+SUPPORTED_HARNESSES = frozenset({"codex", "cursor", "opencode", "zcode"})
+
+
 def generate_project_id() -> str:
     return f"prj_{uuid4().hex[:12]}"
 
@@ -669,7 +676,7 @@ class ProjectRegistry:
         normalized_native = str(native_session_id or "").strip()
         if not normalized_project:
             raise ValueError("project_id is required")
-        if normalized_harness not in {"codex", "cursor", "opencode"}:
+        if normalized_harness not in SUPPORTED_HARNESSES:
             raise ValueError("unsupported harness")
         if not normalized_native:
             raise ValueError("native_session_id is required")

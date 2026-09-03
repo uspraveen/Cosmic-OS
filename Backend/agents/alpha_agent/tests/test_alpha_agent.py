@@ -136,6 +136,35 @@ def test_project_registry_creates_and_resolves_project(tmp_path: Path) -> None:
     assert registry.find_project("cursor:chat_resume_123456").project_id == created.project_id
 
 
+def test_project_registry_records_zcode_harness_sessions(tmp_path: Path) -> None:
+    """ZCode runs must persist their native session like the other harnesses.
+
+    The allowlist used to omit zcode, so a fully successful ZCode run failed
+    right after completion when the observed session was recorded — and
+    follow-up ZCode runs failed at resume for the same reason.
+    """
+    registry = ProjectRegistry(tmp_path / "projects.db")
+    created = registry.create_project(repo_url="https://github.com/uspraveen/blog")
+
+    session = registry.record_harness_session(
+        project_id=created.project_id,
+        harness="zcode",
+        native_session_id="sess_zcode_1234",
+        workspace_path="/var/lib/cosmic/alpha/workspaces/prj_x",
+        task_id="tsk_zcode",
+        model="glm-5.3-flash",
+        status="active",
+    )
+    assert session.session_id.startswith("hses_")
+    best = registry.best_harness_session(
+        created.project_id,
+        harness="zcode",
+        workspace_path="/var/lib/cosmic/alpha/workspaces/prj_x",
+        model="glm-5.3-flash",
+    )
+    assert best.native_session_id == "sess_zcode_1234"
+
+
 def test_project_registry_scores_task_search_fields(tmp_path: Path) -> None:
     registry = ProjectRegistry(tmp_path / "projects.db")
     site = registry.create_project(
