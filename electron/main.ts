@@ -13,6 +13,28 @@ import { GatewayConnectionManager, type GatewayConnectionConfig as PersistentGat
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 process.env.APP_ROOT = path.join(__dirname, '..')
 
+// A broken stdout/stderr pipe (closed terminal, or a Ctrl+C'd dev server
+// that spawned us) turns every later console.error into EPIPE — and an
+// uncaught EPIPE pops the fatal "JavaScript error occurred in the main
+// process" dialog. The console streams are diagnostics only: drop their
+// pipe errors instead of dying on them.
+for (const stream of [process.stdout, process.stderr]) {
+  stream?.on?.('error', (err: NodeJS.ErrnoException) => {
+    if (err?.code === 'EPIPE') return
+    throw err
+  })
+}
+
+// Same failure class arrives from Electron's own write paths — replying to
+// a renderer that went away mid-request also surfaces as EPIPE. Swallow
+// only EPIPE; anything else regains the default fatal behavior.
+const onUncaughtException = (err: NodeJS.ErrnoException) => {
+  if (err?.code === 'EPIPE') return
+  process.removeListener('uncaughtException', onUncaughtException)
+  throw err
+}
+process.on('uncaughtException', onUncaughtException)
+
 // Supabase public constants (anon key is safe to commit — only allows RLS-protected queries)
 const SUPABASE_URL = 'https://hluenippcdiejenmteen.supabase.co'
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhsdWVuaXBwY2RpZWplbm10ZWVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE4MzYwOTMsImV4cCI6MjA2NzQxMjA5M30.dm6YO4B9SAQ8hnGtR-OZS7jn5FcL-zz4s4XxP-TyCpk'
