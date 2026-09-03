@@ -409,12 +409,16 @@ class ZcodeWorkspaceRunner:
                     if isinstance(parsed, dict):
                         # Events type at the top level (`result` included);
                         # some builds nest the type inside `payload` instead.
+                        # The event fields (turnNumber, toolName, usage, …)
+                        # live in `payload`, so flatten both for the mapper.
                         event_type = str(parsed.get("type") or "")
-                        details: dict[str, Any] = parsed
-                        if not event_type and isinstance(parsed.get("payload"), dict):
-                            nested = parsed["payload"]
-                            event_type = str(nested.get("type") or "")
-                            details = nested
+                        nested = parsed.get("payload") if isinstance(parsed.get("payload"), dict) else {}
+                        details: dict[str, Any] = {
+                            **nested,
+                            **{k: v for k, v in parsed.items() if k != "payload"},
+                        }
+                        if not event_type:
+                            event_type = str(details.get("type") or "")
                         if event_type == "result":
                             # The final flat payload — same shape as `--json`.
                             # Stash the parsed object (not the possibly-compacted
