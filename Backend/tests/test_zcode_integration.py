@@ -441,3 +441,39 @@ def test_zcode_runner_extracts_result_from_stream_stdout(tmp_path: Path) -> None
     assert payload is not None
     assert payload.get("response") == "Streamed answer."
     assert runner._extract_native_session_id(stdout, payload) == "sess_stream999"
+
+
+def test_zcode_progress_lines_map_scheduled_and_result_tool_shapes() -> None:
+    from agents.alpha_agent.zcode_runner import _progress_line_for_event
+
+    scheduled = _progress_line_for_event({
+        "type": "tool.updated",
+        "kind": "scheduled",
+        "toolName": "Write",
+        "input": {"file_path": "/tmp/zz_mapper.txt", "content": "hi"},
+    })
+    assert scheduled == "→ Write /tmp/zz_mapper.txt"
+
+    assert _progress_line_for_event({
+        "type": "tool.updated",
+        "kind": "started",
+        "toolName": "Write",
+    }) is None
+
+    ok_result = _progress_line_for_event({
+        "type": "tool.updated",
+        "kind": "result",
+        "toolName": "Write",
+        "result": {"success": True, "content": "File created"},
+    })
+    assert ok_result == "✓ Write"
+
+    failed = _progress_line_for_event({
+        "type": "tool.updated",
+        "kind": "result",
+        "toolName": "Bash",
+        "result": {"success": False, "content": "exit code 1: no such file"},
+    })
+    assert failed is not None
+    assert failed.startswith("✗ Bash")
+    assert "exit code 1" in failed

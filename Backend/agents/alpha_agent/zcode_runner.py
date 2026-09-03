@@ -706,12 +706,20 @@ def _progress_line_for_event(payload: dict[str, Any]) -> str | None:
             bits.append(f"{duration_ms / 1000:.1f}s")
         return "● model request done · " + " · ".join(bits)
     if event_type == "tool.updated":
-        tool_name = str(payload.get("toolName") or "tool")
-        if str(payload.get("kind") or "") == "tool_input_start":
+        tool_name = str(payload.get("toolName") or "") or "tool call"
+        kind = str(payload.get("kind") or "")
+        status = str(payload.get("status") or "")
+        if kind in ("tool_input_start", "scheduled"):
             target = _tool_target_label(payload.get("input"))
             return f"→ {tool_name}{(' ' + target) if target else ''}"
-        if str(payload.get("status") or "") == "tool_result_committed":
+        if status == "tool_result_committed":
             return f"✓ {tool_name}"
+        if kind == "result":
+            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+            if result.get("success", True):
+                return f"✓ {tool_name}"
+            content = str(result.get("content") or "").strip()
+            return f"✗ {tool_name} — {content[:120]}" if content else f"✗ {tool_name}"
         return None
     if event_type == "turn.completed":
         result_type = str(payload.get("resultType") or "success")
