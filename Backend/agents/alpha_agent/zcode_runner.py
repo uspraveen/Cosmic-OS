@@ -407,20 +407,27 @@ class ZcodeWorkspaceRunner:
                         except json.JSONDecodeError:
                             parsed = None
                     if isinstance(parsed, dict):
-                        if parsed.get("type") == "result":
+                        # Events type at the top level (`result` included);
+                        # some builds nest the type inside `payload` instead.
+                        event_type = str(parsed.get("type") or "")
+                        details: dict[str, Any] = parsed
+                        if not event_type and isinstance(parsed.get("payload"), dict):
+                            nested = parsed["payload"]
+                            event_type = str(nested.get("type") or "")
+                            details = nested
+                        if event_type == "result":
                             # The final flat payload — same shape as `--json`.
                             # Stash the parsed object (not the possibly-compacted
                             # line) so a long response survives memory trimming.
                             final_payload = parsed
                             continue
-                        payload = parsed.get("payload")
-                        if isinstance(payload, dict) and payload.get("type"):
+                        if event_type:
                             stream_event_count += 1
-                            progress_line = _progress_line_for_event(payload)
+                            progress_line = _progress_line_for_event(details)
                             if progress_line is not None:
                                 await emit({
                                     "stream": "stdout",
-                                    "event_type": f"zcode.{payload.get('type')}",
+                                    "event_type": f"zcode.{event_type}",
                                     "text": _tail(progress_line, 2000),
                                 })
                             continue
