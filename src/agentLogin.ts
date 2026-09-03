@@ -34,7 +34,10 @@ const REASON_MESSAGES: Record<string, string> = {
     'The ZCode CLI is not installed on the VM, so there is nothing to sign in to. Re-run the VM bootstrap (setup-zcode-cli) to install it.',
   cursor_oauth_login_failed: 'The Cursor sign-in on the VM exited before it completed.',
   chatgpt_login_failed: 'The ChatGPT sign-in on the VM exited before it completed.',
-  zcode_login_failed: 'The Z.ai sign-in on the VM exited before it completed.',
+  zcode_login_failed:
+    'The Z.ai sign-in on the VM exited before it completed. Nothing was saved — try connecting again.',
+  zcode_home_not_writable:
+    'The VM cannot write to the ZCode home directory, so sign-in cannot save its credentials. Run `sudo chown -R $(id -un) /var/lib/cosmic/alpha/homes/zcode` on the VM, then connect again.',
   api_key_relogin_required: 'The saved API key was rejected. Save a new key or switch to browser sign-in.',
   auth_not_configured: 'No sign-in method is configured for this agent yet.',
 }

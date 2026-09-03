@@ -4782,12 +4782,40 @@ def _ensure_zcode_node_runtime() -> str:
     return str(dedicated)
 
 
+def _chown_tree_to_service_user(path: Path) -> None:
+    """Hand a root-created path to the user the cosmic services run as.
+
+    Bootstrap runs under sudo, but cosmic-gateway/cosmic-alpha-agent run as
+    the invoking user; anything left root-owned (homes, CLI state) is
+    unwritable for them and surfaces as opaque CLI failures later.
+    """
+    if os.name != "posix" or os.geteuid() != 0:
+        return
+    service_user = current_service_user()
+    try:
+        pw_entry = pwd.getpwnam(service_user)
+    except (KeyError, AttributeError):
+        return
+    if path.stat().st_uid == pw_entry.pw_uid:
+        return
+    log(
+        "Fixing ownership of {0} -> {1}".format(path, service_user)
+    )
+    for item in [path, *sorted(path.rglob("*"))]:
+        try:
+            os.chown(item, pw_entry.pw_uid, pw_entry.pw_gid, follow_symlinks=False)
+        except OSError as exc:
+            log("WARNING: unable to chown {0}: {1}".format(item, exc))
+
+
 def ensure_zcode_cli_layout() -> None:
     """Pre-create the Alpha ZCode home so Day-1 runs never hit ENOENT."""
     try:
         DEFAULT_ALPHA_ZCODE_HOME.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         log("WARNING: unable to create Alpha ZCode home: {0}".format(exc))
+        return
+    _chown_tree_to_service_user(DEFAULT_ALPHA_ZCODE_HOME)
 
 
 def load_package_json(package_json: Path) -> dict:

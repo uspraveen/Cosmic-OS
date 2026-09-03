@@ -301,3 +301,46 @@ def test_zcode_cli_env_model_override_and_key_stripping(tmp_path: Path, monkeypa
     assert env["ZCODE_MODEL"] == "zai/glm-5.3-flash"
     assert "ZAI_API_KEY" not in env
     assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_ensure_zcode_home_writable_passes_on_fresh_dir(tmp_path: Path) -> None:
+    from shared.zcode_cli import ensure_zcode_home_writable, zcode_home_writable
+
+    home = tmp_path / "homes" / "zcode"
+    # A not-yet-created home must not read as blocked (fresh installs).
+    assert zcode_home_writable(home) is True
+    assert ensure_zcode_home_writable(home) is None
+    assert (home / ".zcode").is_dir()
+    assert zcode_home_writable(home) is True
+
+
+def test_zcode_home_writable_flags_unwritable_dir(tmp_path: Path) -> None:
+    import os
+
+    from shared.zcode_cli import ensure_zcode_home_writable, zcode_home_writable
+
+    if os.name != "posix":
+        # Windows enforcement of directory write bits is not reliable.
+        return
+    home = tmp_path / "homes" / "zcode"
+    home.mkdir(parents=True)
+    home.chmod(0o555)
+    try:
+        assert zcode_home_writable(home) is False
+        reason = ensure_zcode_home_writable(home)
+        assert reason is not None
+        assert "not writable" in reason
+        assert str(home) in reason
+    finally:
+        home.chmod(0o755)
+
+
+def test_ensure_zcode_cli_config_creates_missing_home(tmp_path: Path) -> None:
+    from shared.zcode_cli import ensure_zcode_cli_config, read_zcode_auth_state
+
+    home = tmp_path / "homes" / "zcode"
+    result = ensure_zcode_cli_config(home, api_key="key-123")
+    assert result["wrote"] is True
+    assert result["has_api_key"] is True
+    state = read_zcode_auth_state(home)
+    assert state["has_api_key"] is True

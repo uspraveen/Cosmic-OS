@@ -294,8 +294,10 @@ def ensure_zcode_cli_config(
         update["provider"][PROVIDER_ID]["options"]["apiKey"] = existing_key
     merged = _deep_merge(json.loads(json.dumps(current)), update)
     serialized = json.dumps(merged, indent=2, ensure_ascii=False) + "\n"
+    # mkdir failures must propagate: swallowing them here turned an
+    # unwritable home into a confusing FileNotFoundError on the tmp write.
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         existing_text = path.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):
         existing_text = None
@@ -313,6 +315,46 @@ def ensure_zcode_cli_config(
         ),
         "main_model": str(update["model"]["main"]),
     }
+
+
+def zcode_home_writable(zcode_home: str | Path) -> bool:
+    """Cheap writability probe for status polling (no side effects).
+
+    A not-yet-created home counts as writable when its parent accepts
+    creation — unlike a raw `os.access`, which would report every fresh
+    install as blocked.
+    """
+    home = Path(zcode_home).expanduser()
+    target = home
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    try:
+        return os.access(target, os.W_OK)
+    except OSError:
+        return False
+
+
+def ensure_zcode_home_writable(zcode_home: str | Path) -> str | None:
+    """Probe that the CLI home accepts writes before any flow that needs one.
+
+    The gateway/agent services run unprivileged; a home left root-owned by a
+    sudo run otherwise only surfaces as the CLI's opaque credential-write
+    failure after the user has already completed OAuth in the browser.
+    """
+    home = Path(zcode_home).expanduser()
+    probe_dir = home / ".zcode"
+    try:
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        probe = probe_dir / ".cosmic-write-probe"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        detail = exc.strerror or str(exc)
+        return (
+            f"{home} is not writable by this process ({detail}); fix with "
+            f"sudo chown -R $(id -un) {home}"
+        )
+    return None
 
 
 def read_zcode_auth_state(zcode_home: str | Path) -> dict[str, Any]:

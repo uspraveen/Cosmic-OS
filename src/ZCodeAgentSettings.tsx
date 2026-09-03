@@ -157,6 +157,7 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
     if (cliMissing) return 'ZCode CLI missing on VM'
     if (gatewayStatus?.status === 'authenticated') return 'Z.ai account connected on VM'
     if (gatewayStatus?.status === 'login_pending') return 'Waiting for Z.ai sign-in approval'
+    if (gatewayStatus?.status === 'blocked') return 'VM cannot write the ZCode home'
     if (gatewayStatus?.status === 'update_in_progress') return 'ZCode is updating — Alpha routes around it'
     if (gatewayStatus?.status === 'relogin_required') return 'ZCode needs re-authentication on the VM'
     if (authMode === 'api_key') return hasApiKey ? 'API key saved on VM' : 'API key needed'
@@ -263,8 +264,25 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
     }
   }
 
-  const loginOutput = loginSessionLines(gatewayStatus?.login_session).slice(-8)
+  // The login session is rendered by its real state: running shows the
+  // sign-in URL, failed shows a persistent failure card (status polls must
+  // not blink it away), completed-but-unauthenticated asks for a retry.
+  const loginSession = gatewayStatus?.login_session ?? null
+  const loginState =
+    loginSession?.state === 'running' ||
+    loginSession?.state === 'failed' ||
+    loginSession?.state === 'completed'
+      ? loginSession.state
+      : ''
+  const loginOutput = loginState ? loginSessionLines(loginSession).slice(-8) : []
   const loginUrl = extractLoginUrl(loginOutput)
+  const loginFailureLines =
+    loginState === 'failed'
+      ? loginSessionLines(loginSession)
+          .map(stripAnsi)
+          .filter((line) => /error|failed|denied|credential|timed out/i.test(line))
+          .slice(-3)
+      : []
   const currentModel = MODEL_OPTIONS.find((option) => option.value === preferredModel) ?? MODEL_OPTIONS[1]
 
   return (
@@ -433,11 +451,19 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
           <>
             <p className="cosmic-agents-detail-section-copy">{describeLoginReason(gatewayStatus)}</p>
           </>
-        ) : authenticated && !loginOutput.length ? (
+        ) : authenticated ? (
           <p className="cosmic-agents-detail-section-copy">
             Signed in with your Z.ai account. Your GLM Coding Plan quota applies automatically to Alpha runs.
           </p>
-        ) : loginOutput.length ? (
+        ) : loginState === 'failed' ? (
+          <div className="cosmic-agents-detail-login-output error" role="alert">
+            <span className="cosmic-agents-detail-login-error-title">Z.ai sign-in failed on the VM</span>
+            <span>{describeLoginReason(gatewayStatus) || 'The sign-in process ended without completing.'}</span>
+            {loginFailureLines.length ? (
+              loginFailureLines.map((line, index) => <span key={`${line}-${index}`}>{line}</span>)
+            ) : null}
+          </div>
+        ) : loginState === 'running' ? (
           <div className="cosmic-agents-detail-login-output">
             {loginUrl ? (
               <span>
@@ -447,7 +473,9 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
                   Open again
                 </button>
               </span>
-            ) : null}
+            ) : (
+              <span>Starting the Z.ai sign-in on the VM…</span>
+            )}
             {loginOutput.map((line, index) => {
               const cleanLine = stripAnsi(line)
               const url = extractLoginUrl([line])
@@ -464,6 +492,12 @@ export default function ZCodeAgentSettings({ active }: ZcodeAgentSettingsProps) 
               )
             })}
           </div>
+        ) : loginState === 'completed' ? (
+          <p className="cosmic-agents-detail-section-copy">
+            Sign-in finished, but the VM did not report a saved key. Try connecting again.
+          </p>
+        ) : gatewayStatus?.status === 'blocked' ? (
+          <p className="cosmic-agents-detail-section-copy">{describeLoginReason(gatewayStatus)}</p>
         ) : (
           <p className="cosmic-agents-detail-section-copy">
             Starts the Z.ai OAuth sign-in on the VM and opens the approval page in your browser. Your GLM Coding Plan quota applies automatically.

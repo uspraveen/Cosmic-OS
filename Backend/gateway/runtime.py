@@ -93,9 +93,11 @@ from shared.cursor_cli import cursor_cli_env, find_cursor_agent_binary
 from shared.opencode_cli import find_opencode_binary, opencode_cli_env
 from shared.zcode_cli import (
     ensure_zcode_cli_config,
+    ensure_zcode_home_writable,
     find_zcode_binary,
     read_zcode_auth_state,
     zcode_cli_env,
+    zcode_home_writable,
 )
 from shared.scratchpad import (
     derive_reconciliation_query,
@@ -21683,6 +21685,22 @@ class GatewayRuntime:
         vm_sync_enabled: bool | None = None,
     ) -> dict[str, Any]:
         key_value = self._safe_text(api_key)
+        home_issue = ensure_zcode_home_writable(self.config.alpha_zcode_home)
+        if home_issue:
+            # A save writes cli/config.json under the ZCode home; when the
+            # home is unwritable (root-owned after a sudo bootstrap run),
+            # refuse with an actionable status instead of a 500.
+            settings = self.agent_auth_store.save_zcode(
+                status="blocked",
+                login_required_reason="zcode_home_not_writable",
+                last_cli_status={
+                    "ok": False,
+                    "reason": "zcode_home_not_writable",
+                    "detail": home_issue,
+                },
+            )
+            logger.error("gateway.zcode_home_not_writable detail=%s", home_issue)
+            return await self.get_desktop_zcode_status()
         # The CLI's own config file is the credential store — write auth and
         # model/thinking defaults there (login wrote the key to the same
         # place), then mirror state into the settings store.
@@ -21744,6 +21762,27 @@ class GatewayRuntime:
         session = self._zcode_login_session_snapshot()
         if session and session.get("state") == "running":
             return await self.get_desktop_zcode_status()
+
+        home_issue = ensure_zcode_home_writable(self.config.alpha_zcode_home)
+        if home_issue:
+            settings = self.agent_auth_store.save_zcode(
+                status="blocked",
+                login_required_reason="zcode_home_not_writable",
+                last_cli_status={
+                    "ok": False,
+                    "reason": "zcode_home_not_writable",
+                    "detail": home_issue,
+                },
+            )
+            logger.error("gateway.zcode_home_not_writable detail=%s", home_issue)
+            return self._redact_codex_status(
+                {
+                    **settings,
+                    "cli": {"available": True, "reason": "zcode_home_not_writable"},
+                    "login_session": None,
+                    "zcode_home": str(self.config.alpha_zcode_home),
+                }
+            )
 
         await self._stop_zcode_login_session()
         self.config.alpha_zcode_home.mkdir(parents=True, exist_ok=True)
@@ -21833,6 +21872,11 @@ class GatewayRuntime:
     ) -> dict[str, str]:
         if pending_login and pending_login.get("state") == "running":
             return {"status": "login_pending", "login_required_reason": "zcode_login_pending"}
+        if not zcode_home_writable(self.config.alpha_zcode_home):
+            # Every path that completes sign-in (cli/config.json, credentials)
+            # writes here. A root-owned home from a sudo bootstrap run would
+            # otherwise die as the CLI's opaque credential-write failure.
+            return {"status": "blocked", "login_required_reason": "zcode_home_not_writable"}
         if cli_status.get("authenticated"):
             return {"status": "authenticated", "login_required_reason": ""}
         if not cli_status.get("available", True):
