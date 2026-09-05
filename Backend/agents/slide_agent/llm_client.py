@@ -195,13 +195,20 @@ def call_llm(
     if adaptive_effort is not None and _effort_known_rejected(resolved_model, adaptive_effort):
         adaptive_effort = None
 
+    # Thinking models spend the SAME max_tokens budget on reasoning and on the
+    # answer, so a small budget truncates the answer mid-JSON ("finish_reason":
+    # "length"). On truncation, retry with a doubled budget instead of handing
+    # back a cut-off response for the caller's JSON parser to choke on.
+    base_max_tokens = max_tokens or MODEL_MAX_TOKENS
+    adaptive_max_tokens = base_max_tokens
+
     last_exc: Exception | None = None
     for attempt in range(MODEL_HTTP_RETRIES):
         payload = _build_payload(
             messages,
             temperature=temperature,
             model=resolved_model,
-            max_tokens=max_tokens or MODEL_MAX_TOKENS,
+            max_tokens=adaptive_max_tokens,
             response_schema=response_schema,
             force_json_object=force_json_object,
             reasoning_effort=adaptive_effort,
@@ -234,6 +241,14 @@ def call_llm(
                     continue
                 raise RuntimeError(f"LLM API {resp.status_code}: {error_text}")
             data = resp.json()
+            finish_reason = (data.get("choices") or [{}])[0].get("finish_reason")
+            if finish_reason == "length" and attempt + 1 < MODEL_HTTP_RETRIES and adaptive_max_tokens < 65536:
+                adaptive_max_tokens = min(adaptive_max_tokens * 2, 65536)
+                logger.warning(
+                    "llm_client: response truncated (finish_reason=length); retrying with max_tokens=%s",
+                    adaptive_max_tokens,
+                )
+                continue
             _post_usage(
                 model=resolved_model,
                 data=data,
@@ -332,7 +347,9 @@ def call_llm_json(
             retry_messages,
             temperature=min(temperature, 0.1),
             model=model,
-            max_tokens=max_tokens,
+            # A parse failure often means the previous answer was truncated;
+            # give the retry a doubled budget instead of the same ceiling.
+            max_tokens=min((max_tokens or MODEL_MAX_TOKENS) * 2, 65536),
             response_schema=response_schema,
             force_json_object=response_schema is None,
             reasoning_effort=reasoning_effort,

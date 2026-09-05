@@ -428,6 +428,62 @@ def test_effort_rejection_memo_round_trip() -> None:
         _EFFORT_REJECTIONS.discard((model, "none"))
 
 
+def test_truncated_response_autodoubles_max_tokens(monkeypatch: Any) -> None:
+    """finish_reason=length must double the budget and retry, not return a
+    cut-off answer for the JSON parser to choke on (real TriZ incident)."""
+    import json as json_mod
+
+    import llm_client
+
+    calls: list[int] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+            self.status_code = 200
+            self.text = json_mod.dumps(payload)
+
+        def json(self) -> dict:
+            return self._payload
+
+    complete = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"content": "{\\\"label\\\": \\\"done\\\"}"},
+        }],
+    }
+
+    class FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> "FakeClient":
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+        def post(self, _url: str, json: dict, headers: dict) -> FakeResponse:  # noqa: A002
+            calls.append(json["max_tokens"])
+            if len(calls) == 1:
+                return FakeResponse({
+                    "choices": [{
+                        "finish_reason": "length",
+                        "message": {"content": "{\\\"label\\\": \\\"trun"},
+                    }],
+                })
+            return FakeResponse(complete)
+
+    monkeypatch.setattr(llm_client.httpx, "Client", FakeClient)
+
+    raw = llm_client.call_llm(
+        [{"role": "user", "content": "design a slide"}],
+        max_tokens=100,
+    )
+    assert "\\\"done\\\"" in raw
+    assert calls == [100, 200]  # first attempt truncated, retry doubled
+
+
 # ── agent wiring ───────────────────────────────────────────────────────────────
 
 
