@@ -195,6 +195,7 @@ class GatewayConfig:
     gmail_context_db_path: Path = BACKEND_ROOT / "gateway" / "gmail_context.db"
     gmail_approvals_db_path: Path = BACKEND_ROOT / "gateway" / "gmail_approvals.db"
     sandbox_permissions_db_path: Path = BACKEND_ROOT / "gateway" / "sandbox_permissions.db"
+    slide_workflow_choices_db_path: Path = BACKEND_ROOT / "gateway" / "slide_workflow_choices.db"
     code_sandbox_timeout_sec: float = 45.0
     code_sandbox_allow_pip: bool = True
     code_sandbox_pip_timeout_sec: float = 120.0
@@ -691,6 +692,12 @@ class GatewayConfig:
                 os.getenv(
                     "GATEWAY_SANDBOX_PERMISSIONS_DB_PATH",
                     str(BACKEND_ROOT / "gateway" / "sandbox_permissions.db"),
+                )
+            ).expanduser(),
+            slide_workflow_choices_db_path=Path(
+                os.getenv(
+                    "GATEWAY_SLIDE_WORKFLOW_CHOICES_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "slide_workflow_choices.db"),
                 )
             ).expanduser(),
             code_sandbox_timeout_sec=max(

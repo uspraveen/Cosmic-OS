@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import httpx
 
+from shared import infer_model_provider, normalized_reasoning_effort
 from shared.usage import UsageEvent, post_usage_event, serialize_usage_metadata
 
 from .config import EmailAgentConfig
@@ -63,6 +64,9 @@ async def invoke_email_internal_llm(
             # OpenAI GPT-5 chat-completions models reject temperature/top_p style sampling knobs.
             if not _is_gpt5_chat_model(cfg.internal_llm_model):
                 llm_kwargs["temperature"] = temperature
+            effort = normalized_reasoning_effort(cfg.internal_llm_model, cfg.internal_llm_reasoning_effort)
+            if effort is not None:
+                llm_kwargs["reasoning_effort"] = effort
             llm = ChatOpenAI(**llm_kwargs)
             result = await llm.ainvoke(messages)
     except Exception as exc:
@@ -216,7 +220,7 @@ async def _post_usage(
         route="email",
         operation=operation,
         usage_kind="llm",
-        provider="internal_llm",
+        provider=infer_model_provider(cfg.internal_llm_base_url, model),
         model=model,
         request_id=request_id,
         provider_request_id=None,

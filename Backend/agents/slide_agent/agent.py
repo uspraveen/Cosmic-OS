@@ -148,13 +148,15 @@ class SlideAgent(AgentRuntime):
         if not workflow:
             workflow = self._normalize_workflow(self.config.default_workflow)
         if workflow == "auto":
-            workflow = "template" if explicit_template else "html"
+            workflow = "template" if explicit_template else "advanced"
         if not workflow:
             return self._failed(
                 "NEEDS_WORKFLOW_CHOICE",
                 (
-                    "Choose a slide workflow first: 'html' is fast and image-backed/non-editable; "
-                    "'template' is slower and creates an editable PPTX from a template."
+                    "Choose a slide workflow first: 'advanced' is the default — it designs in HTML and "
+                    "produces a fully editable PPTX (with a theme it plans itself, or on top of a provided "
+                    "template); 'html' is fast and image-backed/non-editable; "
+                    "'template' fills a provided template's layouts and is slower."
                 ),
                 retryable=False,
                 next_action="ask_user",
@@ -162,7 +164,9 @@ class SlideAgent(AgentRuntime):
 
         source_context = await self._prepare_source_materials_for_generation(
             task,
-            exclude_pptx_artifacts=explicit_template is not None and workflow == "template",
+            exclude_pptx_artifacts=(
+                explicit_template is not None and workflow in {"template", "advanced"}
+            ),
         )
         if isinstance(source_context, (AgentResult, TaskInProgress)):
             return source_context
@@ -206,6 +210,45 @@ class SlideAgent(AgentRuntime):
                 workflow="html",
                 editable=False,
                 template_path=None,
+            )
+
+        if workflow == "advanced":
+            # Native path: HTML-designed, converted to real PowerPoint
+            # objects. Works with or without a template — with one, the deck
+            # is built on the template's theme and layouts; without one, the
+            # planning step picks and locks a theme itself.
+            selected_template = explicit_template
+            results = []
+            for part in parts:
+                results.append(
+                    await self._run_blocking_stage(
+                        task,
+                        self._create_generation_stage_message(part),
+                        self._run_native,
+                        part.description,
+                        selected_template,
+                        part.output_dir,
+                        part.max_slides,
+                        validate,
+                        force_catalog,
+                        part.content_plan,
+                    )
+                )
+            if len(results) == 1:
+                return self._result_from_pipeline(
+                    task=task,
+                    result=results[0],
+                    workflow="advanced",
+                    editable=True,
+                    template_path=selected_template,
+                )
+            return self._result_from_split_pipeline(
+                task=task,
+                results=results,
+                parts=parts,
+                workflow="advanced",
+                editable=True,
+                template_path=selected_template,
             )
 
         if workflow != "template":
@@ -329,6 +372,45 @@ class SlideAgent(AgentRuntime):
                 editable=False,
                 template_path=None,
                 edit_mode="html_regeneration_from_non_editable_source",
+            )
+
+        if self._text(source_profile.get("workflow")).lower() == "advanced":
+            report = self._safe_json_load(source_deck.parent / "build_report.json")
+            advanced_template = (
+                self._maybe_path(report.get("template_path"))
+                if isinstance(report, dict) and report.get("template_backed")
+                else None
+            )
+            if advanced_template is not None and not advanced_template.exists():
+                advanced_template = None
+            advanced_description = self._advanced_edit_regeneration_description(
+                source_deck=source_deck,
+                edit_request=edit_request,
+                source_profile=source_profile,
+            )
+            advanced_description = self._augment_description_with_source_context(
+                advanced_description, source_context
+            )
+            result = await self._run_blocking_stage(
+                task,
+                "Regenerating the native editable deck with the requested changes.",
+                self._run_native,
+                advanced_description,
+                advanced_template,
+                output_dir,
+                max_slides,
+                validate,
+                force_catalog,
+                None,
+            )
+            await self._emit_progress(task.task_id, "Packaging the regenerated native deck.")
+            return self._result_from_pipeline(
+                task=task,
+                result=result,
+                workflow="advanced",
+                editable=True,
+                template_path=advanced_template,
+                edit_mode="advanced_regeneration",
             )
 
         result = await self._run_blocking_stage(
@@ -840,6 +922,30 @@ class SlideAgent(AgentRuntime):
         result.setdefault("workflow", "html")
         return result
 
+    def _run_native(
+        self,
+        description: str,
+        template_path: Path | None,
+        output_dir: Path,
+        max_slides: int | None,
+        validate: bool,
+        force_catalog: bool,
+        content_plan: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from native_workflow import run_native_pipeline
+
+        result = run_native_pipeline(
+            description,
+            output_dir=output_dir,
+            max_slides=max_slides,
+            validate=validate,
+            content_plan=content_plan,
+            template_path=template_path,
+            force_catalog=force_catalog,
+        )
+        result.setdefault("workflow", "advanced")
+        return result
+
     def _run_template(
         self,
         description: str,
@@ -1030,6 +1136,37 @@ class SlideAgent(AgentRuntime):
     ) -> str:
         parts = [
             "Regenerate the existing presentation as a new HTML-mode, image-backed deck.",
+            "Preserve the prior deck's subject, slide count, and core content unless the edit request overrides them.",
+            "",
+            f"Source deck: {source_deck.name}",
+        ]
+        title = self._text(source_profile.get("title"))
+        if title:
+            parts.append(f"Previous deck title: {title}")
+        previous_description = self._text(source_profile.get("description"))
+        if previous_description:
+            parts.extend(["", "Previous deck brief:", previous_description])
+        previous_plan = source_profile.get("plan")
+        if isinstance(previous_plan, dict) and previous_plan:
+            parts.extend(
+                [
+                    "",
+                    "Previous deck content plan JSON:",
+                    self._compact_json(previous_plan, limit=12000),
+                ]
+            )
+        parts.extend(["", "Requested edit:", edit_request])
+        return "\n".join(parts)
+
+    def _advanced_edit_regeneration_description(
+        self,
+        *,
+        source_deck: Path,
+        edit_request: str,
+        source_profile: dict[str, Any],
+    ) -> str:
+        parts = [
+            "Regenerate the existing presentation as a new native, fully editable deck (advanced workflow).",
             "Preserve the prior deck's subject, slide count, and core content unless the edit request overrides them.",
             "",
             f"Source deck: {source_deck.name}",
@@ -1855,7 +1992,7 @@ class SlideAgent(AgentRuntime):
     @staticmethod
     def _normalize_workflow(value: Any) -> str:
         normalized = str(value or "").strip().lower()
-        return normalized if normalized in {"html", "template", "auto"} else ""
+        return normalized if normalized in {"html", "template", "advanced", "auto"} else ""
 
     def _max_slides(self, payload: dict[str, Any]) -> int | None:
         value = self._requested_slide_count(payload)

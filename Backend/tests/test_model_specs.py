@@ -13,8 +13,13 @@ def test_model_specs_registry_contains_active_runtime_models() -> None:
     assert "fireworks:accounts/fireworks/models/kimi-k2p6" in specs
     assert "fireworks:accounts/fireworks/models/glm-5p3" in specs
     assert "fireworks:accounts/fireworks/models/glm-5p3-flash" in specs
+    assert "fireworks:accounts/fireworks/models/qwen3p6-plus" in specs
+    assert "fireworks:accounts/fireworks/models/qwen3p7-plus" in specs
     assert "groq:openai/gpt-oss-20b" in specs
     assert "openai:gpt-5-mini" in specs
+    assert "openai:gpt-5.6-sol" in specs
+    assert "openai:gpt-5.6-terra" in specs
+    assert "openai:gpt-5.6-luna" in specs
     assert "openai:gpt-image-1.5" in specs
     assert "xai:grok-imagine-image" in specs
     assert "xai:grok-imagine-image-pro" in specs
@@ -58,6 +63,29 @@ def test_lookup_model_spec_returns_expected_context_metadata() -> None:
     assert gpt5mini.pricing["input_per_1m_usd"] == 0.25
     assert gpt5mini.pricing["cached_input_per_1m_usd"] == 0.025
     assert gpt5mini.pricing["output_per_1m_usd"] == 2.0
+
+    luna = get_model_spec("openai:gpt-5.6-luna")
+    assert luna is not None
+    assert luna.context_window_tokens == 1_050_000
+    assert luna.max_output_tokens == 128_000
+    assert luna.pricing["input_per_1m_usd"] == 0.2
+    assert luna.pricing["cached_input_per_1m_usd"] == 0.02
+    assert luna.pricing["output_per_1m_usd"] == 1.2
+    assert luna.capabilities["supports_image_input"] is True
+    assert luna.capabilities["supports_tool_calling"] is True
+    assert "completion_tokens_details.reasoning_tokens" in luna.token_field_map["reasoning_tokens"]
+
+    terra = get_model_spec("openai:gpt-5.6-terra")
+    assert terra is not None
+    assert terra.pricing["input_per_1m_usd"] == 2.0
+    assert terra.pricing["cached_input_per_1m_usd"] == 0.2
+    assert terra.pricing["output_per_1m_usd"] == 12.0
+
+    sol = get_model_spec("openai:gpt-5.6-sol")
+    assert sol is not None
+    assert sol.pricing["input_per_1m_usd"] == 4.0
+    assert sol.pricing["cached_input_per_1m_usd"] == 0.4
+    assert sol.pricing["output_per_1m_usd"] == 20.0
 
     gpt_image = get_model_spec("openai:gpt-image-1.5")
     assert gpt_image is not None
@@ -109,6 +137,23 @@ def test_lookup_model_spec_returns_expected_context_metadata() -> None:
     # GLM 5.3 Flash is natively multimodal - image turns must stay on it.
     assert glm_flash.capabilities["supports_image_input"] is True
     assert glm_flash.capabilities["supports_tool_calling"] is True
+
+    qwen = get_model_spec("fireworks:accounts/fireworks/models/qwen3p6-plus")
+    assert qwen is not None
+    assert qwen.context_window_tokens == 1_000_000
+    assert qwen.pricing["input_per_1m_usd"] == 0.5
+    assert qwen.pricing["output_per_1m_usd"] == 3.0
+    assert qwen.capabilities["supports_image_input"] is True
+    assert qwen.capabilities["supports_tool_calling"] is True
+
+    qwen37 = get_model_spec("fireworks:accounts/fireworks/models/qwen3p7-plus")
+    assert qwen37 is not None
+    assert qwen37.status == "active"
+    assert qwen37.pricing["input_per_1m_usd"] == 0.5
+    assert qwen37.pricing["cached_input_per_1m_usd"] == 0.1
+    assert qwen37.pricing["output_per_1m_usd"] == 3.0
+    assert qwen37.capabilities["supports_image_input"] is True
+    assert qwen37.capabilities["supports_reasoning_tokens"] is True
 
 
 def test_estimate_text_tokens_is_bounded_and_nonzero_for_text() -> None:

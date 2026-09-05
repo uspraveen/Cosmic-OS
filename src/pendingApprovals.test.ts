@@ -28,6 +28,14 @@ describe('isBlockAwaitingApproval', () => {
     ).toBe(false)
   })
 
+  it('treats a pending slide workflow choice as awaiting a decision', () => {
+    expect(isBlockAwaitingApproval({ id: 'a', type: 'slide_workflow_choice', status: 'pending' })).toBe(true)
+  })
+
+  it('does not flag a slide workflow choice the user already selected', () => {
+    expect(isBlockAwaitingApproval({ id: 'a', type: 'slide_workflow_choice', status: 'selected' })).toBe(false)
+  })
+
   it('ignores unrelated block types like markdown', () => {
     expect(isBlockAwaitingApproval({ id: 'a', type: 'markdown' })).toBe(false)
   })

@@ -67,9 +67,12 @@ class DocsParserConfig:
     enable_office_render_fallback: bool = True
     office_renderer_path: str = "soffice"
     office_render_timeout_sec: float = 180.0
+    # Reasoning effort sent to OpenAI GPT-5.6-family VLM models (picture
+    # description, full-page VLM, asset reinspection).
+    reasoning_effort: str = "xhigh"
     picture_description_api_key: str = ""
     picture_description_api_url: str = "https://api.openai.com/v1/chat/completions"
-    picture_description_model: str = "gpt-4.1-mini"
+    picture_description_model: str = "gpt-5.6-luna"
     picture_description_preset: str = "qwen"
     picture_description_timeout_sec: float = 90.0
     picture_description_concurrency: int = 8
@@ -94,7 +97,7 @@ class DocsParserConfig:
     )
     full_page_vlm_api_key: str = ""
     full_page_vlm_api_url: str = "https://api.openai.com/v1/chat/completions"
-    full_page_vlm_model: str = "gpt-4.1-mini"
+    full_page_vlm_model: str = "gpt-5.6-terra"
     full_page_vlm_preset: str = "qwen"
     full_page_vlm_timeout_sec: float = 120.0
     full_page_vlm_concurrency: int = 6
@@ -103,7 +106,7 @@ class DocsParserConfig:
     full_page_vlm_scale: float = 2.0
     asset_reinspection_api_key: str = ""
     asset_reinspection_api_url: str = "https://api.openai.com/v1/chat/completions"
-    asset_reinspection_model: str = "gpt-4.1-mini"
+    asset_reinspection_model: str = "gpt-5.6-luna"
     asset_reinspection_timeout_sec: float = 90.0
     asset_reinspection_max_new_tokens: int = 900
     asset_reinspection_detail: str = "high"
@@ -148,6 +151,7 @@ class DocsParserConfig:
                 10.0,
                 _env_float("DOCS_PARSER_OFFICE_RENDER_TIMEOUT_SEC", 180.0),
             ),
+            reasoning_effort=(os.getenv("DOCS_PARSER_REASONING_EFFORT") or "xhigh").strip() or "xhigh",
             picture_description_api_key=(
                 os.getenv("DOCS_PARSER_PICTURE_DESCRIPTION_API_KEY")
                 or os.getenv("OPENAI_API_KEY")
@@ -158,7 +162,7 @@ class DocsParserConfig:
                 or "https://api.openai.com/v1/chat/completions"
             ),
             picture_description_model=(
-                os.getenv("DOCS_PARSER_PICTURE_DESCRIPTION_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+                os.getenv("DOCS_PARSER_PICTURE_DESCRIPTION_MODEL", "gpt-5.6-luna").strip() or "gpt-5.6-luna"
             ),
             picture_description_preset=(
                 os.getenv("DOCS_PARSER_PICTURE_DESCRIPTION_PRESET", "qwen").strip() or "qwen"
@@ -214,7 +218,7 @@ class DocsParserConfig:
                 or "https://api.openai.com/v1/chat/completions"
             ),
             full_page_vlm_model=(
-                os.getenv("DOCS_PARSER_FULL_PAGE_VLM_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+                os.getenv("DOCS_PARSER_FULL_PAGE_VLM_MODEL", "gpt-5.6-terra").strip() or "gpt-5.6-terra"
             ),
             full_page_vlm_preset=(
                 os.getenv("DOCS_PARSER_FULL_PAGE_VLM_PRESET", "qwen").strip() or "qwen"
@@ -249,7 +253,7 @@ class DocsParserConfig:
                 or "https://api.openai.com/v1/chat/completions"
             ),
             asset_reinspection_model=(
-                os.getenv("DOCS_PARSER_ASSET_REINSPECTION_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+                os.getenv("DOCS_PARSER_ASSET_REINSPECTION_MODEL", "gpt-5.6-luna").strip() or "gpt-5.6-luna"
             ),
             asset_reinspection_timeout_sec=max(
                 10.0,

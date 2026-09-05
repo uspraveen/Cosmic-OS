@@ -20,7 +20,7 @@ class TestConfig:
         from agents.diagram_agent.config import DiagramAgentConfig
 
         cfg = DiagramAgentConfig()
-        assert cfg.internal_llm_model == "gpt-5-mini"
+        assert cfg.internal_llm_model == "gpt-5.6-terra"
         assert cfg.diagram_use_langgraph is True
         assert cfg.diagram_max_tool_rounds == 6
         assert cfg.default_format == "svg"

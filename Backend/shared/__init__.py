@@ -19,12 +19,16 @@ from .contracts import (
     verify_task_envelope,
 )
 from .model_specs import (
+    DEFAULT_INTERNAL_REASONING_EFFORT,
     ModelSpec,
     build_model_key,
     estimate_text_tokens,
     get_model_spec,
+    infer_model_provider,
+    is_openai_gpt5_chat_model,
     load_model_specs,
     lookup_model_spec,
+    normalized_reasoning_effort,
 )
 from .usage import (
     MeteredCall,
@@ -187,6 +191,10 @@ __all__ = [
     "get_model_spec",
     "load_model_specs",
     "lookup_model_spec",
+    "infer_model_provider",
+    "is_openai_gpt5_chat_model",
+    "normalized_reasoning_effort",
+    "DEFAULT_INTERNAL_REASONING_EFFORT",
     "MeteredCall",
     "UsageEvent",
     "begin_metered_call",

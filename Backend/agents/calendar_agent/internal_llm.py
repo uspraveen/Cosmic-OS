@@ -1,6 +1,6 @@
 """Calendar-agent internal LLM via LangChain OpenAI-compatible client + Gateway usage logging.
 
-Uses gpt-5-mini for natural language scheduling intent parsing.
+Uses gpt-5.6-luna for natural language scheduling intent parsing.
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ from uuid import uuid4
 
 import httpx
 
-from shared.usage import UsageEvent, post_usage_event, serialize_usage_metadata
+from shared import infer_model_provider, normalized_reasoning_effort
+from shared.usage import UsageEvent, post_usage_event, utcnow_iso
 
 from .config import CalendarAgentConfig
 
@@ -132,6 +133,9 @@ async def invoke_calendar_internal_llm(
                 "base_url": cfg.internal_llm_base_url,
                 "http_async_client": llm_http,
             }
+            effort = normalized_reasoning_effort(cfg.internal_llm_model, cfg.internal_llm_reasoning_effort)
+            if effort is not None:
+                llm_kwargs["reasoning_effort"] = effort
             llm = ChatOpenAI(**llm_kwargs)
             result = await llm.ainvoke(messages)
     except Exception as exc:
@@ -141,12 +145,15 @@ async def invoke_calendar_internal_llm(
     latency_ms = (time.perf_counter() - started) * 1000
     raw_content = (result.content or "").strip() if result else ""
 
-    # Extract usage metadata for logging
-    usage_meta = {}
-    if result:
-        usage_meta = serialize_usage_metadata(result)
-
-    # Post usage event
+    # Extract usage for the metered usage event
+    usage: Any = getattr(result, "usage_metadata", None) or {}
+    if not usage and isinstance(getattr(result, "response_metadata", None), dict):
+        response_metadata = result.response_metadata  # type: ignore[union-attr]
+        usage = response_metadata.get("token_usage") or response_metadata.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    prompt_tokens = max(0, int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0))
+    completion_tokens = max(0, int(usage.get("output_tokens") or usage.get("completion_tokens") or 0))
     try:
         await post_usage_event(
             http_client=http_client,
@@ -154,19 +161,21 @@ async def invoke_calendar_internal_llm(
             internal_token=cfg.gateway_internal_token,
             event=UsageEvent(
                 llm_call_id=llm_call_id,
-                llm_call_placed_at=time.time() - (latency_ms / 1000),
-                agent_id="cosmic/calendar-agent:1.0.0",
-                task_id=task_id or "",
-                session_id=session_id or "",
-                source=source or "",
-                source_id=source_id or "",
-                channel=channel or "",
-                provider="openai_compatible",
-                model=cfg.internal_llm_model,
+                source_component="cosmic/calendar-agent:1.0.0",
+                source_id=source_id,
+                task_id=task_id,
+                session_id=session_id,
+                route="calendar",
+                operation="calendar.internal_llm.parse",
                 usage_kind="chat_completion",
-                ok=True,
-                latency_ms=latency_ms,
-                usage=usage_meta,
+                provider=infer_model_provider(cfg.internal_llm_base_url, cfg.internal_llm_model),
+                model=cfg.internal_llm_model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+                latency_ms=int(latency_ms),
+                metadata_json={"source": source, "channel": channel},
+                llm_call_placed_at=utcnow_iso(),
             ),
         )
     except Exception:

@@ -1,4 +1,4 @@
-"""Shared Fireworks LLM client for HTML backend calls."""
+"""Shared OpenAI-compatible LLM client (Fireworks Qwen or OpenAI GPT-5.6) for slide calls."""
 
 from __future__ import annotations
 
@@ -9,19 +9,24 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 from dotenv import load_dotenv
+
+from shared import infer_model_provider, is_openai_gpt5_chat_model, normalized_reasoning_effort
+from shared.usage import UsageEvent, utcnow_iso
 
 _HERE = Path(__file__).resolve().parent
 load_dotenv(_HERE / ".env")
 
 MODEL_BASE_URL: str = os.getenv("MODEL_BASE_URL", "https://api.fireworks.ai/inference/v1").rstrip("/")
 MODEL_API_KEY: str = os.getenv("MODEL_API_KEY", "")
-MODEL_NAME: str = os.getenv("MODEL_NAME", "accounts/fireworks/models/qwen3p6-plus")
+MODEL_NAME: str = os.getenv("MODEL_NAME", "accounts/fireworks/models/glm-5p3-flash")
 MODEL_TIMEOUT_SEC: int = int(os.getenv("MODEL_TIMEOUT_SEC", "300"))
 MODEL_HTTP_RETRIES: int = int(os.getenv("MODEL_HTTP_RETRIES", "3"))
 MODEL_MAX_TOKENS: int = int(os.getenv("HTML_MODEL_MAX_TOKENS", "4096"))
+MODEL_REASONING_EFFORT: str = os.getenv("MODEL_REASONING_EFFORT", "xhigh")
 
 logger = logging.getLogger(__name__)
 
@@ -49,24 +54,41 @@ def _json_candidates(raw: str) -> list[str]:
     return candidates
 
 
-def call_llm(
+def _build_payload(
     messages: list[dict[str, Any]],
     *,
-    temperature: float = 0.2,
-    model: str | None = None,
-    max_tokens: int | None = None,
-    response_schema: dict[str, Any] | None = None,
-    force_json_object: bool = False,
-    reasoning_effort: str | bool | int | None = None,
-) -> str:
-    """Call Fireworks chat completions and return message content."""
+    temperature: float,
+    model: str,
+    max_tokens: int,
+    response_schema: dict[str, Any] | None,
+    force_json_object: bool,
+    reasoning_effort: str | bool | int | None,
+) -> dict[str, Any]:
+    """Build the chat-completions body for the resolved model's family.
+
+    GPT-5-family models reject temperature/max_tokens and take
+    max_completion_tokens plus reasoning_effort; other (Fireworks/Qwen) models
+    keep the original shape untouched.
+    """
     payload: dict[str, Any] = {
-        "model": model or MODEL_NAME,
+        "model": model,
         "messages": messages,
-        "temperature": temperature,
         "stream": False,
-        "max_tokens": max_tokens or MODEL_MAX_TOKENS,
     }
+    if is_openai_gpt5_chat_model(model):
+        payload["max_completion_tokens"] = max_tokens
+        # Bool/int efforts are Qwen-style toggles; only valid level strings apply.
+        requested = reasoning_effort if isinstance(reasoning_effort, str) else None
+        if not (requested or "").strip():
+            requested = MODEL_REASONING_EFFORT
+        effort = normalized_reasoning_effort(model, requested)
+        if effort:
+            payload["reasoning_effort"] = effort
+    else:
+        payload["temperature"] = temperature
+        payload["max_tokens"] = max_tokens
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
     if response_schema is not None:
         payload["response_format"] = {
             "type": "json_schema",
@@ -77,8 +99,67 @@ def call_llm(
         }
     elif force_json_object:
         payload["response_format"] = {"type": "json_object"}
-    if reasoning_effort is not None:
-        payload["reasoning_effort"] = reasoning_effort
+    return payload
+
+
+def _post_usage(*, model: str, data: dict[str, Any], placed_at: str, latency_ms: int) -> None:
+    """Best-effort usage event to the Gateway ledger; never raises."""
+    gateway_url = os.getenv("GATEWAY_URL", "").rstrip("/")
+    gateway_token = os.getenv("GATEWAY_INTERNAL_TOKEN", "")
+    if not gateway_url or not gateway_token:
+        return
+    try:
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        event = UsageEvent(
+            llm_call_id=f"slide_llm_{uuid4().hex[:16]}",
+            source_component="cosmic/slide-agent:1.0.0",
+            route="slides",
+            operation="slide.llm",
+            usage_kind="chat_completion",
+            provider=infer_model_provider(MODEL_BASE_URL, model),
+            model=model,
+            prompt_tokens=max(0, prompt_tokens),
+            completion_tokens=max(0, completion_tokens),
+            total_tokens=max(0, prompt_tokens) + max(0, completion_tokens),
+            latency_ms=max(0, latency_ms),
+            llm_call_placed_at=placed_at,
+        )
+        with httpx.Client(timeout=5.0) as client:
+            client.post(
+                f"{gateway_url}/internal/usage/log",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Internal-Token": gateway_token,
+                },
+                json=event.model_dump(mode="json"),
+            )
+    except Exception as exc:
+        logger.debug("slide usage post failed: %s", exc)
+
+
+def call_llm(
+    messages: list[dict[str, Any]],
+    *,
+    temperature: float = 0.2,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    response_schema: dict[str, Any] | None = None,
+    force_json_object: bool = False,
+    reasoning_effort: str | bool | int | None = None,
+) -> str:
+    """Call the configured chat-completions model and return message content."""
+    resolved_model = model or MODEL_NAME
+    payload = _build_payload(
+        messages,
+        temperature=temperature,
+        model=resolved_model,
+        max_tokens=max_tokens or MODEL_MAX_TOKENS,
+        response_schema=response_schema,
+        force_json_object=force_json_object,
+        reasoning_effort=reasoning_effort,
+    )
 
     headers = {
         "Authorization": f"Bearer {MODEL_API_KEY}",
@@ -88,12 +169,20 @@ def call_llm(
 
     last_exc: Exception | None = None
     for attempt in range(MODEL_HTTP_RETRIES):
+        placed_at = utcnow_iso()
+        started = time.perf_counter()
         try:
             with httpx.Client(timeout=MODEL_TIMEOUT_SEC) as client:
                 resp = client.post(url, json=payload, headers=headers)
             if resp.status_code >= 400:
                 raise RuntimeError(f"LLM API {resp.status_code}: {resp.text[:500]}")
             data = resp.json()
+            _post_usage(
+                model=resolved_model,
+                data=data,
+                placed_at=placed_at,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
             msg = (data.get("choices") or [{}])[0].get("message", {})
             content = msg.get("content", "") or ""
             reasoning = msg.get("reasoning_content", "") or ""

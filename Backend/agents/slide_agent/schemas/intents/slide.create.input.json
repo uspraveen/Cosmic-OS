@@ -16,12 +16,12 @@
     },
     "workflow": {
       "type": "string",
-      "enum": ["html", "template", "auto"],
-      "description": "html is fast/non-editable; template is slower/editable; auto routes from template presence."
+      "enum": ["html", "template", "advanced", "auto"],
+      "description": "advanced designs in HTML and produces a fully editable native PPTX (default; works with or without a template); html is fast/non-editable; template fills a provided template's layouts; auto routes to template when a template is given, else advanced."
     },
     "mode": {
       "type": "string",
-      "enum": ["html", "template", "auto"]
+      "enum": ["html", "template", "advanced", "auto"]
     },
     "template_path": {
       "type": "string",

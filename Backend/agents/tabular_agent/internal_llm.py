@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import httpx
 
+from shared import infer_model_provider, is_openai_gpt5_chat_model, normalized_reasoning_effort
 from shared.usage import UsageEvent, post_usage_event, serialize_usage_metadata
 
 from .config import TabularAgentConfig
@@ -55,13 +56,19 @@ async def invoke_tabular_internal_llm(
             http2=False,
             follow_redirects=True,
         ) as llm_http:
-            llm = ChatOpenAI(
-                model=cfg.internal_llm_model,
-                api_key=cfg.internal_llm_api_key,
-                base_url=base_url,
-                temperature=temperature,
-                http_async_client=llm_http,
-            )
+            llm_kwargs: dict[str, Any] = {
+                "model": cfg.internal_llm_model,
+                "api_key": cfg.internal_llm_api_key,
+                "base_url": base_url,
+                "http_async_client": llm_http,
+            }
+            # OpenAI GPT-5 chat-completions models reject temperature/top_p style sampling knobs.
+            if not is_openai_gpt5_chat_model(cfg.internal_llm_model):
+                llm_kwargs["temperature"] = temperature
+            effort = normalized_reasoning_effort(cfg.internal_llm_model, cfg.internal_llm_reasoning_effort)
+            if effort is not None:
+                llm_kwargs["reasoning_effort"] = effort
+            llm = ChatOpenAI(**llm_kwargs)
             result = await llm.ainvoke(messages)
     except Exception as exc:
         await _post_usage(
@@ -196,7 +203,7 @@ async def _post_usage(
         route="tabular",
         operation=operation,
         usage_kind="llm",
-        provider="internal_llm",
+        provider=infer_model_provider(cfg.internal_llm_base_url, model),
         model=model,
         request_id=request_id,
         provider_request_id=None,

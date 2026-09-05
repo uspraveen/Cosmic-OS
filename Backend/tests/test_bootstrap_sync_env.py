@@ -478,7 +478,7 @@ def test_materialize_bootstrap_env_files_updates_repo_envs(monkeypatch, tmp_path
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
         "EMAIL_AGENT_INTERNAL_LLM_API_KEY=\n"
         "EMAIL_AGENT_INTERNAL_LLM_BASE_URL=\n"
-        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini\n",
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5.6-luna\n",
         encoding="utf-8",
     )
 
@@ -593,7 +593,7 @@ def test_install_service_env_files_installs_firecrawl_agent_env(monkeypatch, tmp
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
         "EMAIL_AGENT_INTERNAL_LLM_API_KEY=\n"
         "EMAIL_AGENT_INTERNAL_LLM_BASE_URL=\n"
-        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini\n",
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5.6-luna\n",
         encoding="utf-8",
     )
 
@@ -642,7 +642,7 @@ def test_build_email_agent_env_rendered_prefers_external_values(tmp_path, monkey
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
         "EMAIL_AGENT_INTERNAL_LLM_API_KEY=\n"
         "EMAIL_AGENT_INTERNAL_LLM_BASE_URL=\n"
-        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini\n",
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5.6-luna\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
@@ -685,7 +685,7 @@ def test_build_email_agent_env_rendered_respects_explicit_disconnect(tmp_path, m
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
         "EMAIL_AGENT_INTERNAL_LLM_API_KEY=\n"
         "EMAIL_AGENT_INTERNAL_LLM_BASE_URL=\n"
-        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini\n",
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5.6-luna\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
@@ -741,7 +741,7 @@ def test_build_image_generator_agent_env_rendered_prefers_external_values(tmp_pa
             bootstrap.IMAGE_GENERATOR_AGENT_ENV_NAME: {
                 "IMAGE_AGENT_XAI_API_KEY": "xai-key",
                 "IMAGE_AGENT_OPENAI_API_KEY": "openai-key",
-                "IMAGE_AGENT_ROUTER_MODEL": "gpt-5-mini",
+                "IMAGE_AGENT_ROUTER_MODEL": "gpt-5.6-sol",
             }
         },
     )
@@ -750,7 +750,7 @@ def test_build_image_generator_agent_env_rendered_prefers_external_values(tmp_pa
     assert "IMAGE_AGENT_XAI_API_KEY=xai-key" in rendered
     assert parsed["IMAGE_AGENT_XAI_API_KEY"] == "xai-key"
     assert parsed["IMAGE_AGENT_OPENAI_API_KEY"] == "openai-key"
-    assert parsed["IMAGE_AGENT_ROUTER_MODEL"] == "gpt-5-mini"
+    assert parsed["IMAGE_AGENT_ROUTER_MODEL"] == "gpt-5.6-sol"
     assert parsed["AGENT_SECRET"] == "signing-secret"
     assert parsed["GATEWAY_INTERNAL_TOKEN"] == "internal-token"
 
@@ -997,7 +997,7 @@ def test_materialize_bootstrap_env_files_can_render_memory_env(monkeypatch, tmp_
         "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=\n"
         "EMAIL_AGENT_INTERNAL_LLM_API_KEY=\n"
         "EMAIL_AGENT_INTERNAL_LLM_BASE_URL=\n"
-        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini\n",
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5.6-luna\n",
         encoding="utf-8",
     )
 
@@ -1710,3 +1710,190 @@ def test_run_post_provision_health_checks_waits_for_image_generator_agent(monkey
         ("orchestrator", "http://127.0.0.1:8743/health"),
         ("gateway", "http://127.0.0.1:8080/health/ready"),
     ]
+
+
+def test_migrate_legacy_internal_llm_model_repoints_retired_defaults() -> None:
+    assert bootstrap.migrate_legacy_internal_llm_model("gpt-5-mini") == "gpt-5.6-luna"
+    assert bootstrap.migrate_legacy_internal_llm_model("gpt-4.1-mini") == "gpt-5.6-luna"
+    assert bootstrap.migrate_legacy_internal_llm_model("") == "gpt-5.6-luna"
+    assert bootstrap.migrate_legacy_internal_llm_model(None) == "gpt-5.6-luna"
+    assert (
+        bootstrap.migrate_legacy_internal_llm_model("gpt-5-mini", default="gpt-5.6-terra")
+        == "gpt-5.6-terra"
+    )
+    # Deliberate (non-legacy) pins pass through untouched.
+    assert bootstrap.migrate_legacy_internal_llm_model("gpt-5.6-sol") == "gpt-5.6-sol"
+    assert bootstrap.migrate_legacy_internal_llm_model("glm-5p3") == "glm-5p3"
+
+
+def test_build_email_agent_env_rendered_migrates_stale_legacy_model(tmp_path, monkeypatch) -> None:
+    backend_root = tmp_path / "Backend"
+    email_dir = backend_root / "agents" / "email_agent"
+    email_dir.mkdir(parents=True)
+    fixture_lines = [
+        "REDIS_URL=redis://127.0.0.1:6379/0",
+        "GATEWAY_URL=http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>",
+        "AGENT_SECRET=<agent-shared-secret>",
+        "INSTANCE_ID=email-agent-1",
+        "COSMIC_MAIL_BASE_URL=",
+        "COSMIC_MAIL_API_TOKEN=",
+        "COSMIC_MAIL_PRIMARY_MAILBOX_ADDRESS=",
+        "EMAIL_AGENT_INTERNAL_LLM_API_KEY=",
+        "EMAIL_AGENT_INTERNAL_LLM_BASE_URL=",
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL=gpt-5-mini",
+    ]
+    (email_dir / "agent.env.example").write_text(
+        "\n".join(fixture_lines) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+
+    dest_path, rendered, parsed = bootstrap.build_email_agent_env_rendered(
+        signing_secret="signing-secret",
+        shared_internal_token="internal-token",
+    )
+
+    assert dest_path.name == bootstrap.EMAIL_AGENT_ENV_NAME
+    assert parsed["EMAIL_AGENT_INTERNAL_LLM_MODEL"] == "gpt-5.6-luna"
+
+
+def test_build_slide_agent_env_rendered_upgrades_to_openai_terra_with_openai_key(
+    tmp_path, monkeypatch
+) -> None:
+    backend_root = tmp_path / "Backend"
+    slide_dir = backend_root / "agents" / "slide_agent"
+    system_env_dir = tmp_path / "etc" / "cosmic"
+    agents_env_dir = system_env_dir / "agents"
+    slide_dir.mkdir(parents=True)
+    agents_env_dir.mkdir(parents=True)
+    (slide_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=slide-agent-1\n"
+        "SLIDE_AGENT_FIREWORKS_BASE_URL=https://api.fireworks.ai/inference/v1\n"
+        "SLIDE_AGENT_FIREWORKS_API_KEY=\n"
+        "SLIDE_AGENT_FIREWORKS_MODEL=accounts/fireworks/models/glm-5p3-flash\n",
+        encoding="utf-8",
+    )
+    (agents_env_dir / bootstrap.DOCS_PARSER_AGENT_ENV_NAME).write_text(
+        "OPENAI_API_KEY=openai-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+
+    dest_path, rendered, parsed = bootstrap.build_slide_agent_env_rendered(
+        signing_secret="signing-secret",
+        shared_internal_token="internal-token",
+        system_env_dir=system_env_dir,
+    )
+
+    assert parsed["SLIDE_AGENT_FIREWORKS_MODEL"] == "gpt-5.6-terra"
+    assert parsed["SLIDE_AGENT_FIREWORKS_BASE_URL"] == "https://api.openai.com/v1"
+    assert parsed["SLIDE_AGENT_FIREWORKS_API_KEY"] == "openai-key"
+
+
+def test_build_slide_agent_env_rendered_keeps_fireworks_default_without_openai_key(
+    tmp_path, monkeypatch
+) -> None:
+    backend_root = tmp_path / "Backend"
+    slide_dir = backend_root / "agents" / "slide_agent"
+    slide_dir.mkdir(parents=True)
+    (slide_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=slide-agent-1\n"
+        "SLIDE_AGENT_FIREWORKS_BASE_URL=https://api.fireworks.ai/inference/v1\n"
+        "SLIDE_AGENT_FIREWORKS_API_KEY=\n"
+        "SLIDE_AGENT_FIREWORKS_MODEL=accounts/fireworks/models/glm-5p3-flash\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+
+    dest_path, rendered, parsed = bootstrap.build_slide_agent_env_rendered(
+        signing_secret="signing-secret",
+        shared_internal_token="internal-token",
+    )
+
+    assert parsed["SLIDE_AGENT_FIREWORKS_MODEL"] == "accounts/fireworks/models/glm-5p3-flash"
+    assert parsed["SLIDE_AGENT_FIREWORKS_BASE_URL"] == "https://api.fireworks.ai/inference/v1"
+
+
+def test_build_slide_agent_env_rendered_inherits_orchestrator_fireworks_key(
+    tmp_path, monkeypatch
+) -> None:
+    backend_root = tmp_path / "Backend"
+    slide_dir = backend_root / "agents" / "slide_agent"
+    system_env_dir = tmp_path / "etc" / "cosmic"
+    slide_dir.mkdir(parents=True)
+    system_env_dir.mkdir(parents=True, exist_ok=True)
+    (slide_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=slide-agent-1\n"
+        "SLIDE_AGENT_FIREWORKS_BASE_URL=https://api.fireworks.ai/inference/v1\n"
+        "SLIDE_AGENT_FIREWORKS_API_KEY=\n"
+        "SLIDE_AGENT_FIREWORKS_MODEL=accounts/fireworks/models/glm-5p3-flash\n",
+        encoding="utf-8",
+    )
+    (system_env_dir / "orchestrator.env").write_text(
+        "ORCHESTRATOR_FIREWORKS_API_KEY=fw-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+
+    dest_path, rendered, parsed = bootstrap.build_slide_agent_env_rendered(
+        signing_secret="signing-secret",
+        shared_internal_token="internal-token",
+        system_env_dir=system_env_dir,
+    )
+
+    assert parsed["SLIDE_AGENT_FIREWORKS_API_KEY"] == "fw-key"
+    assert parsed["SLIDE_AGENT_FIREWORKS_MODEL"] == "accounts/fireworks/models/glm-5p3-flash"
+    assert parsed["SLIDE_AGENT_FIREWORKS_BASE_URL"] == "https://api.fireworks.ai/inference/v1"
+
+
+def test_build_slide_agent_env_rendered_prefers_own_fireworks_key_over_peers(
+    tmp_path, monkeypatch
+) -> None:
+    backend_root = tmp_path / "Backend"
+    slide_dir = backend_root / "agents" / "slide_agent"
+    system_env_dir = tmp_path / "etc" / "cosmic"
+    slide_dir.mkdir(parents=True)
+    system_env_dir.mkdir(parents=True, exist_ok=True)
+    (slide_dir / "agent.env.example").write_text(
+        "REDIS_URL=redis://127.0.0.1:6379/0\n"
+        "GATEWAY_URL=http://127.0.0.1:8080\n"
+        "GATEWAY_INTERNAL_TOKEN=<internal-service-token>\n"
+        "AGENT_SECRET=<agent-shared-secret>\n"
+        "INSTANCE_ID=slide-agent-1\n"
+        "SLIDE_AGENT_FIREWORKS_BASE_URL=https://api.fireworks.ai/inference/v1\n"
+        "SLIDE_AGENT_FIREWORKS_API_KEY=\n"
+        "SLIDE_AGENT_FIREWORKS_MODEL=accounts/fireworks/models/glm-5p3-flash\n",
+        encoding="utf-8",
+    )
+    (system_env_dir / "orchestrator.env").write_text(
+        "ORCHESTRATOR_FIREWORKS_API_KEY=orchestrator-fw-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bootstrap, "BACKEND_ROOT", backend_root)
+
+    dest_path, rendered, parsed = bootstrap.build_slide_agent_env_rendered(
+        signing_secret="signing-secret",
+        shared_internal_token="internal-token",
+        system_env_dir=system_env_dir,
+        external_env_by_name={
+            bootstrap.SLIDE_AGENT_ENV_NAME: {
+                "SLIDE_AGENT_FIREWORKS_API_KEY": "own-fw-key",
+            }
+        },
+    )
+
+    assert parsed["SLIDE_AGENT_FIREWORKS_API_KEY"] == "own-fw-key"
+    assert parsed["SLIDE_AGENT_FIREWORKS_MODEL"] == "accounts/fireworks/models/glm-5p3-flash"

@@ -1428,11 +1428,13 @@ def build_tabular_agent_env_rendered(
         source_data.get("TABULAR_AGENT_INTERNAL_LLM_BASE_URL"),
         source_data.get("OPENAI_COMPAT_BASE_URL"),
     )
-    internal_llm_model = first_meaningful_value(
-        external_env.get("TABULAR_AGENT_INTERNAL_LLM_MODEL"),
-        existing_env.get("TABULAR_AGENT_INTERNAL_LLM_MODEL"),
-        source_data.get("TABULAR_AGENT_INTERNAL_LLM_MODEL"),
-        "gpt-5-mini",
+    internal_llm_model = migrate_legacy_internal_llm_model(
+        first_meaningful_value(
+            external_env.get("TABULAR_AGENT_INTERNAL_LLM_MODEL"),
+            existing_env.get("TABULAR_AGENT_INTERNAL_LLM_MODEL"),
+            source_data.get("TABULAR_AGENT_INTERNAL_LLM_MODEL"),
+        ),
+        default=INTERNAL_LLM_COMPLEX_DEFAULT_MODEL,
     )
     instance_id = first_meaningful_value(
         external_env.get("INSTANCE_ID"),
@@ -1449,7 +1451,7 @@ def build_tabular_agent_env_rendered(
         "INSTANCE_ID": instance_id or TABULAR_AGENT_DEFAULT_INSTANCE_ID,
         "TABULAR_AGENT_ORCHESTRATOR_URL": orchestrator_url or "http://127.0.0.1:8743",
         "TABULAR_AGENT_ORCHESTRATOR_INTERNAL_TOKEN": shared_internal_token,
-        "TABULAR_AGENT_INTERNAL_LLM_MODEL": internal_llm_model or "gpt-5-mini",
+        "TABULAR_AGENT_INTERNAL_LLM_MODEL": internal_llm_model,
     }
     if internal_llm_api_key is not None:
         overrides["TABULAR_AGENT_INTERNAL_LLM_API_KEY"] = internal_llm_api_key
@@ -1607,11 +1609,12 @@ def build_email_agent_env_rendered(
         source_data.get("EMAIL_AGENT_INTERNAL_LLM_BASE_URL"),
         source_data.get("OPENAI_COMPAT_BASE_URL"),
     )
-    internal_llm_model = first_meaningful_value(
-        external_env.get("EMAIL_AGENT_INTERNAL_LLM_MODEL"),
-        existing_env.get("EMAIL_AGENT_INTERNAL_LLM_MODEL"),
-        source_data.get("EMAIL_AGENT_INTERNAL_LLM_MODEL"),
-        "gpt-5-mini",
+    internal_llm_model = migrate_legacy_internal_llm_model(
+        first_meaningful_value(
+            external_env.get("EMAIL_AGENT_INTERNAL_LLM_MODEL"),
+            existing_env.get("EMAIL_AGENT_INTERNAL_LLM_MODEL"),
+            source_data.get("EMAIL_AGENT_INTERNAL_LLM_MODEL"),
+        )
     )
     instance_id = first_meaningful_value(
         external_env.get("INSTANCE_ID"),
@@ -1626,7 +1629,7 @@ def build_email_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or EMAIL_AGENT_DEFAULT_INSTANCE_ID,
-        "EMAIL_AGENT_INTERNAL_LLM_MODEL": internal_llm_model or "gpt-5-mini",
+        "EMAIL_AGENT_INTERNAL_LLM_MODEL": internal_llm_model,
     }
     if cosmic_mail_base_url is not None:
         overrides["COSMIC_MAIL_BASE_URL"] = cosmic_mail_base_url
@@ -1732,11 +1735,12 @@ def build_image_generator_agent_env_rendered(
         source_data.get("OPENAI_BASE_URL"),
         "https://api.openai.com/v1",
     )
-    router_model = first_meaningful_value(
-        external_env.get("IMAGE_AGENT_ROUTER_MODEL"),
-        existing_env.get("IMAGE_AGENT_ROUTER_MODEL"),
-        source_data.get("IMAGE_AGENT_ROUTER_MODEL"),
-        "gpt-5-mini",
+    router_model = migrate_legacy_internal_llm_model(
+        first_meaningful_value(
+            external_env.get("IMAGE_AGENT_ROUTER_MODEL"),
+            existing_env.get("IMAGE_AGENT_ROUTER_MODEL"),
+            source_data.get("IMAGE_AGENT_ROUTER_MODEL"),
+        )
     )
     openai_api_key = first_meaningful_value(
         external_env.get("IMAGE_AGENT_OPENAI_API_KEY"),
@@ -1795,7 +1799,7 @@ def build_image_generator_agent_env_rendered(
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or IMAGE_GENERATOR_AGENT_DEFAULT_INSTANCE_ID,
         "IMAGE_AGENT_ROUTER_BASE_URL": router_base_url or "https://api.openai.com/v1",
-        "IMAGE_AGENT_ROUTER_MODEL": router_model or "gpt-5-mini",
+        "IMAGE_AGENT_ROUTER_MODEL": router_model,
         "IMAGE_AGENT_OPENAI_BASE_URL": openai_base_url or "https://api.openai.com/v1",
         "IMAGE_AGENT_OPENAI_MODEL": openai_model or "gpt-image-1.5",
         "IMAGE_AGENT_XAI_BASE_URL": xai_base_url or "https://api.x.ai/v1",
@@ -1903,11 +1907,12 @@ def build_calendar_agent_env_rendered(
         source_data.get("CALENDAR_AGENT_INTERNAL_LLM_BASE_URL"),
         source_data.get("OPENAI_COMPAT_BASE_URL"),
     )
-    internal_llm_model = first_meaningful_value(
-        external_env.get("CALENDAR_AGENT_INTERNAL_LLM_MODEL"),
-        existing_env.get("CALENDAR_AGENT_INTERNAL_LLM_MODEL"),
-        source_data.get("CALENDAR_AGENT_INTERNAL_LLM_MODEL"),
-        "gpt-5-mini",
+    internal_llm_model = migrate_legacy_internal_llm_model(
+        first_meaningful_value(
+            external_env.get("CALENDAR_AGENT_INTERNAL_LLM_MODEL"),
+            existing_env.get("CALENDAR_AGENT_INTERNAL_LLM_MODEL"),
+            source_data.get("CALENDAR_AGENT_INTERNAL_LLM_MODEL"),
+        )
     )
     internal_llm_timeout_sec = first_meaningful_value(
         external_env.get("CALENDAR_AGENT_INTERNAL_LLM_TIMEOUT_SEC"),
@@ -1982,7 +1987,7 @@ def build_calendar_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or CALENDAR_AGENT_DEFAULT_INSTANCE_ID,
-        "CALENDAR_AGENT_INTERNAL_LLM_MODEL": internal_llm_model or "gpt-5-mini",
+        "CALENDAR_AGENT_INTERNAL_LLM_MODEL": internal_llm_model,
         "CALENDAR_AGENT_INTERNAL_LLM_TIMEOUT_SEC": internal_llm_timeout_sec or "120.0",
         "CALENDAR_AGENT_ENABLE_INTERNAL_LLM": enable_internal_llm or "true",
         "CALENDAR_AGENT_USE_LANGGRAPH": use_langgraph or "true",
@@ -2158,10 +2163,9 @@ def build_gmail_agent_env_rendered(
         "INSTANCE_ID": pick("INSTANCE_ID", GMAIL_AGENT_DEFAULT_INSTANCE_ID)
         or GMAIL_AGENT_DEFAULT_INSTANCE_ID,
         "GMAIL_AGENT_ENABLED": pick("GMAIL_AGENT_ENABLED", "true") or "true",
-        "GMAIL_AGENT_INTERNAL_LLM_MODEL": pick(
-            "GMAIL_AGENT_INTERNAL_LLM_MODEL", "gpt-5-mini"
-        )
-        or "gpt-5-mini",
+        "GMAIL_AGENT_INTERNAL_LLM_MODEL": migrate_legacy_internal_llm_model(
+            pick("GMAIL_AGENT_INTERNAL_LLM_MODEL", "gpt-5-mini")
+        ),
         "GMAIL_AGENT_INTERNAL_LLM_TIMEOUT_SEC": pick(
             "GMAIL_AGENT_INTERNAL_LLM_TIMEOUT_SEC", "90.0"
         )
@@ -2340,10 +2344,9 @@ def build_google_docs_agent_env_rendered(
         or GOOGLE_DOCS_AGENT_DEFAULT_INSTANCE_ID,
         "GOOGLE_DOCS_AGENT_ENABLED": pick("GOOGLE_DOCS_AGENT_ENABLED", "true")
         or "true",
-        "GOOGLE_DOCS_AGENT_INTERNAL_LLM_MODEL": pick(
-            "GOOGLE_DOCS_AGENT_INTERNAL_LLM_MODEL", "gpt-5-mini"
-        )
-        or "gpt-5-mini",
+        "GOOGLE_DOCS_AGENT_INTERNAL_LLM_MODEL": migrate_legacy_internal_llm_model(
+            pick("GOOGLE_DOCS_AGENT_INTERNAL_LLM_MODEL", "gpt-5-mini")
+        ),
         "GOOGLE_DOCS_AGENT_INTERNAL_LLM_TIMEOUT_SEC": pick(
             "GOOGLE_DOCS_AGENT_INTERNAL_LLM_TIMEOUT_SEC", "120.0"
         )
@@ -2513,10 +2516,9 @@ def build_google_sheets_agent_env_rendered(
         or GOOGLE_SHEETS_AGENT_DEFAULT_INSTANCE_ID,
         "GOOGLE_SHEETS_AGENT_ENABLED": pick("GOOGLE_SHEETS_AGENT_ENABLED", "true")
         or "true",
-        "GOOGLE_SHEETS_AGENT_INTERNAL_LLM_MODEL": pick(
-            "GOOGLE_SHEETS_AGENT_INTERNAL_LLM_MODEL", "gpt-5-mini"
-        )
-        or "gpt-5-mini",
+        "GOOGLE_SHEETS_AGENT_INTERNAL_LLM_MODEL": migrate_legacy_internal_llm_model(
+            pick("GOOGLE_SHEETS_AGENT_INTERNAL_LLM_MODEL", "gpt-5-mini")
+        ),
         "GOOGLE_SHEETS_AGENT_INTERNAL_LLM_TIMEOUT_SEC": pick(
             "GOOGLE_SHEETS_AGENT_INTERNAL_LLM_TIMEOUT_SEC", "120.0"
         )
@@ -2632,11 +2634,13 @@ def build_diagram_agent_env_rendered(
         source_data.get("DIAGRAM_AGENT_INTERNAL_LLM_BASE_URL"),
         source_data.get("OPENAI_COMPAT_BASE_URL"),
     )
-    internal_llm_model = first_meaningful_value(
-        external_env.get("DIAGRAM_AGENT_INTERNAL_LLM_MODEL"),
-        existing_env.get("DIAGRAM_AGENT_INTERNAL_LLM_MODEL"),
-        source_data.get("DIAGRAM_AGENT_INTERNAL_LLM_MODEL"),
-        "gpt-5-mini",
+    internal_llm_model = migrate_legacy_internal_llm_model(
+        first_meaningful_value(
+            external_env.get("DIAGRAM_AGENT_INTERNAL_LLM_MODEL"),
+            existing_env.get("DIAGRAM_AGENT_INTERNAL_LLM_MODEL"),
+            source_data.get("DIAGRAM_AGENT_INTERNAL_LLM_MODEL"),
+        ),
+        default=INTERNAL_LLM_COMPLEX_DEFAULT_MODEL,
     )
     internal_llm_timeout_sec = first_meaningful_value(
         external_env.get("DIAGRAM_AGENT_INTERNAL_LLM_TIMEOUT_SEC"),
@@ -2741,7 +2745,7 @@ def build_diagram_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or DIAGRAM_AGENT_DEFAULT_INSTANCE_ID,
-        "DIAGRAM_AGENT_INTERNAL_LLM_MODEL": internal_llm_model or "gpt-5-mini",
+        "DIAGRAM_AGENT_INTERNAL_LLM_MODEL": internal_llm_model,
         "DIAGRAM_AGENT_INTERNAL_LLM_TIMEOUT_SEC": internal_llm_timeout_sec or "120.0",
         "DIAGRAM_AGENT_ENABLE_INTERNAL_LLM": enable_internal_llm or "true",
         "DIAGRAM_AGENT_USE_LANGGRAPH": use_langgraph or "true",
@@ -2879,13 +2883,13 @@ def build_map_agent_env_rendered(
         "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
         "AGENT_SECRET": signing_secret,
         "INSTANCE_ID": instance_id or MAP_AGENT_DEFAULT_INSTANCE_ID,
-        "MAP_AGENT_INTERNAL_LLM_MODEL": first_meaningful_value(
-            external_env.get("MAP_AGENT_INTERNAL_LLM_MODEL"),
-            existing_env.get("MAP_AGENT_INTERNAL_LLM_MODEL"),
-            source_data.get("MAP_AGENT_INTERNAL_LLM_MODEL"),
-            "gpt-5-mini",
-        )
-        or "gpt-5-mini",
+        "MAP_AGENT_INTERNAL_LLM_MODEL": migrate_legacy_internal_llm_model(
+            first_meaningful_value(
+                external_env.get("MAP_AGENT_INTERNAL_LLM_MODEL"),
+                existing_env.get("MAP_AGENT_INTERNAL_LLM_MODEL"),
+                source_data.get("MAP_AGENT_INTERNAL_LLM_MODEL"),
+            )
+        ),
         "MAP_AGENT_ENABLE_INTERNAL_LLM": first_meaningful_value(
             external_env.get("MAP_AGENT_ENABLE_INTERNAL_LLM"),
             existing_env.get("MAP_AGENT_ENABLE_INTERNAL_LLM"),
@@ -2962,8 +2966,9 @@ def build_slide_agent_env_rendered(
     firecrawl_existing_env = (existing_env_by_name or {}).get(FIRECRAWL_AGENT_ENV_NAME, {})
     image_existing_env = (existing_env_by_name or {}).get(IMAGE_GENERATOR_AGENT_ENV_NAME, {})
 
-    def read_peer_env(env_name: str) -> Dict[str, str]:
-        path = ((system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / env_name)
+    def read_peer_env(env_name: str, *, agent_env: bool = True) -> Dict[str, str]:
+        base = system_env_dir or DEFAULT_SYSTEM_ENV_DIR
+        path = (base / "agents" / env_name) if agent_env else (base / env_name)
         if not path.exists():
             return {}
         try:
@@ -2977,6 +2982,18 @@ def build_slide_agent_env_rendered(
         firecrawl_existing_env = read_peer_env(FIRECRAWL_AGENT_ENV_NAME)
     if not image_existing_env:
         image_existing_env = read_peer_env(IMAGE_GENERATOR_AGENT_ENV_NAME)
+    docs_parser_existing_env = (existing_env_by_name or {}).get(DOCS_PARSER_AGENT_ENV_NAME, {})
+    docs_parser_external_env = (external_env_by_name or {}).get(DOCS_PARSER_AGENT_ENV_NAME, {})
+    if not docs_parser_existing_env:
+        docs_parser_existing_env = read_peer_env(DOCS_PARSER_AGENT_ENV_NAME)
+    orchestrator_existing_env = (existing_env_by_name or {}).get("orchestrator.env", {})
+    orchestrator_external_env = (external_env_by_name or {}).get("orchestrator.env", {})
+    if not orchestrator_existing_env:
+        orchestrator_existing_env = read_peer_env("orchestrator.env", agent_env=False)
+    visual_existing_env = (existing_env_by_name or {}).get("visual_enhancement.env", {})
+    visual_external_env = (external_env_by_name or {}).get("visual_enhancement.env", {})
+    if not visual_existing_env:
+        visual_existing_env = read_peer_env("visual_enhancement.env", agent_env=False)
 
     redis_url = first_meaningful_value(
         external_env.get("REDIS_URL"),
@@ -2998,29 +3015,73 @@ def build_slide_agent_env_rendered(
             default,
         )
 
-    internal_llm_api_key = pick_env(
-        (
-            "MODEL_API_KEY",
-            "SLIDE_AGENT_FIREWORKS_API_KEY",
-            "FIREWORKS_API_KEY",
-            "OPENAI_COMPAT_API_KEY",
-            "OPENROUTER_API_KEY",
+    # Repo example defaults must not count as explicit pins: they only seed the
+    # fallback, so an OpenAI-key install can still upgrade to GPT-5.6 Terra.
+    explicit_model_name = first_meaningful_value(
+        external_env.get("MODEL_NAME"),
+        external_env.get("SLIDE_AGENT_FIREWORKS_MODEL"),
+        external_env.get("FIREWORKS_KIMI_MODEL"),
+        existing_env.get("MODEL_NAME"),
+        existing_env.get("SLIDE_AGENT_FIREWORKS_MODEL"),
+        existing_env.get("FIREWORKS_KIMI_MODEL"),
+    )
+    # Slide's own Fireworks keys first, then whatever Fireworks credential the
+    # VM already carries (orchestrator / visual-enhancement sidecar) so the
+    # Qwen fallback works without per-agent key setup.
+    fireworks_api_key = first_meaningful_value(
+        external_env.get("MODEL_API_KEY"),
+        external_env.get("SLIDE_AGENT_FIREWORKS_API_KEY"),
+        external_env.get("FIREWORKS_API_KEY"),
+        external_env.get("OPENAI_COMPAT_API_KEY"),
+        external_env.get("OPENROUTER_API_KEY"),
+        existing_env.get("MODEL_API_KEY"),
+        existing_env.get("SLIDE_AGENT_FIREWORKS_API_KEY"),
+        existing_env.get("FIREWORKS_API_KEY"),
+        existing_env.get("OPENAI_COMPAT_API_KEY"),
+        existing_env.get("OPENROUTER_API_KEY"),
+        orchestrator_external_env.get("ORCHESTRATOR_FIREWORKS_API_KEY"),
+        orchestrator_external_env.get("FIREWORKS_API_KEY"),
+        orchestrator_external_env.get("MODEL_API_KEY"),
+        orchestrator_existing_env.get("ORCHESTRATOR_FIREWORKS_API_KEY"),
+        orchestrator_existing_env.get("FIREWORKS_API_KEY"),
+        orchestrator_existing_env.get("MODEL_API_KEY"),
+        visual_external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
+        visual_existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
+    )
+    slide_openai_api_key = first_meaningful_value(
+        external_env.get("SLIDE_AGENT_OPENAI_API_KEY"),
+        external_env.get("OPENAI_API_KEY"),
+        docs_parser_external_env.get("OPENAI_API_KEY"),
+        existing_env.get("SLIDE_AGENT_OPENAI_API_KEY"),
+        existing_env.get("OPENAI_API_KEY"),
+        docs_parser_existing_env.get("OPENAI_API_KEY"),
+    )
+    # Vendor-paired default: without an explicit model or Fireworks key, an
+    # OpenAI key upgrades the agent to GPT-5.6 Terra (heavy slide work).
+    # Otherwise the Fireworks Qwen defaults keep working untouched.
+    if not explicit_model_name and not fireworks_api_key and slide_openai_api_key:
+        internal_llm_model = "gpt-5.6-terra"
+        internal_llm_base_url = first_meaningful_value(
+            external_env.get("MODEL_BASE_URL"),
+            external_env.get("OPENAI_COMPAT_BASE_URL"),
+            existing_env.get("MODEL_BASE_URL"),
+            existing_env.get("OPENAI_COMPAT_BASE_URL"),
+            "https://api.openai.com/v1",
         )
-    )
-    internal_llm_base_url = pick_env(
-        (
-            "MODEL_BASE_URL",
-            "SLIDE_AGENT_FIREWORKS_BASE_URL",
-            "FIREWORKS_BASE_URL",
-            "OPENAI_COMPAT_BASE_URL",
-            "OPENROUTER_BASE_URL",
-        ),
-        "https://api.fireworks.ai/inference/v1",
-    )
-    internal_llm_model = pick_env(
-        ("MODEL_NAME", "SLIDE_AGENT_FIREWORKS_MODEL", "FIREWORKS_KIMI_MODEL"),
-        "accounts/fireworks/models/qwen3p6-plus",
-    )
+        internal_llm_api_key = slide_openai_api_key
+    else:
+        internal_llm_model = explicit_model_name or "accounts/fireworks/models/glm-5p3-flash"
+        internal_llm_base_url = pick_env(
+            (
+                "MODEL_BASE_URL",
+                "SLIDE_AGENT_FIREWORKS_BASE_URL",
+                "FIREWORKS_BASE_URL",
+                "OPENAI_COMPAT_BASE_URL",
+                "OPENROUTER_BASE_URL",
+            ),
+            "https://api.fireworks.ai/inference/v1",
+        )
+        internal_llm_api_key = fireworks_api_key
     model_timeout_sec = pick_env(
         ("MODEL_TIMEOUT_SEC", "SLIDE_AGENT_FIREWORKS_TIMEOUT_SEC"),
         "300",
@@ -3216,10 +3277,10 @@ def build_slide_agent_env_rendered(
         "SLIDE_AGENT_FIREWORKS_BASE_URL": internal_llm_base_url
         or "https://api.fireworks.ai/inference/v1",
         "SLIDE_AGENT_FIREWORKS_MODEL": internal_llm_model
-        or "accounts/fireworks/models/qwen3p6-plus",
+        or "accounts/fireworks/models/glm-5p3-flash",
         "VISION_MODEL_NAME": vision_model_name
         or internal_llm_model
-        or "accounts/fireworks/models/qwen3p6-plus",
+        or "accounts/fireworks/models/glm-5p3-flash",
         "MODEL_TIMEOUT_SEC": model_timeout_sec or "300",
         "MODEL_HTTP_RETRIES": model_http_retries or "3",
         "MODEL_MAX_TOKENS": model_max_tokens or "16384",
@@ -4909,6 +4970,24 @@ def first_meaningful_value(*values: Optional[str]) -> Optional[str]:
         if normalized is not None:
             return normalized
     return None
+
+
+# Retired internal-LLM defaults. Env values still carrying them were written by
+# older bootstrap runs (not deliberate pins), so they are re-pointed to the
+# GPT-5.6 family instead of being honored.
+_LEGACY_INTERNAL_LLM_MODELS = {"gpt-5-mini", "gpt-4.1-mini"}
+INTERNAL_LLM_DEFAULT_MODEL = "gpt-5.6-luna"
+INTERNAL_LLM_COMPLEX_DEFAULT_MODEL = "gpt-5.6-terra"
+
+
+def migrate_legacy_internal_llm_model(
+    value: Optional[str],
+    default: str = INTERNAL_LLM_DEFAULT_MODEL,
+) -> str:
+    normalized = str(value or "").strip()
+    if not normalized or normalized in _LEGACY_INTERNAL_LLM_MODELS:
+        return default
+    return normalized
 
 
 def generate_safe_secret(length: int = 40) -> str:

@@ -51,10 +51,13 @@
 
 ## Slide Deck Workflow Choice
 
-- When the user asks to create, generate, make, or build a slide deck or presentation, do not immediately delegate `slide.create` unless the user already chose a workflow or provided a template. First ask whether they want HTML mode or template mode.
-- HTML mode is fast and produces an image-backed/non-editable PPTX.
-- Template mode is slower and produces an editable PowerPoint deck. If no template is specified, the Slide Agent can auto-select from its templates folder after planning.
-- If the user uploads PDF/DOC/DOCX/PPT source material and asks to make a deck from it, still ask for the HTML vs template workflow first when unspecified, then pass the source files to `slide.create` as artifacts.
+- When the user asks to create, generate, make, or build a slide deck or presentation and has NOT already chosen a workflow or provided a template, delegate `slide.create` with the description and any artifacts but WITHOUT a workflow. The Slide Agent will refuse with NEEDS_WORKFLOW_CHOICE and the client renders an inline workflow choice card. Acknowledge briefly and wait for the user to pick; do not ask the workflow question in prose and do not demand a typed answer.
+- The workflows: `advanced` is the default — it designs each slide and produces a fully editable native PowerPoint file (works with or without a template); `html` is fast but image-backed and non-editable; `template` fills a user-provided template's layouts and is slower.
+- Only ask the question yourself in prose when the tool result does not include the trusted workflow-choice contract (e.g. a channel that cannot render cards).
+- When the user's choice arrives as a `[Slide workflow selected: ...]` continuation message, delegate `slide.create` again with that workflow and the original description and artifacts. Never re-ask the question.
+- If the user already told you what they want ("make me an editable deck", "use my template", "fast deck for a screen"), pass the matching `workflow` (`advanced`/`template`/`html`) directly and skip the choice card.
+- A user-uploaded PPTX template works with BOTH `advanced` (designs fresh slides on the template's theme and layouts — usually the better-looking result) and `template` (fills the template's existing slide layouts). Prefer `advanced` unless the user explicitly asks to reuse the template's slides as-is.
+- If the user uploads PDF/DOC/DOCX/PPT source material and asks to make a deck from it, still let the workflow choice card ask when the workflow is unspecified, and pass the source files to `slide.create` as artifacts.
 - If the user uploads a PPTX template and asks to catalog it, delegate `slide.catalog_template`.
 - If the user uploads an existing PPTX deck and asks to edit it, delegate `slide.edit`.
 

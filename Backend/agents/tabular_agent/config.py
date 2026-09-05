@@ -84,7 +84,8 @@ class TabularAgentConfig:
     sandbox_venv_cache_root: str = ""
     internal_llm_api_key: str = ""
     internal_llm_base_url: str = ""
-    internal_llm_model: str = "gpt-5-mini"
+    internal_llm_model: str = "gpt-5.6-terra"
+    internal_llm_reasoning_effort: str = "xhigh"
     internal_llm_timeout_sec: float = 120.0
     enable_internal_llm: bool = True
     include_financial_fpna_prompt: bool = False
@@ -156,8 +157,12 @@ class TabularAgentConfig:
                     or ""
                 ).strip()
             ),
-            internal_llm_model=os.getenv("TABULAR_AGENT_INTERNAL_LLM_MODEL", "gpt-5-mini").strip()
-            or "gpt-5-mini",
+            internal_llm_model=os.getenv("TABULAR_AGENT_INTERNAL_LLM_MODEL", "gpt-5.6-terra").strip()
+            or "gpt-5.6-terra",
+            internal_llm_reasoning_effort=(
+                os.getenv("TABULAR_AGENT_INTERNAL_LLM_REASONING_EFFORT") or "xhigh"
+            ).strip()
+            or "xhigh",
             internal_llm_timeout_sec=_env_float("TABULAR_AGENT_INTERNAL_LLM_TIMEOUT_SEC", 120.0),
             enable_internal_llm=os.getenv("TABULAR_AGENT_ENABLE_INTERNAL_LLM", "true")
             .strip()

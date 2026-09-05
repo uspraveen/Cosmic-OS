@@ -5,7 +5,7 @@ calendar.update_event, calendar.respond_to_invite, calendar.cancel_event,
 calendar.recall_session.
 
 Uses self.auth.access_token from orchestrator-injected credentials.
-Internal LLM (gpt-5-mini) for natural language scheduling parsing.
+Internal LLM (gpt-5.6-luna) for natural language scheduling parsing.
 """
 
 from __future__ import annotations

@@ -95,6 +95,10 @@ class EmailDraftUpdateRequest(BaseModel):
     body_text: str = Field(..., max_length=200000)
 
 
+class SlideWorkflowChoiceSelectRequest(BaseModel):
+    workflow: str = Field(..., min_length=1, max_length=32)
+
+
 class CalendarEventUpdateRequest(BaseModel):
     account_id: str | None = Field(default=None, max_length=160)
     calendar_id: str = Field(default="primary", min_length=1, max_length=320)
@@ -2507,6 +2511,28 @@ async def update_gmail_approval_draft(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.get("/channels/slide/choices")
+async def list_slide_workflow_choices(
+    include_terminal: bool = Query(default=True),
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return runtime.list_slide_workflow_choices(include_terminal=include_terminal)
+
+
+@router.post("/channels/slide/choices/{choice_id}/select")
+async def select_slide_workflow_choice(
+    choice_id: str,
+    body: SlideWorkflowChoiceSelectRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.select_slide_workflow_choice(choice_id, body.workflow)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.post("/channels/agent-email/approvals/{approval_id}/approve")

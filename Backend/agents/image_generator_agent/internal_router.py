@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from shared import begin_metered_call, build_model_key, build_usage_event, post_usage_event, serialize_usage_metadata
+from shared import begin_metered_call, build_model_key, build_usage_event, normalized_reasoning_effort, post_usage_event, serialize_usage_metadata
 
 from .config import ImageGeneratorAgentConfig
 
@@ -142,6 +142,9 @@ async def _route_with_llm(
             }
             if not _is_gpt5_chat_model(cfg.router_model):
                 llm_kwargs["temperature"] = 0.1
+            effort = normalized_reasoning_effort(cfg.router_model, cfg.router_reasoning_effort)
+            if effort is not None:
+                llm_kwargs["reasoning_effort"] = effort
             llm = ChatOpenAI(**llm_kwargs)
             response = await llm.ainvoke(
                 [

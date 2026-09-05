@@ -72,7 +72,7 @@ load_dotenv(_HERE / ".env")
 
 MODEL_BASE_URL: str   = os.getenv("MODEL_BASE_URL", "https://api.fireworks.ai/inference/v1").rstrip("/")
 MODEL_API_KEY: str    = os.getenv("MODEL_API_KEY", "")
-MODEL_NAME: str       = os.getenv("MODEL_NAME", "accounts/fireworks/models/qwen3p6-plus")
+MODEL_NAME: str       = os.getenv("MODEL_NAME", "accounts/fireworks/models/glm-5p3-flash")
 MODEL_TIMEOUT_SEC: int = int(os.getenv("MODEL_TIMEOUT_SEC", "300"))
 MODEL_HTTP_RETRIES: int = int(os.getenv("MODEL_HTTP_RETRIES", "3"))
 PARALLELISM: int      = int(os.getenv("BUILDER_PARALLELISM", "2"))

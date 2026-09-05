@@ -39,6 +39,66 @@ def estimate_text_tokens(text: str) -> int:
     return max(1, ceil(len(normalized) / 4))
 
 
+# Reasoning-effort levels accepted by the OpenAI chat-completions models, per
+# family: GPT-5.6 adds xhigh/max; the earlier GPT-5 models (gpt-5, gpt-5-mini,
+# ...) only accept up to high.
+GPT5_6_REASONING_EFFORT_LEVELS = {"none", "low", "medium", "high", "xhigh", "max"}
+GPT5_LEGACY_REASONING_EFFORT_LEVELS = {"minimal", "low", "medium", "high"}
+DEFAULT_INTERNAL_REASONING_EFFORT = "xhigh"
+
+
+def is_openai_gpt5_chat_model(model: str | None) -> bool:
+    """True for GPT-5-family chat models, which reject temperature-style knobs."""
+    return str(model or "").strip().casefold().startswith("gpt-5")
+
+
+def infer_model_provider(base_url: str | None, model: str | None) -> str:
+    """Best-effort vendor name for an OpenAI-compatible endpoint + model id.
+
+    Usage events must carry a real vendor so model keys resolve against
+    pricing cards; generic labels like "internal_llm" cannot be priced.
+    """
+    normalized = str(base_url or "").strip().lower()
+    model_text = str(model or "").strip().lower()
+    if "api.openai.com" in normalized or model_text.startswith("gpt-"):
+        return "openai"
+    if "fireworks.ai" in normalized:
+        return "fireworks"
+    if "api.x.ai" in normalized:
+        return "xai"
+    if "api.groq.com" in normalized:
+        return "groq"
+    if "api.anthropic.com" in normalized:
+        return "anthropic"
+    if "api.perplexity.ai" in normalized:
+        return "perplexity"
+    return "openai_compatible"
+
+
+def normalized_reasoning_effort(
+    model: str | None,
+    requested: str | None = None,
+    *,
+    default: str = DEFAULT_INTERNAL_REASONING_EFFORT,
+) -> str | None:
+    """Resolve the reasoning_effort to send for a GPT-5-family chat model.
+
+    Returns None for non-GPT-5 models (the parameter must not be sent) or when
+    nothing valid can be resolved for the model's family. Empty/"auto" requests
+    fall back to ``default``, clamped to the family's supported levels.
+    """
+    if not is_openai_gpt5_chat_model(model):
+        return None
+    name = str(model or "").strip().casefold()
+    supported = GPT5_6_REASONING_EFFORT_LEVELS if "5.6" in name else GPT5_LEGACY_REASONING_EFFORT_LEVELS
+    effort = str(requested or "").strip().casefold()
+    if effort in {"", "auto", "default"}:
+        effort = str(default or "").strip().casefold()
+    if effort in supported:
+        return effort
+    return "high" if "high" in supported else None
+
+
 @lru_cache(maxsize=1)
 def load_model_specs() -> dict[str, ModelSpec]:
     payload = json.loads(MODEL_SPECS_PATH.read_text(encoding="utf-8"))
@@ -78,7 +138,21 @@ def get_model_spec(model_key: str) -> ModelSpec | None:
     normalized = str(model_key or "").strip()
     if not normalized:
         return None
-    return load_model_specs().get(normalized)
+    specs = load_model_specs()
+    spec = specs.get(normalized)
+    if spec is not None:
+        return spec
+    # Agent usage events label the internal LLM with generic provider names
+    # ("internal_llm", "openai_compatible"). Resolve those to the real vendor
+    # card so token mapping and cost estimation keep working; only when the
+    # model name is unambiguous across the catalog.
+    provider, separator, model = normalized.partition(":")
+    if not separator or not model:
+        return None
+    if provider in {entry.provider for entry in specs.values()}:
+        return None
+    matches = [entry for entry in specs.values() if entry.model.casefold() == model.casefold()]
+    return matches[0] if len(matches) == 1 else None
 
 
 def lookup_model_spec(provider: str, model: str) -> ModelSpec | None:

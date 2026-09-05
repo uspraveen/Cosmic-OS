@@ -78,7 +78,8 @@ class EmailAgentConfig:
     attachment_docs_parse_poll_interval_sec: float = 0.25
     internal_llm_api_key: str = ""
     internal_llm_base_url: str = ""
-    internal_llm_model: str = "gpt-5-mini"
+    internal_llm_model: str = "gpt-5.6-luna"
+    internal_llm_reasoning_effort: str = "xhigh"
     internal_llm_timeout_sec: float = 120.0
     enable_internal_llm: bool = True
     agent_email_integrations_db_path: Path = BACKEND_ROOT / "gateway" / "agent_email_integrations.db"
@@ -120,7 +121,11 @@ class EmailAgentConfig:
             internal_llm_base_url=normalize_openai_compatible_base_url(
                 (os.getenv("EMAIL_AGENT_INTERNAL_LLM_BASE_URL") or os.getenv("OPENAI_COMPAT_BASE_URL") or "").strip()
             ),
-            internal_llm_model=os.getenv("EMAIL_AGENT_INTERNAL_LLM_MODEL", "gpt-5-mini").strip() or "gpt-5-mini",
+            internal_llm_model=os.getenv("EMAIL_AGENT_INTERNAL_LLM_MODEL", "gpt-5.6-luna").strip() or "gpt-5.6-luna",
+            internal_llm_reasoning_effort=(
+                os.getenv("EMAIL_AGENT_INTERNAL_LLM_REASONING_EFFORT") or "xhigh"
+            ).strip()
+            or "xhigh",
             internal_llm_timeout_sec=_env_float("EMAIL_AGENT_INTERNAL_LLM_TIMEOUT_SEC", 120.0),
             enable_internal_llm=_env_bool("EMAIL_AGENT_ENABLE_INTERNAL_LLM", True),
             agent_email_integrations_db_path=Path(

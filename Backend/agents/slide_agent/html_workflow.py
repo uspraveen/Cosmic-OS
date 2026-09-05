@@ -164,7 +164,25 @@ CONSTRAINTS
 - One display font. One body font. One accent font (may equal display). No more.
 - At most TWO accent colors total (`accent` and optional `accent_2`). Beyond
   that the deck looks like a colour-test card.
-- If the brief implies dark, premium, cinematic, or black-dominant, embrace it.
+- PALETTE DOMINANCE. Build every slide on BACKGROUND → PRIMARY → ACCENT:
+  the background carries 60–70% of the visual weight, the primary tone does
+  the structural work, and the accent touches ~5–10% of the slide on the
+  single most important element per slide. Never give colors equal weight.
+  When you need more differentiation, use tints and shades of the primary —
+  never new hues.
+- DERIVE THE PALETTE FROM THE SUBJECT. The colors should feel designed for
+  THIS topic — its industry, place, brand, or mood. Test: if the palette
+  would work unchanged on an unrelated deck, it is not specific enough.
+  Do not default to blue, and do not default to cream/beige backgrounds —
+  white or a real brand tone beats a warm-neutral shrug.
+- SANDWICH STRUCTURE. Default to dark backgrounds for the cover and closing
+  slides and light backgrounds for content slides — or commit to dark
+  throughout for a premium feel. Note the choice in deck_guidelines so every
+  slide follows it.
+- ONE SIGNATURE MOTIF. Pick a single repeatable visual idea (oversized
+  numbers, rounded image frames, a consistent card treatment…) and state it
+  in deck_guidelines. Repeated on every slide, it makes the deck feel
+  authored.
 - If the brief explicitly asks for a different style (light/airy, brutalist,
   editorial, brand-coloured, retro, maximalist…), that style WINS over every
   default below.
@@ -225,6 +243,17 @@ CORE PHILOSOPHY
   Gradients, glass, shadows, animations, ornaments — these are usually
   dressing on a confused message. Strengthen the hierarchy first.
 
+FOCAL POINT AND SPACE
+- Every slide needs a visual element — an image, chart, diagram, shape, or
+  oversized figure. A text-only slide is a failed slide.
+- Every slide has ONE clear visual focal point that dominates the
+  composition; everything else is subordinate to it.
+- No large blank areas. Resolve empty regions with CONTENT — bigger type, a
+  wider visual, a promoted pull quote or caption — never with filler bars,
+  strips, rules, or flat color blocks whose only purpose is occupying space.
+- Vary the rhythm across the deck: alternate text-driven, image-driven, and
+  data-driven slides. Do not reuse one layout twice in a row.
+
 LAYOUT AND STRUCTURE
 - The slide root already exists as <section class="slide">. You must only
   generate inner HTML and CSS.
@@ -232,6 +261,9 @@ LAYOUT AND STRUCTURE
 - Use the THEME's CSS variables and font stacks. Never introduce a new
   color, gradient, or font that isn't in the theme tokens. The theme is
   locked — your job is to compose with it, not redecorate.
+- The ONE sanctioned exception: if the deck guidelines define a dark/light
+  inversion for cover, section-break, or closing slides, use the same
+  palette roles inverted (background ↔ text colors) — never new hues.
 - Use local asset paths exactly as provided; do not invent URLs.
 - No scripts, no iframes, no external stylesheets, no external fonts.
 - Curate ruthlessly. If the FULL CONTENT JSON has six bullets, surface the
@@ -246,6 +278,8 @@ TYPE AND READABILITY
   to speaker_notes.
 - Body text contrast against its immediate background must be ≥ 4.5:1.
   If you put text over an image, add a panel/scrim or you have failed.
+- The smallest text on any slide (captions, footers, source lines) stays
+  legible: never below 14px, and keep it high-contrast against its background.
 - `font-variant-numeric: tabular-nums` for any column of numbers.
 - Use `white-space: pre` (or `pre-wrap`) for code blocks and verse;
   otherwise the line breaks are lost.
@@ -255,11 +289,27 @@ brief explicitly requests one of these, treat it as a feature, not a smell.)
 - No emoji in titles, headers, bullets, or buttons. Emoji are not icons.
 - No drop-shadows on body text.
 - No more than 2 accent colors used in this slide.
+- NEVER a decorative color bar, accent stripe, sidebar strip, or single-side
+  edge border — not along a slide edge, not along a card edge, and never the
+  same treatment on consecutive slides. Group with background tints,
+  hairline separators (1px, between items only), or spacing instead. This is
+  the single most recognizable "AI deck" tell.
+- NEVER a decorative underline beneath a title. Whitespace carries hierarchy.
+- No card/tile grids (2×2, 3×2, 4-up) more than rarely — at most one grid in
+  five content slides, never on consecutive slides, and only when the
+  content is genuinely peer items. Otherwise use columns, timelines, or a
+  focal composition.
+- No center-aligned multi-line body paragraphs.
 - No three-column "feature card" layouts with circular icons unless the
   content is genuinely three parallel features. Don't fake it for symmetry.
-- No center-aligned multi-line body paragraphs.
 - No phrases of the form "In today's fast-paced world", "Welcome to…",
   "Let's begin", "Unlocking the power of…".
+
+ATTRIBUTION
+- If FULL CONTENT gives a source for a figure, chart, or quote, render it as
+  a small muted source line (12–16px, muted color) at the bottom of the
+  slide. Never present an invented number as sourced; label estimates as
+  "est." or "illustrative".
 
 USING THE PROVIDED ASSETS
 - Photos work for the OPENING, CLOSING, HIGHLIGHT, and VISUAL roles, or
@@ -349,16 +399,27 @@ FIDELITY CHECKLIST  (walk through these before scoring)
 - Footer / page-number / logo elements: not covered by content?
 - Charts: axis labels present and legible? legend doesn't overlap data?
 - Images: not stretched, not pixelated, behind a scrim if text sits on them?
+- Focal point: is there one dominant element, or does everything compete?
+- Blank areas: large empty regions left unresolved, or filler decoration
+  parked in them instead of real content?
+- Attribution: figures/quotes that carry a source rendered with a source line?
+
+AI-SLIDE TELLS  (flag as MEDIUM; fail only if they dominate the deck's look)
+- Decorative color bars, accent stripes, sidebar strips, single-side edge
+  borders on cards, or an underline beneath a title
+- The same card/tile grid layout on consecutive slides
+- Three or more competing accent colors
+- Content-free decoration occupying space where content should be
 
 LIKELY-GENERIC SMELLS  (note as LOW issues unless they actively harm the
 slide; do NOT auto-fail)
 - Emoji used as a structural icon in title/headers
-- Three or more clearly distinct accent colors competing for attention
 - Drop-shadows on body text
 - Center-aligned multi-line body paragraphs
 - "In today's fast-paced world…" / "Welcome to…" / generic SaaS clichés
 - Stock-photo "diverse team smiling at laptop" aesthetic where the topic
   doesn't call for it
+- Default-blue or beige palettes that carry no hint of the subject
 """
 
 VALIDATION_USER = """\
@@ -393,6 +454,10 @@ REPAIR PHILOSOPHY
 - Address the listed issues SPECIFICALLY. If validation flagged a
   truncation, fix the truncation; do not rewrite the whole slide because
   you wanted to.
+- When validation flags an AI-slide tell (decorative stripes, edge bars,
+  title underlines, filler blocks), REMOVE the ornament — replace it with
+  whitespace, a 1px hairline, or a background tint. Never swap one decoration
+  for another.
 - A repaired slide should feel like the same slide — only the broken
   parts changed. If the original got the layout right but the title was
   cut off, the repair shortens the title; it does not pick a new layout.
@@ -747,14 +812,27 @@ def _launch_browser():
     raise RuntimeError("Could not launch a Chromium browser via Playwright: " + " | ".join(errors))
 
 
-def render_slide_html_files(manifest: list[dict], rendered_dir: Path) -> list[Path]:
-    """Render each slide HTML to PNG using Playwright."""
+def render_slide_html_files(
+    manifest: list[dict],
+    rendered_dir: Path,
+    *,
+    canvas_width: int | None = None,
+    canvas_height: int | None = None,
+) -> list[Path]:
+    """Render each slide HTML to PNG using Playwright.
+
+    canvas_width/canvas_height override the browser viewport for decks whose
+    design canvas differs from the default (e.g. 4:3 templates in the native
+    workflow); the screenshot still targets the .slide element itself.
+    """
+    viewport_w = max(HTML_VIEWPORT_WIDTH, int(canvas_width or 0))
+    viewport_h = max(HTML_VIEWPORT_HEIGHT, int(canvas_height or 0))
     rendered_dir.mkdir(parents=True, exist_ok=True)
     pw, browser = _launch_browser()
     slide_pngs: list[Path] = []
     try:
         page = browser.new_page(
-            viewport={"width": HTML_VIEWPORT_WIDTH, "height": HTML_VIEWPORT_HEIGHT},
+            viewport={"width": viewport_w, "height": viewport_h},
             device_scale_factor=HTML_DEVICE_SCALE,
         )
         for item in manifest:

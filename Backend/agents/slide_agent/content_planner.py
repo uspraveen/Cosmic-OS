@@ -49,7 +49,7 @@ load_dotenv(_HERE / ".env")
 
 MODEL_BASE_URL: str = os.getenv("MODEL_BASE_URL", "https://api.fireworks.ai/inference/v1").rstrip("/")
 MODEL_API_KEY: str  = os.getenv("MODEL_API_KEY", "")
-MODEL_NAME: str     = os.getenv("MODEL_NAME", "accounts/fireworks/models/qwen3p6-plus")
+MODEL_NAME: str     = os.getenv("MODEL_NAME", "accounts/fireworks/models/glm-5p3-flash")
 # Deck JSON is large; low limits yield truncated JSON and json.loads failures.
 MODEL_MAX_TOKENS: int = int(os.getenv("MODEL_MAX_TOKENS", "16384"))
 
@@ -122,7 +122,11 @@ honor it.)
    number, either omit the figure or use a clearly labeled estimate.
    When reproducing numbers from a source, keep the precision the source
    used; do not silently round. If a source is contradictory, say so on
-   the slide rather than picking one.
+   the slide rather than picking one. When a figure, chart, or quote comes
+   from a known source, include that source (e.g. a "source" field on stat
+   blocks, or the source named in the chart title/context) so the deck can
+   attribute it — a deck that cites its numbers reads as credible; one
+   that doesn't reads as invented.
 
 Your job is to turn raw input into a structured, compelling slide deck plan.
 The input might be any of three things — you must detect which and act accordingly:
@@ -188,7 +192,8 @@ Most slides have 1–2 blocks. Do not over-stuff a slide.
 { "type": "stat",
   "value": "47%",
   "label": "of companies report...",
-  "context": "one sentence explaining significance" }
+  "context": "one sentence explaining significance",
+  "source": "IDC Worldwide Tracker, 2025 — omit if genuinely unknown" }
 
 { "type": "comparison",
   "left":  { "label": "Option A", "points": ["...", "..."] },

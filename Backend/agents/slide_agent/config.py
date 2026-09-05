@@ -61,12 +61,12 @@ class SlideAgentConfig:
 
     model_base_url: str = "https://api.fireworks.ai/inference/v1"
     model_api_key: str = ""
-    model_name: str = "accounts/fireworks/models/qwen3p6-plus"
+    model_name: str = "accounts/fireworks/models/glm-5p3-flash"
     model_timeout_sec: int = 300
     model_http_retries: int = 3
     model_max_tokens: int = 16384
     html_model_max_tokens: int = 4096
-    vision_model_name: str = "accounts/fireworks/models/qwen3p6-plus"
+    vision_model_name: str = "accounts/fireworks/models/glm-5p3-flash"
 
     libreoffice_path: str = "soffice"
     pdftoppm_path: str = "pdftoppm"
@@ -92,33 +92,55 @@ class SlideAgentConfig:
 
     @classmethod
     def from_env(cls) -> "SlideAgentConfig":
-        model_name = _first_env(
+        explicit_model_name = _first_env(
             "MODEL_NAME",
             "SLIDE_AGENT_FIREWORKS_MODEL",
             "FIREWORKS_KIMI_MODEL",
-            default="accounts/fireworks/models/qwen3p6-plus",
         )
-        model_base_url = _first_env(
-            "MODEL_BASE_URL",
-            "SLIDE_AGENT_FIREWORKS_BASE_URL",
-            "FIREWORKS_BASE_URL",
-            "OPENAI_COMPAT_BASE_URL",
-            "OPENROUTER_BASE_URL",
-            default="https://api.fireworks.ai/inference/v1",
-        ).rstrip("/")
+        fireworks_api_key = _first_env(
+            "MODEL_API_KEY",
+            "SLIDE_AGENT_FIREWORKS_API_KEY",
+            "FIREWORKS_API_KEY",
+            "OPENAI_COMPAT_API_KEY",
+            "OPENROUTER_API_KEY",
+            # VM-wide Fireworks credentials the bootstrap may have rendered for
+            # peers; the slide agent can ride the same account.
+            "ORCHESTRATOR_FIREWORKS_API_KEY",
+            "VISUAL_ENHANCEMENT_FIREWORKS_API_KEY",
+        )
+        openai_api_key = _first_env(
+            "SLIDE_AGENT_OPENAI_API_KEY",
+            "OPENAI_API_KEY",
+        )
+        # Vendor-paired default: without an explicit model or Fireworks key, an
+        # OpenAI key upgrades the agent to GPT-5.6 Terra (heavy slide work).
+        # Otherwise the Fireworks Qwen defaults keep working untouched.
+        use_openai = not explicit_model_name and not fireworks_api_key and bool(openai_api_key)
+        if use_openai:
+            model_name = explicit_model_name or "gpt-5.6-terra"
+            model_base_url = _first_env(
+                "MODEL_BASE_URL",
+                "OPENAI_COMPAT_BASE_URL",
+                default="https://api.openai.com/v1",
+            ).rstrip("/")
+            model_api_key = openai_api_key
+        else:
+            model_name = explicit_model_name or "accounts/fireworks/models/glm-5p3-flash"
+            model_base_url = _first_env(
+                "MODEL_BASE_URL",
+                "SLIDE_AGENT_FIREWORKS_BASE_URL",
+                "FIREWORKS_BASE_URL",
+                "OPENAI_COMPAT_BASE_URL",
+                "OPENROUTER_BASE_URL",
+                default="https://api.fireworks.ai/inference/v1",
+            ).rstrip("/")
+            model_api_key = fireworks_api_key
         return cls(
             redis_url=_first_env("REDIS_URL", default="redis://127.0.0.1:6379/0"),
             gateway_url=_first_env("GATEWAY_URL", default="http://127.0.0.1:8080"),
             gateway_internal_token=_first_env("GATEWAY_INTERNAL_TOKEN", default=""),
             model_base_url=model_base_url,
-            model_api_key=_first_env(
-                "MODEL_API_KEY",
-                "SLIDE_AGENT_FIREWORKS_API_KEY",
-                "FIREWORKS_API_KEY",
-                "OPENAI_COMPAT_API_KEY",
-                "OPENROUTER_API_KEY",
-                default="",
-            ),
+            model_api_key=model_api_key,
             model_name=model_name,
             model_timeout_sec=_env_int("MODEL_TIMEOUT_SEC", _env_int("SLIDE_AGENT_FIREWORKS_TIMEOUT_SEC", 300)),
             model_http_retries=_env_int("MODEL_HTTP_RETRIES", 3),

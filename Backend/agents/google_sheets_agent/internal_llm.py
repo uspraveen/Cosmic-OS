@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from shared import normalized_reasoning_effort
 from shared.usage import (
     begin_metered_call,
     build_model_key,
@@ -110,6 +111,9 @@ async def invoke_google_sheets_planner_llm(
     }
     if not _is_gpt5_chat_model(cfg.internal_llm_model):
         request_body["temperature"] = 0.12
+    effort = normalized_reasoning_effort(cfg.internal_llm_model, cfg.internal_llm_reasoning_effort)
+    if effort is not None:
+        request_body["reasoning_effort"] = effort
 
     url = f"{cfg.internal_llm_base_url.rstrip('/')}/chat/completions"
     metered = begin_metered_call(prefix="google_sheets_llm")

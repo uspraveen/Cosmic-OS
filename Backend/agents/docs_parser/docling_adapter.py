@@ -8,11 +8,34 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from shared import SUPPORTED_DOCUMENT_EXTENSIONS, SUPPORTED_DOCUMENT_MIME_TYPES
+from shared import (
+    SUPPORTED_DOCUMENT_EXTENSIONS,
+    SUPPORTED_DOCUMENT_MIME_TYPES,
+    is_openai_gpt5_chat_model,
+    normalized_reasoning_effort,
+)
 
 SUPPORTED_MIME_TYPES = SUPPORTED_DOCUMENT_MIME_TYPES
 SUPPORTED_EXTENSIONS = SUPPORTED_DOCUMENT_EXTENSIONS
 PAGE_BREAK_PLACEHOLDER = "\n\n[[DOCLING_PAGE_BREAK]]\n\n"
+
+
+def _openai_vlm_params(*, model: str, max_new_tokens: int, reasoning_effort: str | None) -> dict[str, Any]:
+    """Body params for the OpenAI-compatible VLM endpoint.
+
+    GPT-5-family chat models reject temperature and max_tokens; they take
+    max_completion_tokens plus an optional reasoning_effort instead.
+    """
+    params: dict[str, Any] = {"model": model}
+    if is_openai_gpt5_chat_model(model):
+        params["max_completion_tokens"] = max_new_tokens
+        effort = normalized_reasoning_effort(model, reasoning_effort)
+        if effort:
+            params["reasoning_effort"] = effort
+    else:
+        params["max_tokens"] = max_new_tokens
+        params["temperature"] = 0
+    return params
 
 
 @dataclass(slots=True)
@@ -45,6 +68,7 @@ class PictureDescriptionRequest:
     picture_area_threshold: float
     classification_min_confidence: float
     classification_deny: tuple[str, ...]
+    reasoning_effort: str = "xhigh"
 
 
 @dataclass(slots=True)
@@ -58,6 +82,7 @@ class FullPageVlmRequest:
     batch_size: int
     max_new_tokens: int
     scale: float
+    reasoning_effort: str = "xhigh"
 
 
 @dataclass(slots=True)
@@ -194,11 +219,11 @@ class DoclingAdapter:
                         headers={
                             "Authorization": f"Bearer {request.full_page_vlm.api_key}",
                         },
-                        params={
-                            "model": request.full_page_vlm.model,
-                            "max_tokens": request.full_page_vlm.max_new_tokens,
-                            "temperature": 0,
-                        },
+                        params=_openai_vlm_params(
+                            model=request.full_page_vlm.model,
+                            max_new_tokens=request.full_page_vlm.max_new_tokens,
+                            reasoning_effort=request.full_page_vlm.reasoning_effort,
+                        ),
                         timeout=request.full_page_vlm.timeout_sec,
                         concurrency=request.full_page_vlm.concurrency,
                     ),
@@ -234,11 +259,11 @@ class DoclingAdapter:
                             headers={
                                 "Authorization": f"Bearer {request.picture_description.api_key}",
                             },
-                            params={
-                                "model": request.picture_description.model,
-                                "max_tokens": request.picture_description.max_new_tokens,
-                                "temperature": 0,
-                            },
+                            params=_openai_vlm_params(
+                                model=request.picture_description.model,
+                                max_new_tokens=request.picture_description.max_new_tokens,
+                                reasoning_effort=request.picture_description.reasoning_effort,
+                            ),
                             timeout=request.picture_description.timeout_sec,
                             concurrency=request.picture_description.concurrency,
                         ),

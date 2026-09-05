@@ -231,6 +231,66 @@
       },
       "status": "active"
     },
+    "fireworks:accounts/fireworks/models/qwen3p6-plus": {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/qwen3p6-plus",
+      "sdk": "openai_compatible",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": 1000000,
+      "max_output_tokens": null,
+      "recommended_headroom_reserve_tokens": 16000,
+      "pricing": {
+        "input_per_1m_usd": 0.5,
+        "cached_input_per_1m_usd": null,
+        "output_per_1m_usd": 3.0
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": true,
+        "supports_streaming": true,
+        "supports_image_input": true,
+        "supports_tool_calling": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cached_tokens", "cache_read_input_tokens", "prompt_tokens_details.cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens", "completion_tokens_details.reasoning_tokens"]
+      },
+      "status": "deprecated"
+    },
+    "fireworks:accounts/fireworks/models/qwen3p7-plus": {
+      "provider": "fireworks",
+      "model": "accounts/fireworks/models/qwen3p7-plus",
+      "sdk": "openai_compatible",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": 1000000,
+      "max_output_tokens": null,
+      "recommended_headroom_reserve_tokens": 16000,
+      "pricing": {
+        "input_per_1m_usd": 0.5,
+        "cached_input_per_1m_usd": 0.1,
+        "output_per_1m_usd": 3.0
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": true,
+        "supports_streaming": true,
+        "supports_image_input": true,
+        "supports_tool_calling": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cached_tokens", "cache_read_input_tokens", "prompt_tokens_details.cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens", "completion_tokens_details.reasoning_tokens"]
+      },
+      "status": "active"
+    },
     "groq:openai/gpt-oss-20b": {
       "provider": "groq",
       "model": "openai/gpt-oss-20b",
@@ -259,6 +319,34 @@
       },
       "status": "active"
     },
+    "openai:gpt-4.1-mini": {
+      "provider": "openai",
+      "model": "gpt-4.1-mini",
+      "sdk": "openai_compatible",
+      "base_url": "https://api.openai.com/v1",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": 1047576,
+      "max_output_tokens": 32768,
+      "recommended_headroom_reserve_tokens": 8000,
+      "pricing": {
+        "input_per_1m_usd": 0.4,
+        "cached_input_per_1m_usd": 0.1,
+        "output_per_1m_usd": 1.6
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": false,
+        "supports_streaming": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cached_tokens", "cache_read_input_tokens", "prompt_tokens_details.cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens"]
+      },
+      "status": "deprecated"
+    },
     "openai:gpt-5-mini": {
       "provider": "openai",
       "model": "gpt-5-mini",
@@ -284,6 +372,96 @@
         "total_tokens": ["total_tokens"],
         "cached_tokens": ["cached_tokens", "cache_read_input_tokens"],
         "reasoning_tokens": ["reasoning_tokens"]
+      },
+      "status": "deprecated"
+    },
+    "openai:gpt-5.6-sol": {
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "sdk": "openai_compatible",
+      "base_url": "https://api.openai.com/v1",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": 1050000,
+      "max_output_tokens": 128000,
+      "recommended_headroom_reserve_tokens": 16000,
+      "pricing": {
+        "input_per_1m_usd": 4.0,
+        "cached_input_per_1m_usd": 0.4,
+        "output_per_1m_usd": 20.0
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": true,
+        "supports_streaming": true,
+        "supports_image_input": true,
+        "supports_tool_calling": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cached_tokens", "cache_read_input_tokens", "prompt_tokens_details.cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens", "completion_tokens_details.reasoning_tokens"]
+      },
+      "status": "active"
+    },
+    "openai:gpt-5.6-terra": {
+      "provider": "openai",
+      "model": "gpt-5.6-terra",
+      "sdk": "openai_compatible",
+      "base_url": "https://api.openai.com/v1",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": 1050000,
+      "max_output_tokens": 128000,
+      "recommended_headroom_reserve_tokens": 16000,
+      "pricing": {
+        "input_per_1m_usd": 2.0,
+        "cached_input_per_1m_usd": 0.2,
+        "output_per_1m_usd": 12.0
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": true,
+        "supports_streaming": true,
+        "supports_image_input": true,
+        "supports_tool_calling": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cached_tokens", "cache_read_input_tokens", "prompt_tokens_details.cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens", "completion_tokens_details.reasoning_tokens"]
+      },
+      "status": "active"
+    },
+    "openai:gpt-5.6-luna": {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "sdk": "openai_compatible",
+      "base_url": "https://api.openai.com/v1",
+      "usage_kind": "chat_completion",
+      "context_window_tokens": 1050000,
+      "max_output_tokens": 128000,
+      "recommended_headroom_reserve_tokens": 16000,
+      "pricing": {
+        "input_per_1m_usd": 0.2,
+        "cached_input_per_1m_usd": 0.02,
+        "output_per_1m_usd": 1.2
+      },
+      "capabilities": {
+        "supports_cached_input_tokens": true,
+        "supports_reasoning_tokens": true,
+        "supports_streaming": true,
+        "supports_image_input": true,
+        "supports_tool_calling": true
+      },
+      "token_field_map": {
+        "prompt_tokens": ["prompt_tokens", "input_tokens"],
+        "completion_tokens": ["completion_tokens", "output_tokens"],
+        "total_tokens": ["total_tokens"],
+        "cached_tokens": ["cached_tokens", "cache_read_input_tokens", "prompt_tokens_details.cached_tokens"],
+        "reasoning_tokens": ["reasoning_tokens", "completion_tokens_details.reasoning_tokens"]
       },
       "status": "active"
     },

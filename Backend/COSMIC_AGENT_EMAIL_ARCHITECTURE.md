@@ -139,7 +139,7 @@ Implemented at:
 
 LLM choice:
 - Xiaomi internal LLM via OpenAI-compatible endpoint
-- default model: `gpt-5-mini`
+- default model: `gpt-5.6-luna`
 
 Current specialist intents:
 - `email.process_inbound`

@@ -163,7 +163,7 @@ def test_agent_card_references_all_gmail_schemas() -> None:
     authz = card["policies"]["intent_authorization"]
     assert "cosmic/gateway:1.0.0" in authz["gmail.sync_watch"]
     assert "cosmic/gateway:1.0.0" in authz["gmail.stop_watch"]
-    assert card["model_requirements"]["internal_llm"]["default_model_key"] == "openai:gpt-5-mini"
+    assert card["model_requirements"]["internal_llm"]["default_model_key"] == "openai:gpt-5.6-luna"
 
 
 @pytest.mark.asyncio

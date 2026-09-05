@@ -5729,6 +5729,26 @@ class OrchestratorRuntime:
             }
             if alpha_project.get("alpha_project_id"):
                 receipt["alpha_project"] = alpha_project
+        if intent_name == "slide.create":
+            choice = data.get("slide_workflow_choice") if isinstance(data.get("slide_workflow_choice"), dict) else {}
+            if choice.get("choice_id"):
+                artifacts = [
+                    item
+                    for item in (choice.get("artifacts") if isinstance(choice.get("artifacts"), list) else [])
+                    if isinstance(item, dict)
+                ][:10]
+                receipt["slide_workflow_choice"] = {
+                    "choice_id": self._activity_excerpt(choice.get("choice_id"), limit=120),
+                    "description": self._activity_excerpt(choice.get("description"), limit=2000),
+                    "requested_slides": choice.get("requested_slides"),
+                    "validate": bool(choice.get("validate")),
+                    "force_catalog": bool(choice.get("force_catalog")),
+                    "artifact_count": len(artifacts),
+                    "artifacts": artifacts,
+                    "session_id": self._activity_excerpt(choice.get("session_id"), limit=160),
+                    "task_id": self._activity_excerpt(choice.get("task_id"), limit=160),
+                    "channel": self._activity_excerpt(choice.get("channel"), limit=120),
+                }
         if artifact_count > 0:
             receipt["artifact_count"] = artifact_count
         if local_sources:
@@ -5800,6 +5820,7 @@ class OrchestratorRuntime:
         "sandbox_permission",
         "calendar_event",
         "alpha_project",
+        "slide_workflow_choice",
     )
 
     @classmethod

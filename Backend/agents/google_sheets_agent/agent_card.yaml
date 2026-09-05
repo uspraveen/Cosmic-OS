@@ -94,7 +94,7 @@ model_requirements:
   internal_llm:
     required: true
     provider: openai_compatible
-    default_model_key: openai:gpt-5-mini
+    default_model_key: openai:gpt-5.6-luna
     purposes:
       - google_sheets.internal_llm.plan
     usage_reporting: Gateway /internal/usage/log

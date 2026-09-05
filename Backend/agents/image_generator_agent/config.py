@@ -76,7 +76,8 @@ class ImageGeneratorAgentConfig:
 
     router_api_key: str = ""
     router_base_url: str = "https://api.openai.com/v1"
-    router_model: str = "gpt-5-mini"
+    router_model: str = "gpt-5.6-luna"
+    router_reasoning_effort: str = "xhigh"
     router_timeout_sec: float = 45.0
     enable_internal_router_llm: bool = True
 
@@ -128,7 +129,8 @@ class ImageGeneratorAgentConfig:
             gateway_internal_token=os.getenv("GATEWAY_INTERNAL_TOKEN", "").strip(),
             router_api_key=(os.getenv("IMAGE_AGENT_ROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip(),
             router_base_url=router_base_url,
-            router_model=os.getenv("IMAGE_AGENT_ROUTER_MODEL", "gpt-5-mini").strip() or "gpt-5-mini",
+            router_model=os.getenv("IMAGE_AGENT_ROUTER_MODEL", "gpt-5.6-luna").strip() or "gpt-5.6-luna",
+            router_reasoning_effort=(os.getenv("IMAGE_AGENT_ROUTER_REASONING_EFFORT") or "xhigh").strip() or "xhigh",
             router_timeout_sec=max(5.0, _env_float("IMAGE_AGENT_ROUTER_TIMEOUT_SEC", 45.0)),
             enable_internal_router_llm=_env_bool("IMAGE_AGENT_ENABLE_INTERNAL_ROUTER_LLM", True),
             openai_api_key=(os.getenv("IMAGE_AGENT_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip(),

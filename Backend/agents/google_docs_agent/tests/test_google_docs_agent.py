@@ -241,7 +241,7 @@ def test_agent_card_references_all_google_docs_schemas() -> None:
         assert (schemas_dir / intent["output_schema"].split("/")[-1]).exists()
     assert "https://www.googleapis.com/auth/documents" in card["auth_requirements"]["docs.edit"]["scopes"]
     assert "https://www.googleapis.com/auth/drive.file" in card["auth_requirements"]["docs.edit"]["scopes"]
-    assert card["model_requirements"]["internal_llm"]["default_model_key"] == "openai:gpt-5-mini"
+    assert card["model_requirements"]["internal_llm"]["default_model_key"] == "openai:gpt-5.6-luna"
 
 
 @pytest.mark.asyncio

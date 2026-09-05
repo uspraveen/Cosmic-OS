@@ -3498,6 +3498,37 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:get-slide-workflow-choices', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/channels/slide/choices', {
+      method: 'GET',
+      timeoutMs: 20000,
+    })
+  })
+
+  ipcMain.handle('gateway:select-slide-workflow', async (_, payload: { choiceId?: string; workflow?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const choiceId = String(payload?.choiceId || '').trim()
+    const workflow = String(payload?.workflow || '').trim()
+    if (!choiceId) {
+      throw new Error('Slide workflow choice id is required.')
+    }
+    if (workflow !== 'html' && workflow !== 'template' && workflow !== 'advanced') {
+      throw new Error('Slide workflow must be html, template, or advanced.')
+    }
+    return callGatewayJson(config, `/channels/slide/choices/${encodeURIComponent(choiceId)}/select`, {
+      method: 'POST',
+      body: { workflow },
+      timeoutMs: 30000,
+    })
+  })
+
   ipcMain.handle('gateway:update-gmail-approval-draft', async (_, payload: { approvalId?: string; subject?: string; bodyText?: string }) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

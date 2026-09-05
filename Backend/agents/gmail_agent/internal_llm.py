@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from shared import normalized_reasoning_effort
 from shared.usage import begin_metered_call, build_model_key, build_usage_event, post_usage_event, serialize_usage_metadata
 
 from .config import GmailAgentConfig
@@ -152,6 +153,9 @@ async def _chat_json(
     }
     if not _is_gpt5_chat_model(cfg.internal_llm_model):
         request_body["temperature"] = temperature
+    effort = normalized_reasoning_effort(cfg.internal_llm_model, cfg.internal_llm_reasoning_effort)
+    if effort is not None:
+        request_body["reasoning_effort"] = effort
     metered = begin_metered_call(prefix="gmail_llm")
     provider = _infer_provider(cfg.internal_llm_base_url, cfg.internal_llm_model)
     started = time.perf_counter()

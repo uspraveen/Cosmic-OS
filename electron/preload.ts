@@ -307,6 +307,8 @@ contextBridge.exposeInMainWorld('cosmic', {
   respondGatewayCalendarInvite: (payload: any) => ipcRenderer.invoke('gateway:respond-calendar-invite', payload),
   approveGatewaySandboxPermission: (payload: any) => ipcRenderer.invoke('gateway:approve-sandbox-permission', payload),
   rejectGatewaySandboxPermission: (payload: any) => ipcRenderer.invoke('gateway:reject-sandbox-permission', payload),
+  getGatewaySlideWorkflowChoices: () => ipcRenderer.invoke('gateway:get-slide-workflow-choices'),
+  selectGatewaySlideWorkflow: (payload: any) => ipcRenderer.invoke('gateway:select-slide-workflow', payload),
   cosmicMailRequest: (payload: any) => ipcRenderer.invoke('cosmic-mail:request', payload),
   recordCosmicMailGatewayNotification: (payload: any) => ipcRenderer.invoke('cosmic-mail:record-gateway-notification', payload),
   cosmicMailUploadDraftAttachment: (payload: any) => ipcRenderer.invoke('cosmic-mail:upload-draft-attachment', payload),

@@ -1,4 +1,4 @@
-import { CalendarDays, Check, ChevronRight, Code2, Copy, Mail, Maximize2, Mic, Minimize2, Pencil, Save, Shield, Square, X } from 'lucide-react'
+import { CalendarDays, Check, ChevronRight, Code2, Copy, Mail, Maximize2, Mic, Minimize2, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
 import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
@@ -249,10 +249,15 @@ interface ResponseSlotBlock {
 
 interface ResponseActionBlock {
   id: string
-  type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event' | 'sandbox_permission_request'
+  type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event' | 'sandbox_permission_request' | 'slide_workflow_choice'
   status?: string | null
   approvalId?: string | null
   permissionId?: string | null
+  choiceId?: string | null
+  workflow?: string | null
+  title?: string | null
+  requestedSlides?: number | null
+  artifactCount?: number | null
   eventId?: string | null
   calendarId?: string | null
   accountId?: string | null
@@ -594,7 +599,7 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
       })
       continue
     }
-    if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event' || type === 'sandbox_permission_request') {
+    if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event' || type === 'sandbox_permission_request' || type === 'slide_workflow_choice') {
       const stringList = (raw: unknown) => Array.isArray(raw)
         ? raw.map((value) => String(value || '').trim()).filter(Boolean)
         : []
@@ -637,6 +642,15 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
         responseStatus: typeof (item as any).response_status === 'string' ? (item as any).response_status.trim() : null,
         canRespond: Boolean((item as any).can_respond),
         permissionId: typeof (item as any).permission_id === 'string' ? (item as any).permission_id.trim() : null,
+        choiceId: typeof (item as any).choice_id === 'string' ? (item as any).choice_id.trim() : null,
+        workflow: typeof (item as any).workflow === 'string' ? (item as any).workflow.trim() : null,
+        title: typeof (item as any).title === 'string' ? (item as any).title.trim() : null,
+        requestedSlides: Number.isFinite(Number((item as any).requested_slides)) && Number((item as any).requested_slides) > 0
+          ? Number((item as any).requested_slides)
+          : null,
+        artifactCount: Number.isFinite(Number((item as any).artifact_count)) && Number((item as any).artifact_count) > 0
+          ? Number((item as any).artifact_count)
+          : null,
         network: Boolean((item as any).network),
         hostReadPaths: stringList((item as any).host_read_paths),
         hostWritePaths: stringList((item as any).host_write_paths),
@@ -3165,6 +3179,126 @@ const SandboxPermissionActionBlock = ({ block }: { block: ResponseActionBlock })
   )
 }
 
+const SLIDE_WORKFLOW_OPTIONS: Array<{
+  value: 'advanced' | 'html' | 'template'
+  label: string
+  detail: string
+}> = [
+  {
+    value: 'advanced',
+    label: 'Native deck',
+    detail: 'Recommended. Designed slide-by-slide and fully editable in PowerPoint — real text and shapes.',
+  },
+  {
+    value: 'html',
+    label: 'HTML deck',
+    detail: 'Fast, image-backed slides. Great for presenting, but not editable in PowerPoint.',
+  },
+  {
+    value: 'template',
+    label: 'Template deck',
+    detail: 'Fills the layouts of a provided template. Slower to build and fully editable.',
+  },
+]
+
+const SlideWorkflowChoiceBlock = ({ block }: { block: ResponseActionBlock }) => {
+  const [status, setStatus] = useState(block.status || 'pending')
+  const [workflow, setWorkflow] = useState(block.workflow || '')
+  const [busyWorkflow, setBusyWorkflow] = useState<string | null>(null)
+  const [error, setError] = useState('')
+  const isPending = ['pending', 'failed'].includes(status.toLowerCase())
+  const title = block.title || block.description || 'Slide deck'
+  const facts = [
+    block.requestedSlides ? `Target length: ${block.requestedSlides} slides` : '',
+    block.artifactCount ? `${block.artifactCount} source file${block.artifactCount === 1 ? '' : 's'} attached` : '',
+  ].filter(Boolean)
+
+  useEffect(() => {
+    setStatus(block.status || 'pending')
+    setWorkflow(block.workflow || '')
+  }, [block.status, block.workflow])
+
+  const select = async (value: 'advanced' | 'html' | 'template') => {
+    if (!block.choiceId || busyWorkflow || !isPending) return
+    setBusyWorkflow(value)
+    setError('')
+    try {
+      if (!window.cosmic?.selectGatewaySlideWorkflow) {
+        throw new Error('Slide workflow choice is unavailable.')
+      }
+      setStatus('selected')
+      setWorkflow(value)
+      const result = await window.cosmic.selectGatewaySlideWorkflow({
+        choiceId: block.choiceId,
+        workflow: value,
+      })
+      if (String(result?.status || '').trim() === 'ignored') {
+        throw new Error('This choice was already handled on another device.')
+      }
+      const nextStatus = String(result?.status || result?.choice?.status || 'selected').trim()
+      if (nextStatus) setStatus(nextStatus)
+      const nextWorkflow = String(result?.choice?.workflow || value).trim()
+      if (nextWorkflow) setWorkflow(nextWorkflow)
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Action failed.')
+      setStatus(block.status || 'pending')
+      setWorkflow(block.workflow || '')
+    } finally {
+      setBusyWorkflow(null)
+    }
+  }
+
+  return (
+    <section className="assistant-action-card" data-kind={block.type}>
+      <div className="assistant-action-card-head">
+        <div className="assistant-action-card-heading">
+          <span className="assistant-action-card-icon" aria-hidden="true">
+            <Presentation size={15} />
+          </span>
+          <div className="assistant-action-card-heading-copy">
+            <div className="assistant-action-card-kicker">Slide workflow</div>
+            <div className="assistant-action-card-title">{title}</div>
+          </div>
+        </div>
+        <div className="assistant-action-card-head-actions">
+          <div className={`assistant-action-card-status is-${status.toLowerCase()}`}>
+            {status}
+          </div>
+        </div>
+      </div>
+      <div className="assistant-action-card-details">
+        {facts.map((fact) => (
+          <div key={fact}>{fact}</div>
+        ))}
+      </div>
+      {error && <div className="assistant-action-card-error">{error}</div>}
+      <div className="assistant-action-card-actions">
+        {isPending ? (
+          SLIDE_WORKFLOW_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className="assistant-action-button is-primary"
+              disabled={Boolean(busyWorkflow)}
+              title={option.detail}
+              onClick={() => void select(option.value)}
+            >
+              {busyWorkflow === option.value ? 'Building…' : `Use ${option.label}`}
+            </button>
+          ))
+        ) : workflow ? (
+          <div className="assistant-action-card-details">
+            <div>
+              <span>Selected</span>
+              {SLIDE_WORKFLOW_OPTIONS.find((option) => option.value === workflow)?.label || workflow}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
 const AssistantResponseBlocks = memo(({
   blocks,
 }: {
@@ -3188,6 +3322,9 @@ const AssistantResponseBlocks = memo(({
         }
         if (block.type === 'sandbox_permission_request') {
           return <SandboxPermissionActionBlock key={block.id} block={block} />
+        }
+        if (block.type === 'slide_workflow_choice') {
+          return <SlideWorkflowChoiceBlock key={block.id} block={block} />
         }
         if (block.type === 'code') {
           return (
@@ -6156,6 +6293,7 @@ export default function App() {
           || normalizedBlock.type === 'agent_email_draft_approval'
           || normalizedBlock.type === 'calendar_event'
           || normalizedBlock.type === 'sandbox_permission_request'
+          || normalizedBlock.type === 'slide_workflow_choice'
         )) {
           setMessages((prev) => prev.map((message) => ({
             ...message,

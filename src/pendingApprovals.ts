@@ -1,6 +1,6 @@
 // Pending approval detection: identifies response blocks (sandbox permission
-// requests, Gmail/agent-email draft approvals, calendar responses) that are
-// still waiting on an explicit user decision.
+// requests, Gmail/agent-email draft approvals, calendar responses, slide
+// workflow choices) that are still waiting on an explicit user decision.
 //
 // These cards live inline inside a specific assistant message and never get
 // removed from that message once rendered - but the *stream* around them
@@ -24,6 +24,7 @@ const APPROVAL_BLOCK_TYPES = new Set([
   'gmail_draft_approval',
   'agent_email_draft_approval',
   'calendar_event',
+  'slide_workflow_choice',
 ])
 
 // Terminal statuses mean the user (or the system) already resolved this
@@ -42,6 +43,7 @@ const RESOLVED_STATUSES = new Set([
   'ignored',
   'sent',
   'failed',
+  'selected',
 ])
 
 export const isBlockAwaitingApproval = (block: ApprovalLikeBlock | null | undefined): boolean => {

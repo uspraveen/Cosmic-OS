@@ -53,7 +53,7 @@ load_dotenv(_HERE / ".env")
 
 MODEL_BASE_URL: str      = os.getenv("MODEL_BASE_URL", "https://api.fireworks.ai/inference/v1").rstrip("/")
 MODEL_API_KEY: str       = os.getenv("MODEL_API_KEY", "")
-VISION_MODEL: str        = os.getenv("VISION_MODEL_NAME", "accounts/fireworks/models/qwen3p6-plus")
+VISION_MODEL: str        = os.getenv("VISION_MODEL_NAME", "accounts/fireworks/models/glm-5p3-flash")
 LIBREOFFICE_PATH: str    = os.getenv("LIBREOFFICE_PATH", "soffice")
 PDFTOPPM_PATH: str       = os.getenv("PDFTOPPM_PATH", "pdftoppm")
 CATALOGS_DIR: Path       = _HERE / os.getenv("CATALOGS_DIR", "catalogs")

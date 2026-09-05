@@ -65,7 +65,8 @@ class GmailAgentConfig:
     gateway_internal_token: str = ""
     internal_llm_api_key: str = ""
     internal_llm_base_url: str = ""
-    internal_llm_model: str = "gpt-5-mini"
+    internal_llm_model: str = "gpt-5.6-luna"
+    internal_llm_reasoning_effort: str = "xhigh"
     internal_llm_timeout_sec: float = 90.0
     enable_internal_llm: bool = True
     max_search_results: int = 10
@@ -99,8 +100,12 @@ class GmailAgentConfig:
                     or ""
                 ).strip()
             ),
-            internal_llm_model=(os.getenv("GMAIL_AGENT_INTERNAL_LLM_MODEL") or "gpt-5-mini").strip()
-            or "gpt-5-mini",
+            internal_llm_model=(os.getenv("GMAIL_AGENT_INTERNAL_LLM_MODEL") or "gpt-5.6-luna").strip()
+            or "gpt-5.6-luna",
+            internal_llm_reasoning_effort=(
+                os.getenv("GMAIL_AGENT_INTERNAL_LLM_REASONING_EFFORT") or "xhigh"
+            ).strip()
+            or "xhigh",
             internal_llm_timeout_sec=max(
                 10.0, _env_float("GMAIL_AGENT_INTERNAL_LLM_TIMEOUT_SEC", 90.0)
             ),

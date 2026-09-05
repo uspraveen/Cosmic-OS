@@ -392,21 +392,12 @@ body,
 
 /* Wide mode is a density choice: the content column tracks the glass instead
    of sitting at a fixed cap inside it. Prose takes surface minus a constant
-   240px of breathing room (~120px shoulders at any width), and artifacts —
-   code and tables — bleed the rest of the way to the padding. Session strips
-   and inline images stay on the reading column so they share both edges with
-   the reply. */
+   240px of breathing room (~120px shoulders at any width). Every block —
+   prose, code, tables — shares that one column's two edges; long code lines
+   and wide tables scroll horizontally inside their own block instead of
+   breaking the column. */
 .overlay.chat-wide .chat-response-content {
   --response-column: min(100%, max(580px, calc(var(--chat-surface-width) - 240px)));
-  --artifact-bleed: 88px;
-}
-
-.overlay.chat-wide .chat-response-content .code-block,
-.overlay.chat-wide .chat-response-content .assistant-response-code-block,
-.overlay.chat-wide .chat-response-content .response-content table {
-  width: calc(100% + 2 * var(--artifact-bleed, 0px));
-  max-width: none;
-  margin-inline: calc(-1 * var(--artifact-bleed, 0px));
 }
 
 /* Panel mode keeps prose at 580px, which is too tight for a dual-plot PNG.

@@ -526,7 +526,84 @@ class ToolExecutor:
                 "intent": intent,
                 "agent_id": preferred_agent_id,
             }
+        if (
+            intent == "slide.create"
+            and response.get("error") is True
+            and str(response.get("code") or "").strip() == "NEEDS_WORKFLOW_CHOICE"
+        ):
+            self._attach_slide_workflow_choice(
+                response,
+                tool_input=tool_input,
+                input_artifacts=input_artifacts,
+                context=context,
+            )
         return response
+
+    def _attach_slide_workflow_choice(
+        self,
+        response: dict[str, Any],
+        *,
+        tool_input: dict[str, Any],
+        input_artifacts: list[dict[str, Any]] | None,
+        context: ToolExecutionContext | None,
+    ) -> None:
+        """Attach a workflow-choice receipt when the Slide Agent needs a path.
+
+        The Slide Agent refuses to generate without a workflow. Rather than
+        leaving the choice to prose, hand the Gateway everything it needs to
+        render an inline choice card and resume the request once the user
+        picks a path. The choice carries the ORIGINAL delegation input so the
+        resumed turn reproduces the same request with `workflow` filled in.
+        """
+        payload = tool_input.get("input") if isinstance(tool_input.get("input"), dict) else {}
+        description = str(payload.get("description") or "").strip()
+        if not description:
+            return
+        raw_slides = payload.get("max_slides")
+        if raw_slides is None:
+            raw_slides = payload.get("slides")
+        try:
+            requested_slides = int(raw_slides) if raw_slides is not None else 0
+        except (TypeError, ValueError):
+            requested_slides = 0
+        artifacts = [
+            item for item in (input_artifacts or []) if isinstance(item, dict)
+        ][:10]
+        choice = {
+            "choice_id": f"slide_wf_{uuid4().hex[:16]}",
+            "description": description[:2000],
+            "requested_slides": requested_slides if requested_slides > 0 else None,
+            "validate": bool(payload.get("validate")),
+            "force_catalog": bool(payload.get("force_catalog")),
+            "artifact_count": len(artifacts),
+            "artifacts": artifacts,
+            "session_id": str(context.session_id or "").strip() if context else "",
+            "task_id": str(context.task_id or "").strip() if context else "",
+            "channel": str(context.channel or "").strip() if context else "",
+        }
+        response["slide_workflow_choice"] = choice
+
+        channel = str(context.channel if context else "").strip().lower()
+        channel_platform = channel.split(":", 1)[0]
+        if channel_platform in {"desktop", "mobile"}:
+            response["_cosmic_ui"] = {
+                "version": 1,
+                "render": "trusted_inline_block",
+                "block_type": "slide_workflow_choice",
+                "covers": [
+                    "deck request summary",
+                    "workflow options with tradeoffs",
+                    "choice actions",
+                ],
+                "response_mode": "brief_acknowledgement",
+                "instruction": (
+                    "The client will render a workflow choice card with the two slide "
+                    "modes beside your final response. Briefly note that the deck is "
+                    "ready to build once a mode is picked and add any context the card "
+                    "does not show. Do not repeat the option descriptions in Markdown "
+                    "and do not ask the user to type their choice."
+                ),
+            }
 
     def _merge_artifact_descriptors(
         self,

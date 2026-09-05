@@ -518,6 +518,8 @@ def _display_provider_name(value: str) -> str:
         "perplexity": "Perplexity",
         "fireworks": "Fireworks",
         "deepgram": "Deepgram",
+        "openai_compatible": "OpenAI-compatible",
+        "internal_llm": "Internal LLM",
     }.get(normalized, normalized.replace("_", " ").title())
 
 

@@ -6,7 +6,7 @@
 - **Display Name:** Slide Agent
 - **Location:** `Backend/agents/slide_agent/`
 - **Entry point:** `python -m agents.slide_agent`
-- **LLM:** gpt-5-mini (planning + vision validation)
+- **LLM:** gpt-5.6-terra (planning + vision validation); falls back to Fireworks GLM 5.3 Flash (glm-5p3-flash) when no OpenAI key is configured
 - **Rendering:** python-pptx → LibreOffice headless → PNG for validation
 - **Output:** Editable `.pptx` + optional `.pdf` export
 
@@ -204,7 +204,7 @@ All logic lives in graph nodes and the `slide_builder.py` module. No separate `d
 
 **4. `render_and_validate`** — Vision-based quality check:
 - Renders each slide to PNG via LibreOffice + pdftoppm
-- Sends each PNG to gpt-5-mini vision for quality assessment
+- Sends each PNG to gpt-5.6-terra vision for quality assessment
 - Checks: text readability, image placement, chart clarity, color contrast, whitespace balance
 - If issues found and attempts < 2: fixes in build_slides and re-validates (same pattern as diagram agent)
 
@@ -238,7 +238,7 @@ The LLM translates user requests ("add a summary slide at the end, change the ti
 ## Visual Validation (per-slide)
 
 ```
-Slide N → LibreOffice → PNG → gpt-5-mini vision → {pass, issues, suggestion}
+Slide N → LibreOffice → PNG → gpt-5.6-terra vision → {pass, issues, suggestion}
 ```
 
 Vision checks:
@@ -263,7 +263,7 @@ agents/slide_agent/
 ├── config.py                      # SlideAgentConfig
 ├── slide_graph.py                 # LangGraph workflow (all nodes + helpers)
 ├── slide_builder.py               # Deterministic PPTX builder (python-pptx)
-├── internal_llm.py                # gpt-5-mini: planning, vision validation, regeneration
+├── internal_llm.py                # gpt-5.6-terra: planning, vision validation, regeneration
 ├── asset_manager.py               # Image resize/crop, diagram/image agent delegation
 ├── templates/
 │   ├── corporate-dark.pptx

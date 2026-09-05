@@ -15,7 +15,7 @@ const MODEL_OPTIONS = [
   { value: 'auto', label: 'Auto', note: 'Use CLI config' },
   { value: 'cursor-grok-4.6-high', label: 'Cursor Grok 4.6', note: 'High effort, not Fast' },
   { value: 'composer-2.5', label: 'Composer 2.5', note: 'Standard, not Fast' },
-  { value: 'gpt-5', label: 'GPT-5', note: 'Manual' },
+  { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', note: 'Manual' },
   { value: 'claude-4-sonnet', label: 'Claude Sonnet', note: 'Manual' },
   { value: 'opus-4.6', label: 'Opus 4.6', note: 'Manual' },
 ]

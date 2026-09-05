@@ -149,6 +149,11 @@ interface Window {
       permissionId: string
       note?: string
     }) => Promise<any>
+    getGatewaySlideWorkflowChoices: () => Promise<any>
+    selectGatewaySlideWorkflow: (payload: {
+      choiceId: string
+      workflow: 'html' | 'template' | 'advanced'
+    }) => Promise<any>
     cosmicMailRequest: (payload: GatewayConnectionPayload & {
       path: string
       method?: string

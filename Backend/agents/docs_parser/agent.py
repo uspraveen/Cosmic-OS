@@ -18,6 +18,7 @@ from shared.agent_runtime import AgentRuntime
 from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnvelope
 from shared.sqlite_client import connect_sync
 from shared import infer_document_mime_from_extension, is_supported_document_artifact
+from shared import is_openai_gpt5_chat_model, normalized_reasoning_effort
 
 from .config import AGENT_ROOT, BACKEND_ROOT, DocsParserConfig
 from .docling_adapter import DoclingAdapter, FullPageVlmRequest, ParseRequest, PictureDescriptionRequest
@@ -58,6 +59,7 @@ class AssetReinspectionRequest:
     timeout_sec: float
     max_new_tokens: int
     detail: str
+    reasoning_effort: str = "xhigh"
 
 
 class DocsParserAgent(AgentRuntime):
@@ -692,6 +694,7 @@ class DocsParserAgent(AgentRuntime):
             timeout_sec=self.config.asset_reinspection_timeout_sec,
             max_new_tokens=self.config.asset_reinspection_max_new_tokens,
             detail=detail,
+            reasoning_effort=self.config.reasoning_effort,
         )
 
     async def _run_asset_reinspection(
@@ -734,31 +737,42 @@ class DocsParserAgent(AgentRuntime):
             )
         if question:
             context_parts.append(f"Specific follow-up question: {question}")
-        payload = {
-            "model": request.model,
-            "temperature": 0,
-            "max_tokens": request.max_new_tokens,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": request.prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "\n".join(context_parts),
+        if is_openai_gpt5_chat_model(request.model):
+            # GPT-5-family chat models reject temperature/max_tokens.
+            payload: dict[str, Any] = {
+                "model": request.model,
+                "max_completion_tokens": request.max_new_tokens,
+                "response_format": {"type": "json_object"},
+            }
+            effort = normalized_reasoning_effort(request.model, request.reasoning_effort)
+            if effort:
+                payload["reasoning_effort"] = effort
+        else:
+            payload = {
+                "model": request.model,
+                "temperature": 0,
+                "max_tokens": request.max_new_tokens,
+                "response_format": {"type": "json_object"},
+            }
+        payload["messages"] = [
+            {"role": "system", "content": request.prompt},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "\n".join(context_parts),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": data_url,
+                            "detail": request.detail,
                         },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": data_url,
-                                "detail": request.detail,
-                            },
-                        },
-                    ],
-                },
-            ],
-        }
+                    },
+                ],
+            },
+        ]
         response = await self._http_client.post(
             request.api_url,
             headers={
@@ -989,6 +1003,7 @@ class DocsParserAgent(AgentRuntime):
             picture_area_threshold=self.config.picture_description_area_threshold,
             classification_min_confidence=self.config.picture_description_classification_min_confidence,
             classification_deny=tuple(self.config.picture_description_classification_deny),
+            reasoning_effort=self.config.reasoning_effort,
         )
 
     def _build_full_page_vlm_request(self, *, enabled: bool) -> FullPageVlmRequest | None:
@@ -1010,6 +1025,7 @@ class DocsParserAgent(AgentRuntime):
             batch_size=self.config.full_page_vlm_batch_size,
             max_new_tokens=self.config.full_page_vlm_max_new_tokens,
             scale=self.config.full_page_vlm_scale,
+            reasoning_effort=self.config.reasoning_effort,
         )
 
     def _parse_with_enrichment_fallback(

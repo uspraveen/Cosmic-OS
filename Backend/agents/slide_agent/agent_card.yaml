@@ -2,19 +2,21 @@ agent_id: cosmic/slide-agent:1.0.0
 display_name: Slide Agent
 description: >
   Specialist agent for creating, editing, and cataloging presentation decks using the
-  copied cosmic-slides-2 core. Supports a fast HTML/image-backed workflow and a
+  copied cosmic-slides-2 core. Supports an advanced native workflow (HTML-designed,
+  fully editable PowerPoint output; default), a fast HTML/image-backed workflow, and a
   slower template-backed editable PowerPoint workflow.
 
 intents:
   - name: slide.create
-    description: Create a new slide deck using either HTML mode or template mode.
+    description: Create a new slide deck using advanced (native), HTML, or template mode.
     input_schema: schemas/intents/slide.create.input.json
     output_schema: schemas/intents/slide.create.output.json
     timeout_sec: 900
     usage_hints:
-      - Do not delegate a new deck request here until the user has chosen workflow=html or workflow=template, unless the user explicitly passed workflow=auto or provided a template.
+      - Do not delegate a new deck request here until the user has chosen workflow=advanced, workflow=html, or workflow=template, unless the user explicitly passed workflow=auto or provided a template.
+      - Advanced mode is the default — it designs each slide and converts it into a fully editable native PPTX. It works with or without a template: with a template it builds on the template's own theme and layouts; without one it plans and locks a theme itself.
       - HTML mode is fast and produces an image-backed, non-editable PPTX.
-      - Template mode is slower and produces an editable PPTX from an uploaded template or an auto-selected template from the agent templates folder.
+      - Template mode is slower and produces an editable PPTX by filling an uploaded template's existing layouts (or an auto-selected template from the agent templates folder).
       - The Slide Agent has internal visual sourcing tools for stock photos, web research, generated images, and bounded local Python asset generation. When the user asks for visuals inside the deck, let the Slide Agent source them internally instead of pre-generating them in the orchestrator.
       - If the user asks for generated images, custom backgrounds, or web-sourced visuals on slides, delegate directly to Slide Agent and do not route those visuals through the standalone image agent first unless the user explicitly wants separate image artifacts outside the deck.
       - If multiple templates exist and no template is specified, the agent plans the deck then selects the best matching template internally.
@@ -24,7 +26,7 @@ intents:
       - "'One slide per page/slide' requests are handled by segmented source retrieval, preserving source order across split deck parts."
 
   - name: slide.edit
-    description: Revise an existing PPTX; editable decks use template-backed regeneration and HTML/image-backed decks are regenerated through HTML mode.
+    description: Revise an existing PPTX; advanced/native and template decks regenerate through their own paths, HTML/image-backed decks through HTML mode.
     input_schema: schemas/intents/slide.edit.input.json
     output_schema: schemas/intents/slide.create.output.json
     timeout_sec: 900
@@ -102,6 +104,22 @@ sla:
       - INTERNAL_ERROR
 
 stream_key: streams:cosmic/slide-agent:1.0.0
+
+model_requirements:
+  internal_llm:
+    required: true
+    provider: openai_compatible
+    default_model_key: openai:gpt-5.6-terra
+    env_model: SLIDE_AGENT_FIREWORKS_MODEL
+    env_api_key: SLIDE_AGENT_FIREWORKS_API_KEY
+    env_base_url: SLIDE_AGENT_FIREWORKS_BASE_URL
+    fallback:
+      default_model_key: fireworks:accounts/fireworks/models/glm-5p3-flash
+    notes:
+      - Deck planning and per-slide vision validation are heavy work; with an OpenAI
+        key the agent runs GPT-5.6 Terra at xhigh reasoning effort.
+      - Without an OpenAI key the agent keeps the Fireworks Qwen fallback
+        (accounts/fireworks/models/glm-5p3-flash) unchanged.
 
 version_info:
   semver: 1.0.0

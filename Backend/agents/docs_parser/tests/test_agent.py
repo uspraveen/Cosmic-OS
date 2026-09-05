@@ -1509,7 +1509,7 @@ async def test_docs_parser_agent_reinspects_image_asset_and_uses_cache(tmp_path:
         request_count += 1
         assert request.url == httpx.URL("https://api.openai.com/v1/chat/completions")
         payload = json.loads(request.content.decode("utf-8"))
-        assert payload["model"] == "gpt-4.1-mini"
+        assert payload["model"] == "gpt-5.6-luna"
         assert payload["response_format"] == {"type": "json_object"}
         return httpx.Response(
             200,

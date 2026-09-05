@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from shared import normalized_reasoning_effort
+
 from .config import MapAgentConfig
 
 logger = logging.getLogger(__name__)
@@ -153,6 +155,9 @@ async def _chat_json(
         ],
         "response_format": {"type": "json_object"},
     }
+    effort = normalized_reasoning_effort(cfg.internal_llm_model, cfg.internal_llm_reasoning_effort)
+    if effort is not None:
+        payload["reasoning_effort"] = effort
     headers = {
         "Authorization": f"Bearer {cfg.internal_llm_api_key}",
         "Content-Type": "application/json",

@@ -47,6 +47,7 @@ from .event_automation_store import EventAutomationStore
 from .gmail_approval_store import GmailApprovalStore
 from .gmail_context_store import GmailContextStore
 from .sandbox_permission_store import SandboxPermissionStore
+from .slide_workflow_choice_store import SlideWorkflowChoiceStore
 from .memory import MemoryWriteAuditStore
 from .memory.client import (
     CosmicMemoryClient,
@@ -504,6 +505,9 @@ class GatewayRuntime:
         self.gmail_context_store = GmailContextStore(config.gmail_context_db_path)
         self.gmail_approval_store = GmailApprovalStore(config.gmail_approvals_db_path)
         self.sandbox_permission_store = SandboxPermissionStore(config.sandbox_permissions_db_path)
+        self.slide_workflow_choice_store = SlideWorkflowChoiceStore(
+            config.slide_workflow_choices_db_path
+        )
         self.event_automation_store = EventAutomationStore(config.event_automation_db_path)
         self.scheduler_store = SchedulerStore(config.scheduler_db_path)
         self.agent_email_integration_store = AgentEmailIntegrationStore(
@@ -652,6 +656,7 @@ class GatewayRuntime:
         self.gmail_context_store.initialize()
         self.gmail_approval_store.initialize()
         self.sandbox_permission_store.initialize()
+        self.slide_workflow_choice_store.initialize()
         self.event_automation_store.initialize()
         self.scheduler_store.initialize(
             default_timezone=self.config.user_timezone_fallback,
@@ -4540,6 +4545,174 @@ class GatewayRuntime:
             name=f"gmail-approval-update-{approval_id}",
         )
         return {"status": "rejected", "approval": rejected}
+
+    # ── Slide Agent workflow choice ──────────────────────────────
+
+    async def _persist_slide_workflow_choice_receipts(self, event: dict[str, Any]) -> list[dict[str, Any]]:
+        # A choice receipt rides alongside up to 8 consequential receipts; the
+        # default limit of 4 would silently drop it in busy turns.
+        receipts = self._normalize_specialist_receipts(
+            event.get("specialist_receipts"), limit=12
+        )
+        persisted: list[dict[str, Any]] = []
+        for receipt in receipts:
+            choice = receipt.get("slide_workflow_choice")
+            if not isinstance(choice, dict):
+                continue
+            payload = {
+                **choice,
+                "request_id": self._safe_text(event.get("request_id")),
+                "session_id": self._safe_text(choice.get("session_id"))
+                or self._safe_text(event.get("session_id")),
+                "task_id": self._safe_text(choice.get("task_id"))
+                or self._safe_text(event.get("task_id")),
+                "payload": {
+                    "receipt": receipt,
+                    "route": self._safe_text(event.get("route")),
+                },
+            }
+            try:
+                row, _was_created = self.slide_workflow_choice_store.upsert_pending(payload)
+            except ValueError:
+                logger.exception("gateway.slide_workflow_choice.upsert_invalid")
+                continue
+            persisted.append(row)
+        return persisted
+
+    def _slide_workflow_choice_response_block(self, choice: dict[str, Any]) -> dict[str, Any]:
+        choice_id = self._safe_text(choice.get("choice_id"))
+        description = self._safe_text(choice.get("description")) or "Slide deck"
+        return {
+            key: value
+            for key, value in {
+                "id": f"slide_workflow_choice:{choice_id}",
+                "type": "slide_workflow_choice",
+                "choice_id": choice_id,
+                "status": self._safe_text(choice.get("status")) or "pending",
+                "workflow": self._safe_text(choice.get("workflow")),
+                "title": description,
+                "description": description,
+                "requested_slides": choice.get("requested_slides"),
+                "artifact_count": choice.get("artifact_count") or 0,
+                "session_id": self._safe_text(choice.get("session_id")),
+                "task_id": self._safe_text(choice.get("task_id")),
+                "created_at": self._safe_text(choice.get("created_at")),
+            }.items()
+            if value not in (None, "", [], {})
+        }
+
+    def _historical_slide_workflow_choice_blocks(self, specialist_receipts: Any) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        for receipt in self._normalize_specialist_receipts(
+            specialist_receipts, limit=12
+        ):
+            choice = receipt.get("slide_workflow_choice")
+            if not isinstance(choice, dict):
+                continue
+            choice_id = self._safe_text(choice.get("choice_id"))
+            if not choice_id:
+                continue
+            persisted = self.slide_workflow_choice_store.get(choice_id)
+            if persisted is not None:
+                blocks.append(self._slide_workflow_choice_response_block(persisted))
+        return blocks
+
+    def list_slide_workflow_choices(self, *, include_terminal: bool = True) -> dict[str, Any]:
+        choices = self.slide_workflow_choice_store.list(include_terminal=include_terminal)
+        return {
+            "status": "ok",
+            "choices": choices,
+            "pending_count": sum(
+                1 for item in choices if self._safe_text(item.get("status")) == "pending"
+            ),
+        }
+
+    async def select_slide_workflow_choice(self, choice_id: str, workflow: str) -> dict[str, Any]:
+        normalized_workflow = self._safe_text(workflow).strip().lower()
+        if normalized_workflow not in {"html", "template", "advanced"}:
+            raise ValueError("workflow must be 'html', 'template', or 'advanced'.")
+        choice = self.slide_workflow_choice_store.get(choice_id)
+        if not choice:
+            raise ValueError("Slide workflow choice not found.")
+        status = self._safe_text(choice.get("status"))
+        if status != "pending":
+            return {
+                "status": "ignored",
+                "choice": choice,
+                "reason": f"choice_is_{status or 'unknown'}",
+            }
+
+        selected = (
+            self.slide_workflow_choice_store.mark_selected(choice_id, normalized_workflow)
+            or choice
+        )
+        block = self._slide_workflow_choice_response_block(selected)
+        self._persist_response_action_block(block)
+        await self._publish_response_action_update(response_block=block)
+
+        # Resume the original request as a new orchestrator turn in the same
+        # session. Deck generation is a long, streaming, artifact-producing
+        # specialist flow, so it must run through the normal chat pipeline
+        # (task rail, progress events, artifact cards) rather than a bare
+        # agent dispatch. Desktop/mobile channels cannot be hijacked by the
+        # pending-task-input reply path, and route_override pins the turn to
+        # the orchestrator regardless of what the classifier makes of the
+        # synthetic continuation text.
+        self._schedule_background_task(
+            self._continue_slide_workflow_choice(selected, normalized_workflow),
+            name=f"slide-choice-continue-{choice_id}",
+        )
+        return {"status": "selected", "choice": selected, "response_block": block}
+
+    async def _continue_slide_workflow_choice(
+        self,
+        choice: dict[str, Any],
+        workflow: str,
+    ) -> None:
+        choice_id = self._safe_text(choice.get("choice_id"))
+        description = self._safe_text(choice.get("description"))
+        session_id = self._safe_text(choice.get("session_id")) or self._current_session_id()
+        channel = self._safe_text(choice.get("channel")) or "desktop"
+        if self._channel_platform(channel) not in {"desktop", "mobile"}:
+            channel = "desktop"
+        try:
+            await self.process_incoming_user_message(
+                {
+                    "content": (
+                        f'[Slide workflow selected: {workflow}] Continue building the slide deck '
+                        f'the user described earlier: "{description}". Delegate slide.create again '
+                        f'with input workflow="{workflow}" and the same description'
+                        + (
+                            f' and max_slides={int(choice.get("requested_slides"))}'
+                            if choice.get("requested_slides")
+                            else ""
+                        )
+                        + ". Reuse the same input artifacts as the original request. "
+                        "The choice was made via the slide workflow card; do not ask which "
+                        "workflow to use again."
+                    ),
+                    "channel": channel,
+                    "session_id": session_id,
+                    "request_id": uuid4().hex,
+                    "route_override": "opus",
+                    "metadata": {
+                        "platform": "desktop",
+                        "message_type": "slide_workflow_choice",
+                        "slide_workflow_choice_id": choice_id,
+                        "slide_workflow": workflow,
+                    },
+                }
+            )
+        except Exception:
+            logger.exception(
+                "gateway.slide_workflow_choice.continuation_failed choice_id=%s",
+                choice_id,
+            )
+            reverted = self.slide_workflow_choice_store.mark_pending(choice_id)
+            if reverted is not None:
+                block = self._slide_workflow_choice_response_block(reverted)
+                self._persist_response_action_block(block)
+                await self._publish_response_action_update(response_block=block)
 
     def create_sandbox_permission(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.sandbox_permission_store.create_pending(payload)
@@ -20024,6 +20197,11 @@ class GatewayRuntime:
                 else []
             )
             sandbox_permissions = await self._persist_sandbox_permission_receipts(event)
+            slide_workflow_choices = (
+                await self._persist_slide_workflow_choice_receipts(event)
+                if event.get("specialist_receipts")
+                else []
+            )
             response_blocks = (
                 [dict(item) for item in event.get("response_blocks") if isinstance(item, dict)]
                 if isinstance(event.get("response_blocks"), list)
@@ -20042,6 +20220,10 @@ class GatewayRuntime:
                     *[
                         self._sandbox_permission_response_block(permission)
                         for permission in sandbox_permissions
+                    ],
+                    *[
+                        self._slide_workflow_choice_response_block(choice)
+                        for choice in slide_workflow_choices
                     ],
                     *self._calendar_response_blocks(event),
                 ],
@@ -23250,6 +23432,9 @@ class GatewayRuntime:
             [
                 *self._historical_gmail_approval_blocks(metadata.get("specialist_receipts")),
                 *self._historical_sandbox_permission_blocks(metadata.get("specialist_receipts")),
+                *self._historical_slide_workflow_choice_blocks(
+                    metadata.get("specialist_receipts")
+                ),
             ],
         )
         response_blocks = self._build_client_response_blocks(
@@ -23635,6 +23820,36 @@ class GatewayRuntime:
                         normalized_calendar_event["account"] = normalized_account
                 if normalized_calendar_event.get("event_id") or normalized_calendar_event.get("summary"):
                     receipt["calendar_event"] = normalized_calendar_event
+            slide_workflow_choice = item.get("slide_workflow_choice")
+            if isinstance(slide_workflow_choice, dict):
+                normalized_choice: dict[str, Any] = {}
+                for key in (
+                    "choice_id",
+                    "description",
+                    "session_id",
+                    "task_id",
+                    "channel",
+                ):
+                    text = self._safe_text(slide_workflow_choice.get(key))
+                    if text:
+                        normalized_choice[key] = text
+                requested_slides = self._coerce_int(slide_workflow_choice.get("requested_slides"))
+                if requested_slides:
+                    normalized_choice["requested_slides"] = requested_slides
+                for key in ("validate", "force_catalog"):
+                    normalized_choice[key] = bool(slide_workflow_choice.get(key))
+                artifacts: list[dict[str, Any]] = []
+                if isinstance(slide_workflow_choice.get("artifacts"), list):
+                    for artifact in slide_workflow_choice.get("artifacts", [])[:10]:
+                        if isinstance(artifact, dict):
+                            artifacts.append(artifact)
+                if artifacts:
+                    normalized_choice["artifacts"] = artifacts
+                normalized_choice["artifact_count"] = self._coerce_int(
+                    slide_workflow_choice.get("artifact_count")
+                ) or len(artifacts)
+                if normalized_choice.get("choice_id") and normalized_choice.get("description"):
+                    receipt["slide_workflow_choice"] = normalized_choice
             if receipt:
                 normalized.append(receipt)
                 seen.add(dedupe)
