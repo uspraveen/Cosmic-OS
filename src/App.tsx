@@ -210,6 +210,7 @@ interface ResponseArtifactBlock {
   sizeBytes?: number | null
   kind?: string | null
   downloadable?: boolean
+  contentUrl?: string | null
   previewUrl?: string | null
   caption?: string | null
   provenance?: ResponseBlockProvenance
@@ -721,6 +722,11 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
         sizeBytes: Number.isFinite(rawSize) && rawSize > 0 ? rawSize : null,
         kind: typeof (item as any).kind === 'string' ? (item as any).kind.trim() : null,
         downloadable: (item as any).downloadable !== false,
+        contentUrl: typeof (item as any).content_url === 'string' && (item as any).content_url.trim()
+          ? (item as any).content_url.trim()
+          : typeof (item as any).contentUrl === 'string' && (item as any).contentUrl.trim()
+            ? (item as any).contentUrl.trim()
+            : null,
         previewUrl: typeof (item as any).preview_url === 'string' && (item as any).preview_url.trim()
           ? (item as any).preview_url.trim()
           : typeof (item as any).previewUrl === 'string' && (item as any).previewUrl.trim()
@@ -3331,6 +3337,55 @@ const SlideWorkflowChoiceBlock = ({ block }: { block: ResponseActionBlock }) => 
   )
 }
 
+const DeckPreviewStrip = ({ slides }: { slides: ResponseArtifactBlock[] }) => {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null)
+  useEffect(() => {
+    if (activeIndex === null) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setActiveIndex(null)
+      if (event.key === 'ArrowRight') setActiveIndex((prev) => (prev === null ? prev : Math.min(prev + 1, slides.length - 1)))
+      if (event.key === 'ArrowLeft') setActiveIndex((prev) => (prev === null ? prev : Math.max(prev - 1, 0)))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [activeIndex, slides.length])
+  const active = activeIndex !== null ? slides[activeIndex] : null
+  const activeUrl = active ? (active.contentUrl || active.previewUrl || '') : ''
+
+  return (
+    <div className="deck-preview" data-count={slides.length}>
+      <div className="deck-preview-kicker">Slide preview</div>
+      <div className="deck-preview-strip">
+        {slides.map((slide, index) => (
+          <figure
+            key={slide.id}
+            className="deck-preview-thumb"
+            onClick={() => setActiveIndex(index)}
+            title={`Slide ${index + 1} — click to enlarge`}
+          >
+            <img
+              src={slide.contentUrl || slide.previewUrl || ''}
+              alt={slide.caption || slide.filename}
+              className="deck-preview-image"
+              loading="lazy"
+              draggable={false}
+            />
+            <figcaption className="deck-preview-number">{index + 1}</figcaption>
+          </figure>
+        ))}
+      </div>
+      {active && activeUrl && (
+        <div className="deck-preview-lightbox" onClick={() => setActiveIndex(null)}>
+          <img src={activeUrl} alt={active.caption || active.filename} className="deck-preview-full" />
+          <div className="deck-preview-lightbox-meta">
+            {`Slide ${activeIndex !== null ? activeIndex + 1 : 1} of ${slides.length}`}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 const AssistantResponseBlocks = memo(({
   blocks,
 }: {
@@ -3339,9 +3394,31 @@ const AssistantResponseBlocks = memo(({
   if (!blocks || blocks.length <= 0) {
     return null
   }
+  // Consecutive per-slide preview renders collapse into one scrollable strip.
+  const grouped: Array<{ kind: 'block'; block: ResponseBlock } | { kind: 'strip'; slides: ResponseArtifactBlock[] }> = []
+  let previewRun: ResponseArtifactBlock[] = []
+  const flushPreviewRun = () => {
+    if (previewRun.length > 0) {
+      grouped.push({ kind: 'strip', slides: previewRun })
+      previewRun = []
+    }
+  }
+  for (const block of blocks) {
+    if (block.type === 'image_artifact' && block.kind === 'slide_preview') {
+      previewRun.push(block)
+      continue
+    }
+    flushPreviewRun()
+    grouped.push({ kind: 'block', block })
+  }
+  flushPreviewRun()
   return (
     <div className="assistant-response-blocks">
-      {blocks.map((block) => {
+      {grouped.map((entry, entryIndex) => {
+        if (entry.kind === 'strip') {
+          return <DeckPreviewStrip key={`deck-preview-${entryIndex}`} slides={entry.slides} />
+        }
+        const block = entry.block
         if (block.type === 'markdown') {
           return (
             <div key={block.id} className="assistant-response-markdown">

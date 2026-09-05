@@ -1264,6 +1264,22 @@ class SlideAgent(AgentRuntime):
     ) -> AgentResult:
         artifacts: list[ArtifactManifest] = []
         seen: set[Path] = set()
+        # Per-slide renders come first so the client can build the scrollable
+        # deck preview strip right at the top of the response.
+        for raw in (result.get("slide_pngs") or [])[:50]:
+            path = self._maybe_path(raw)
+            if path is None or path in seen or not path.exists():
+                continue
+            seen.add(path)
+            artifacts.append(
+                self._artifact_manifest(
+                    task_id=task.task_id,
+                    path=path,
+                    mime=self._mime_for_path(path),
+                    kind="slide_preview",
+                    audience="deliverable",
+                )
+            )
         deliverable_candidates = [
             result.get("pptx_path"),
             result.get("pdf_path"),
@@ -1356,6 +1372,20 @@ class SlideAgent(AgentRuntime):
         validation_issues: list[dict[str, Any]] = []
 
         for part, result in zip(parts, results, strict=False):
+            for raw in (result.get("slide_pngs") or [])[:50]:
+                path = self._maybe_path(raw)
+                if path is None or path in seen or not path.exists():
+                    continue
+                seen.add(path)
+                artifacts.append(
+                    self._artifact_manifest(
+                        task_id=task.task_id,
+                        path=path,
+                        mime=self._mime_for_path(path),
+                        kind="slide_preview",
+                        audience="deliverable",
+                    )
+                )
             deliverable_candidates = [
                 result.get("pptx_path"),
                 result.get("pdf_path"),
