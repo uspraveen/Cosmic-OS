@@ -3183,23 +3183,33 @@ const SLIDE_WORKFLOW_OPTIONS: Array<{
   value: 'advanced' | 'html' | 'template'
   label: string
   detail: string
+  recommended?: boolean
 }> = [
   {
     value: 'advanced',
     label: 'Native deck',
-    detail: 'Recommended. Designed slide-by-slide and fully editable in PowerPoint — real text and shapes.',
+    detail: 'Designed slide-by-slide, fully editable in PowerPoint — real text and shapes.',
+    recommended: true,
   },
   {
     value: 'html',
     label: 'HTML deck',
-    detail: 'Fast, image-backed slides. Great for presenting, but not editable in PowerPoint.',
+    detail: 'Fast, image-backed. Great for presenting, not editable.',
   },
   {
     value: 'template',
     label: 'Template deck',
-    detail: 'Fills the layouts of a provided template. Slower to build and fully editable.',
+    detail: 'Fills a provided template\'s layouts. Slower, fully editable.',
   },
 ]
+
+const deckTitleFrom = (description: string): string => {
+  const text = (description || '').trim()
+  if (!text) return 'Slide deck'
+  const firstSentence = text.split(/(?<=[.!?])\s+/)[0] || text
+  const title = firstSentence.length >= 24 ? firstSentence : text
+  return title.length > 96 ? `${title.slice(0, 93).trimEnd()}…` : title
+}
 
 const SlideWorkflowChoiceBlock = ({ block }: { block: ResponseActionBlock }) => {
   const [status, setStatus] = useState(block.status || 'pending')
@@ -3207,10 +3217,12 @@ const SlideWorkflowChoiceBlock = ({ block }: { block: ResponseActionBlock }) => 
   const [busyWorkflow, setBusyWorkflow] = useState<string | null>(null)
   const [error, setError] = useState('')
   const isPending = ['pending', 'failed'].includes(status.toLowerCase())
-  const title = block.title || block.description || 'Slide deck'
+  const title = deckTitleFrom(block.title || block.description || '')
+  const fullDescription = (block.description || '').trim()
+  const showDescription = fullDescription.length > title.length + 8
   const facts = [
-    block.requestedSlides ? `Target length: ${block.requestedSlides} slides` : '',
-    block.artifactCount ? `${block.artifactCount} source file${block.artifactCount === 1 ? '' : 's'} attached` : '',
+    block.requestedSlides ? `${block.requestedSlides} slide${block.requestedSlides === 1 ? '' : 's'}` : '',
+    block.artifactCount ? `${block.artifactCount} source file${block.artifactCount === 1 ? '' : 's'}` : '',
   ].filter(Boolean)
 
   useEffect(() => {
@@ -3257,7 +3269,7 @@ const SlideWorkflowChoiceBlock = ({ block }: { block: ResponseActionBlock }) => 
           </span>
           <div className="assistant-action-card-heading-copy">
             <div className="assistant-action-card-kicker">Slide workflow</div>
-            <div className="assistant-action-card-title">{title}</div>
+            <div className="assistant-action-card-title" title={fullDescription || title}>{title}</div>
           </div>
         </div>
         <div className="assistant-action-card-head-actions">
@@ -3266,35 +3278,55 @@ const SlideWorkflowChoiceBlock = ({ block }: { block: ResponseActionBlock }) => 
           </div>
         </div>
       </div>
-      <div className="assistant-action-card-details">
-        {facts.map((fact) => (
-          <div key={fact}>{fact}</div>
-        ))}
-      </div>
+      {showDescription && (
+        <div className="slide-choice-description" title={fullDescription}>
+          {fullDescription}
+        </div>
+      )}
+      {facts.length > 0 && (
+        <div className="slide-choice-chips">
+          {facts.map((fact) => (
+            <span key={fact} className="slide-choice-chip">{fact}</span>
+          ))}
+        </div>
+      )}
       {error && <div className="assistant-action-card-error">{error}</div>}
-      <div className="assistant-action-card-actions">
-        {isPending ? (
-          SLIDE_WORKFLOW_OPTIONS.map((option) => (
+      {isPending ? (
+        <div className="slide-choice-options">
+          {SLIDE_WORKFLOW_OPTIONS.map((option) => (
             <button
               key={option.value}
               type="button"
-              className="assistant-action-button is-primary"
+              className={[
+                'slide-choice-option',
+                option.recommended ? 'is-recommended' : '',
+                busyWorkflow === option.value ? 'is-busy' : '',
+              ].join(' ').trim()}
               disabled={Boolean(busyWorkflow)}
-              title={option.detail}
               onClick={() => void select(option.value)}
             >
-              {busyWorkflow === option.value ? 'Building…' : `Use ${option.label}`}
+              <span className="slide-choice-option-name">
+                {option.label}
+                {option.recommended && <span className="slide-choice-option-badge">Recommended</span>}
+                {busyWorkflow === option.value && <span className="slide-choice-option-badge is-busy">Building…</span>}
+              </span>
+              <span className="slide-choice-option-detail">{option.detail}</span>
             </button>
-          ))
-        ) : workflow ? (
-          <div className="assistant-action-card-details">
-            <div>
-              <span>Selected</span>
-              {SLIDE_WORKFLOW_OPTIONS.find((option) => option.value === workflow)?.label || workflow}
+          ))}
+        </div>
+      ) : workflow ? (
+        <div className="slide-choice-options">
+          {SLIDE_WORKFLOW_OPTIONS.filter((option) => option.value === workflow).map((option) => (
+            <div key={option.value} className="slide-choice-option is-selected">
+              <span className="slide-choice-option-name">
+                {option.label}
+                <span className="slide-choice-option-badge">Selected</span>
+              </span>
+              <span className="slide-choice-option-detail">{option.detail}</span>
             </div>
-          </div>
-        ) : null}
-      </div>
+          ))}
+        </div>
+      ) : null}
     </section>
   )
 }
