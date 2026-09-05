@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -877,6 +878,30 @@ def plan_html_theme(plan: dict, description: str) -> dict:
     return call_llm_json(messages, temperature=0.2, response_schema=THEME_JSON_SCHEMA)
 
 
+def _validate_manifest_parallel(manifest: list[dict], plan: dict) -> list[dict]:
+    """Review every rendered slide concurrently; results keep slide order."""
+    pairs = [
+        (item, slide, Path(item["png_path"]))
+        for item, slide in zip(manifest, plan.get("slides", []), strict=False)
+    ]
+    results: list[dict | None] = [None] * len(pairs)
+    workers = max(1, min(env_int("HTML_QA_PARALLELISM", 4), len(pairs) or 1))
+
+    def _one(index: int) -> None:
+        item, slide, png_path = pairs[index]
+        results[index] = _validate_slide_render(png_path, slide, item["design"])
+
+    if workers > 1 and len(pairs) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_one, index) for index in range(len(pairs))]
+            for future in futures:
+                future.result()
+    else:
+        for index in range(len(pairs)):
+            _one(index)
+    return [result for result in results if result is not None]
+
+
 def run_html_pipeline(
     description: str,
     *,
@@ -922,12 +947,14 @@ def run_html_pipeline(
     validation_results: list[dict] = []
     if validate:
         for repair_round in range(HTML_MAX_REPAIR_ROUNDS + 1):
-            validation_results = []
+            validation_results = _validate_manifest_parallel(manifest, plan)
             failed: list[int] = []
             for item, slide in zip(manifest, plan.get("slides", []), strict=False):
-                result = _validate_slide_render(Path(item["png_path"]), slide, item["design"])
-                validation_results.append(result)
-                if result.get("verdict") != "pass":
+                result = next(
+                    (v for v in validation_results if v["slide_number"] == slide["slide_number"]),
+                    None,
+                )
+                if result is not None and result.get("verdict") != "pass":
                     failed.append(slide["slide_number"])
 
             if not failed or repair_round >= HTML_MAX_REPAIR_ROUNDS:

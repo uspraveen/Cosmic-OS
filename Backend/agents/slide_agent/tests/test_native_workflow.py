@@ -408,6 +408,26 @@ def test_modules_import_with_float_numeric_env(monkeypatch: Any) -> None:
     importlib.reload(llm_client)  # restore defaults for other tests
 
 
+def test_effort_rejection_memo_round_trip() -> None:
+    from llm_client import (
+        _EFFORT_REJECTIONS,
+        _effort_known_rejected,
+        _memoize_effort_rejection,
+    )
+
+    model = "accounts/fireworks/models/test-model"
+    _EFFORT_REJECTIONS.discard((model, "none"))
+    try:
+        assert _effort_known_rejected(model, "none") is False
+        _memoize_effort_rejection(model, "none")
+        assert _effort_known_rejected(model, "none") is True
+        # A different model/effort pair is not implicated.
+        assert _effort_known_rejected(model, "high") is False
+        assert _effort_known_rejected("other-model", "none") is False
+    finally:
+        _EFFORT_REJECTIONS.discard((model, "none"))
+
+
 # ── agent wiring ───────────────────────────────────────────────────────────────
 
 

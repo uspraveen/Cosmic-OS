@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,6 @@ from html_workflow import (
     SLIDE_JSON_SCHEMA,
     SLIDE_USER,
     _assets_text,
-    _deck_previous_labels,
     _export_pdf,
     _prepare_slide_assets,
     _repair_slide,
@@ -304,6 +304,77 @@ def _write_slide_html_native(
     return path
 
 
+# ── parallel QA helpers ────────────────────────────────────────────────────────
+#
+# Vision validations and repairs are independent per slide, so they fan out
+# across threads; on a thinking model this turns N sequential calls into
+# roughly one call of wall time. Results keep slide order.
+
+
+def _qa_workers(count: int) -> int:
+    return max(1, min(env_int("NATIVE_QA_PARALLELISM", 4), count or 1))
+
+
+def _validate_pairs_parallel(pairs: list[tuple[dict, dict, Path]]) -> list[dict]:
+    """Validate (manifest_item, plan_slide, png_path) triples concurrently."""
+    results: list[dict | None] = [None] * len(pairs)
+
+    def _one(index: int) -> None:
+        item, slide, png_path = pairs[index]
+        results[index] = _validate_slide_render(png_path, slide, item["design"])
+
+    if len(pairs) > 1:
+        with ThreadPoolExecutor(max_workers=_qa_workers(len(pairs))) as pool:
+            futures = [pool.submit(_one, index) for index in range(len(pairs))]
+            for future in futures:
+                future.result()
+    else:
+        for index in range(len(pairs)):
+            _one(index)
+    return [result for result in results if result is not None]
+
+
+def _repair_failed_parallel(
+    manifest: list[dict],
+    slides: list[dict],
+    validations: list[dict],
+    failed_numbers: set[int],
+    theme: dict,
+    *,
+    canvas_w: int = CANVAS_WIDTH_PX,
+    canvas_h: int = CANVAS_HEIGHT_PX,
+) -> None:
+    """Repair the failed slides concurrently and rewrite their HTML."""
+
+    def _one(item: dict, slide: dict, validation: dict) -> None:
+        repaired = _repair_slide(theme, slide, item["assets"], item["design"], validation)
+        item["design"] = repaired
+        item["speaker_notes"] = repaired.get("speaker_notes") or item["speaker_notes"]
+        _write_slide_html_native(
+            Path(item["html_path"]).parent,
+            theme,
+            repaired,
+            canvas_w=canvas_w,
+            canvas_h=canvas_h,
+        )
+
+    jobs = [
+        (item, slide, next((v for v in validations if v.get("slide_number") == slide["slide_number"]), None))
+        for item, slide in zip(manifest, slides, strict=False)
+        if slide["slide_number"] in failed_numbers
+    ]
+    jobs = [(item, slide, validation) for item, slide, validation in jobs if validation is not None]
+    if not jobs:
+        return
+    if len(jobs) > 1:
+        with ThreadPoolExecutor(max_workers=_qa_workers(len(jobs))) as pool:
+            futures = [pool.submit(_one, item, slide, validation) for item, slide, validation in jobs]
+            for future in futures:
+                future.result()
+    else:
+        _one(*jobs[0])
+
+
 # ── conversion + final QA ──────────────────────────────────────────────────────
 
 def _backdrop_from_theme(theme: dict, template_mode: bool) -> tuple[int, int, int]:
@@ -355,39 +426,31 @@ def _final_pptx_qa_rounds(
             )
 
         validation_results = []
-        failed: list[int] = []
-        for item, slide in zip(manifest, plan.get("slides", []), strict=False):
-            png_index = slide["slide_number"] - 1
-            if png_index >= len(final_pngs):
-                continue
-            result = _validate_slide_render(final_pngs[png_index], slide, item["design"])
-            validation_results.append(result)
-            if result.get("verdict") != "pass":
-                failed.append(slide["slide_number"])
+        pairs = [
+            (item, slide, final_pngs[slide["slide_number"] - 1])
+            for item, slide in zip(manifest, plan.get("slides", []), strict=False)
+            if slide["slide_number"] - 1 < len(final_pngs)
+        ]
+        validation_results = _validate_pairs_parallel(pairs)
+        failed = {
+            result["slide_number"]
+            for result in validation_results
+            if result.get("verdict") != "pass"
+        }
 
         if not failed or round_index >= NATIVE_MAX_REPAIR_ROUNDS:
             break
 
         # Repair the HTML design, re-render, and reconvert the whole deck.
-        for item, slide in zip(manifest, plan.get("slides", []), strict=False):
-            if slide["slide_number"] not in failed:
-                continue
-            validation = next(
-                (v for v in validation_results if v["slide_number"] == slide["slide_number"]),
-                None,
-            )
-            if validation is None:
-                continue
-            repaired = _repair_slide(theme, slide, item["assets"], item["design"], validation)
-            item["design"] = repaired
-            item["speaker_notes"] = repaired.get("speaker_notes") or item["speaker_notes"]
-            _write_slide_html_native(
-                Path(item["html_path"]).parent,
-                theme,
-                repaired,
-                canvas_w=canvas_w,
-                canvas_h=canvas_h,
-            )
+        _repair_failed_parallel(
+            manifest,
+            plan.get("slides", []),
+            validation_results,
+            failed,
+            theme,
+            canvas_w=canvas_w,
+            canvas_h=canvas_h,
+        )
         _reconvert_manifest(
             manifest,
             deck_path,
@@ -476,16 +539,25 @@ def run_native_pipeline(
     prs_dims = _deck_dimensions(template_path)
     canvas_w, canvas_h = prs_dims or (CANVAS_WIDTH_PX, CANVAS_HEIGHT_PX)
 
-    manifest: list[dict] = []
-    for slide in plan.get("slides", []):
+    # Per-slide design runs in parallel: the calls are independent (coherence
+    # comes from the locked theme + planned titles, not from call order), and
+    # on a thinking model sequential design dominated the wall clock.
+    slides = plan.get("slides", [])
+    manifest: list[dict | None] = [None] * len(slides)
+    design_workers = max(1, min(env_int("NATIVE_DESIGN_PARALLELISM", 4), len(slides) or 1))
+
+    def _design_one(index: int, slide: dict) -> None:
         slide_dir = html_dir / f"slide-{slide['slide_number']:02d}-{_safe_name(slide['title'])}"
         slide_dir.mkdir(parents=True, exist_ok=True)
         assets = _prepare_slide_assets(slide, slide_dir)
+        planned_labels = "\n".join(
+            f"- Slide {s['slide_number']}: {s['title']}" for s in slides[max(0, index - 3):index]
+        ) or "- none"
         design = _design_slide_native(
             theme,
             slide,
             assets,
-            _deck_previous_labels(manifest),
+            planned_labels,
             template_mode=template_mode,
             canvas_w=canvas_w,
             canvas_h=canvas_h,
@@ -497,7 +569,7 @@ def run_native_pipeline(
             canvas_w=canvas_w,
             canvas_h=canvas_h,
         )
-        manifest.append({
+        manifest[index] = {
             "slide_number": slide["slide_number"],
             "title": slide["title"],
             "deck_title": plan.get("deck_title", ""),
@@ -505,7 +577,17 @@ def run_native_pipeline(
             "assets": assets,
             "design": design,
             "html_path": str(html_path),
-        })
+        }
+
+    if design_workers > 1 and len(slides) > 1:
+        with ThreadPoolExecutor(max_workers=design_workers) as pool:
+            futures = [pool.submit(_design_one, index, slide) for index, slide in enumerate(slides)]
+            for future in futures:
+                future.result()
+    else:
+        for index, slide in enumerate(slides):
+            _design_one(index, slide)
+    manifest = [entry for entry in manifest if entry is not None]
 
     # Stage 1 QA: the HTML renders (cheap, catches most issues before conversion).
     slide_pngs = render_slide_html_files(manifest, rendered_dir, canvas_width=canvas_w, canvas_height=canvas_h)
@@ -513,34 +595,25 @@ def run_native_pipeline(
     html_validation: list[dict] = []
     if validate:
         for repair_round in range(html_workflow.HTML_MAX_REPAIR_ROUNDS + 1):
-            html_validation = []
-            failed: list[int] = []
-            for item, slide in zip(manifest, plan.get("slides", []), strict=False):
-                result = _validate_slide_render(Path(item["png_path"]), slide, item["design"])
-                html_validation.append(result)
-                if result.get("verdict") != "pass":
-                    failed.append(slide["slide_number"])
+            html_validation = _validate_pairs_parallel(
+                [(item, slide, Path(item["png_path"])) for item, slide in zip(manifest, slides, strict=False)]
+            )
+            failed = {
+                result["slide_number"]
+                for result in html_validation
+                if result.get("verdict") != "pass"
+            }
             if not failed or repair_round >= html_workflow.HTML_MAX_REPAIR_ROUNDS:
                 break
-            for item, slide in zip(manifest, plan.get("slides", []), strict=False):
-                if slide["slide_number"] not in failed:
-                    continue
-                validation = next(
-                    (v for v in html_validation if v["slide_number"] == slide["slide_number"]),
-                    None,
-                )
-                if validation is None:
-                    continue
-                repaired = _repair_slide(theme, slide, item["assets"], item["design"], validation)
-                item["design"] = repaired
-                item["speaker_notes"] = repaired.get("speaker_notes") or item["speaker_notes"]
-                _write_slide_html_native(
-                    Path(item["html_path"]).parent,
-                    theme,
-                    repaired,
-                    canvas_w=canvas_w,
-                    canvas_h=canvas_h,
-                )
+            _repair_failed_parallel(
+                manifest,
+                slides,
+                html_validation,
+                failed,
+                theme,
+                canvas_w=canvas_w,
+                canvas_h=canvas_h,
+            )
             slide_pngs = render_slide_html_files(manifest, rendered_dir, canvas_width=canvas_w, canvas_height=canvas_h)
 
     # Conversion to native objects.

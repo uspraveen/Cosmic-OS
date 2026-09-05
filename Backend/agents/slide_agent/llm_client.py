@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,21 @@ MODEL_API_KEY: str = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME: str = os.getenv("MODEL_NAME", "accounts/fireworks/models/glm-5p3-flash")
 
 logger = logging.getLogger(__name__)
+
+# (model, effort) pairs this provider has already rejected. Thread-safe: the
+# design/validation stages fan LLM calls out across worker threads.
+_EFFORT_REJECTIONS: set[tuple[str, str]] = set()
+_EFFORT_REJECTIONS_LOCK = threading.Lock()
+
+
+def _effort_known_rejected(model: str, effort: Any) -> bool:
+    with _EFFORT_REJECTIONS_LOCK:
+        return (model, str(effort)) in _EFFORT_REJECTIONS
+
+
+def _memoize_effort_rejection(model: str, effort: Any) -> None:
+    with _EFFORT_REJECTIONS_LOCK:
+        _EFFORT_REJECTIONS.add((model, str(effort)))
 
 
 def env_int(name: str, default: int) -> int:
@@ -172,8 +188,12 @@ def call_llm(
     resolved_model = model or MODEL_NAME
     # "none" keeps non-thinking models cheap, but thinking-only models (GLM-5.3)
     # reject it outright. If the provider says so, drop the field and retry with
-    # its default effort instead of failing the call.
+    # its default effort instead of failing the call. The rejection is memoized
+    # per provider+effort so later calls skip the doomed attempt entirely
+    # instead of paying one wasted round-trip each.
     adaptive_effort = reasoning_effort
+    if adaptive_effort is not None and _effort_known_rejected(resolved_model, adaptive_effort):
+        adaptive_effort = None
 
     last_exc: Exception | None = None
     for attempt in range(MODEL_HTTP_RETRIES):
@@ -209,6 +229,7 @@ def call_llm(
                         "llm_client: provider rejected reasoning_effort=%r; retrying without it",
                         adaptive_effort,
                     )
+                    _memoize_effort_rejection(resolved_model, adaptive_effort)
                     adaptive_effort = None
                     continue
                 raise RuntimeError(f"LLM API {resp.status_code}: {error_text}")
