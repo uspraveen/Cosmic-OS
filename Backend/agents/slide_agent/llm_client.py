@@ -170,31 +170,48 @@ def call_llm(
 ) -> str:
     """Call the configured chat-completions model and return message content."""
     resolved_model = model or MODEL_NAME
-    payload = _build_payload(
-        messages,
-        temperature=temperature,
-        model=resolved_model,
-        max_tokens=max_tokens or MODEL_MAX_TOKENS,
-        response_schema=response_schema,
-        force_json_object=force_json_object,
-        reasoning_effort=reasoning_effort,
-    )
-
-    headers = {
-        "Authorization": f"Bearer {MODEL_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    url = f"{MODEL_BASE_URL}/chat/completions"
+    # "none" keeps non-thinking models cheap, but thinking-only models (GLM-5.3)
+    # reject it outright. If the provider says so, drop the field and retry with
+    # its default effort instead of failing the call.
+    adaptive_effort = reasoning_effort
 
     last_exc: Exception | None = None
     for attempt in range(MODEL_HTTP_RETRIES):
+        payload = _build_payload(
+            messages,
+            temperature=temperature,
+            model=resolved_model,
+            max_tokens=max_tokens or MODEL_MAX_TOKENS,
+            response_schema=response_schema,
+            force_json_object=force_json_object,
+            reasoning_effort=adaptive_effort,
+        )
+
+        headers = {
+            "Authorization": f"Bearer {MODEL_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        url = f"{MODEL_BASE_URL}/chat/completions"
+
         placed_at = utcnow_iso()
         started = time.perf_counter()
         try:
             with httpx.Client(timeout=MODEL_TIMEOUT_SEC) as client:
                 resp = client.post(url, json=payload, headers=headers)
             if resp.status_code >= 400:
-                raise RuntimeError(f"LLM API {resp.status_code}: {resp.text[:500]}")
+                error_text = resp.text[:500]
+                if (
+                    adaptive_effort is not None
+                    and "reasoning_effort" in error_text
+                    and attempt + 1 < MODEL_HTTP_RETRIES
+                ):
+                    logger.warning(
+                        "llm_client: provider rejected reasoning_effort=%r; retrying without it",
+                        adaptive_effort,
+                    )
+                    adaptive_effort = None
+                    continue
+                raise RuntimeError(f"LLM API {resp.status_code}: {error_text}")
             data = resp.json()
             _post_usage(
                 model=resolved_model,
