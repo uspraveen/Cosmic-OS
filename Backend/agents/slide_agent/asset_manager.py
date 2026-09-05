@@ -44,6 +44,7 @@ from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
+from llm_client import env_int
 from PIL import Image, ImageColor, ImageOps
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ load_dotenv(_HERE / ".env")
 
 PEXELS_API_KEY: str    = os.getenv("PEXELS_API_KEY", "")
 ASSETS_CACHE_DIR: Path = _HERE / os.getenv("ASSETS_CACHE_DIR", "assets/cache")
-ICON_DEFAULT_SIZE: int = int(os.getenv("ICON_DEFAULT_SIZE_PX", "128"))
+ICON_DEFAULT_SIZE: int = env_int("ICON_DEFAULT_SIZE_PX", 128)
 ICON_DEFAULT_COLOR: str = os.getenv("ICON_DEFAULT_COLOR", "#222222")
 
 ICONIFY_API   = "https://api.iconify.design"

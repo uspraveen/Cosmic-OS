@@ -62,6 +62,7 @@ from agent_tools import ToolContext, builder_tools
 from asset_manager import resolve_icon, resolve_photo
 from content_planner import plan_content
 from layout_selector import select_layouts
+from llm_client import env_int
 from llm_tool_harness import run_json_stage_with_tools
 from template_cataloger import render_template_to_pngs
 
@@ -73,11 +74,11 @@ load_dotenv(_HERE / ".env")
 MODEL_BASE_URL: str   = os.getenv("MODEL_BASE_URL", "https://api.fireworks.ai/inference/v1").rstrip("/")
 MODEL_API_KEY: str    = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME: str       = os.getenv("MODEL_NAME", "accounts/fireworks/models/glm-5p3-flash")
-MODEL_TIMEOUT_SEC: int = int(os.getenv("MODEL_TIMEOUT_SEC", "300"))
-MODEL_HTTP_RETRIES: int = int(os.getenv("MODEL_HTTP_RETRIES", "3"))
-PARALLELISM: int      = int(os.getenv("BUILDER_PARALLELISM", "2"))
-MAX_REPAIR: int       = int(os.getenv("BUILDER_MAX_REPAIR_ROUNDS", "2"))
-VALIDATION_RENDER_DPI: int = int(os.getenv("VALIDATION_RENDER_DPI", "220"))
+MODEL_TIMEOUT_SEC: int = env_int("MODEL_TIMEOUT_SEC", 300)
+MODEL_HTTP_RETRIES: int = env_int("MODEL_HTTP_RETRIES", 3)
+PARALLELISM: int      = env_int("BUILDER_PARALLELISM", 2)
+MAX_REPAIR: int       = env_int("BUILDER_MAX_REPAIR_ROUNDS", 2)
+VALIDATION_RENDER_DPI: int = env_int("VALIDATION_RENDER_DPI", 220)
 ASSETS_CACHE: Path    = _HERE / os.getenv("ASSETS_CACHE_DIR", "assets/cache")
 
 logger = logging.getLogger(__name__)

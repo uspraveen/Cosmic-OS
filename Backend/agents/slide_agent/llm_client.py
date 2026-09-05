@@ -23,12 +23,31 @@ load_dotenv(_HERE / ".env")
 MODEL_BASE_URL: str = os.getenv("MODEL_BASE_URL", "https://api.fireworks.ai/inference/v1").rstrip("/")
 MODEL_API_KEY: str = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME: str = os.getenv("MODEL_NAME", "accounts/fireworks/models/glm-5p3-flash")
-MODEL_TIMEOUT_SEC: int = int(os.getenv("MODEL_TIMEOUT_SEC", "300"))
-MODEL_HTTP_RETRIES: int = int(os.getenv("MODEL_HTTP_RETRIES", "3"))
-MODEL_MAX_TOKENS: int = int(os.getenv("HTML_MODEL_MAX_TOKENS", "4096"))
-MODEL_REASONING_EFFORT: str = os.getenv("MODEL_REASONING_EFFORT", "xhigh")
 
 logger = logging.getLogger(__name__)
+
+
+def env_int(name: str, default: int) -> int:
+    """Read an integer env var without crashing on "120.0"-style values.
+
+    Deployment env files routinely write numeric settings as floats ("120.0");
+    bare int() at import time turned that into a module-load crash, which took
+    down every pipeline in the agent while the service itself stayed healthy.
+    """
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        logger.warning("llm_client: ignoring non-numeric %s=%r; using %s", name, raw, default)
+        return default
+
+
+MODEL_TIMEOUT_SEC: int = env_int("MODEL_TIMEOUT_SEC", 300)
+MODEL_HTTP_RETRIES: int = env_int("MODEL_HTTP_RETRIES", 3)
+MODEL_MAX_TOKENS: int = env_int("HTML_MODEL_MAX_TOKENS", 4096)
+MODEL_REASONING_EFFORT: str = os.getenv("MODEL_REASONING_EFFORT", "xhigh")
 
 
 def _json_candidates(raw: str) -> list[str]:

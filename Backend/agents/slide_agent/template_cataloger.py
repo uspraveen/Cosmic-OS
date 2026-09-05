@@ -46,6 +46,8 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
+from llm_client import env_int
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 _HERE = Path(__file__).resolve().parent
@@ -57,7 +59,7 @@ VISION_MODEL: str        = os.getenv("VISION_MODEL_NAME", "accounts/fireworks/mo
 LIBREOFFICE_PATH: str    = os.getenv("LIBREOFFICE_PATH", "soffice")
 PDFTOPPM_PATH: str       = os.getenv("PDFTOPPM_PATH", "pdftoppm")
 CATALOGS_DIR: Path       = _HERE / os.getenv("CATALOGS_DIR", "catalogs")
-CATALOG_PARALLELISM: int = int(os.getenv("CATALOG_PARALLELISM", "5"))
+CATALOG_PARALLELISM: int = env_int("CATALOG_PARALLELISM", 5)
 
 logger = logging.getLogger(__name__)
 

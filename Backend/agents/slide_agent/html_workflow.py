@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from asset_manager import resolve_icon, resolve_photo
 from content_planner import plan_content
-from llm_client import call_llm_json
+from llm_client import call_llm_json, env_int
 from ooxml_validator import validate_pptx
 from pptx_writer import build_pptx_from_images
 from template_cataloger import LIBREOFFICE_PATH, _run, create_numbered_collage
@@ -22,12 +22,12 @@ from template_cataloger import LIBREOFFICE_PATH, _run, create_numbered_collage
 _HERE = Path(__file__).resolve().parent
 load_dotenv(_HERE / ".env")
 
-HTML_MAX_REPAIR_ROUNDS = int(os.getenv("HTML_MAX_REPAIR_ROUNDS", "1"))
-HTML_RENDER_TIMEOUT_MS = int(os.getenv("HTML_RENDER_TIMEOUT_MS", "45000"))
-HTML_VIEWPORT_WIDTH = int(os.getenv("HTML_VIEWPORT_WIDTH", "1440"))
-HTML_VIEWPORT_HEIGHT = int(os.getenv("HTML_VIEWPORT_HEIGHT", "900"))
+HTML_MAX_REPAIR_ROUNDS = env_int("HTML_MAX_REPAIR_ROUNDS", 1)
+HTML_RENDER_TIMEOUT_MS = env_int("HTML_RENDER_TIMEOUT_MS", 45000)
+HTML_VIEWPORT_WIDTH = env_int("HTML_VIEWPORT_WIDTH", 1440)
+HTML_VIEWPORT_HEIGHT = env_int("HTML_VIEWPORT_HEIGHT", 900)
 HTML_DEVICE_SCALE = float(os.getenv("HTML_DEVICE_SCALE", "1.5"))
-MAX_SLIDES_DEFAULT = int(os.getenv("MAX_SLIDES", "50"))
+MAX_SLIDES_DEFAULT = env_int("MAX_SLIDES", 50)
 
 logger = logging.getLogger(__name__)
 

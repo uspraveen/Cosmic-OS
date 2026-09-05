@@ -370,6 +370,44 @@ html, body {{ margin: 0; width: {canvas_w}px; height: {canvas_h}px; overflow: hi
     assert not [s for s in prs.slides[0].shapes if s.shape_type == 1]
 
 
+# ── env parsing robustness ───────────────────────────────────────────────────
+
+
+def test_env_int_tolerates_float_strings_and_garbage(monkeypatch: Any) -> None:
+    """Deployment env files write numerics as floats ("MODEL_TIMEOUT_SEC=120.0");
+    bare int() at import time crashed every pipeline module (real VM incident)."""
+    from llm_client import env_int
+
+    monkeypatch.setenv("SLIDE_TEST_INT", "120.0")
+    assert env_int("SLIDE_TEST_INT", 300) == 120
+
+    monkeypatch.setenv("SLIDE_TEST_INT", "  42 ")
+    assert env_int("SLIDE_TEST_INT", 300) == 42
+
+    monkeypatch.setenv("SLIDE_TEST_INT", "not-a-number")
+    assert env_int("SLIDE_TEST_INT", 300) == 300
+
+    monkeypatch.delenv("SLIDE_TEST_INT", raising=False)
+    assert env_int("SLIDE_TEST_INT", 300) == 300
+
+    monkeypatch.setenv("SLIDE_TEST_INT", "")
+    assert env_int("SLIDE_TEST_INT", 300) == 300
+
+
+def test_modules_import_with_float_numeric_env(monkeypatch: Any) -> None:
+    """The exact VM failure: float-form env values must not break module import."""
+    import importlib
+
+    import llm_client
+
+    monkeypatch.setenv("MODEL_TIMEOUT_SEC", "120.0")
+    monkeypatch.setenv("HTML_MODEL_MAX_TOKENS", "8192.0")
+    reloaded = importlib.reload(llm_client)
+    assert reloaded.MODEL_TIMEOUT_SEC == 120
+    assert reloaded.MODEL_MAX_TOKENS == 8192
+    importlib.reload(llm_client)  # restore defaults for other tests
+
+
 # ── agent wiring ───────────────────────────────────────────────────────────────
 
 

@@ -39,7 +39,7 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 from agent_tools import ToolContext, planner_tools
-from llm_client import parse_json_response
+from llm_client import env_int, parse_json_response
 from llm_tool_harness import run_json_stage_with_tools
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ MODEL_BASE_URL: str = os.getenv("MODEL_BASE_URL", "https://api.fireworks.ai/infe
 MODEL_API_KEY: str  = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME: str     = os.getenv("MODEL_NAME", "accounts/fireworks/models/glm-5p3-flash")
 # Deck JSON is large; low limits yield truncated JSON and json.loads failures.
-MODEL_MAX_TOKENS: int = int(os.getenv("MODEL_MAX_TOKENS", "16384"))
+MODEL_MAX_TOKENS: int = env_int("MODEL_MAX_TOKENS", 16384)
 
 logger = logging.getLogger(__name__)
 

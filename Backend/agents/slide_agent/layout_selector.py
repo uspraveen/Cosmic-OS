@@ -52,6 +52,7 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
+from llm_client import env_int
 from template_cataloger import catalog_template, load_catalog, LAYOUT_ARCHETYPES
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -62,7 +63,7 @@ load_dotenv(_HERE / ".env")
 MODEL_BASE_URL: str = os.getenv("MODEL_BASE_URL", "https://api.fireworks.ai/inference/v1").rstrip("/")
 MODEL_API_KEY: str  = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME: str     = os.getenv("MODEL_NAME", "accounts/fireworks/models/glm-5p3-flash")
-MAX_SLIDES_DEFAULT  = int(os.getenv("MAX_SLIDES", "15"))
+MAX_SLIDES_DEFAULT  = env_int("MAX_SLIDES", 15)
 
 logger = logging.getLogger(__name__)
 
