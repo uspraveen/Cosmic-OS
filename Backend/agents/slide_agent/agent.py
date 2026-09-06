@@ -90,6 +90,15 @@ class SlideAgent(AgentRuntime):
         self.config.apply_to_environment()
         if str(AGENT_ROOT) not in sys.path:
             sys.path.insert(0, str(AGENT_ROOT))
+        # The model comes from a three-file env layering (systemd → agent.env
+        # → .env); announce what actually resolved so a stale file with a dead
+        # model name is visible in the journal on the first failing call.
+        logger.info(
+            "slide_agent config: model=%s vision=%s base_url=%s",
+            self.config.model_name,
+            self.config.vision_model_name,
+            self.config.model_base_url,
+        )
 
         super().__init__(
             agent_card_path=AGENT_ROOT / "agent_card.yaml",
