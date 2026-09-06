@@ -362,6 +362,9 @@ def _call_planner_llm(messages: list[dict], *, timeout: float, temperature: floa
             stream_payload = {**payload, "stream": True}
             with client.stream("POST", url, json=stream_payload, headers=headers) as response:
                 if response.status_code >= 400:
+                    # On a streaming response .text raises ResponseNotRead and
+                    # masks the real API error — read the body first.
+                    response.read()
                     raise ValueError(f"API error {response.status_code}: {response.text}")
                 response.raise_for_status()
                 raw_text, finish_reason = _accumulate_chat_stream(response)
