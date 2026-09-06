@@ -160,9 +160,24 @@ Return ONLY JSON:
 }
 
 CONSTRAINTS
-- Use render-safe fonts only: Bahnschrift, Georgia, Verdana, Arial, Calibri.
+- TYPOGRAPHY IS A DELIBERATE DESIGN DECISION. Choose the pairing from the
+  FONT CATALOG provided with the brief — do not default, and do not invent
+  faces. Every catalog face ships with Windows/Office, so the finished
+  native deck renders true with zero font embedding.
+- Match the pairing to the scenario: neo-grotesque/humanist sans for
+  corporate, tech and data decks; a serif for editorial, academic, legal or
+  heritage topics; a high-contrast display face for covers only. Name the
+  choice and its reason in design_rationale, and restate the pairing rules
+  in deck_guidelines (e.g. "All titles use Cambria Bold at 64–96px.").
+- Prefer preview-true faces unless the brief genuinely calls for a
+  face whose preview is approximate; for approximate faces, leave ~10%
+  layout slack since build-time previews substitute a similar-width face.
+- One display face. One body face. One accent face (may equal display).
+  No more than two families overall. Never leave the default stack in
+  place — hierarchy comes from size and weight, not from swapping faces.
+- No thin/light weights on colored backgrounds. Body faces must be highly
+  legible; decorative or poster faces are display-only.
 - Prefer strong palettes with real contrast (body text ≥ 4.5:1 against bg).
-- One display font. One body font. One accent font (may equal display). No more.
 - At most TWO accent colors total (`accent` and optional `accent_2`). Beyond
   that the deck looks like a colour-test card.
 - PALETTE DOMINANCE. Build every slide on BACKGROUND → PRIMARY → ACCENT:
@@ -214,6 +229,11 @@ Description: {description}
 
 Slides:
 {slides_text}
+
+FONT CATALOG — every face below ships with Windows/Office and renders true
+in the finished deck. Choose the pairing from this catalog only:
+
+{font_catalog}
 """
 
 SLIDE_SYSTEM = """\
@@ -866,6 +886,8 @@ def _export_pdf(pptx_path: Path, out_dir: Path) -> str:
 
 
 def plan_html_theme(plan: dict, description: str) -> dict:
+    from fonts import format_catalog_for_prompt
+
     messages = [
         {"role": "system", "content": THEME_SYSTEM},
         {"role": "user", "content": THEME_USER.format(
@@ -873,6 +895,7 @@ def plan_html_theme(plan: dict, description: str) -> dict:
             deck_theme=plan.get("deck_theme", ""),
             description=description,
             slides_text=_plan_slides_text(plan),
+            font_catalog=format_catalog_for_prompt(),
         )},
     ]
     return call_llm_json(messages, temperature=0.2, response_schema=THEME_JSON_SCHEMA)

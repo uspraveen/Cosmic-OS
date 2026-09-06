@@ -484,6 +484,36 @@ def test_truncated_response_autodoubles_max_tokens(monkeypatch: Any) -> None:
     assert calls == [100, 200]  # first attempt truncated, retry doubled
 
 
+# ── font catalog ───────────────────────────────────────────────────────────────
+
+
+def test_font_catalog_is_well_formed_and_prompt_ready() -> None:
+    from fonts import FONT_CATALOG, font_stack, format_catalog_for_prompt
+
+    families = list(FONT_CATALOG)
+    assert len(families) >= 15
+    assert len(set(families)) == len(families)
+    for family, meta in FONT_CATALOG.items():
+        assert meta["category"] in {"sans", "serif", "display", "mono"}, family
+        assert meta["moods"] and meta["weights"] and meta["fallback"], family
+        assert meta["preview"] in {"full", "approximate"}, family
+        assert meta["substitute"] and meta["note"], family
+
+    prompt_text = format_catalog_for_prompt()
+    assert "SERIF FACES" in prompt_text and "SANS FACES" in prompt_text
+    for family in ("Georgia", "Calibri", "Cambria", "Rockwell"):
+        assert family in prompt_text
+    # preview-true faces are the ones with metric-compatible substitutes installed
+    assert "preview-true" in prompt_text and "preview-approx" in prompt_text
+
+
+def test_font_stack_wraps_known_family_and_passthrough_unknown() -> None:
+    from fonts import font_stack
+
+    assert font_stack("Georgia").startswith("'Georgia'")
+    assert font_stack("Some Custom Face") == "Some Custom Face"
+
+
 # ── agent wiring ───────────────────────────────────────────────────────────────
 
 
