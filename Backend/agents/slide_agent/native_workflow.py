@@ -25,7 +25,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
 
 import html_workflow
 from content_planner import plan_content
@@ -59,7 +58,6 @@ from template_cataloger import (
 )
 
 _HERE = Path(__file__).resolve().parent
-load_dotenv(_HERE / ".env")
 
 NATIVE_MAX_REPAIR_ROUNDS = env_int("NATIVE_MAX_REPAIR_ROUNDS", 1)
 NATIVE_PPTX_QA = os.getenv("NATIVE_PPTX_QA", "1") not in {"0", "false", "no"}

@@ -43,14 +43,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
-from dotenv import load_dotenv
 from llm_client import env_int
 from PIL import Image, ImageColor, ImageOps
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 _HERE = Path(__file__).resolve().parent
-load_dotenv(_HERE / ".env")
 
 PEXELS_API_KEY: str    = os.getenv("PEXELS_API_KEY", "")
 ASSETS_CACHE_DIR: Path = _HERE / os.getenv("ASSETS_CACHE_DIR", "assets/cache")

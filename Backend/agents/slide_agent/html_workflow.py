@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
 
 from asset_manager import resolve_icon, resolve_photo
 from content_planner import plan_content
@@ -21,7 +20,6 @@ from pptx_writer import build_pptx_from_images
 from template_cataloger import LIBREOFFICE_PATH, _run, create_numbered_collage
 
 _HERE = Path(__file__).resolve().parent
-load_dotenv(_HERE / ".env")
 
 HTML_MAX_REPAIR_ROUNDS = env_int("HTML_MAX_REPAIR_ROUNDS", 1)
 HTML_RENDER_TIMEOUT_MS = env_int("HTML_RENDER_TIMEOUT_MS", 45000)

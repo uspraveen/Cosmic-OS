@@ -14,6 +14,15 @@ BACKEND_ROOT = AGENT_ROOT.parent.parent
 
 __all__ = ["AGENT_ROOT", "BACKEND_ROOT", "SlideAgentConfig"]
 
+# Env layering (most wins first):
+#   1. process environment — on the VM this is the systemd EnvironmentFile
+#      (/etc/cosmic/agents/slide-agent.env), which is THE runtime config.
+#   2. agent.env — the single local-dev file (gitignored; copy from
+#      agent.env.example). The core modules read THIS file too via the one
+#      loader in llm_client — do not reintroduce a second dev env file.
+#   3. Backend/.env — whole-backend dev defaults.
+# load_dotenv never overrides values already in the process environment, so
+# a deployed systemd value always beats a local file value.
 load_dotenv(AGENT_ROOT / "agent.env")
 load_dotenv(BACKEND_ROOT / ".env")
 

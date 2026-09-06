@@ -44,14 +44,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from dotenv import load_dotenv
 
 from llm_client import env_int
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 _HERE = Path(__file__).resolve().parent
-load_dotenv(_HERE / ".env")
 
 MODEL_BASE_URL: str      = os.getenv("MODEL_BASE_URL", "https://api.fireworks.ai/inference/v1").rstrip("/")
 MODEL_API_KEY: str       = os.getenv("MODEL_API_KEY", "")

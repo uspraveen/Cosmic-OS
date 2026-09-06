@@ -14,7 +14,6 @@ from typing import Any, Callable
 from uuid import uuid4
 
 import httpx
-from dotenv import load_dotenv
 from PIL import Image
 
 from shared import (
@@ -26,7 +25,6 @@ from shared import (
 )
 
 _HERE = Path(__file__).resolve().parent
-load_dotenv(_HERE / ".env")
 
 logger = logging.getLogger(__name__)
 

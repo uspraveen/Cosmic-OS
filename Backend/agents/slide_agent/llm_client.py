@@ -19,7 +19,11 @@ from shared import infer_model_provider, is_openai_gpt5_chat_model, normalized_r
 from shared.usage import UsageEvent, utcnow_iso
 
 _HERE = Path(__file__).resolve().parent
-load_dotenv(_HERE / ".env")
+# The ONE local-dev env loader for the slides core: every core module imports
+# llm_client, so this is the single place .env is read. Values already present
+# in the process environment (systemd EnvironmentFile on the VM) always win —
+# load_dotenv never overrides.
+load_dotenv(_HERE / "agent.env")
 
 MODEL_BASE_URL: str = os.getenv("MODEL_BASE_URL", "https://api.fireworks.ai/inference/v1").rstrip("/")
 MODEL_API_KEY: str = os.getenv("MODEL_API_KEY", "")

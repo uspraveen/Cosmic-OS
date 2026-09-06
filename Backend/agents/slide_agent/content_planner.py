@@ -37,7 +37,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from dotenv import load_dotenv
 from agent_tools import ToolContext, planner_tools
 from llm_client import env_int, parse_json_response
 from llm_tool_harness import run_json_stage_with_tools
@@ -45,7 +44,6 @@ from llm_tool_harness import run_json_stage_with_tools
 # ── Config ────────────────────────────────────────────────────────────────────
 
 _HERE = Path(__file__).resolve().parent
-load_dotenv(_HERE / ".env")
 
 MODEL_BASE_URL: str = os.getenv("MODEL_BASE_URL", "https://api.fireworks.ai/inference/v1").rstrip("/")
 MODEL_API_KEY: str  = os.getenv("MODEL_API_KEY", "")
