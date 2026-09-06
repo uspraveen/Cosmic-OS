@@ -9,7 +9,6 @@ import {
   Settings2,
   SlidersHorizontal,
   Smartphone,
-  SquareTerminal,
   type LucideIcon,
 } from 'lucide-react'
 import { CursorMark, OpenAIMark, OpenCodeMark, ZCodeMark } from './brandIcons'
@@ -302,6 +301,14 @@ export default function Settings({
       : gatewayConnection?.state === 'error'
         ? 'Gateway unavailable'
         : 'Signed in to VM'
+  // Compact status for the pin label on the agents hero globe.
+  const vmPresenceLabel = gatewayConnection?.connected
+    ? 'VM Online'
+    : gatewayConnection?.state === 'connecting' || gatewayConnection?.state === 'reconnecting'
+      ? 'VM Syncing'
+      : gatewayConnection?.state === 'error'
+        ? 'VM Offline'
+        : 'VM Standby'
   const saveAlphaPreferredHarness = async (preferredHarness: AlphaPreferredHarness) => {
     setAlphaPreferredHarness(preferredHarness)
     setAlphaConfigError('')
@@ -525,16 +532,17 @@ export default function Settings({
             {currentView === 'agents' && (
               <div className="cosmic-agents-page">
                 <div className="cosmic-agents-hero">
-                  <div className="cosmic-agents-hero-top">
-                    <div className="cosmic-agents-hero-icon" aria-hidden="true">
-                      <SquareTerminal size={28} />
-                    </div>
-                    <div className="cosmic-agents-hero-text">
-                      <span className="cosmic-agents-kicker">Agent Providers</span>
-                      <h3>Alpha Agents</h3>
-                      <p>Connect coding providers that Alpha can use for project-level work on your VM.</p>
-                    </div>
+                  <div className="cosmic-agents-hero-globe" aria-hidden="true">
+                    <span className="cosmic-agents-hero-globe-dots" />
+                    <span className="cosmic-agents-hero-globe-warm" />
+                    <span className="cosmic-agents-hero-globe-glow" />
+                    <span className="cosmic-agents-hero-globe-pin" />
                   </div>
+                  <div className="cosmic-agents-hero-copy">
+                    <h3>Alpha Agents</h3>
+                    <p>Connect coding providers that Alpha can use for project-level work on your VM.</p>
+                  </div>
+                  <span className="cosmic-agents-hero-vm">{vmPresenceLabel}</span>
                 </div>
 
                 <div className="cosmic-alpha-provider-switch">
