@@ -524,21 +524,29 @@ export default function Settings({
             {currentView === 'agents' && (
               <div className="cosmic-agents-page">
                 <div className="cosmic-agents-hero">
-                  <span className="cosmic-agents-hero-mark" aria-hidden="true">
-                    {/* Alpha's terminal mark (AgentGlyph) as a dot matrix: a faint
-                        dot field, a blurred halo where the strokes run, and a crisp
-                        lit spine tracing the prompt. */}
-                    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <div className="cosmic-agents-hero-matrix" aria-hidden="true">
+                    {/* Alpha's terminal mark as a full-bleed dot matrix: the field
+                        bleeds off the card's right edge like the reference globe and
+                        dissolves toward the copy, with the prompt lit where the
+                        AgentGlyph strokes run. */}
+                    <svg width="230" height="170" viewBox="0 0 230 170" fill="none" xmlns="http://www.w3.org/2000/svg">
                       <defs>
-                        <pattern id="alphaDotGrid" width="1.5" height="1.5" patternUnits="userSpaceOnUse">
-                          <circle cx="0.75" cy="0.75" r="0.48" fill="#fff" />
+                        <pattern id="alphaDotGrid" width="3" height="3" patternUnits="userSpaceOnUse">
+                          <circle cx="1.5" cy="1.5" r="0.95" fill="#fff" />
                         </pattern>
-                        <filter id="alphaDotBlur" x="-30%" y="-30%" width="160%" height="160%">
+                        <linearGradient id="alphaFieldFade" x1="0" y1="0" x2="1" y2="0">
+                          <stop offset="0.08" stopColor="#000" />
+                          <stop offset="0.5" stopColor="#fff" />
+                        </linearGradient>
+                        <mask id="alphaFieldMask" maskUnits="userSpaceOnUse" x="0" y="0" width="230" height="170">
+                          <rect width="230" height="170" fill="url(#alphaFieldFade)" />
+                        </mask>
+                        <filter id="alphaDotBlur" x="-40%" y="-40%" width="180%" height="180%">
                           <feGaussianBlur stdDeviation="0.9" />
                         </filter>
-                        <mask id="alphaDotGlow" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
-                          <rect width="24" height="24" fill="#000" />
-                          <g stroke="#fff" strokeLinecap="round" strokeLinejoin="round" fill="none">
+                        <mask id="alphaPromptMask" maskUnits="userSpaceOnUse" x="0" y="0" width="230" height="170">
+                          <rect width="230" height="170" fill="#000" />
+                          <g transform="translate(102 47) scale(3.2)" stroke="#fff" strokeLinecap="round" strokeLinejoin="round" fill="none">
                             <g strokeWidth="3.6" filter="url(#alphaDotBlur)">
                               <path d="M3.8 6.2 9.6 12l-5.8 5.8" />
                               <path d="M12.4 17.8h7.8" />
@@ -550,10 +558,10 @@ export default function Settings({
                           </g>
                         </mask>
                       </defs>
-                      <rect width="24" height="24" fill="url(#alphaDotGrid)" opacity="0.15" />
-                      <rect width="24" height="24" fill="url(#alphaDotGrid)" mask="url(#alphaDotGlow)" />
+                      <rect width="230" height="170" fill="url(#alphaDotGrid)" opacity="0.14" mask="url(#alphaFieldMask)" />
+                      <rect width="230" height="170" fill="url(#alphaDotGrid)" mask="url(#alphaPromptMask)" />
                     </svg>
-                  </span>
+                  </div>
                   <div className="cosmic-agents-hero-copy">
                     <h3>Alpha Agents</h3>
                     <p>Connect coding providers that Alpha can use for project-level work on your VM.</p>

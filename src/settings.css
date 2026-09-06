@@ -5547,10 +5547,8 @@
 }
 
 .cosmic-agents-hero {
-  display: flex;
-  align-items: center;
-  gap: 15px;
-  padding: 17px 20px;
+  position: relative;
+  padding: 18px 20px;
   border-radius: 18px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   /* Same cool-dark family as the panel's cards, stepped darker so the
@@ -5559,28 +5557,25 @@
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.07),
     0 14px 36px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
 }
 
-/* Alpha's tile: a dark dot-matrix module — the same footprint as the
-   provider tiles below, but a lit display instead of a white logo chip. */
-.cosmic-agents-hero-mark {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015)),
-    rgba(5, 7, 9, 0.65);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 4px 14px rgba(0, 0, 0, 0.3);
+/* The dot-matrix prompt bleeds off the card's right edge like the
+   reference globe: clipped by the card, dissolving toward the copy. */
+.cosmic-agents-hero-matrix {
+  position: absolute;
+  top: 50%;
+  right: -36px;
+  width: 230px;
+  height: 170px;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
 
 .cosmic-agents-hero-copy {
+  position: relative;
+  z-index: 1;
+  max-width: 280px;
   min-width: 0;
 }
 
