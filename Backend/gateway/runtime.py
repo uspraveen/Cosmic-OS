@@ -4676,7 +4676,12 @@ class GatewayRuntime:
         if self._channel_platform(channel) not in {"desktop", "mobile"}:
             channel = "desktop"
         try:
-            await self.process_incoming_user_message(
+            # process_incoming_user_message only PREPARES the request record
+            # (message persisted, memory assembled, routing decided); the turn
+            # itself runs only when the caller starts fulfillment — the same
+            # contract the desktop adapter follows. Skipping this is what left
+            # selections stored-but-never-built.
+            request_record = await self.process_incoming_user_message(
                 {
                     "content": (
                         f'[Slide workflow selected: {workflow}] Continue building the slide deck '
@@ -4703,6 +4708,7 @@ class GatewayRuntime:
                     },
                 }
             )
+            self.start_request_fulfillment(request_record)
         except Exception:
             logger.exception(
                 "gateway.slide_workflow_choice.continuation_failed choice_id=%s",

@@ -399,9 +399,15 @@ async def test_select_marks_the_choice_and_schedules_the_continuation_turn(tmp_p
 
     async def fake_process_incoming(message: dict) -> dict:
         turns.append(message)
-        return {"status": "accepted"}
+        return {"status": "accepted", "request_id": "req_test", "route": "opus"}
+
+    fulfillments: list[dict] = []
+
+    def fake_start_fulfillment(record: dict) -> None:
+        fulfillments.append(record)
 
     runtime.process_incoming_user_message = fake_process_incoming
+    runtime.start_request_fulfillment = fake_start_fulfillment
 
     result = await runtime.select_slide_workflow_choice("slide_wf_abc123", "template")
     assert result["status"] == "selected"
@@ -411,7 +417,9 @@ async def test_select_marks_the_choice_and_schedules_the_continuation_turn(tmp_p
     assert persisted_blocks and published
 
     # The continuation turn must run through the chat pipeline pinned to the
-    # orchestrator, in the original session and channel.
+    # orchestrator, in the original session and channel — and its fulfillment
+    # must actually START (a prepared-but-never-fulfilled record is what left
+    # selections stored-but-never-built).
     assert len(scheduled) == 1
     await scheduled[0]
     assert len(turns) == 1
@@ -422,6 +430,7 @@ async def test_select_marks_the_choice_and_schedules_the_continuation_turn(tmp_p
     assert turn["metadata"]["slide_workflow_choice_id"] == "slide_wf_abc123"
     assert 'workflow="template"' in turn["content"]
     assert "Investor pitch deck for Acme" in turn["content"]
+    assert fulfillments and fulfillments[0]["request_id"] == "req_test"
 
     # A second select on the same choice is ignored, not a double dispatch.
     again = await runtime.select_slide_workflow_choice("slide_wf_abc123", "html")
