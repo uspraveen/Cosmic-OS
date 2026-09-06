@@ -525,10 +525,33 @@ export default function Settings({
               <div className="cosmic-agents-page">
                 <div className="cosmic-agents-hero">
                   <span className="cosmic-agents-hero-mark" aria-hidden="true">
-                    {/* Alpha's mark elsewhere in the app (AgentGlyph terminal). */}
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.85} strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M3.8 6.2 9.6 12l-5.8 5.8" />
-                      <path d="M12.4 17.8h7.8" />
+                    {/* Alpha's terminal mark (AgentGlyph) as a dot matrix: a faint
+                        dot field, a blurred halo where the strokes run, and a crisp
+                        lit spine tracing the prompt. */}
+                    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <defs>
+                        <pattern id="alphaDotGrid" width="1.5" height="1.5" patternUnits="userSpaceOnUse">
+                          <circle cx="0.75" cy="0.75" r="0.48" fill="#fff" />
+                        </pattern>
+                        <filter id="alphaDotBlur" x="-30%" y="-30%" width="160%" height="160%">
+                          <feGaussianBlur stdDeviation="0.9" />
+                        </filter>
+                        <mask id="alphaDotGlow" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
+                          <rect width="24" height="24" fill="#000" />
+                          <g stroke="#fff" strokeLinecap="round" strokeLinejoin="round" fill="none">
+                            <g strokeWidth="3.6" filter="url(#alphaDotBlur)">
+                              <path d="M3.8 6.2 9.6 12l-5.8 5.8" />
+                              <path d="M12.4 17.8h7.8" />
+                            </g>
+                            <g strokeWidth="1.3">
+                              <path d="M3.8 6.2 9.6 12l-5.8 5.8" />
+                              <path d="M12.4 17.8h7.8" />
+                            </g>
+                          </g>
+                        </mask>
+                      </defs>
+                      <rect width="24" height="24" fill="url(#alphaDotGrid)" opacity="0.15" />
+                      <rect width="24" height="24" fill="url(#alphaDotGrid)" mask="url(#alphaDotGlow)" />
                     </svg>
                   </span>
                   <div className="cosmic-agents-hero-copy">
