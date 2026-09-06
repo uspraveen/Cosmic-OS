@@ -524,8 +524,17 @@ export default function Settings({
             {currentView === 'agents' && (
               <div className="cosmic-agents-page">
                 <div className="cosmic-agents-hero">
-                  <h3>Alpha Agents</h3>
-                  <p>Connect coding providers that Alpha can use for project-level work on your VM.</p>
+                  <span className="cosmic-agents-hero-mark" aria-hidden="true">
+                    {/* Alpha's mark elsewhere in the app (AgentGlyph terminal). */}
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.85} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3.8 6.2 9.6 12l-5.8 5.8" />
+                      <path d="M12.4 17.8h7.8" />
+                    </svg>
+                  </span>
+                  <div className="cosmic-agents-hero-copy">
+                    <h3>Alpha Agents</h3>
+                    <p>Connect coding providers that Alpha can use for project-level work on your VM.</p>
+                  </div>
                 </div>
 
                 <div className="cosmic-alpha-provider-switch">
