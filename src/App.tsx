@@ -1050,9 +1050,19 @@ const buildProgressActivityEntries = (
   }]
 }
 
+// The slide workflow choice card resumes the deck build by injecting a
+// synthetic continuation into the session (the orchestrator needs it in
+// context). That message must never surface as a user query bubble.
+const SLIDE_CHOICE_MESSAGE_MARKER = '[Slide workflow selected:'
+const isSyntheticSlideChoiceMessage = (content?: string | null, metadata?: any): boolean =>
+  String(metadata?.message_type || '') === 'slide_workflow_choice'
+  || String(content || '').trimStart().startsWith(SLIDE_CHOICE_MESSAGE_MARKER)
+
 const historyToMessages = (history: any[] = []): Message[] => {
   return groupRepliesWithTheirQuery(history
-    .filter((item) => item && (item.role === 'user' || item.role === 'assistant'))
+    .filter((item) => item
+      && (item.role === 'user' || item.role === 'assistant')
+      && !(item.role === 'user' && isSyntheticSlideChoiceMessage(item?.content, item?.metadata)))
     .map((item, index) => ({
       id: String(item.message_id || `${item.role}-${index}-${crypto.randomUUID()}`),
       role: item.role,
@@ -6475,6 +6485,10 @@ export default function App() {
         }
 
         setMessages((prev) => {
+          if (role === 'user' && isSyntheticSlideChoiceMessage(content, (event as any).metadata)) {
+            // The workflow-choice continuation must never appear as a query.
+            return prev
+          }
           const eventMessageId = typeof event.message_id === 'string' ? event.message_id.trim() : ''
           const newMsg: Message = {
             id: eventMessageId || `xchan-${crypto.randomUUID()}`,
@@ -8330,6 +8344,11 @@ export default function App() {
 
                   {/* MESSAGES */}
                   {mode !== 'task' && messages.map((msg, idx) => {
+                    // The workflow-choice continuation drives the orchestrator
+                    // but is not a user query - never render it as a bubble.
+                    if (msg.role === 'user' && isSyntheticSlideChoiceMessage(msg.content, (msg as any).metadata)) {
+                      return null
+                    }
                     // Session rollover divider
                     if (msg.channel === '__session_rollover__') {
                       return (
