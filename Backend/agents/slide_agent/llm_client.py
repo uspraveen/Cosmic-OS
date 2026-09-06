@@ -147,6 +147,22 @@ def _post_usage(*, model: str, data: dict[str, Any], placed_at: str, latency_ms:
         usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
         prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
         completion_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        # Cached input bills at a fraction of the input rate and reasoning
+        # tokens are the thinking model's main cost driver — dropping either
+        # makes the ledger overstate (cached) or under-explain (reasoning).
+        prompt_details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+        completion_details = usage.get("completion_tokens_details") if isinstance(usage.get("completion_tokens_details"), dict) else {}
+        cached_tokens = int(
+            prompt_details.get("cached_tokens")
+            or usage.get("cached_tokens")
+            or usage.get("cache_read_input_tokens")
+            or 0
+        )
+        reasoning_tokens = int(
+            completion_details.get("reasoning_tokens")
+            or usage.get("reasoning_tokens")
+            or 0
+        )
         event = UsageEvent(
             llm_call_id=f"slide_llm_{uuid4().hex[:16]}",
             source_component="cosmic/slide-agent:1.0.0",
@@ -158,6 +174,8 @@ def _post_usage(*, model: str, data: dict[str, Any], placed_at: str, latency_ms:
             prompt_tokens=max(0, prompt_tokens),
             completion_tokens=max(0, completion_tokens),
             total_tokens=max(0, prompt_tokens) + max(0, completion_tokens),
+            cached_tokens=max(0, cached_tokens),
+            reasoning_tokens=max(0, reasoning_tokens),
             latency_ms=max(0, latency_ms),
             llm_call_placed_at=placed_at,
         )
