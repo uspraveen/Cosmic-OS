@@ -502,6 +502,9 @@ class ToolExecutor:
         if isinstance(input_artifacts, dict) and input_artifacts.get("error"):
             return input_artifacts
         if intent == "alpha.execute":
+            cross_fallback = tool_input.get("allow_cross_harness_fallback")
+            if cross_fallback is not None and "allow_cross_harness_fallback" not in payload:
+                payload["allow_cross_harness_fallback"] = cross_fallback
             input_artifacts = self._merge_artifact_descriptors(
                 input_artifacts or [],
                 context.parent_task.input_artifacts if context and context.parent_task else [],

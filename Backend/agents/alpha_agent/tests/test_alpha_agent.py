@@ -10,8 +10,10 @@ from agents.alpha_agent.codex_runner import CodexWorkspaceRunner
 from agents.alpha_agent.config import AlphaAgentConfig
 from agents.alpha_agent.cursor_runner import CursorRunResult, CursorWorkspaceRunner, normalize_cursor_model
 from agents.alpha_agent.docker_runner import DockerWorkspaceRunner
+from agents.alpha_agent.opencode_runner import OpenCodeRunResult
 from agents.alpha_agent.project_registry import ProjectRegistry
 from agents.alpha_agent.workspace_manager import WorkspaceManager
+from agents.alpha_agent.zcode_runner import ZcodeRunResult
 from shared.contracts import TaskEnvelope
 
 
@@ -625,6 +627,316 @@ def test_alpha_cross_provider_fallback_is_explicit_opt_in(tmp_path: Path) -> Non
 def test_alpha_unknown_harness_yields_no_candidates(tmp_path: Path) -> None:
     agent = AlphaAgent(_FakeRedis(), config=_config(tmp_path))
     assert agent._candidate_harnesses("claude-code", _task({"goal": "Anything."})) == []
+
+
+def _zcode_result(paths: object, *, stderr: str, returncode: int = 1) -> ZcodeRunResult:
+    artifacts = getattr(paths, "artifacts", None)
+    if artifacts is None:
+        artifacts = Path(str(paths)) / "artifacts"
+    artifacts = Path(str(artifacts))
+    artifacts.mkdir(parents=True, exist_ok=True)
+    return ZcodeRunResult(
+        returncode=returncode,
+        stdout="",
+        stderr=stderr,
+        timed_out=False,
+        command=["zcode"],
+        last_message_path=artifacts / "zcode-last-message.md",
+        last_message="",
+        duration_sec=0.5,
+        requested_model="glm-5.3-flash",
+    )
+
+
+async def _authenticated_status(provider: str) -> dict[str, object]:
+    del provider
+    return {
+        "status": "authenticated",
+        "preferred_model": "glm-5.3-flash",
+        "cli": {"authenticated": True},
+    }
+
+
+def test_alpha_is_rate_limit_failure_detection(tmp_path: Path) -> None:
+    agent = AlphaAgent(_FakeRedis(), config=_config(tmp_path))
+    rate_limited = _zcode_result(
+        tmp_path,
+        stderr="responseStatus: 429,\ntype: 'rate_limit_error'\nError: Turn execution failed",
+    )
+    generic = _zcode_result(tmp_path, stderr="boom: workspace exploded")
+
+    assert agent._is_rate_limit_failure(rate_limited)
+    assert not agent._is_rate_limit_failure(generic)
+    assert not agent._is_rate_limit_failure(None)
+
+
+def test_alpha_rotates_once_after_repeated_rate_limit_429s(tmp_path: Path) -> None:
+    redis = _FakeRedis()
+    agent = AlphaAgent(redis, config=_config(tmp_path))
+
+    class ZcodeThrottled:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, **kwargs: object) -> ZcodeRunResult:
+            self.calls += 1
+            return _zcode_result(
+                kwargs["paths"],
+                stderr="responseStatus: 429\ntype: 'rate_limit_error'",
+            )
+
+    class OpenCodeFinishes:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, **kwargs: object) -> OpenCodeRunResult:
+            self.calls += 1
+            paths = kwargs["paths"]
+            paths.artifacts.mkdir(parents=True, exist_ok=True)
+            output = paths.artifacts / "opencode-last-message.md"
+            output.write_text("OpenCode finished the edit.", encoding="utf-8")
+            return OpenCodeRunResult(
+                returncode=0,
+                stdout="",
+                stderr="",
+                timed_out=False,
+                command=["opencode"],
+                last_message_path=output,
+                last_message="OpenCode finished the edit.",
+                duration_sec=1.0,
+            )
+
+    class MustNotRun:
+        async def run(self, **kwargs: object) -> object:
+            del kwargs
+            raise AssertionError("Only the one-time rate-limit rotation harness may run.")
+
+    zcode = ZcodeThrottled()
+    opencode = OpenCodeFinishes()
+    agent.zcode_runner = zcode
+    agent.opencode_runner = opencode
+    agent.codex_runner = MustNotRun()
+    agent.cursor_runner = MustNotRun()
+    agent._fetch_provider_status = _authenticated_status
+
+    result = asyncio.run(
+        agent.handle_alpha_execute(
+            _task(
+                {
+                    "goal": "Update the portfolio site.",
+                    "preferred_harness": "zcode",
+                    "project_ref": "portfolio",
+                }
+            )
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.output["harness"] == "opencode"
+    assert zcode.calls == 2
+    assert opencode.calls == 1
+    assert "fallback_from" in result.output
+    assert "rate-limited" in str(result.output["fallback_from"].get("reason"))
+    assert any("alpha.harness_fallback" in str(event) for event in redis.events)
+    assert "fallback_hint" not in result.output
+
+
+def test_alpha_non_rate_limit_failure_stops_without_cross_provider(tmp_path: Path) -> None:
+    agent = AlphaAgent(_FakeRedis(), config=_config(tmp_path))
+
+    class ZcodeBroken:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, **kwargs: object) -> ZcodeRunResult:
+            self.calls += 1
+            return _zcode_result(kwargs["paths"], stderr="boom: workspace exploded")
+
+    class MustNotRun:
+        async def run(self, **kwargs: object) -> object:
+            del kwargs
+            raise AssertionError("Non-rate-limit failures must not switch providers.")
+
+    zcode = ZcodeBroken()
+    agent.zcode_runner = zcode
+    agent.opencode_runner = MustNotRun()
+    agent.codex_runner = MustNotRun()
+    agent.cursor_runner = MustNotRun()
+    agent._fetch_provider_status = _authenticated_status
+
+    result = asyncio.run(
+        agent.handle_alpha_execute(
+            _task(
+                {
+                    "goal": "Update the portfolio site.",
+                    "preferred_harness": "zcode",
+                    "project_ref": "portfolio",
+                }
+            )
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.error is not None and result.error.code == "ZCODE_EXECUTION_FAILED"
+    assert zcode.calls == 2
+    assert "fallback_hint" not in result.output
+
+
+def test_alpha_rate_limit_failure_without_rotation_carries_fallback_hint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ALPHA_RATE_LIMIT_ROTATION_FAILURES", "0")
+    agent = AlphaAgent(_FakeRedis(), config=_config(tmp_path))
+
+    class ZcodeThrottled:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, **kwargs: object) -> ZcodeRunResult:
+            self.calls += 1
+            return _zcode_result(
+                kwargs["paths"],
+                stderr="responseStatus: 429\ntype: 'rate_limit_error'",
+            )
+
+    class MustNotRun:
+        async def run(self, **kwargs: object) -> object:
+            del kwargs
+            raise AssertionError("Rotation is disabled; no other provider may run.")
+
+    agent.zcode_runner = ZcodeThrottled()
+    agent.opencode_runner = MustNotRun()
+    agent.codex_runner = MustNotRun()
+    agent.cursor_runner = MustNotRun()
+    agent._fetch_provider_status = _authenticated_status
+
+    result = asyncio.run(
+        agent.handle_alpha_execute(
+            _task(
+                {
+                    "goal": "Update the portfolio site.",
+                    "preferred_harness": "zcode",
+                    "project_ref": "portfolio",
+                }
+            )
+        )
+    )
+
+    assert result.status == "failed"
+    assert "fallback_hint" in result.output
+    assert "allow_cross_harness_fallback=true" in str(result.output["fallback_hint"])
+
+
+def test_alpha_rate_limit_rotation_respects_require_preferred_harness(tmp_path: Path) -> None:
+    agent = AlphaAgent(_FakeRedis(), config=_config(tmp_path))
+
+    class ZcodeThrottled:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, **kwargs: object) -> ZcodeRunResult:
+            self.calls += 1
+            return _zcode_result(
+                kwargs["paths"],
+                stderr="responseStatus: 429\ntype: 'rate_limit_error'",
+            )
+
+    class MustNotRun:
+        async def run(self, **kwargs: object) -> object:
+            del kwargs
+            raise AssertionError("require_preferred_harness must block the rotation.")
+
+    agent.zcode_runner = ZcodeThrottled()
+    agent.opencode_runner = MustNotRun()
+    agent.codex_runner = MustNotRun()
+    agent.cursor_runner = MustNotRun()
+    agent._fetch_provider_status = _authenticated_status
+
+    result = asyncio.run(
+        agent.handle_alpha_execute(
+            _task(
+                {
+                    "goal": "Update the portfolio site.",
+                    "preferred_harness": "zcode",
+                    "project_ref": "portfolio",
+                    "require_preferred_harness": True,
+                }
+            )
+        )
+    )
+
+    assert result.status == "failed"
+    assert "fallback_hint" not in result.output
+
+
+def test_alpha_explicit_cross_fallback_flag_still_rotates_per_plan(tmp_path: Path) -> None:
+    redis = _FakeRedis()
+    agent = AlphaAgent(redis, config=_config(tmp_path))
+
+    class ZcodeThrottled:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, **kwargs: object) -> ZcodeRunResult:
+            self.calls += 1
+            return _zcode_result(
+                kwargs["paths"],
+                stderr="responseStatus: 429\ntype: 'rate_limit_error'",
+            )
+
+    class OpenCodeFinishes:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, **kwargs: object) -> OpenCodeRunResult:
+            self.calls += 1
+            paths = kwargs["paths"]
+            paths.artifacts.mkdir(parents=True, exist_ok=True)
+            output = paths.artifacts / "opencode-last-message.md"
+            output.write_text("OpenCode finished the edit.", encoding="utf-8")
+            return OpenCodeRunResult(
+                returncode=0,
+                stdout="",
+                stderr="",
+                timed_out=False,
+                command=["opencode"],
+                last_message_path=output,
+                last_message="OpenCode finished the edit.",
+                duration_sec=1.0,
+            )
+
+    class MustNotRun:
+        async def run(self, **kwargs: object) -> object:
+            del kwargs
+            raise AssertionError("The plan allows only one cross-provider step.")
+
+    zcode = ZcodeThrottled()
+    opencode = OpenCodeFinishes()
+    agent.zcode_runner = zcode
+    agent.opencode_runner = opencode
+    agent.codex_runner = MustNotRun()
+    agent.cursor_runner = MustNotRun()
+    agent._fetch_provider_status = _authenticated_status
+
+    result = asyncio.run(
+        agent.handle_alpha_execute(
+            _task(
+                {
+                    "goal": "Update the portfolio site.",
+                    "preferred_harness": "zcode",
+                    "project_ref": "portfolio",
+                    "allow_cross_harness_fallback": True,
+                }
+            )
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.output["harness"] == "opencode"
+    assert zcode.calls == 2
+    assert opencode.calls == 1
+    assert "fallback_from" in result.output
+    assert "fallback_hint" not in result.output
 
 
 def test_alpha_large_goal_is_externalized_for_cli_prompt(tmp_path: Path) -> None:

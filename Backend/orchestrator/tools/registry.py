@@ -497,7 +497,11 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "input": {
                         "type": "object",
-                        "description": "Structured payload for the specialist intent. Keep it minimal and match the schema hints returned by agent_catalog_search. For alpha.execute, write a concise high-level goal and pass bulky files or parsed documents by artifact_ids/input_artifacts; if a document has a bundle_id, pass the source artifact reference so parsed bundle files can be staged. Let Alpha use its configured/auto harness (OpenCode is the VM default) unless the user explicitly requires one provider, and do not request cross-provider fallback unless the user has clearly allowed it. Alpha rotates away from providers that are unauthenticated, missing, or mid-update on its own — you do not need to plan for that.",
+                        "description": "Structured payload for the specialist intent. Keep it minimal and match the schema hints returned by agent_catalog_search. For alpha.execute, write a concise high-level goal and pass bulky files or parsed documents by artifact_ids/input_artifacts; if a document has a bundle_id, pass the source artifact reference so parsed bundle files can be staged. Let Alpha use its configured/auto harness (the VM-level Settings > Agents selection applies) unless the user explicitly requires one provider. Alpha rotates away from providers that are unauthenticated, missing, or mid-update on its own, and after repeated rate-limit (429) failures on one harness it rotates once to the next authenticated harness on its own. For any other provider switch, set allow_cross_harness_fallback=true inside this input object — but only when the user has clearly allowed continuation with a different authenticated provider; saying so in your reply without setting the flag does nothing.",
+                    },
+                    "allow_cross_harness_fallback": {
+                        "type": "boolean",
+                        "description": "Alpha-only convenience: when true, this value is injected into the alpha.execute input as allow_cross_harness_fallback (same as setting it inside `input`). Set it only when the user has clearly allowed continuation with a different authenticated provider, e.g. after a rate-limit failure and the user asked to use other providers.",
                     },
                     "agent_id": {
                         "type": "string",

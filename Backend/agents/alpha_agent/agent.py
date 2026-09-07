@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import os
 import re
 import shutil
 from dataclasses import replace
@@ -32,6 +33,18 @@ logger = logging.getLogger(__name__)
 # Canonical provider order: "auto" and cross-provider fallback resolve in
 # this order (OpenCode first — it is the COSMIC default harness).
 ALPHA_HARNESSES: tuple[str, ...] = ("opencode", "codex", "cursor", "zcode")
+
+# Provider-side rate limiting is the one failure mode where retrying the same
+# harness again cannot succeed: the upstream quota is spent for now. After
+# ALPHA_RATE_LIMIT_ROTATION_FAILURES consecutive rate-limited attempts on one
+# harness (default 2, 0 disables), Alpha rotates once to the next harness in
+# ALPHA_HARNESSES order — still skipped entirely when
+# require_preferred_harness=true. Every other post-failure provider switch
+# stays an explicit opt-in (allow_cross_harness_fallback).
+_RATE_LIMIT_FAILURE_PATTERN = re.compile(
+    r"\b429\b|rate[_ ]?limit|too many requests",
+    re.IGNORECASE,
+)
 
 
 class AlphaAgent(AgentRuntime):
@@ -295,14 +308,16 @@ class AlphaAgent(AgentRuntime):
         all_artifacts: list[Any] = []
         attempt_outputs: dict[str, Any] = {}
         fallback_from: dict[str, Any] | None = None
+        consecutive_rate_limit_failures = 0
+        rate_limit_rotation_used = False
         last_result: CodexRunResult | CursorRunResult | OpenCodeRunResult | ZcodeRunResult | None = None
         last_provider = candidate_harnesses[0]
         # Harnesses beyond the original attempt plan exist only so the
         # pre-execution auth walk can rotate to a logged-in provider when the
         # preferred one cannot run (unauthenticated / missing CLI /
-        # mid-update maintenance). They are never executed after a real
-        # failed run — post-failure cross-provider switching stays an
-        # explicit opt-in (allow_cross_harness_fallback).
+        # mid-update maintenance). After a real failed run they execute in
+        # only two cases: explicit opt-in (allow_cross_harness_fallback), or
+        # the one-time rotation after repeated rate-limit failures below.
         runnable_candidate_count = len(candidate_harnesses)
         candidate_harnesses.extend(
             item for item in ALPHA_HARNESSES if item not in candidate_harnesses
@@ -621,13 +636,35 @@ class AlphaAgent(AgentRuntime):
                     error=None,
                 )
 
-            if attempt_index + 1 >= min(len(candidate_harnesses), runnable_candidate_count):
-                break
+            if self._is_rate_limit_failure(run_result):
+                consecutive_rate_limit_failures += 1
+            else:
+                consecutive_rate_limit_failures = 0
             if not self._should_try_next_harness(run_result):
                 break
 
-            next_harness = candidate_harnesses[attempt_index + 1]
+            next_index = attempt_index + 1
             reason = self._failure_reason(active_harness, run_result)
+            if next_index >= min(len(candidate_harnesses), runnable_candidate_count):
+                rotation_index = self._rate_limit_rotation_index(
+                    task=task,
+                    candidate_harnesses=candidate_harnesses,
+                    active_harness=active_harness,
+                    attempt_index=attempt_index,
+                    consecutive_rate_limit_failures=consecutive_rate_limit_failures,
+                    rotation_used=rate_limit_rotation_used,
+                )
+                if rotation_index is None:
+                    break
+                next_index = rotation_index
+                rate_limit_rotation_used = True
+                reason = (
+                    f"{provider_label} was rate-limited on "
+                    f"{consecutive_rate_limit_failures} consecutive attempts; "
+                    "rotating once to the next authenticated harness."
+                )
+
+            next_harness = candidate_harnesses[next_index]
             await self._emit_harness_fallback(
                 task=task,
                 project_id=project.project_id,
@@ -644,7 +681,7 @@ class AlphaAgent(AgentRuntime):
                 "timed_out": run_result.timed_out,
                 "reason": reason,
             }
-            attempt_index += 1
+            attempt_index = next_index
 
         if self.step_plan is not None:
             await self.step_plan.update(5, "failed", f"{last_provider_label} execution failed.")
@@ -673,6 +710,20 @@ class AlphaAgent(AgentRuntime):
             failure.output = {
                 "retry_from" if fallback_from.get("retrying_same_provider") else "fallback_from": fallback_from,
                 "attempts": attempt_outputs,
+            }
+        if (
+            self._is_rate_limit_failure(last_result)
+            and not rate_limit_rotation_used
+            and not self._allow_cross_harness_fallback(task)
+            and not self._coerce_bool(task.input.get("require_preferred_harness"), default=False)
+        ):
+            failure.output = {
+                **(failure.output or {}),
+                "fallback_hint": (
+                    f"{self._harness_label(last_provider)} was rate-limited and no other provider was tried. "
+                    "Re-delegate alpha.execute with allow_cross_harness_fallback=true to continue on the "
+                    "next authenticated harness."
+                ),
             }
         return failure
 
@@ -1000,6 +1051,61 @@ class AlphaAgent(AgentRuntime):
         if getattr(result, "cancelled", False):
             return False
         return not result.ok
+
+    @staticmethod
+    def _is_rate_limit_failure(
+        result: CodexRunResult | CursorRunResult | OpenCodeRunResult | ZcodeRunResult | None,
+    ) -> bool:
+        if result is None or getattr(result, "timed_out", False) or getattr(result, "cancelled", False):
+            return False
+        combined = "\n".join(
+            str(getattr(result, attr, "") or "")
+            for attr in ("stderr", "stdout", "last_message")
+        )
+        return bool(_RATE_LIMIT_FAILURE_PATTERN.search(combined))
+
+    @staticmethod
+    def _rate_limit_rotation_threshold() -> int:
+        raw = os.getenv("ALPHA_RATE_LIMIT_ROTATION_FAILURES", "2")
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return 2
+        return max(0, value)
+
+    def _rate_limit_rotation_index(
+        self,
+        *,
+        task: TaskEnvelope,
+        candidate_harnesses: list[str],
+        active_harness: str,
+        attempt_index: int,
+        consecutive_rate_limit_failures: int,
+        rotation_used: bool,
+    ) -> int | None:
+        """One-time cross-harness rotation when the same provider rate-limited
+        every attempt. Returns the candidate index to run next, or None when
+        the run must stop — every other post-failure provider switch stays an
+        explicit opt-in (allow_cross_harness_fallback)."""
+        threshold = self._rate_limit_rotation_threshold()
+        if threshold == 0 or rotation_used:
+            return None
+        if self._allow_cross_harness_fallback(task):
+            # The attempt plan already carries an explicit cross-harness step;
+            # the rate-limit rotation must not extend it.
+            return None
+        if consecutive_rate_limit_failures < threshold:
+            return None
+        if self._coerce_bool(task.input.get("require_preferred_harness"), default=False):
+            return None
+        return next(
+            (
+                j
+                for j in range(attempt_index + 1, len(candidate_harnesses))
+                if candidate_harnesses[j] != active_harness
+            ),
+            None,
+        )
 
     def _failure_reason(self, provider: str, result: CodexRunResult | CursorRunResult | OpenCodeRunResult | ZcodeRunResult) -> str:
         if getattr(result, "cancelled", False):
