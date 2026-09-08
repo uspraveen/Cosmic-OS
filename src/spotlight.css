@@ -5094,6 +5094,44 @@ kbd {
   text-align: center;
 }
 
+.browser-run-card {
+  position: relative;
+  overflow: hidden;
+}
+
+/* Quiet identity mark for the card, in the same dot-matrix language as the
+   Alpha and Vault settings headers (field of dots + a masked glyph, two-pass
+   stroke for a soft glow under a crisp line) — scaled down and kept low-
+   opacity since this card's actual content is the live screenshot, not the
+   mark. Sits behind the head row, bleeding off the top-right corner. */
+.browser-run-mark {
+  position: absolute;
+  top: -16px;
+  right: -14px;
+  width: 108px;
+  height: 84px;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.55;
+  transition: opacity 500ms ease;
+}
+
+.browser-run-mark.is-live {
+  animation: browser-run-mark-breathe 4.4s ease-in-out infinite;
+}
+
+@keyframes browser-run-mark-breathe {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 0.85; }
+}
+
+.browser-run-card .slide-build-head,
+.browser-run-card .slide-build-main,
+.browser-run-card .browser-run-interrupt {
+  position: relative;
+  z-index: 1;
+}
+
 .browser-run-live-frame {
   position: relative;
   flex: 0 0 220px;

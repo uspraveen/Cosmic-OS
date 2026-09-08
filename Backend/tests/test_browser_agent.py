@@ -95,7 +95,143 @@ def test_credentials_from_auth(browser_agent):
 def test_classify_ask_user_kind(browser_agent):
     assert browser_agent._classify_ask_user_kind("Please enter your password to continue.") == "password"
     assert browser_agent._classify_ask_user_kind("What is the verification code sent to your phone?") == "verification_code"
-    assert browser_agent._classify_ask_user_kind("I see a CAPTCHA — can you solve it and tell me when done?") == "generic"
+    # "tell me when done" is a confirm signal (button, nothing to type) and is
+    # checked ahead of "captcha" (blocked) since it pins down the actual
+    # widget — see _classify_ask_user_kind's docstring. This fallback only
+    # runs when the model itself doesn't declare a kind on its AskUser call.
+    assert browser_agent._classify_ask_user_kind("I see a CAPTCHA — can you solve it and tell me when done?") == "confirm"
+    assert browser_agent._classify_ask_user_kind("This page shows a CAPTCHA I can't solve.") == "blocked"
+    assert browser_agent._classify_ask_user_kind("Which of these two shipping addresses should I use?") == "generic"
+
+
+class _FakeAskUserResponse:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _FakeAskUserClient:
+    """Stand-in for the shared httpx.AsyncClient: records the request body
+    the bridge posted and returns a scripted response."""
+
+    def __init__(self, response_payload: dict):
+        self._response_payload = response_payload
+        self.last_request: dict | None = None
+
+    async def post(self, url: str, *, json: dict, headers: dict, timeout: float):
+        self.last_request = json
+        return _FakeAskUserResponse(self._response_payload)
+
+
+def test_ask_user_bridge_prefers_model_declared_kind_over_keywords(browser_agent):
+    """A model_kind the browser agent recognizes wins even when the question
+    text itself would keyword-classify differently — the model already knows
+    why it's asking, which beats guessing from the question after the fact."""
+    import asyncio
+
+    browser_agent._http_client = _FakeAskUserClient({"status": "answered", "answer": "yes, continue"})
+    live_state: dict = {}
+    interrupt_log: list = []
+
+    answer = asyncio.run(
+        browser_agent._ask_user_bridge(
+            _task({"goal": "g"}),
+            "Please enter your password to continue.",  # keyword-classifies as "password"
+            "confirm",  # but the model says this is really a confirm
+            live_state,
+            interrupt_log,
+        )
+    )
+    assert answer == "yes, continue"
+    assert interrupt_log[-1]["kind"] == "confirm"
+    assert interrupt_log[-1]["status"] == "answered"
+    # Non-secret kinds keep the answer text for the orchestrator's post-hoc view.
+    assert interrupt_log[-1]["answer"] == "yes, continue"
+    assert browser_agent._http_client.last_request["kind"] == "confirm"
+
+
+def test_ask_user_bridge_falls_back_to_keyword_classifier(browser_agent):
+    """An empty/unrecognized model_kind (older bridge, or the model skipped
+    the field) must not break anything — falls back to the keyword sniff."""
+    import asyncio
+
+    browser_agent._http_client = _FakeAskUserClient({"status": "answered", "answer": "123456"})
+    live_state: dict = {}
+    interrupt_log: list = []
+
+    asyncio.run(
+        browser_agent._ask_user_bridge(
+            _task({"goal": "g"}),
+            "What is the verification code sent to your phone?",
+            "",  # nothing declared
+            live_state,
+            interrupt_log,
+        )
+    )
+    assert interrupt_log[-1]["kind"] == "verification_code"
+
+    interrupt_log.clear()
+    asyncio.run(
+        browser_agent._ask_user_bridge(
+            _task({"goal": "g"}),
+            "What is the verification code sent to your phone?",
+            "not_a_real_kind",  # unrecognized value
+            live_state,
+            interrupt_log,
+        )
+    )
+    assert interrupt_log[-1]["kind"] == "verification_code"
+
+
+def test_ask_user_bridge_redacts_secret_answers(browser_agent):
+    """password/verification_code answers must never land in interrupt_log —
+    only that an answer was provided — since that log is surfaced to the
+    orchestrator via user_interrupts."""
+    import asyncio
+
+    browser_agent._http_client = _FakeAskUserClient({"status": "answered", "answer": "hunter2"})
+    live_state: dict = {}
+    interrupt_log: list = []
+
+    asyncio.run(
+        browser_agent._ask_user_bridge(
+            _task({"goal": "g"}), "Password please?", "password", live_state, interrupt_log
+        )
+    )
+    assert interrupt_log[-1]["status"] == "answered"
+    assert "answer" not in interrupt_log[-1]
+
+
+def test_ask_user_bridge_logs_skip_and_timeout(browser_agent):
+    import asyncio
+
+    live_state: dict = {}
+
+    browser_agent._http_client = _FakeAskUserClient({"status": "skipped"})
+    interrupt_log: list = []
+    with pytest.raises(RuntimeError, match="skipped"):
+        asyncio.run(
+            browser_agent._ask_user_bridge(
+                _task({"goal": "g"}), "Anything else?", "generic", live_state, interrupt_log
+            )
+        )
+    assert interrupt_log[-1]["status"] == "skipped"
+    assert "answer" not in interrupt_log[-1]
+
+    browser_agent._http_client = _FakeAskUserClient({"status": "timeout"})
+    interrupt_log = []
+    with pytest.raises(RuntimeError, match="No response"):
+        asyncio.run(
+            browser_agent._ask_user_bridge(
+                _task({"goal": "g"}), "Anything else?", "generic", live_state, interrupt_log
+            )
+        )
+    assert interrupt_log[-1]["status"] == "timeout"
 
 
 def test_attach_progress_screenshot_copies_and_stamps_artifact(browser_agent, tmp_path):

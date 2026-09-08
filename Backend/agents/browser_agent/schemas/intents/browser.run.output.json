@@ -31,6 +31,28 @@
       }
     },
     "next_action": {"type": "string"},
-    "credential_hint": {"type": "string"}
+    "credential_hint": {"type": "string"},
+    "user_interrupts": {
+      "type": "array",
+      "description": "Every AskUser question raised mid-run and its outcome, for post-hoc visibility only — these were resolved directly between the browser agent and the desktop, not by the orchestrator. Answers to password/verification_code questions are never included, only whether one was provided.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "question": {"type": "string"},
+          "kind": {
+            "type": "string",
+            "enum": ["password", "verification_code", "confirm", "blocked", "generic"]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["answered", "skipped", "timeout", "empty_answer", "error"]
+          },
+          "answer": {
+            "type": "string",
+            "description": "Present only for non-secret kinds (confirm/blocked/generic) that were answered; truncated to 200 chars."
+          }
+        }
+      }
+    }
   }
 }

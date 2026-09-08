@@ -1,5 +1,5 @@
 import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, Mail, Maximize2, Mic, Minimize2, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
-import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -408,7 +408,7 @@ interface BrowserProgressScreenshot {
 interface BrowserProgressInterrupt {
   requestId: string
   question: string
-  kind: 'password' | 'verification_code' | 'generic'
+  kind: 'password' | 'verification_code' | 'confirm' | 'blocked' | 'generic'
   status: 'pending' | 'answered' | 'skipped'
 }
 
@@ -1810,7 +1810,10 @@ const normalizeBrowserProgress = (value: unknown): BrowserProgressState | undefi
     ? {
         requestId,
         question,
-        kind: interruptRaw?.kind === 'password' || interruptRaw?.kind === 'verification_code'
+        kind: interruptRaw?.kind === 'password'
+          || interruptRaw?.kind === 'verification_code'
+          || interruptRaw?.kind === 'confirm'
+          || interruptRaw?.kind === 'blocked'
           ? interruptRaw.kind
           : 'generic',
         status: interruptRaw?.status === 'answered' || interruptRaw?.status === 'skipped'
@@ -2114,7 +2117,67 @@ const formatBrowserUrl = (url?: string | null): string => {
 const BROWSER_INTERRUPT_KIND_LABEL: Record<BrowserProgressInterrupt['kind'], string> = {
   password: 'Password requested',
   verification_code: 'Verification code needed',
+  confirm: 'Waiting on you',
+  blocked: 'Stuck — needs help',
   generic: 'Needs your input',
+}
+
+/** Quiet dot-matrix identity mark for the live browser card — same technique
+ * as the Alpha/Vault settings headers (a field of dots, faded by a gradient
+ * mask, plus a second full-opacity pass masked to a glyph silhouette with a
+ * soft blurred glow under a crisp line), scaled down to a corner watermark
+ * and given a slow breathe while the run is actually live, so the same
+ * identity mark used elsewhere in the app also carries a hint of activity
+ * here instead of being purely decorative. */
+const BrowserRunMark = ({ live }: { live?: boolean }) => {
+  // Multiple browser cards can be on screen at once (several messages, or
+  // the same run mirrored into the Tasks panel) — SVG def ids are global to
+  // the document, so each instance needs its own to avoid one card's mask
+  // silently borrowing another's.
+  const uid = useId()
+  const dotGridId = `browserDotGrid-${uid}`
+  const fieldFadeId = `browserFieldFade-${uid}`
+  const fieldMaskId = `browserFieldMask-${uid}`
+  const dotBlurId = `browserDotBlur-${uid}`
+  const glyphMaskId = `browserGlyphMask-${uid}`
+  return (
+    <div className={`browser-run-mark${live ? ' is-live' : ''}`} aria-hidden="true">
+      <svg width="108" height="84" viewBox="0 0 108 84" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <pattern id={dotGridId} width="3" height="3" patternUnits="userSpaceOnUse">
+            <circle cx="1.5" cy="1.5" r="0.95" fill="#fff" />
+          </pattern>
+          <linearGradient id={fieldFadeId} x1="0.15" y1="0" x2="0.85" y2="1">
+            <stop offset="0.1" stopColor="#000" />
+            <stop offset="0.7" stopColor="#fff" />
+          </linearGradient>
+          <mask id={fieldMaskId} maskUnits="userSpaceOnUse" x="0" y="0" width="108" height="84">
+            <rect width="108" height="84" fill={`url(#${fieldFadeId})`} />
+          </mask>
+          <filter id={dotBlurId} x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="0.8" />
+          </filter>
+          <mask id={glyphMaskId} maskUnits="userSpaceOnUse" x="0" y="0" width="108" height="84">
+            <rect width="108" height="84" fill="#000" />
+            <g transform="translate(62 14) scale(1.7)" stroke="#fff" strokeLinecap="round" strokeLinejoin="round" fill="none">
+              <g strokeWidth="2.2" filter={`url(#${dotBlurId})`}>
+                <circle cx="12" cy="12" r="9" />
+                <path d="M3 12h18" />
+                <path d="M12 3c2.75 2.45 4.3 5.6 4.3 9s-1.55 6.55-4.3 9c-2.75-2.45-4.3-5.6-4.3-9S9.25 5.45 12 3Z" />
+              </g>
+              <g strokeWidth="1">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M3 12h18" />
+                <path d="M12 3c2.75 2.45 4.3 5.6 4.3 9s-1.55 6.55-4.3 9c-2.75-2.45-4.3-5.6-4.3-9S9.25 5.45 12 3Z" />
+              </g>
+            </g>
+          </mask>
+        </defs>
+        <rect width="108" height="84" fill={`url(#${dotGridId})`} opacity="0.16" mask={`url(#${fieldMaskId})`} />
+        <rect width="108" height="84" fill={`url(#${dotGridId})`} mask={`url(#${glyphMaskId})`} />
+      </svg>
+    </div>
+  )
 }
 
 const BrowserRunCard = ({
@@ -2195,8 +2258,33 @@ const BrowserRunCard = ({
     }
   }
 
+  // "confirm" interrupts ask the agent to wait for something the user does
+  // outside the chat entirely (approve sign-in on a phone, solve a captcha
+  // by hand) — there's nothing to type, just a single button to say it's
+  // done. Reuses the same answer bridge with a canned acknowledgment rather
+  // than adding a parallel resolution path for one card variant.
+  const confirmDone = async () => {
+    if (!requestId || busy) return
+    setBusy('answer')
+    setError('')
+    try {
+      const bridge = window.cosmic?.browserRespondInterrupt
+      if (!bridge) throw new Error('Browser answer action is unavailable.')
+      const result = await bridge(requestId, 'Done')
+      if (String(result?.status || '').trim() === 'ignored') {
+        throw new Error('This question was already answered or timed out.')
+      }
+      setLocalStatus('answered')
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Action failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
     <div className={`slide-build-card browser-run-card${streaming ? ' streaming' : ''}`} role="status" aria-live="polite">
+      <BrowserRunMark live={streaming} />
       <div className="slide-build-head">
         <span className="docs-progress-kicker">
           <Globe size={12} aria-hidden style={{ marginRight: 5, verticalAlign: -2 }} />
@@ -2241,7 +2329,19 @@ const BrowserRunCard = ({
               <div className={`assistant-action-card-status is-${localStatus}`}>{localStatus}</div>
             </div>
           </div>
-          {isAwaitingInput ? (
+          {isAwaitingInput && interrupt.kind === 'confirm' ? (
+            <>
+              {error && <div className="assistant-action-card-error">{error}</div>}
+              <div className="assistant-action-card-actions">
+                <button type="button" className="assistant-action-button" disabled={Boolean(busy)} onClick={() => void skip()}>
+                  {busy === 'skip' ? 'Skipping…' : 'Skip'}
+                </button>
+                <button type="button" className="assistant-action-button is-primary" disabled={Boolean(busy)} onClick={() => void confirmDone()}>
+                  {busy === 'answer' ? 'Continuing…' : 'Done — continue'}
+                </button>
+              </div>
+            </>
+          ) : isAwaitingInput ? (
             <>
               <div className="assistant-action-card-form">
                 <label>

@@ -48,13 +48,62 @@ _SCREENSHOT_MIME_BY_SUFFIX = {
     ".webp": "image/webp",
 }
 
-# Cheap keyword sniff on the AskUser question text — cosmetic only, drives
-# whether the desktop card shows a masked password input, a plain text input,
-# or a generic one. Mirrors the wording cosmic-browser-use's own credential
-# governor uses (main.py:_detect_credential_handoff_reason) so the two stay
-# in sync without importing across the repo boundary.
+# Cheap keyword sniff on the AskUser question text — deterministic, no LLM
+# call and no extra context on any model anywhere (cosmic-browser-use's own
+# internal model just keeps calling one generic AskUser(question); this is
+# pure post-hoc string matching in Python). Picks which of a small, fixed set
+# of desktop card templates (kind -> widget, see BrowserRunCard on the
+# frontend) fits the question, always falling back to a plain text field
+# (`generic`) when nothing matches — so an unrecognized phrasing degrades to
+# today's behavior rather than breaking.
+#
+# `password`/`verification_code` mirror the wording cosmic-browser-use's own
+# credential governor uses (main.py:_detect_credential_handoff_reason) so the
+# two stay in sync without importing across the repo boundary.
 _PASSWORD_HINT_WORDS = ("password",)
 _CODE_HINT_WORDS = ("verification code", "security code", "one-time code", "otp", "mfa", "2fa")
+# `confirm`: nothing to type — the user does something themselves (approve on
+# a phone, sign in in another window, solve a puzzle) and just acknowledges
+# it. These get a single "Done — continue" button instead of a text field.
+_CONFIRM_HINT_PHRASES = (
+    "let me know when",
+    "let me know once",
+    "once you've",
+    "once you have",
+    "as soon as you",
+    "when you're done",
+    "when you are done",
+    "when it's done",
+    "when that's done",
+    "reply that it's done",
+    "reply that you're done",
+    "tell me when",
+    "reply when",
+    "reply once",
+    "approve this sign-in",
+    "approve the sign-in",
+    "confirm on your phone",
+    "on your phone",
+)
+# `blocked`: a CAPTCHA/bot-check/manual-verification wall the agent
+# explicitly cannot solve itself. Same free-text widget as `generic` (there's
+# nothing more actionable to offer without full remote control of the
+# browser, which this deliberately doesn't do) — just distinct card copy so
+# the user understands why they're being asked instead of it looking like a
+# stuck run.
+_BLOCKED_HINT_PHRASES = (
+    "captcha",
+    "bot check",
+    "not a robot",
+    "verify you're human",
+    "verify you are human",
+    "sign in to confirm",
+    "not allowed to bypass",
+    "cannot bypass",
+    "can't bypass",
+    "blocked by",
+    "security check",
+)
 
 # Live view frame rate cap. CDP pushes a frame on every repaint, which can be
 # much faster than this during animations — we drop frames rather than slow
@@ -153,12 +202,21 @@ class BrowserAgent(AgentRuntime):
         # otherwise the live screenshot would blink out while a question is
         # pending. Mirrors the Slide Agent's LiveDeckProgress accumulator.
         live_state: dict[str, Any] = {}
+        # Every AskUser question this run makes, with its outcome — surfaced
+        # to the orchestrator in the final result (see `user_interrupts`
+        # below) so it has full knowledge of what its specialist needed from
+        # the user, even though it isn't in the loop for resolving any of
+        # them in real time (that happens directly between the browser agent
+        # and the desktop — see _ask_user_bridge). Secrets (password/
+        # verification_code answers) are never included, only whether one
+        # was provided.
+        interrupt_log: list[dict[str, Any]] = []
 
         async def on_progress(info: dict[str, Any]) -> None:
             await self._on_run_progress(task, info, live_state)
 
-        async def ask_user_handler(question: str) -> str:
-            return await self._ask_user_bridge(task, question, live_state)
+        async def ask_user_handler(question: str, model_kind: str) -> str:
+            return await self._ask_user_bridge(task, question, model_kind, live_state, interrupt_log)
 
         live_frame_last_sent = {"at": 0.0}
 
@@ -231,6 +289,13 @@ class BrowserAgent(AgentRuntime):
             "duration_sec": result.get("duration_sec"),
             "run_dir": run_dir,
         }
+        if interrupt_log:
+            # Post-hoc visibility only — the orchestrator was never in the
+            # real-time loop for any of these (they're resolved directly
+            # between the browser agent and the desktop). This lets it know
+            # what its specialist needed from the user and how that went,
+            # e.g. to explain an "incomplete" status or follow up on a skip.
+            output["user_interrupts"] = interrupt_log
         if needs_credentials:
             output["needs_credentials"] = needs_credentials
             output["next_action"] = "provision_credentials"
@@ -716,18 +781,33 @@ class BrowserAgent(AgentRuntime):
 
     @staticmethod
     def _classify_ask_user_kind(question: str) -> str:
+        """Picks a card template for this AskUser question. Order matters:
+        password/code checks are most specific (never want to mistake either
+        for a plain confirmation), confirm is checked before blocked because
+        it pins down the actual widget (button vs. text) while blocked is
+        only about framing/copy on the same text widget generic uses."""
         lowered = question.lower()
         if any(word in lowered for word in _PASSWORD_HINT_WORDS):
             return "password"
         if any(word in lowered for word in _CODE_HINT_WORDS):
             return "verification_code"
+        if any(phrase in lowered for phrase in _CONFIRM_HINT_PHRASES):
+            return "confirm"
+        if any(phrase in lowered for phrase in _BLOCKED_HINT_PHRASES):
+            return "blocked"
         return "generic"
+
+    # Recognized card templates (see BrowserRunCard on the frontend). Must
+    # match cosmic-browser-use's own _ASK_USER_MODEL_KINDS + "password".
+    _KNOWN_ASK_USER_KINDS = {"password", "verification_code", "confirm", "blocked", "generic"}
 
     async def _ask_user_bridge(
         self,
         task: TaskEnvelope,
         question: str,
+        model_kind: str,
         live_state: dict[str, Any],
+        interrupt_log: list[dict[str, Any]],
     ) -> str:
         """Bridges cosmic-browser-use's AskUser action to the desktop.
 
@@ -737,10 +817,24 @@ class BrowserAgent(AgentRuntime):
         otherwise one-way task.progress live-view channel — everything else
         (OTP, CAPTCHA, phone-approval, ambiguous forms) already funnels
         through this single AskUser action on the cosmic-browser-use side.
+
+        `model_kind` is cosmic-browser-use's own hint for which card fits —
+        set by its model when it decides to ask, or deterministically by its
+        credential governor for password/OTP fields. Trusted first, since
+        the agent already knows why it's asking; that beats us re-guessing
+        intent from the question text after the fact. The keyword classifier
+        (_classify_ask_user_kind) only runs as a fallback when this is
+        missing or not a value we recognize, so nothing breaks if a model
+        skips the field or an older bridge doesn't set it.
         """
         question = str(question or "").strip()
         request_id = f"bwi_{uuid4().hex[:12]}"
-        kind = self._classify_ask_user_kind(question)
+        normalized_model_kind = str(model_kind or "").strip().lower()
+        kind = (
+            normalized_model_kind
+            if normalized_model_kind in self._KNOWN_ASK_USER_KINDS
+            else self._classify_ask_user_kind(question)
+        )
         timeout_sec = max(5.0, float(self.config.ask_user_wait_sec))
 
         live_state["interrupt"] = {
@@ -754,6 +848,12 @@ class BrowserAgent(AgentRuntime):
         async def _clear_interrupt() -> None:
             live_state.pop("interrupt", None)
             await self._emit_progress(task.task_id, "", browser_progress=dict(live_state))
+
+        # Recorded for the orchestrator's post-hoc visibility (see
+        # `user_interrupts` in handle_browser_run) regardless of outcome.
+        # Secret-bearing kinds never carry the actual answer text — only
+        # whether one was provided.
+        log_entry: dict[str, Any] = {"question": question, "kind": kind}
 
         try:
             response = await self._http_client.post(
@@ -773,6 +873,8 @@ class BrowserAgent(AgentRuntime):
             result = response.json()
         except Exception as exc:
             await _clear_interrupt()
+            log_entry["status"] = "error"
+            interrupt_log.append(log_entry)
             raise RuntimeError(f"Could not reach the user for this question: {exc}") from exc
 
         await _clear_interrupt()
@@ -780,10 +882,20 @@ class BrowserAgent(AgentRuntime):
         if status == "answered":
             answer = str(result.get("answer") or "").strip()
             if answer:
+                log_entry["status"] = "answered"
+                if kind not in ("password", "verification_code"):
+                    log_entry["answer"] = answer[:200]
+                interrupt_log.append(log_entry)
                 return answer
+            log_entry["status"] = "empty_answer"
+            interrupt_log.append(log_entry)
             raise RuntimeError("The user submitted an empty answer.")
         if status == "skipped":
+            log_entry["status"] = "skipped"
+            interrupt_log.append(log_entry)
             raise RuntimeError("The user skipped this question — continue without it if possible.")
+        log_entry["status"] = "timeout"
+        interrupt_log.append(log_entry)
         raise RuntimeError(f"No response from the user within {int(timeout_sec)}s.")
 
     @staticmethod

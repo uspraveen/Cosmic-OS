@@ -568,7 +568,10 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "browser_credential_request and call browser_task again with the resulting credential_ref. Consider "
                 "browser_recall_session first if the user is asking about a site you likely already browsed this "
                 "session. Runs can take minutes; an in_progress response is normal — poll again with the same "
-                "idempotency key."
+                "idempotency key. The result may include user_interrupts: every question the agent asked the user "
+                "mid-run (OTP, bot check, ambiguous form choice) and how it was resolved — you were not in that "
+                "loop in real time, but this tells you what happened so you can explain an incomplete/failed status "
+                "or follow up if the user skipped something you need."
             ),
             "input_schema": {
                 "type": "object",
