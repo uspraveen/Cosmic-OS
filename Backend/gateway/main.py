@@ -16,6 +16,7 @@ from .memory.routes import router as memory_router
 from .preferences.routes import router as preferences_router
 from .runtime import GatewayRuntime
 from .usage.routes import router as usage_router
+from .vault.routes import router as vault_router
 from .wishlist.routes import router as wishlist_router
 from .tool_opportunities.routes import router as tool_opportunities_router
 
@@ -69,6 +70,7 @@ app.include_router(github_router)
 app.include_router(memory_router)
 app.include_router(preferences_router)
 app.include_router(usage_router)
+app.include_router(vault_router)
 app.include_router(wishlist_router)
 app.include_router(tool_opportunities_router)
 

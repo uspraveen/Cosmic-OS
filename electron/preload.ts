@@ -176,6 +176,20 @@ contextBridge.exposeInMainWorld('cosmic', {
   authorizeMobileDevice: (deviceId: string) => ipcRenderer.invoke('gateway:authorize-mobile-device', deviceId),
   revokeMobileDevice: (deviceId: string) => ipcRenderer.invoke('gateway:revoke-mobile-device', deviceId),
   revokeAllMobileDevices: () => ipcRenderer.invoke('gateway:revoke-all-mobile-devices'),
+
+  // --- PASSWORD VAULT ---
+  vaultListEntries: () => ipcRenderer.invoke('vault:list-entries'),
+  vaultCreateEntry: (payload: any) => ipcRenderer.invoke('vault:create-entry', payload),
+  vaultUpdateEntry: (entryId: string, payload: any) => ipcRenderer.invoke('vault:update-entry', entryId, payload),
+  vaultDeleteEntry: (entryId: string) => ipcRenderer.invoke('vault:delete-entry', entryId),
+  vaultRevealPassword: (entryId: string) => ipcRenderer.invoke('vault:reveal-password', entryId),
+  vaultTotpCode: (entryId: string) => ipcRenderer.invoke('vault:totp-code', entryId),
+  vaultSetPolicy: (entryId: string, payload: any) => ipcRenderer.invoke('vault:set-policy', entryId, payload),
+  vaultGetEntry: (entryId: string) => ipcRenderer.invoke('vault:get-entry', entryId),
+  vaultListAudit: () => ipcRenderer.invoke('vault:list-audit'),
+  vaultListPending: () => ipcRenderer.invoke('vault:list-pending'),
+  vaultApprovePending: (requestId: string) => ipcRenderer.invoke('vault:approve-pending', requestId),
+  vaultRejectPending: (requestId: string) => ipcRenderer.invoke('vault:reject-pending', requestId),
   onGatewayEvent: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('gateway:event', listener)

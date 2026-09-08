@@ -47,6 +47,7 @@ from .event_automation_store import EventAutomationStore
 from .gmail_approval_store import GmailApprovalStore
 from .gmail_context_store import GmailContextStore
 from .sandbox_permission_store import SandboxPermissionStore
+from .vault.store import VaultStore, decrypt_entry_secrets
 from .slide_workflow_choice_store import SlideWorkflowChoiceStore
 from .memory import MemoryWriteAuditStore
 from .memory.client import (
@@ -505,6 +506,7 @@ class GatewayRuntime:
         self.gmail_context_store = GmailContextStore(config.gmail_context_db_path)
         self.gmail_approval_store = GmailApprovalStore(config.gmail_approvals_db_path)
         self.sandbox_permission_store = SandboxPermissionStore(config.sandbox_permissions_db_path)
+        self.vault_store = VaultStore(config.vault_db_path)
         self.slide_workflow_choice_store = SlideWorkflowChoiceStore(
             config.slide_workflow_choices_db_path
         )
@@ -656,6 +658,7 @@ class GatewayRuntime:
         self.gmail_context_store.initialize()
         self.gmail_approval_store.initialize()
         self.sandbox_permission_store.initialize()
+        self.vault_store.initialize()
         self.slide_workflow_choice_store.initialize()
         self.event_automation_store.initialize()
         self.scheduler_store.initialize(
@@ -5108,6 +5111,236 @@ class GatewayRuntime:
             name=f"sandbox-permission-update-{permission_id}",
         )
         return {"status": "rejected", "permission": rejected}
+
+    # ── Password vault approval flow ────────────────────────────────────────
+
+    def _vault_request_response_block(self, pending: dict[str, Any]) -> dict[str, Any]:
+        payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
+        status = self._safe_text(pending.get("status")) or "pending"
+        request_id = self._safe_text(pending.get("request_id")) or ""
+        title = self._safe_text(payload.get("title"))
+        entry_id = self._safe_text(pending.get("entry_id"))
+        if not title and entry_id:
+            entry = self.vault_store.get_entry(entry_id) or {}
+            title = self._safe_text(entry.get("title"))
+        return {
+            "id": f"vault_request:{request_id}",
+            "type": "vault_permission_request",
+            "request_id": request_id,
+            "action": self._safe_text(pending.get("action")) or "use_entry",
+            "entry_id": entry_id,
+            "title": title,
+            "username": self._safe_text(payload.get("username")),
+            "site_domain": self._safe_text(payload.get("site_domain")),
+            "purpose": self._safe_text(pending.get("purpose")),
+            "status": status,
+            "can_respond": status == "pending",
+            "created_at": self._safe_text(pending.get("created_at")),
+        }
+
+    async def _publish_vault_request_block(self, pending: dict[str, Any]) -> None:
+        block = self._vault_request_response_block(pending)
+        request_id = self._safe_text(pending.get("request_id")) or ""
+        self._persist_response_action_status(
+            approval_id=request_id,
+            block_type="vault_permission_request",
+            status=self._safe_text(block.get("status")) or "pending",
+        )
+        self._persist_response_action_block(block)
+        await self._publish_response_action_update(response_block=block)
+
+    async def _publish_vault_notification(self, pending: dict[str, Any]) -> None:
+        payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
+        request_id = self._safe_text(pending.get("request_id")) or ""
+        action = self._safe_text(pending.get("action")) or "use_entry"
+        if action == "add_entry":
+            summary = f"Cosmic wants to save credentials for {payload.get('title') or 'a site'} in your vault"
+        else:
+            summary = f"Cosmic wants to use your saved login for {payload.get('title') or 'a site'}"
+        event = {
+            "type": "vault.notification",
+            "kind": "approval",
+            "event_type": "vault.approval",
+            "notification_id": f"vault:request:{request_id}",
+            "request_id": request_id,
+            "summary": summary,
+            "tab": "chat",
+            "timestamp": utcnow_iso(),
+        }
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            try:
+                await adapter.broadcast_all(event)
+            except Exception:
+                logger.exception("gateway.vault.broadcast_failed platform=%s", adapter.platform)
+        self._schedule_mobile_push(
+            session_id=self._safe_text(pending.get("session_id")) or None,
+            origin_channel="vault",
+            event_type="vault.approval",
+            title="Vault approval needed",
+            body=summary,
+            screen="chat",
+            priority="high",
+            data={"type": "vault.approval", "request_id": request_id, "screen": "chat"},
+        )
+
+    async def create_vault_pending_and_notify(self, item: dict[str, Any]) -> dict[str, Any]:
+        pending = self.vault_store.create_pending(item)
+        await self._publish_vault_request_block(pending)
+        await self._publish_vault_notification(pending)
+        return pending
+
+    async def approve_vault_request(self, request_id: str) -> dict[str, Any]:
+        pending = self.vault_store.get_pending(request_id)
+        if not pending:
+            raise ValueError("Vault request not found.")
+        status = self._safe_text(pending.get("status"))
+        if status != "pending":
+            return {
+                "status": "ignored",
+                "request": pending,
+                "reason": f"request_is_{status or 'unknown'}",
+            }
+        action = self._safe_text(pending.get("action")) or "use_entry"
+        payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
+        entry_id = self._safe_text(pending.get("entry_id")) or None
+        task_id = self._safe_text(pending.get("task_id"))
+        if action == "add_entry":
+            entry = self.vault_store.add_entry(
+                {
+                    "title": payload.get("title"),
+                    "site_url": payload.get("site_url"),
+                    "username": payload.get("username"),
+                    "password_encrypted": payload.get("password_encrypted"),
+                    "totp_seed_encrypted": payload.get("totp_seed_encrypted"),
+                    "notes_encrypted": payload.get("notes_encrypted"),
+                    "tags": payload.get("tags") or [],
+                    "source": "agent",
+                    "created_by_task_id": task_id,
+                }
+            )
+            entry_id = entry.get("entry_id")
+        approved = self.vault_store.mark_pending(request_id, "approved")
+        if entry_id:
+            self.vault_store.append_audit(
+                entry_id,
+                "user",
+                "save_approved" if action == "add_entry" else "use_approved",
+                task_id,
+            )
+        if approved:
+            await self._publish_vault_request_block({**approved, "status": "approved"})
+            self._schedule_background_task(
+                self._continue_turn_after_vault({**approved, "status": "approved"}),
+                name=f"vault-continuation-{request_id}",
+            )
+        return {"status": "approved", "request": approved, "entry_id": entry_id}
+
+    async def reject_vault_request(self, request_id: str, *, note: str | None = None) -> dict[str, Any]:
+        pending = self.vault_store.get_pending(request_id)
+        if not pending:
+            raise ValueError("Vault request not found.")
+        status = self._safe_text(pending.get("status"))
+        if status != "pending":
+            return {
+                "status": "ignored",
+                "request": pending,
+                "reason": f"request_is_{status or 'unknown'}",
+            }
+        rejected = self.vault_store.mark_pending(request_id, "rejected")
+        if rejected:
+            self.vault_store.append_audit(
+                self._safe_text(rejected.get("entry_id")),
+                "user",
+                "request_rejected",
+                self._safe_text(rejected.get("task_id")),
+                result="rejected",
+                detail=note,
+            )
+            await self._publish_vault_request_block(rejected)
+        return {"status": "rejected", "request": rejected}
+
+    def _compose_vault_continuation_query(self, pending: dict[str, Any]) -> str:
+        action = self._safe_text(pending.get("action")) or "use_entry"
+        payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
+        title = self._safe_text(payload.get("title")) or "the site"
+        if action == "add_entry":
+            return (
+                "[VAULT CONTINUATION — system message, not from the user]\n"
+                f"The user approved saving the credentials you created for {title} in the "
+                "password vault. They are stored now. Continue the user's original task — "
+                "do not call vault_save_entry again for these credentials."
+            )
+        return (
+            "[VAULT CONTINUATION — system message, not from the user]\n"
+            f"The user approved vault access for {title}. Call vault_lookup again with the "
+            "same site — it will now return the credential reference so you can continue. "
+            "Do not ask the user to approve again unless the lookup is denied a second time."
+        )
+
+    async def _continue_turn_after_vault(self, pending: dict[str, Any]) -> None:
+        channel = self._safe_text(pending.get("channel"))
+        session_id = self._safe_text(pending.get("session_id"))
+        request_id = self._safe_text(pending.get("request_id")) or ""
+        if not channel or not session_id:
+            return
+        if self.registry.get_adapter(channel) is None:
+            logger.info(
+                "gateway.vault.continuation_skipped channel_unavailable channel=%s request_id=%s",
+                channel,
+                request_id,
+            )
+            return
+        query = self._compose_vault_continuation_query(pending)
+        new_request_id = f"req_vaultcont_{uuid4().hex[:16]}"
+        message = {
+            "type": "query",
+            "content": query,
+            "channel": channel,
+            "session_id": session_id,
+            "request_id": new_request_id,
+            "metadata": {
+                "origin": "vault_continuation",
+                "request_id": request_id,
+            },
+        }
+        record = {
+            "status": "accepted",
+            "request_id": new_request_id,
+            "session_id": session_id,
+            "source": "user",
+            "source_id": f"vault_continuation:{request_id}",
+            "channel": channel,
+            "route": "opus",
+            "dispatch_target": "orchestrator",
+            "classification": {
+                "route": "opus",
+                "is_task": True,
+                "is_continuation": True,
+                "signals": ["vault_continuation"],
+                "confidence": 1.0,
+            },
+            "message": message,
+            "assembled_conversation_context": self._build_conversation_context(
+                session_id,
+                fallback_context=[],
+            ),
+            "memory_context": "",
+            "visual_response_enhancement_enabled": (
+                self._channel_platform(channel) == "desktop"
+            ),
+            "gateway_preferences": self.get_desktop_preferences_snapshot(),
+            "accepted_at": utcnow_iso(),
+        }
+        self.request_records[new_request_id] = record
+        try:
+            self.start_request_fulfillment(record)
+        except Exception:
+            logger.exception(
+                "gateway.vault.continuation_failed request_id=%s",
+                request_id,
+            )
 
     async def update_gmail_approval_draft(
         self,

@@ -2995,6 +2995,20 @@ class OrchestratorRuntime:
                 auth_requirement=auth_requirement,
             )
 
+        # Vault credentials: the model only ever saw a credential_ref from
+        # vault_lookup. Resolve the real secret here and inject it into the
+        # child envelope's auth field so the specialist can use it at its
+        # browser/executor layer without it entering any model context.
+        vault_credential_ref = str(child_input.get("credential_ref") or "").strip()
+        if vault_credential_ref:
+            vault_credential = await self._resolve_vault_credential(
+                credential_ref=vault_credential_ref,
+                parent_task=parent_task,
+            )
+            vault_auth = dict(child_input["auth"]) if isinstance(child_input.get("auth"), dict) else {}
+            vault_auth["vault"] = vault_credential
+            child_input["auth"] = vault_auth
+
         child_priority = str(priority or parent_task.priority or SOURCE_PRIORITY_MAP.get(parent_task.source, "normal")).strip()
         normalized_idempotency_key = str(idempotency_key or "").strip() or self._build_child_idempotency_key(
             parent_task.idempotency_key,
@@ -3393,6 +3407,42 @@ class OrchestratorRuntime:
         resolved = response.json()
         if not isinstance(resolved, dict) or not str(resolved.get("access_token") or "").strip():
             raise RuntimeError(f"Gateway returned an invalid credential payload for {intent}.")
+        return resolved
+
+    async def _resolve_vault_credential(
+        self,
+        *,
+        credential_ref: str,
+        parent_task: TaskEnvelope,
+    ) -> dict[str, Any]:
+        """Fetch decrypted vault credentials for dispatch-time envelope injection.
+
+        The response never reaches a model context: it is placed directly into
+        the child task's auth field for the specialist's executor to consume.
+        """
+        headers = {"Content-Type": "application/json"}
+        if self.config.internal_token:
+            headers["X-Internal-Token"] = self.config.internal_token
+        url = f"{self.config.gateway_url.rstrip('/')}/internal/vault/resolve"
+        try:
+            response = await self._client.post(
+                url,
+                json={"credential_ref": credential_ref, "task_id": parent_task.task_id},
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                f"Vault credential resolution failed: unable to reach Gateway ({exc})."
+            )
+        if response.status_code == 404:
+            raise RuntimeError(
+                "The vault credential referenced by this task no longer exists. "
+                "Ask the user to re-check the entry in the Password Vault settings."
+            )
+        response.raise_for_status()
+        resolved = response.json()
+        if not isinstance(resolved, dict) or not resolved.get("entry_id"):
+            raise RuntimeError("Gateway returned an invalid vault credential payload.")
         return resolved
 
     async def _refresh_credential_via_gateway(self, credential_ref: str) -> dict[str, Any]:

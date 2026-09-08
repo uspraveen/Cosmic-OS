@@ -633,6 +633,108 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         handler_method="_cosmic_code_execution",
     ),
     ToolSpec(
+        name="vault_lookup",
+        api_definition={
+            "name": "vault_lookup",
+            "description": (
+                "Look up a saved login (username + credential reference) for a website from the "
+                "user's password vault so a specialist agent can sign in on their behalf. Returns "
+                "the username and a credential_ref to pass in delegate_to_agent input — NEVER a "
+                "password. Depending on the user's per-site policy this either succeeds immediately, "
+                "or pauses for an inline user approval card: if the result says permission_required, "
+                "briefly tell the user why vault access is needed, end your turn, and wait — the turn "
+                "resumes automatically after they approve, then call vault_lookup again."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "site": {
+                        "type": "string",
+                        "description": "Site domain (github.com), URL, or vault entry title.",
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": "Short human-readable reason shown on the approval card, e.g. 'Signing in to GitHub to check notifications'.",
+                    },
+                },
+                "required": ["site"],
+            },
+        },
+        group="integrations",
+        prompt_summary=(
+            "Fetch a saved login from the user's password vault by site. Returns a credential_ref "
+            "for delegation — never a password. May pause for user approval."
+        ),
+        progress_builder=lambda tool_input: (
+            f"Looking up vault credentials for {str((tool_input or {}).get('site') or '')[:60]}..."
+            if tool_input
+            else "Looking up vault credentials..."
+        ),
+        handler_method="_vault_lookup",
+    ),
+    ToolSpec(
+        name="vault_save_entry",
+        api_definition={
+            "name": "vault_save_entry",
+            "description": (
+                "Save credentials the user asked you to create (for example after signing up on a "
+                "site for them) into their password vault. Always pauses for an inline user approval "
+                "card before anything is stored: briefly tell the user what you are saving, end your "
+                "turn, and wait — you will be resumed after they approve or reject."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Human-readable entry name, e.g. 'GitHub' or 'Nexus forum'.",
+                    },
+                    "site_url": {
+                        "type": "string",
+                        "description": "The site's URL, e.g. https://github.com.",
+                    },
+                    "username": {"type": "string", "description": "Username or email used to sign in."},
+                    "password": {"type": "string", "description": "The password to store encrypted."},
+                    "totp_seed": {
+                        "type": "string",
+                        "description": "Optional base32 TOTP/2FA seed so Cosmic can generate login codes.",
+                    },
+                    "notes": {"type": "string", "description": "Optional private notes."},
+                    "purpose": {
+                        "type": "string",
+                        "description": "Short human-readable reason shown on the approval card.",
+                    },
+                },
+                "required": ["password"],
+            },
+        },
+        group="integrations",
+        prompt_summary=(
+            "Store credentials you created for the user (with their approval) in the password vault. "
+            "Always requires an inline user approval card before saving."
+        ),
+        progress_builder=lambda tool_input: (
+            "Saving credentials to the vault (needs approval)..."
+        ),
+        handler_method="_vault_save_entry",
+    ),
+    ToolSpec(
+        name="vault_list_sites",
+        api_definition={
+            "name": "vault_list_sites",
+            "description": (
+                "List which sites have saved logins in the user's password vault (titles, domains, "
+                "usernames, and access policy). Metadata only — contains no secrets. Use this when a "
+                "task needs a login and you want to know whether one is already saved."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        group="integrations",
+        prompt_summary="List sites with saved logins in the password vault (metadata only).",
+        read_only=True,
+        handler_method="_vault_list_sites",
+    ),
+    ToolSpec(
         name="artifact_lookup",
         api_definition={
             "name": "artifact_lookup",

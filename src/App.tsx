@@ -250,7 +250,7 @@ interface ResponseSlotBlock {
 
 interface ResponseActionBlock {
   id: string
-  type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event' | 'sandbox_permission_request' | 'slide_workflow_choice'
+  type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event' | 'sandbox_permission_request' | 'slide_workflow_choice' | 'vault_permission_request'
   status?: string | null
   approvalId?: string | null
   permissionId?: string | null
@@ -287,6 +287,11 @@ interface ResponseActionBlock {
   allowedHosts?: string[]
   resultPreview?: string | null
   errorMessage?: string | null
+  requestId?: string | null
+  action?: string | null
+  siteDomain?: string | null
+  username?: string | null
+  purpose?: string | null
 }
 
 type ResponseBlock =
@@ -600,7 +605,7 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
       })
       continue
     }
-    if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event' || type === 'sandbox_permission_request' || type === 'slide_workflow_choice') {
+    if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event' || type === 'sandbox_permission_request' || type === 'slide_workflow_choice' || type === 'vault_permission_request') {
       const stringList = (raw: unknown) => Array.isArray(raw)
         ? raw.map((value) => String(value || '').trim()).filter(Boolean)
         : []
@@ -658,6 +663,11 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
         allowedHosts: stringList((item as any).allowed_hosts),
         resultPreview: typeof (item as any).result_preview === 'string' ? (item as any).result_preview.trim() : null,
         errorMessage: typeof (item as any).error_message === 'string' ? (item as any).error_message.trim() : null,
+        requestId: typeof (item as any).request_id === 'string' ? (item as any).request_id.trim() : null,
+        action: typeof (item as any).action === 'string' ? (item as any).action.trim() : null,
+        siteDomain: typeof (item as any).site_domain === 'string' ? (item as any).site_domain.trim() : null,
+        username: typeof (item as any).username === 'string' ? (item as any).username.trim() : null,
+        purpose: typeof (item as any).purpose === 'string' ? (item as any).purpose.trim() : null,
       })
       continue
     }
@@ -3195,6 +3205,96 @@ const SandboxPermissionActionBlock = ({ block }: { block: ResponseActionBlock })
   )
 }
 
+const VaultPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) => {
+  const [status, setStatus] = useState(block.status || 'pending')
+  const [busy, setBusy] = useState<'approve' | 'reject' | null>(null)
+  const [error, setError] = useState('')
+  const isPending = status.toLowerCase() === 'pending' && block.canRespond !== false
+  const action = block.action === 'add_entry' ? 'add_entry' : 'use_entry'
+  const siteLabel = block.siteDomain || block.title || 'this site'
+  const headline = action === 'add_entry'
+    ? `Save login for ${siteLabel} in your vault?`
+    : `Allow Cosmic to use your saved ${siteLabel} login?`
+
+  useEffect(() => {
+    setStatus(block.status || 'pending')
+  }, [block.status])
+
+  const act = async (kind: 'approve' | 'reject') => {
+    if (!block.requestId || busy || !isPending) return
+    setBusy(kind)
+    setError('')
+    try {
+      const bridge = kind === 'approve'
+        ? window.cosmic?.vaultApprovePending
+        : window.cosmic?.vaultRejectPending
+      if (!bridge) {
+        throw new Error('Vault approval action is unavailable.')
+      }
+      const result = await bridge(block.requestId)
+      if (String(result?.status || '').trim() === 'ignored') {
+        throw new Error('This vault request was already handled on another device.')
+      }
+      setStatus(kind === 'approve' ? 'approved' : 'rejected')
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Action failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <section className="assistant-action-card" data-kind={block.type}>
+      <div className="assistant-action-card-head">
+        <div className="assistant-action-card-heading">
+          <span className="assistant-action-card-icon" aria-hidden="true">
+            <Shield size={15} />
+          </span>
+          <div className="assistant-action-card-heading-copy">
+            <div className="assistant-action-card-kicker">Password vault</div>
+            <div className="assistant-action-card-title">{headline}</div>
+          </div>
+        </div>
+        <div className="assistant-action-card-head-actions">
+          <div className={`assistant-action-card-status is-${status.toLowerCase()}`}>
+            {status}
+          </div>
+        </div>
+      </div>
+      <div className="assistant-action-card-details">
+        {block.siteDomain && <div><span>Site</span>{block.siteDomain}</div>}
+        {block.username && <div><span>Username</span>{block.username}</div>}
+        {action === 'add_entry' && <div><span>Action</span>Store these credentials encrypted in your vault</div>}
+        {action === 'use_entry' && <div><span>Action</span>Cosmic reads the saved login to sign in for you — the password is never shown to the agent</div>}
+        {block.purpose && <div><span>Reason</span>{block.purpose}</div>}
+      </div>
+      {error && <div className="assistant-action-card-error">{error}</div>}
+      <div className="assistant-action-card-actions">
+        {isPending ? (
+          <>
+            <button
+              type="button"
+              className="assistant-action-button"
+              disabled={Boolean(busy)}
+              onClick={() => void act('reject')}
+            >
+              {busy === 'reject' ? 'Denying…' : 'Deny'}
+            </button>
+            <button
+              type="button"
+              className="assistant-action-button is-primary"
+              disabled={Boolean(busy)}
+              onClick={() => void act('approve')}
+            >
+              {busy === 'approve' ? 'Working…' : action === 'add_entry' ? 'Allow & save' : 'Allow once'}
+            </button>
+          </>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
 const SLIDE_WORKFLOW_OPTIONS: Array<{
   value: 'advanced' | 'html' | 'template'
   label: string
@@ -3441,6 +3541,9 @@ const AssistantResponseBlocks = memo(({
         }
         if (block.type === 'sandbox_permission_request') {
           return <SandboxPermissionActionBlock key={block.id} block={block} />
+        }
+        if (block.type === 'vault_permission_request') {
+          return <VaultPermissionActionBlock key={block.id} block={block} />
         }
         if (block.type === 'slide_workflow_choice') {
           return <SlideWorkflowChoiceBlock key={block.id} block={block} />

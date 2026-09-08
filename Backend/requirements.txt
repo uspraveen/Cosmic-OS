@@ -19,6 +19,7 @@ pyyaml
 redis
 python-dotenv
 python-pptx
+pyotp
 playwright
 reportlab
 svglib

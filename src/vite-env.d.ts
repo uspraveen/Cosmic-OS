@@ -300,6 +300,32 @@ interface Window {
     authorizeMobileDevice: (deviceId: string) => Promise<{ device: any }>
     revokeMobileDevice: (deviceId: string) => Promise<{ device: any }>
     revokeAllMobileDevices: () => Promise<{ revoked_count: number; device_ids: string[]; revoked_at: string; reason: string }>
+
+    // Password vault
+    vaultListEntries: () => Promise<{ entries: any[] }>
+    vaultCreateEntry: (payload: {
+      title: string
+      site_url: string
+      username: string
+      password: string
+      totp_seed?: string
+      notes?: string
+      tags?: string[]
+    }) => Promise<{ entry: any }>
+    vaultUpdateEntry: (entryId: string, payload: Record<string, unknown>) => Promise<{ entry: any }>
+    vaultDeleteEntry: (entryId: string) => Promise<{ status: string }>
+    vaultRevealPassword: (entryId: string) => Promise<{ password: string }>
+    vaultTotpCode: (entryId: string) => Promise<{ code: string | null; seconds_remaining: number | null }>
+    vaultSetPolicy: (entryId: string, payload: {
+      mode: 'always_ask' | 'always_allow' | 'window'
+      window_expires_at?: string | null
+      window_seconds?: number | null
+    }) => Promise<{ policy: any }>
+    vaultGetEntry: (entryId: string) => Promise<{ entry: any }>
+    vaultListAudit: () => Promise<{ audit: any[] }>
+    vaultListPending: () => Promise<{ pending: any[] }>
+    vaultApprovePending: (requestId: string) => Promise<{ status: string; request?: any; entry_id?: string | null }>
+    vaultRejectPending: (requestId: string) => Promise<{ status: string; request?: any }>
     onGatewayEvent: (cb: (data: any) => void) => () => void
     onGatewayStatus: (cb: (data: GatewaySocketState['status']) => void) => () => void
     getGatewaySystemMetrics: (

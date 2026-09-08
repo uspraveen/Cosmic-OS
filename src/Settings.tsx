@@ -7,6 +7,7 @@ import {
   Monitor,
   Plug,
   Settings2,
+  ShieldCheck,
   SlidersHorizontal,
   Smartphone,
   type LucideIcon,
@@ -21,6 +22,7 @@ import WhatsAppIntegrationSettings from './WhatsAppIntegrationSettings'
 import TelegramIntegrationSettings from './TelegramIntegrationSettings'
 import GitHubIntegrationSettings from './GitHubIntegrationSettings'
 import MobileDevicesSettings from './MobileDevicesSettings'
+import PasswordVaultSettings from './PasswordVaultSettings'
 import GatewayPreferencesSettings from './GatewayPreferencesSettings'
 import CodexAgentSettings from './CodexAgentSettings'
 import CursorAgentSettings from './CursorAgentSettings'
@@ -41,7 +43,7 @@ function normalizeAlphaHarness(value: unknown): AlphaPreferredHarness {
 }
 
 type MainSettingsNavItem = {
-  view: 'integrations' | 'agents' | 'api' | 'devices' | 'monitors' | 'ui' | 'preferences'
+  view: 'integrations' | 'agents' | 'api' | 'devices' | 'vault' | 'monitors' | 'ui' | 'preferences'
   title: string
   description: string
   icon: LucideIcon
@@ -79,6 +81,12 @@ const MAIN_SETTINGS_GROUPS: Array<{ label: string; items: MainSettingsNavItem[] 
         title: 'Mobile Devices',
         description: 'Review linked phones and remove access device-by-device or all at once.',
         icon: Smartphone,
+      },
+      {
+        view: 'vault',
+        title: 'Password Vault',
+        description: 'Saved logins Cosmic can use to sign in for you, with per-site access rules.',
+        icon: ShieldCheck,
       },
       {
         view: 'monitors',
@@ -156,6 +164,7 @@ export type SettingsView =
   | 'preferences'
   | 'ui'
   | 'devices'
+  | 'vault'
   | 'agents'
   | 'agents-codex'
   | 'agents-cursor'
@@ -252,6 +261,8 @@ export default function Settings({
             ? 'UI Settings'
             : currentView === 'devices'
               ? 'Mobile Devices'
+            : currentView === 'vault'
+              ? 'Password Vault'
             : currentView === 'agents'
               ? 'Agents'
             : currentView === 'agents-codex'
@@ -747,6 +758,9 @@ export default function Settings({
 
             {currentView === 'devices' && (
               <MobileDevicesSettings active={currentView === 'devices'} />
+            )}
+            {currentView === 'vault' && (
+              <PasswordVaultSettings active={currentView === 'vault'} />
             )}
 
             {currentView === 'monitors' && (

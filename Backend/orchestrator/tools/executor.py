@@ -457,6 +457,118 @@ class ToolExecutor:
             ),
         }
 
+    # ── Password Vault ──────────────────────────────────────────
+
+    async def _vault_list_sites(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context, tool_input
+        try:
+            payload = await self._request_gateway_json("GET", "/internal/vault/sites")
+        except ToolHTTPError as exc:
+            return {"error": True, "message": exc.message}
+        return {"sites": (payload or {}).get("sites", [])}
+
+    async def _vault_lookup(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        query = str(tool_input.get("site") or tool_input.get("query") or "").strip()
+        if not query:
+            return {"error": True, "message": "site is required (a domain like github.com or an entry title)."}
+        purpose = str(tool_input.get("purpose") or "").strip()
+        try:
+            payload = await self._request_gateway_json(
+                "POST",
+                "/internal/vault/lookup",
+                json_body={
+                    "query": query,
+                    "task_id": self._coerce_task_id(tool_input, context),
+                    "session_id": context.session_id if context else None,
+                    "channel": context.channel if context else None,
+                    "purpose": purpose or None,
+                },
+            )
+        except ToolHTTPError as exc:
+            # 404 → nothing stored yet; 409 → ambiguous match (the gateway
+            # detail lists the candidates). Both are model-actionable.
+            return {"error": True, "message": exc.message}
+        if not isinstance(payload, dict):
+            return {"error": True, "message": "Gateway returned an invalid vault lookup response."}
+        if payload.get("status") == "permission_required":
+            presentation = self._vault_permission_presentation_contract(context)
+            if presentation:
+                payload["_cosmic_ui"] = presentation
+        return payload
+
+    async def _vault_save_entry(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        site_url = str(tool_input.get("site_url") or "").strip()
+        title = str(tool_input.get("title") or "").strip()
+        username = str(tool_input.get("username") or "").strip()
+        password = str(tool_input.get("password") or "")
+        if not site_url and not title:
+            return {"error": True, "message": "Provide at least a title or site_url for the vault entry."}
+        if not password:
+            return {"error": True, "message": "password is required to save a vault entry."}
+        try:
+            payload = await self._request_gateway_json(
+                "POST",
+                "/internal/vault/entries",
+                json_body={
+                    "title": title,
+                    "site_url": site_url,
+                    "username": username,
+                    "password": password,
+                    "totp_seed": str(tool_input.get("totp_seed") or ""),
+                    "notes": str(tool_input.get("notes") or ""),
+                    "tags": [str(t) for t in tool_input.get("tags") or [] if str(t).strip()],
+                    "task_id": self._coerce_task_id(tool_input, context),
+                    "session_id": context.session_id if context else None,
+                    "channel": context.channel if context else None,
+                    "purpose": str(tool_input.get("purpose") or "").strip() or None,
+                },
+            )
+        except ToolHTTPError as exc:
+            return {"error": True, "message": exc.message}
+        if not isinstance(payload, dict):
+            return {"error": True, "message": "Gateway returned an invalid vault save response."}
+        if payload.get("status") == "permission_required":
+            presentation = self._vault_permission_presentation_contract(context)
+            if presentation:
+                payload["_cosmic_ui"] = presentation
+        return payload
+
+    @staticmethod
+    def _vault_permission_presentation_contract(
+        context: ToolExecutionContext | None,
+    ) -> dict[str, Any] | None:
+        channel = str(context.channel if context else "").strip().lower()
+        channel_platform = channel.split(":", 1)[0]
+        if channel_platform not in {"desktop", "mobile"}:
+            return None
+        return {
+            "version": 1,
+            "render": "trusted_inline_block",
+            "block_type": "vault_permission_request",
+            "covers": ["site", "username", "approval actions"],
+            "response_mode": "brief_acknowledgement",
+            "instruction": (
+                "The client will render a vault approval card with Allow/Deny controls beside your final response. "
+                "Briefly tell the user why the vault is needed and wait for their decision — the turn resumes "
+                "automatically after they respond. Never claim the action already happened."
+            ),
+        }
+
     # ── Specialist Agents ────────────────────────────────────────
 
     async def _agent_catalog_search(

@@ -2368,6 +2368,117 @@ app.whenReady().then(() => {
     })
   })
 
+  // --- PASSWORD VAULT ---
+  ipcMain.handle('vault:list-entries', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      return { entries: [] }
+    }
+    return callGatewayJson(config, '/channels/vault/entries')
+  })
+
+  ipcMain.handle('vault:create-entry', async (_, payload: any) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/channels/vault/entries', { method: 'POST', body: payload })
+  })
+
+  ipcMain.handle('vault:update-entry', async (_, entryId: string, payload: any) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/vault/entries/${encodeURIComponent(String(entryId || '').trim())}`, {
+      method: 'PATCH',
+      body: payload,
+    })
+  })
+
+  ipcMain.handle('vault:delete-entry', async (_, entryId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/vault/entries/${encodeURIComponent(String(entryId || '').trim())}`, {
+      method: 'DELETE',
+    })
+  })
+
+  ipcMain.handle('vault:reveal-password', async (_, entryId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/vault/entries/${encodeURIComponent(String(entryId || '').trim())}/reveal-password`, {
+      method: 'POST',
+    })
+  })
+
+  ipcMain.handle('vault:totp-code', async (_, entryId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/vault/entries/${encodeURIComponent(String(entryId || '').trim())}/totp`)
+  })
+
+  ipcMain.handle('vault:set-policy', async (_, entryId: string, payload: any) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/vault/entries/${encodeURIComponent(String(entryId || '').trim())}/policy`, {
+      method: 'PUT',
+      body: payload,
+    })
+  })
+
+  ipcMain.handle('vault:get-entry', async (_, entryId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/vault/entries/${encodeURIComponent(String(entryId || '').trim())}`)
+  })
+
+  ipcMain.handle('vault:list-audit', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      return { audit: [] }
+    }
+    return callGatewayJson(config, '/channels/vault/audit')
+  })
+
+  ipcMain.handle('vault:list-pending', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      return { pending: [] }
+    }
+    return callGatewayJson(config, '/channels/vault/pending')
+  })
+
+  ipcMain.handle('vault:approve-pending', async (_, requestId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/vault/pending/${encodeURIComponent(String(requestId || '').trim())}/approve`, {
+      method: 'POST',
+    })
+  })
+
+  ipcMain.handle('vault:reject-pending', async (_, requestId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/vault/pending/${encodeURIComponent(String(requestId || '').trim())}/reject`, {
+      method: 'POST',
+    })
+  })
+
   ipcMain.handle(
     'gateway:get-system-metrics',
     async (
