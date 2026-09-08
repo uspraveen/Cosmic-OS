@@ -99,6 +99,17 @@ function getErrorMessage(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback
 }
 
+function deriveSiteDomain(siteUrl?: string | null): string {
+  const raw = String(siteUrl || '').trim()
+  if (!raw) return ''
+  const withScheme = raw.includes('://') ? raw : `https://${raw}`
+  try {
+    return (new URL(withScheme).hostname || '').replace(/^www\./, '').toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
 function windowActive(policy?: VaultPolicy | null): boolean {
   if (!policy || policy.mode !== 'window' || !policy.window_expires_at) return false
   const parsed = new Date(policy.window_expires_at)
@@ -206,6 +217,16 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
     }, REVEAL_HIDE_MS)
     return () => window.clearTimeout(timer)
   }, [revealedId])
+
+  // Escape closes the credential editor.
+  useEffect(() => {
+    if (!editor) return
+    const handleEsc = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setEditor(null)
+    }
+    window.addEventListener('keydown', handleEsc)
+    return () => window.removeEventListener('keydown', handleEsc)
+  }, [editor])
 
   // Keep the visible TOTP code ticking; refetch when the window rolls over.
   useEffect(() => {
@@ -686,64 +707,111 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
       </div>
 
       {editor ? (
-        <div className="vault-modal-overlay" role="dialog" aria-modal="true">
+        <div
+          className="vault-modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setEditor(null)
+          }}
+        >
           <div className="vault-modal">
-            <h3 className="vault-modal-title">{editor.entryId ? 'Edit credential' : 'Add credential'}</h3>
-            <label className="vault-field">
-              <span>Name</span>
-              <input
-                type="text"
-                value={editor.title}
-                placeholder="GitHub"
-                onChange={(event) => setEditor({ ...editor, title: event.target.value })}
-              />
-            </label>
-            <label className="vault-field">
-              <span>Site URL</span>
-              <input
-                type="text"
-                value={editor.siteUrl}
-                placeholder="https://github.com"
-                onChange={(event) => setEditor({ ...editor, siteUrl: event.target.value })}
-              />
-            </label>
-            <label className="vault-field">
-              <span>Username</span>
-              <input
-                type="text"
-                value={editor.username}
-                autoComplete="off"
-                onChange={(event) => setEditor({ ...editor, username: event.target.value })}
-              />
-            </label>
-            <label className="vault-field">
-              <span>{editor.entryId ? 'New password (leave blank to keep)' : 'Password'}</span>
-              <input
-                type="password"
-                value={editor.password}
-                autoComplete="new-password"
-                onChange={(event) => setEditor({ ...editor, password: event.target.value })}
-              />
-            </label>
-            <label className="vault-field">
-              <span>2FA seed (optional, base32)</span>
-              <input
-                type="password"
-                value={editor.totpSeed}
-                autoComplete="off"
-                placeholder="JBSWY3DPEHPK3PXP"
-                onChange={(event) => setEditor({ ...editor, totpSeed: event.target.value })}
-              />
-            </label>
-            <label className="vault-field">
-              <span>Notes (optional, encrypted)</span>
-              <textarea
-                value={editor.notes}
-                rows={3}
-                onChange={(event) => setEditor({ ...editor, notes: event.target.value })}
-              />
-            </label>
-            <div className="vault-modal-actions">
+            <header className="vault-modal-hero">
+              <div className="vault-entry-icon" aria-hidden="true">
+                <ShieldGlyph className="vault-entry-icon-glyph" />
+              </div>
+              <div className="vault-modal-hero-copy">
+                <h3>{editor.entryId ? 'Edit credential' : 'Add credential'}</h3>
+                <p>
+                  Stored encrypted on your VM. Cosmic signs in for you using a scoped reference —
+                  the password itself never enters the agent's context.
+                </p>
+              </div>
+            </header>
+
+            <div className="vault-modal-body">
+              <div className="vault-modal-group-label">Site</div>
+              {deriveSiteDomain(editor.siteUrl) ? (
+                <div className="vault-match-preview">
+                  <span className="vault-match-preview-dot" aria-hidden="true" />
+                  Cosmic will match this login on <strong>{deriveSiteDomain(editor.siteUrl)}</strong>
+                </div>
+              ) : null}
+              <div className="vault-field-grid">
+                <label className="vault-field">
+                  <span>Name</span>
+                  <input
+                    type="text"
+                    value={editor.title}
+                    placeholder="GitHub"
+                    onChange={(event) => setEditor({ ...editor, title: event.target.value })}
+                  />
+                </label>
+                <label className="vault-field">
+                  <span>Site URL</span>
+                  <input
+                    type="text"
+                    value={editor.siteUrl}
+                    placeholder="https://github.com"
+                    onChange={(event) => setEditor({ ...editor, siteUrl: event.target.value })}
+                  />
+                </label>
+              </div>
+
+              <div className="vault-modal-group-label">Sign-in</div>
+              <div className="vault-field-grid">
+                <label className="vault-field">
+                  <span>Username</span>
+                  <input
+                    type="text"
+                    value={editor.username}
+                    autoComplete="off"
+                    placeholder="you@example.com"
+                    onChange={(event) => setEditor({ ...editor, username: event.target.value })}
+                  />
+                </label>
+                <label className="vault-field">
+                  <span>{editor.entryId ? 'New password (blank to keep)' : 'Password'}</span>
+                  <input
+                    type="password"
+                    value={editor.password}
+                    autoComplete="new-password"
+                    onChange={(event) => setEditor({ ...editor, password: event.target.value })}
+                  />
+                </label>
+              </div>
+
+              <div className="vault-modal-group-label">
+                Two-factor <em>optional</em>
+              </div>
+              <label className="vault-field">
+                <span>2FA seed (base32)</span>
+                <input
+                  type="password"
+                  value={editor.totpSeed}
+                  autoComplete="off"
+                  placeholder="JBSWY3DPEHPK3PXP"
+                  onChange={(event) => setEditor({ ...editor, totpSeed: event.target.value })}
+                />
+              </label>
+              <div className="vault-field-hint">
+                With a seed stored, Cosmic generates fresh login codes for you on demand.
+              </div>
+
+              <div className="vault-modal-group-label">
+                Notes <em>optional</em>
+              </div>
+              <label className="vault-field">
+                <textarea
+                  value={editor.notes}
+                  rows={3}
+                  placeholder="Recovery codes, security questions…"
+                  onChange={(event) => setEditor({ ...editor, notes: event.target.value })}
+                />
+              </label>
+            </div>
+
+            <footer className="vault-modal-actions">
               <button
                 type="button"
                 className="vault-btn vault-btn--ghost"
@@ -760,7 +828,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
               >
                 {saving ? 'Saving…' : editor.entryId ? 'Save changes' : 'Save credential'}
               </button>
-            </div>
+            </footer>
           </div>
         </div>
       ) : null}
