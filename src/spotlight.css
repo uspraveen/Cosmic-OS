@@ -2912,7 +2912,15 @@ kbd {
 .deck-preview-lightbox {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  /* Portaled to document.body, so it's a DOM sibling of .overlay (the
+     response screen surface, z-index: 9000) — not a descendant. 1000 put
+     it visually behind that surface the entire time it was "open" (it
+     escaped the card's own stacking context via the portal, but not the
+     response screen's higher one), making it permanently inaccessible.
+     Cleared above every persistent app surface; stays below the small
+     transient overlays (hover tooltips, mode dropdown, toast rails) that
+     legitimately float above everything, including modals. */
+  z-index: 9500;
   display: grid;
   place-items: center;
   padding: 32px;
