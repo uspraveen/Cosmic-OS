@@ -317,6 +317,8 @@ class RegistryStore:
         *,
         limit: int = 5,
         lookback_days: int = 15,
+        new_agent_grace_days: int = 3,
+        new_agent_extra_slots: int = 3,
         refreshed_at: datetime | None = None,
     ) -> list[dict[str, Any]]:
         normalized_limit = max(0, int(limit))
@@ -428,6 +430,7 @@ class RegistryStore:
                     "score": round(score, 3),
                     "usage_count": usage_count,
                     "last_used_at": _datetime_to_iso(last_activity_at) if last_activity_at else None,
+                    "registered_at": _datetime_to_iso(registered_at) if registered_at else None,
                 }
             )
 
@@ -441,6 +444,39 @@ class RegistryStore:
             reverse=True,
         )
         featured = ranked[:normalized_limit]
+
+        # Grace period: a brand-new agent starts with zero usage history, so
+        # pure merit ranking would never surface it until the orchestrator
+        # happened to find it via agent_catalog_search first. Guarantee any
+        # recently-registered agent a spot — additional to, not displacing,
+        # the merit-ranked ones above — for a bounded number of days, capped
+        # so a burst of simultaneous launches can't blow up the prompt. It
+        # falls off automatically once the grace window elapses; from then on
+        # it's ranked purely on usage like everything else.
+        normalized_grace_days = max(0, int(new_agent_grace_days))
+        normalized_extra_slots = max(0, int(new_agent_extra_slots))
+        if normalized_grace_days > 0 and normalized_extra_slots > 0:
+            grace_cutoff_dt = refresh_dt - timedelta(days=normalized_grace_days)
+            featured_ids = {item["agent_id"] for item in featured}
+            grace_candidates = [
+                item
+                for item in ranked
+                if item["agent_id"] not in featured_ids
+                and (registered_dt := _parse_iso_datetime(item.get("registered_at"))) is not None
+                and registered_dt >= grace_cutoff_dt
+            ]
+            # Already sorted by the same merit order as `ranked`; take the
+            # strongest grace candidates first if more qualify than there is
+            # room for.
+            featured = featured + grace_candidates[:normalized_extra_slots]
+
+        for item in featured:
+            registered_dt = _parse_iso_datetime(item.get("registered_at"))
+            item["new_agent"] = bool(
+                normalized_grace_days > 0
+                and registered_dt is not None
+                and registered_dt >= refresh_dt - timedelta(days=normalized_grace_days)
+            )
 
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM featured_specialists")
@@ -474,7 +510,27 @@ class RegistryStore:
                 )
             connection.commit()
 
-        return self.list_featured_specialists(limit=normalized_limit)
+        # Return the full in-memory list (not a re-read via
+        # list_featured_specialists(limit=normalized_limit)) — that limit is
+        # the merit-based count and would silently drop any grace-period
+        # extras appended above. The featured_specialists table itself still
+        # only has the persisted columns (no new_agent/registered_at), which
+        # is fine: it's a debug/inspection view, not this method's contract.
+        return [
+            {
+                "rank": index,
+                "agent_id": item["agent_id"],
+                "display_name": item["display_name"],
+                "agent_summary": item.get("agent_summary") or "",
+                "common_intents": item.get("common_intents") or [],
+                "score": float(item.get("score") or 0.0),
+                "usage_count": int(item.get("usage_count") or 0),
+                "last_used_at": item.get("last_used_at"),
+                "refreshed_at": refresh_iso,
+                "new_agent": bool(item.get("new_agent")),
+            }
+            for index, item in enumerate(featured, start=1)
+        ]
 
     def list_featured_specialists(self, *, limit: int = 5) -> list[dict[str, Any]]:
         normalized_limit = max(0, int(limit))

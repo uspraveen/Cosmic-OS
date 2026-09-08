@@ -167,6 +167,17 @@ class OrchestratorConfig:
     featured_specialists_count: int = 5
     featured_specialists_lookback_days: int = 15
     featured_specialists_refresh_sec: int = 300
+    # A brand-new specialist starts with zero usage history, so pure
+    # usage-based ranking would never surface it until the orchestrator
+    # happened to find it via agent_catalog_search first — a cold-start
+    # chicken-and-egg problem. Any agent whose registered_at is within this
+    # many days is guaranteed a spot in the featured list (additional to,
+    # not displacing, the usage-ranked ones), up to the extra-slots cap, so
+    # it's visible and usable immediately after launch. It then "falls off"
+    # automatically once the grace window elapses and it competes purely on
+    # usage like everything else.
+    featured_specialists_new_agent_grace_days: int = 3
+    featured_specialists_new_agent_extra_slots: int = 3
     task_input_requests_stream: str = "user_input:requests"
     task_input_replies_stream: str = "user_input:replies"
     task_input_orchestrator_group: str = "orchestrator"
@@ -340,6 +351,12 @@ class OrchestratorConfig:
             featured_specialists_count=max(0, _env_int("ORCHESTRATOR_FEATURED_SPECIALISTS_COUNT", 5)),
             featured_specialists_lookback_days=max(1, _env_int("ORCHESTRATOR_FEATURED_SPECIALISTS_LOOKBACK_DAYS", 15)),
             featured_specialists_refresh_sec=max(30, _env_int("ORCHESTRATOR_FEATURED_SPECIALISTS_REFRESH_SEC", 300)),
+            featured_specialists_new_agent_grace_days=max(
+                0, _env_int("ORCHESTRATOR_FEATURED_SPECIALISTS_NEW_AGENT_GRACE_DAYS", 3)
+            ),
+            featured_specialists_new_agent_extra_slots=max(
+                0, _env_int("ORCHESTRATOR_FEATURED_SPECIALISTS_NEW_AGENT_EXTRA_SLOTS", 3)
+            ),
             task_input_requests_stream=os.getenv("TASK_INPUT_REQUESTS_STREAM", "user_input:requests").strip()
             or "user_input:requests",
             task_input_replies_stream=os.getenv("TASK_INPUT_REPLIES_STREAM", "user_input:replies").strip()

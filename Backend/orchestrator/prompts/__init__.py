@@ -147,10 +147,14 @@ def build_featured_specialists_prompt(featured_specialists: list[dict[str, objec
         trimmed_intents = [str(intent).strip() for intent in common_intents if str(intent).strip()][:2]
         if trimmed_intents:
             intent_suffix = f" Common intents: {', '.join(f'`{intent}`' for intent in trimmed_intents)}."
+        # Recently-registered specialists ride here on a grace period, not
+        # usage — call that out so the model doesn't read "featured" as "the
+        # single most relevant tool" and reach for it out of proportion.
+        new_prefix = "(newly added) " if item.get("new_agent") else ""
         body = summary.rstrip(".")
         if body:
-            lines.append(f"- `{display_name}`: {body}.{intent_suffix}")
+            lines.append(f"- {new_prefix}`{display_name}`: {body}.{intent_suffix}")
         else:
             fallback = intent_suffix.strip() or "Specialist agent available via live catalog lookup."
-            lines.append(f"- `{display_name}`: {fallback}")
+            lines.append(f"- {new_prefix}`{display_name}`: {fallback}")
     return "\n".join(lines).strip()

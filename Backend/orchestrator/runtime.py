@@ -3107,6 +3107,8 @@ class OrchestratorRuntime:
         self._featured_specialists_cache = self.registry_store.refresh_featured_specialists(
             limit=self.config.featured_specialists_count,
             lookback_days=self.config.featured_specialists_lookback_days,
+            new_agent_grace_days=self.config.featured_specialists_new_agent_grace_days,
+            new_agent_extra_slots=self.config.featured_specialists_new_agent_extra_slots,
         )
         self._featured_specialists_refreshed_at = now_monotonic
 
