@@ -73,6 +73,14 @@ const EMPTY_EDITOR: EditorState = {
 }
 
 const REVEAL_HIDE_MS = 15000
+const POLICY_MODES = ['always_ask', 'always_allow', 'window'] as const
+type PolicyMode = (typeof POLICY_MODES)[number]
+
+const POLICY_LABELS: Record<PolicyMode, string> = {
+  always_ask: 'Always ask',
+  always_allow: 'Always allow',
+  window: '24h window',
+}
 
 function formatTimestamp(value?: string | null): string {
   const normalized = String(value || '').trim()
@@ -89,17 +97,6 @@ function formatTimestamp(value?: string | null): string {
 
 function getErrorMessage(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback
-}
-
-function policyLabel(mode?: string | null): string {
-  switch (String(mode || 'always_ask')) {
-    case 'always_allow':
-      return 'Always allow'
-    case 'window':
-      return 'Time window'
-    default:
-      return 'Always ask'
-  }
 }
 
 function windowActive(policy?: VaultPolicy | null): boolean {
@@ -134,11 +131,12 @@ function ShieldGlyph({ className }: { className?: string }) {
         strokeLinejoin="round"
       />
       <path
-        d="M12 10.25v3.5M12 8.6a1.1 1.1 0 1 0 0-.05"
+        d="M12 10.4v3.4"
         stroke="currentColor"
         strokeWidth="1.35"
         strokeLinecap="round"
       />
+      <circle cx="12" cy="8.7" r="1.05" fill="currentColor" />
     </svg>
   )
 }
@@ -352,7 +350,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
     }
   }, [totpState])
 
-  const handlePolicy = useCallback(async (entry: VaultEntry, mode: VaultPolicy['mode']) => {
+  const handlePolicy = useCallback(async (entry: VaultEntry, mode: PolicyMode) => {
     if (!window.cosmic?.vaultSetPolicy) return
     setBusyEntryId(entry.entry_id)
     setError(null)
@@ -398,68 +396,63 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
   }, [showAudit])
 
   const openPending = useMemo(() => pending.filter((item) => String(item.status || 'pending') === 'pending'), [pending])
-  const alwaysAllowCount = useMemo(
-    () => entries.filter((entry) => entry.policy?.mode === 'always_allow' || windowActive(entry.policy)).length,
-    [entries],
-  )
 
   return (
-    <div className="setting-subpage vault-page">
-      <header className="vault-header">
-        <div className="vault-header-top">
-          <div className="vault-header-text">
-            <span className="vault-kicker">Security</span>
-            <h2 className="vault-title">Password Vault</h2>
-          </div>
-          <div className="vault-header-actions">
-            <button
-              type="button"
-              className="vault-btn vault-btn--subtle"
-              onClick={() => void refresh()}
-              disabled={loading}
-            >
-              {loading ? 'Refreshing…' : 'Refresh'}
-            </button>
-            <button
-              type="button"
-              className="vault-btn vault-btn--primary"
-              onClick={() => openEditor()}
-            >
-              Add credential
-            </button>
-          </div>
+    <div className="vault-page">
+      <div className="vault-hero">
+        <div className="vault-hero-matrix" aria-hidden="true">
+          {/* The vault's shield mark as a full-bleed dot matrix — the same
+              field treatment as the Alpha hero, dissolving toward the copy
+              with the shield strokes lit where the dots run. */}
+          <svg width="230" height="170" viewBox="0 0 230 170" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <pattern id="vaultDotGrid" width="3" height="3" patternUnits="userSpaceOnUse">
+                <circle cx="1.5" cy="1.5" r="0.95" fill="#fff" />
+              </pattern>
+              <linearGradient id="vaultFieldFade" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0.08" stopColor="#000" />
+                <stop offset="0.5" stopColor="#fff" />
+              </linearGradient>
+              <mask id="vaultFieldMask" maskUnits="userSpaceOnUse" x="0" y="0" width="230" height="170">
+                <rect width="230" height="170" fill="url(#vaultFieldFade)" />
+              </mask>
+              <filter id="vaultDotBlur" x="-40%" y="-40%" width="180%" height="180%">
+                <feGaussianBlur stdDeviation="0.9" />
+              </filter>
+              <mask id="vaultGlyphMask" maskUnits="userSpaceOnUse" x="0" y="0" width="230" height="170">
+                <rect width="230" height="170" fill="#000" />
+                <g transform="translate(97 32) scale(4.4)" stroke="#fff" strokeLinecap="round" strokeLinejoin="round" fill="none">
+                  <g strokeWidth="2.6" filter="url(#vaultDotBlur)">
+                    <path d="M12 3.25 5.25 6v5.4c0 4.3 2.85 8.05 6.75 9.35 3.9-1.3 6.75-5.05 6.75-9.35V6L12 3.25Z" />
+                    <path d="M12 10.6v3" />
+                    <circle cx="12" cy="8.7" r="0.9" />
+                  </g>
+                  <g strokeWidth="1.1">
+                    <path d="M12 3.25 5.25 6v5.4c0 4.3 2.85 8.05 6.75 9.35 3.9-1.3 6.75-5.05 6.75-9.35V6L12 3.25Z" />
+                    <path d="M12 10.6v3" />
+                    <circle cx="12" cy="8.7" r="0.9" />
+                  </g>
+                </g>
+              </mask>
+            </defs>
+            <rect width="230" height="170" fill="url(#vaultDotGrid)" opacity="0.14" mask="url(#vaultFieldMask)" />
+            <rect width="230" height="170" fill="url(#vaultDotGrid)" mask="url(#vaultGlyphMask)" />
+          </svg>
         </div>
-        <p className="vault-lead">
-          Credentials stored here are encrypted on your VM. Cosmic's orchestrator can use them to sign
-          in for you — it only ever sees a reference, never the password itself, and each site follows
-          the access rule you set below.
-        </p>
-      </header>
-
-      <div className="vault-stats" aria-label="Vault summary">
-        <div className="vault-stat">
-          <span className="vault-stat-value">{entries.length}</span>
-          <span className="vault-stat-label">Saved logins</span>
-        </div>
-        <div className="vault-stat vault-stat--accent">
-          <span className="vault-stat-value">{alwaysAllowCount}</span>
-          <span className="vault-stat-label">Auto-allowed sites</span>
-        </div>
-        <div className="vault-stat">
-          <span className="vault-stat-value">{openPending.length}</span>
-          <span className="vault-stat-label">Awaiting your approval</span>
+        <div className="vault-hero-copy">
+          <h3>Password Vault</h3>
+          <p>
+            Logins Cosmic can use to sign in for you — encrypted on your VM. The agent only ever
+            handles a reference, never the password itself.
+          </p>
         </div>
       </div>
 
-      {error ? (
-        <div className="vault-error" role="alert">
-          {error}
-        </div>
-      ) : null}
+      {error ? <div className="vault-inline-error">{error}</div> : null}
 
       {openPending.length > 0 ? (
-        <div className="vault-pending-section">
-          <h3 className="vault-section-title">Cosmic is asking for vault access</h3>
+        <>
+          <div className="vault-section-label">Awaiting your approval</div>
           {openPending.map((item) => {
             const payload = item.payload || {}
             const isAdd = item.action === 'add_entry'
@@ -482,7 +475,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                 <div className="vault-pending-actions">
                   <button
                     type="button"
-                    className="vault-btn vault-btn--subtle"
+                    className="vault-btn vault-btn--ghost"
                     disabled={busyEntryId === item.request_id}
                     onClick={() => void handlePendingAction(item.request_id, 'reject')}
                   >
@@ -500,8 +493,29 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
               </article>
             )
           })}
-        </div>
+        </>
       ) : null}
+
+      <div className="vault-toolbar">
+        <div className="vault-section-label">Saved Logins</div>
+        <div className="vault-toolbar-actions">
+          <button
+            type="button"
+            className="vault-btn vault-btn--ghost"
+            onClick={() => void refresh()}
+            disabled={loading}
+          >
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
+          <button
+            type="button"
+            className="vault-btn vault-btn--primary"
+            onClick={() => openEditor()}
+          >
+            Add credential
+          </button>
+        </div>
+      </div>
 
       {loading && entries.length === 0 ? (
         <div className="vault-loading" aria-live="polite">
@@ -523,56 +537,59 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
       <div className="vault-list">
         {entries.map((entry) => {
           const policy = entry.policy
+          const mode = (policy?.mode || 'always_ask') as PolicyMode
           const isRevealed = revealedId === entry.entry_id
           const showTotp = totpState?.entryId === entry.entry_id
           const confirmingDelete = confirmDeleteId === entry.entry_id
           return (
             <article key={entry.entry_id} className="vault-entry-card">
               <div className="vault-entry-top">
-                <div className="vault-entry-icon-wrap" aria-hidden>
-                  <ShieldGlyph className="vault-entry-icon" />
+                <div className="vault-entry-icon" aria-hidden="true">
+                  <ShieldGlyph className="vault-entry-icon-glyph" />
                 </div>
-                <div className="vault-entry-main">
-                  <div className="vault-entry-title-row">
-                    <div className="vault-entry-title-block">
-                      <span className="vault-entry-eyebrow">{entry.site_domain || 'credential'}</span>
-                      <div className="vault-entry-name">{entry.title || entry.entry_id}</div>
-                    </div>
-                    <div className="vault-entry-pill-wrap">
-                      <span className={`vault-entry-pill is-${entry.source === 'agent' ? 'agent' : 'user'}`}>
-                        {entry.source === 'agent' ? 'Added by Cosmic' : 'Added by you'}
-                      </span>
-                      {entry.has_totp ? <span className="vault-entry-pill is-totp">2FA</span> : null}
+                <div className="vault-entry-body">
+                  <div className="vault-entry-head">
+                    <strong className="vault-entry-name" title={entry.site_domain || entry.title}>
+                      {entry.title || entry.entry_id}
+                    </strong>
+                    <div className="vault-entry-badges">
+                      {entry.has_totp ? <span className="vault-tag">2FA</span> : null}
+                      {entry.source === 'agent' ? <span className="vault-tag is-agent">By Cosmic</span> : null}
+                      {mode === 'window' && windowActive(policy) ? (
+                        <span className="vault-tag is-window">Window open</span>
+                      ) : null}
                     </div>
                   </div>
-                  {entry.username ? <div className="vault-entry-username">{entry.username}</div> : null}
+                  <span className="vault-entry-desc">
+                    {[entry.username, entry.site_domain].filter(Boolean).join(' · ') || 'No username stored'}
+                  </span>
                 </div>
               </div>
 
-              <div className="vault-policy-panel">
+              <div className="vault-policy-row">
                 <span className="vault-policy-label">Cosmic access</span>
-                <div className="vault-policy-segments" role="group" aria-label="Agent access policy">
-                  {(['always_ask', 'always_allow', 'window'] as const).map((mode) => (
+                <div className="vault-policy-toggle" role="group" aria-label="Agent access policy">
+                  {POLICY_MODES.map((option) => (
                     <button
-                      key={mode}
+                      key={option}
                       type="button"
-                      className={`vault-policy-segment${(policy?.mode || 'always_ask') === mode ? ' is-active' : ''}`}
+                      className={mode === option ? 'active' : ''}
                       disabled={busyEntryId === entry.entry_id}
                       title={
-                        mode === 'always_ask'
+                        option === 'always_ask'
                           ? 'Ask you with an approval card every time'
-                          : mode === 'always_allow'
+                          : option === 'always_allow'
                             ? 'Use without asking, fully audited'
                             : 'Allow automatically for the next 24 hours'
                       }
-                      onClick={() => void handlePolicy(entry, mode)}
+                      onClick={() => void handlePolicy(entry, option)}
                     >
-                      {policyLabel(mode)}
+                      {POLICY_LABELS[option]}
                     </button>
                   ))}
                 </div>
-                {policy?.mode === 'window' && windowActive(policy) ? (
-                  <span className="vault-policy-window-note">until {formatTimestamp(policy.window_expires_at)}</span>
+                {mode === 'window' && windowActive(policy) ? (
+                  <span className="vault-policy-note">until {formatTimestamp(policy?.window_expires_at)}</span>
                 ) : null}
               </div>
 
@@ -583,7 +600,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                 </div>
               ) : null}
               {showTotp ? (
-                <div className="vault-secret-row is-totp">
+                <div className="vault-secret-row">
                   <span className="vault-secret-value">{totpState?.code}</span>
                   <span className="vault-secret-note">{totpState?.seconds}s remaining</span>
                 </div>
@@ -592,7 +609,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
               <div className="vault-entry-actions">
                 <button
                   type="button"
-                  className="vault-btn vault-btn--subtle"
+                  className="vault-btn vault-btn--ghost"
                   disabled={!entry.has_password}
                   onClick={() => void handleReveal(entry)}
                 >
@@ -601,7 +618,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                 {entry.has_totp ? (
                   <button
                     type="button"
-                    className="vault-btn vault-btn--subtle"
+                    className="vault-btn vault-btn--ghost"
                     onClick={() => void handleShowTotp(entry)}
                   >
                     {showTotp ? 'Hide code' : '2FA code'}
@@ -609,7 +626,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                 ) : null}
                 <button
                   type="button"
-                  className="vault-btn vault-btn--subtle"
+                  className="vault-btn vault-btn--ghost"
                   onClick={() => openEditor(entry)}
                 >
                   Edit
@@ -649,7 +666,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
 
       <div className="vault-audit-section">
         <button type="button" className="vault-audit-toggle" onClick={() => void toggleAudit()}>
-          {showAudit ? 'Hide vault activity' : 'Show vault activity'}
+          {showAudit ? 'Hide vault activity' : 'Vault activity'}
         </button>
         {showAudit ? (
           audit.length === 0 ? (

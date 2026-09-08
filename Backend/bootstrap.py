@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import base64
 import shlex
 import shutil
 import socket
@@ -5103,6 +5104,14 @@ def build_service_env_overrides(
         bridge_data.get("WHATSAPP_AUTH_DIR"),
         str(DEFAULT_WHATSAPP_AUTH_DIR),
     )
+    # Fernet key for OAuth refresh tokens and the password vault. A stable
+    # key is required — an ephemeral one silently invalidates every stored
+    # secret after each gateway restart.
+    credential_encryption_key = first_meaningful_value(
+        gateway_external.get("CREDENTIAL_ENCRYPTION_KEY"),
+        gateway_existing.get("CREDENTIAL_ENCRYPTION_KEY"),
+        gateway_data.get("CREDENTIAL_ENCRYPTION_KEY"),
+    )
     shared_anthropic_api_key = first_meaningful_value(
         gateway_external.get("ANTHROPIC_API_KEY"),
         orchestrator_external.get("ANTHROPIC_API_KEY"),
@@ -5324,6 +5333,8 @@ def build_service_env_overrides(
             "GATEWAY_LOCAL_API_TOKEN": local_api_token or secrets.token_urlsafe(24),
             "GATEWAY_SIGNING_SECRET": signing_secret or secrets.token_urlsafe(32),
             "WHATSAPP_BRIDGE_TOKEN": bridge_token or secrets.token_urlsafe(32),
+            "CREDENTIAL_ENCRYPTION_KEY": credential_encryption_key
+            or base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(),
             "ANTHROPIC_API_KEY": shared_anthropic_api_key or "<anthropic-api-key>",
             "PERPLEXITY_API_KEY": perplexity_api_key or "<perplexity-api-key>",
             "XAI_API_KEY": gateway_xai_api_key or "",
