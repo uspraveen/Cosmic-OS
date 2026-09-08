@@ -18,6 +18,7 @@ export interface ResponseBlockLike {
 export type AlphaStreamSegment =
   | { kind: 'content'; content?: string; blocks?: ResponseBlockLike[] }
   | { kind: 'alpha_console'; taskId: string | null }
+  | { kind: 'browser_run'; taskId: string | null }
 
 const DEFAULT_ALPHA_TASK_KEY = '_default'
 
@@ -114,13 +115,27 @@ export const ensureAlphaConsoleAnchor = (
   return [...existing, { taskId: taskId ?? null, offset: safeOffset }].sort((a, b) => a.offset - b.offset)
 }
 
+interface KindedAnchor extends AlphaConsoleAnchor {
+  segmentKind: 'alpha_console' | 'browser_run'
+}
+
 export const buildAlphaStreamSegments = (options: {
   content?: string
   responseBlocks?: ResponseBlockLike[]
   alphaConsoleAnchors?: AlphaConsoleAnchor[]
   alphaTerminalLog?: AlphaTerminalAnchorSource[]
+  // Browser-agent equivalent of alphaConsoleAnchors: stamped once, client-side,
+  // the first time a message's browserProgress arrives (no terminal-log-style
+  // fallback source the way Alpha has, since there's one live card per
+  // message, not a per-task log to derive an offset from).
+  browserConsoleAnchors?: AlphaConsoleAnchor[]
 }): { segments: AlphaStreamSegment[]; hasAnchors: boolean } => {
-  const anchors = resolveAlphaConsoleAnchors(options.alphaConsoleAnchors, options.alphaTerminalLog)
+  const alphaAnchors: KindedAnchor[] = resolveAlphaConsoleAnchors(options.alphaConsoleAnchors, options.alphaTerminalLog)
+    .map((anchor) => ({ ...anchor, segmentKind: 'alpha_console' as const }))
+  const browserAnchors: KindedAnchor[] = (options.browserConsoleAnchors || [])
+    .map((anchor) => ({ ...anchor, segmentKind: 'browser_run' as const }))
+  const anchors: KindedAnchor[] = [...alphaAnchors, ...browserAnchors].sort((a, b) => a.offset - b.offset)
+
   if (anchors.length <= 0) {
     return {
       hasAnchors: false,
@@ -152,7 +167,7 @@ export const buildAlphaStreamSegments = (options: {
       remainingContent = after
     }
 
-    segments.push({ kind: 'alpha_console', taskId: anchor.taskId })
+    segments.push({ kind: anchor.segmentKind, taskId: anchor.taskId })
 
     const isLast = index === anchors.length - 1
     if (isLast) {

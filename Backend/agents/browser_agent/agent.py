@@ -12,6 +12,7 @@ store, where only the deterministic CredentialFill action consumes them.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -33,6 +34,12 @@ from .config import AGENT_ROOT, BrowserAgentConfig
 logger = logging.getLogger(__name__)
 
 BROWSER_AGENT_ID = "cosmic/browser-agent:1.0.0"
+
+
+class _BrowserRunCancelled(Exception):
+    """Raised internally when the orchestrator's Stop button fires while a
+    browser.run is in flight. Caught in handle_browser_run to report a clean
+    CANCELLED result instead of an internal error."""
 
 _SCREENSHOT_MIME_BY_SUFFIX = {
     ".jpg": "image/jpeg",
@@ -159,19 +166,33 @@ class BrowserAgent(AgentRuntime):
             await self._live_frame_bridge(task, frame_b64, live_frame_last_sent)
 
         try:
-            result = await run_goal(
-                goal,
-                initial_url=initial_url,
-                max_steps=max_steps,
-                memory_mode=memory_mode,
-                headless=headless,
-                credentials=credentials,
-                on_progress=on_progress,
-                ask_user_handler=ask_user_handler,
-                on_live_frame=on_live_frame,
-                working_dir_root=str(self.config.working_dir_root),
-                run_timeout_sec=min(self.config.run_timeout_sec, self.max_task_duration_sec),
+            result = await self._run_goal_with_cancel_watch(
+                task,
+                run_goal(
+                    goal,
+                    initial_url=initial_url,
+                    max_steps=max_steps,
+                    memory_mode=memory_mode,
+                    headless=headless,
+                    credentials=credentials,
+                    on_progress=on_progress,
+                    ask_user_handler=ask_user_handler,
+                    on_live_frame=on_live_frame,
+                    working_dir_root=str(self.config.working_dir_root),
+                    run_timeout_sec=min(self.config.run_timeout_sec, self.max_task_duration_sec),
+                ),
             )
+        except _BrowserRunCancelled:
+            self._record_session_run(
+                task,
+                goal=goal,
+                status="cancelled",
+                summary=f"Cancelled by user: {goal[:150]}",
+                target_url=live_state.get("url"),
+                screenshot=live_state.get("screenshot"),
+                run_dir=None,
+            )
+            return self._failed("CANCELLED", "Browser run was stopped by the user.", retryable=False, next_action="skip")
         except BrowserRunError as exc:
             self._record_session_run(
                 task,
@@ -639,6 +660,59 @@ class BrowserAgent(AgentRuntime):
             )
         except Exception:
             logger.debug("browser_agent.live_frame_send_failed task_id=%s", task.task_id, exc_info=True)
+
+    async def _run_goal_with_cancel_watch(self, task: TaskEnvelope, coro: Any) -> Any:
+        """Races `coro` (the run_goal(...) call) against the orchestrator's
+        Stop-button cancel signal.
+
+        The orchestrator's cancel_task() sets `task_cancel:{task_id}` in
+        Redis (Backend/orchestrator/runtime.py:_request_agent_task_cancel) —
+        it does not push a cancellation into the specialist itself, and
+        cosmic-browser-use's step loop has no cancellation hook of its own
+        (unlike Alpha, which polls this same key between CLI turns), so
+        without this a Stop click only ends the orchestrator's own turn: the
+        Chromium session, LLM calls, and CDP screencast all keep running
+        server-side until the goal finishes or times out on its own.
+
+        On cancel we asyncio.Task.cancel() the run — cosmic-browser-use's own
+        `finally` cleanup (stop_live_screencast/close) still executes for a
+        CancelledError exactly like any other exception, so the browser is
+        torn down either way.
+        """
+        run_future = asyncio.ensure_future(coro)
+        watch_future = asyncio.ensure_future(self._watch_for_cancel(task.task_id))
+        try:
+            done, _pending = await asyncio.wait(
+                {run_future, watch_future}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if run_future in done:
+                return run_future.result()
+            run_future.cancel()
+            try:
+                await run_future
+            except (asyncio.CancelledError, Exception):
+                pass
+            raise _BrowserRunCancelled()
+        finally:
+            if not watch_future.done():
+                watch_future.cancel()
+                try:
+                    await watch_future
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    async def _watch_for_cancel(self, task_id: str) -> None:
+        """Polls the orchestrator's cancel flag every 2s. Returns as soon as
+        it's set; runs until externally cancelled otherwise (i.e. once the
+        real run finishes first)."""
+        while True:
+            try:
+                raw = await self.redis.get(f"task_cancel:{task_id}")
+                if raw:
+                    return
+            except Exception:
+                logger.debug("browser_agent.cancel_watch_failed task_id=%s", task_id, exc_info=True)
+            await asyncio.sleep(2.0)
 
     @staticmethod
     def _classify_ask_user_kind(question: str) -> str:

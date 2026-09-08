@@ -51,6 +51,7 @@ interface Message {
   activityLog?: ActivityLogEntry[]
   alphaTerminalLog?: AlphaTerminalEntry[]
   alphaConsoleAnchors?: AlphaConsoleAnchor[]
+  browserConsoleAnchors?: AlphaConsoleAnchor[]
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
   stopped?: boolean
   channel?: string | null
@@ -100,6 +101,7 @@ interface BackgroundTask {
   activityLog?: ActivityLogEntry[]
   alphaTerminalLog?: AlphaTerminalEntry[]
   alphaConsoleAnchors?: AlphaConsoleAnchor[]
+  browserConsoleAnchors?: AlphaConsoleAnchor[]
   progress?: DocsProgressState | TabularProgressState
   slideProgress?: SlideProgressState
   browserProgress?: BrowserProgressState
@@ -150,6 +152,7 @@ interface GatewayForegroundStreamSnapshot {
   activityLog?: ActivityLogEntry[]
   alphaTerminalLog?: AlphaTerminalEntry[]
   alphaConsoleAnchors?: AlphaConsoleAnchor[]
+  browserConsoleAnchors?: AlphaConsoleAnchor[]
   progress?: DocsProgressState | TabularProgressState
   slideProgress?: SlideProgressState
   browserProgress?: BrowserProgressState
@@ -1194,6 +1197,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       activityLog: normalizeActivityLog(item?.metadata?.activity_log),
       alphaTerminalLog: normalizeAlphaTerminalLog(item?.metadata?.alpha_terminal_log),
       alphaConsoleAnchors: normalizeAlphaConsoleAnchors(item?.metadata?.alpha_console_anchors),
+      browserConsoleAnchors: normalizeAlphaConsoleAnchors(item?.metadata?.browser_console_anchors),
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
       stopped: Boolean(item?.metadata?.interrupted),
       channel: typeof item?.channel === 'string' ? item.channel : null,
@@ -1317,6 +1321,7 @@ const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStr
     activityLog: normalizeActivityLog((value as any).activity_log ?? (value as any).activityLog),
     alphaTerminalLog: normalizeAlphaTerminalLog((value as any).alpha_terminal_log ?? (value as any).alphaTerminalLog),
     alphaConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).alpha_console_anchors ?? (value as any).alphaConsoleAnchors),
+    browserConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).browser_console_anchors ?? (value as any).browserConsoleAnchors),
     progress,
     slideProgress,
     browserProgress,
@@ -1890,6 +1895,7 @@ const normalizeBackgroundTask = (value: unknown): BackgroundTask | null => {
     activityLog: normalizeActivityLog((value as any).activity_log ?? (value as any).activityLog),
     alphaTerminalLog: normalizeAlphaTerminalLog((value as any).alpha_terminal_log ?? (value as any).alphaTerminalLog),
     alphaConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).alpha_console_anchors ?? (value as any).alphaConsoleAnchors),
+    browserConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).browser_console_anchors ?? (value as any).browserConsoleAnchors),
     progress: normalizeTabularProgress((value as any).tabular_progress) ?? normalizeDocsProgress((value as any).docs_progress),
     slideProgress: normalizeSlideProgress((value as any).slide_progress ?? (value as any).slideProgress),
     browserProgress: normalizeBrowserProgress((value as any).browser_progress ?? (value as any).browserProgress),
@@ -2203,6 +2209,9 @@ const BrowserRunCard = ({
           <figure className="browser-run-live-frame" onClick={() => setExpanded(true)}>
             {Boolean(liveFrame) && <span className="browser-run-live-dot" aria-hidden="true" />}
             <img src={liveFrame || progress.screenshot?.previewUrl || ''} alt={progress.pageTitle || 'Live browser view'} draggable={false} />
+            <span className="browser-run-expand-affordance" aria-hidden="true">
+              <Maximize2 size={13} />
+            </span>
           </figure>
         )}
         <div className="slide-build-copy">
@@ -2263,11 +2272,12 @@ const BrowserRunCard = ({
           ) : null}
         </div>
       )}
-      {expanded && (liveFrame || progress.screenshot?.previewUrl) && (
+      {expanded && (liveFrame || progress.screenshot?.previewUrl) && createPortal(
         <div className="deck-preview-lightbox" onClick={() => setExpanded(false)}>
           <img src={liveFrame || progress.screenshot?.previewUrl || ''} alt={progress.pageTitle || 'Live browser view'} className="deck-preview-full" />
           <div className="deck-preview-lightbox-meta">{progress.pageTitle || displayUrl}</div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )
@@ -4420,19 +4430,29 @@ AssistantResponseBlocks.displayName = 'AssistantResponseBlocks'
 const AssistantAlphaStreamBody = ({
   message,
   onStopAlpha,
+  browserStreaming = false,
+  browserLiveFrame,
 }: {
-  message: Pick<Message, 'content' | 'responseBlocks' | 'alphaTerminalLog' | 'alphaConsoleAnchors' | 'activityLog' | 'requestId' | 'stopped'>
+  message: Pick<Message, 'content' | 'responseBlocks' | 'alphaTerminalLog' | 'alphaConsoleAnchors' | 'activityLog' | 'requestId' | 'stopped' | 'browserProgress' | 'browserConsoleAnchors'>
   onStopAlpha: (payload: { requestId?: string; taskId?: string }) => void
+  /** Whether this message is the currently-streaming one — passed through to
+   * BrowserRunCard for its status pill / live pulse indicator. */
+  browserStreaming?: boolean
+  /** Live CDP screencast frame for this message's browser run, if any — kept
+   * out of Message state (see browserLiveFrames), so it's threaded in here. */
+  browserLiveFrame?: string
 }) => {
   const { segments, hasAnchors } = buildAlphaStreamSegments({
     content: message.content,
     responseBlocks: message.responseBlocks,
     alphaConsoleAnchors: message.alphaConsoleAnchors,
     alphaTerminalLog: message.alphaTerminalLog,
+    browserConsoleAnchors: message.browserConsoleAnchors,
   })
   const fallbackConsole = buildAlphaConsoleView(message.activityLog, message.alphaTerminalLog, {
     stopped: message.stopped,
   })
+  const hasBrowserAnchor = Boolean(message.browserConsoleAnchors && message.browserConsoleAnchors.length > 0)
 
   if (!hasAnchors) {
     return (
@@ -4445,6 +4465,9 @@ const AssistantAlphaStreamBody = ({
             stopped={message.stopped}
             onStop={onStopAlpha}
           />
+        )}
+        {message.browserProgress && (
+          <BrowserRunCard progress={message.browserProgress} streaming={browserStreaming} liveFrame={browserLiveFrame} />
         )}
         {message.responseBlocks && message.responseBlocks.length > 0 ? (
           <AssistantResponseBlocks blocks={message.responseBlocks} />
@@ -4471,6 +4494,16 @@ const AssistantAlphaStreamBody = ({
             />
           )
         }
+        if (segment.kind === 'browser_run') {
+          return message.browserProgress ? (
+            <BrowserRunCard
+              key={`browser-run-${segment.taskId || 'default'}-${index}`}
+              progress={message.browserProgress}
+              streaming={browserStreaming}
+              liveFrame={browserLiveFrame}
+            />
+          ) : null
+        }
         if (segment.blocks && segment.blocks.length > 0) {
           return (
             <AssistantResponseBlocks
@@ -4489,6 +4522,11 @@ const AssistantAlphaStreamBody = ({
         }
         return null
       })}
+      {/* Safety net: browserProgress exists but no anchor was stamped for it
+          (segments came only from alpha anchors) — never lose the card. */}
+      {message.browserProgress && !hasBrowserAnchor && (
+        <BrowserRunCard progress={message.browserProgress} streaming={browserStreaming} liveFrame={browserLiveFrame} />
+      )}
     </>
   )
 }
@@ -7099,6 +7137,17 @@ export default function App() {
                   measureAssistantStreamLength(message.content, message.responseBlocks),
                 )
                 : message.alphaConsoleAnchors,
+              // Stamped once, the first time browserProgress arrives, at the
+              // stream length seen so far — mirrors alphaConsoleAnchors so the
+              // live BrowserRunCard renders inline at the point browser_task
+              // was actually invoked instead of always pinned to the top.
+              browserConsoleAnchors: incomingBrowserProgress
+                ? ensureAlphaConsoleAnchor(
+                  message.browserConsoleAnchors,
+                  null,
+                  measureAssistantStreamLength(message.content, message.responseBlocks),
+                )
+                : message.browserConsoleAnchors,
               progress: alphaTerminalEntry ? message.progress : (progressState ?? message.progress),
               slideProgress: alphaTerminalEntry ? message.slideProgress : (incomingSlideProgress ?? message.slideProgress),
               browserProgress: alphaTerminalEntry ? message.browserProgress : (incomingBrowserProgress ?? message.browserProgress),
@@ -7201,6 +7250,7 @@ export default function App() {
         const activityLog = normalizeActivityLog((event as any).activity_log)
         const alphaTerminalLog = normalizeAlphaTerminalLog((event as any).alpha_terminal_log)
         const alphaConsoleAnchors = normalizeAlphaConsoleAnchors((event as any).alpha_console_anchors)
+        const browserConsoleAnchors = normalizeAlphaConsoleAnchors((event as any).browser_console_anchors)
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
           const persistedMessageId = typeof (event as any).message_id === 'string'
@@ -7225,6 +7275,7 @@ export default function App() {
               activityLog: mergeActivityLogEntries(message.activityLog, activityLog),
               alphaTerminalLog: mergeAlphaTerminalLogs(message.alphaTerminalLog, alphaTerminalLog),
               alphaConsoleAnchors: alphaConsoleAnchors ?? message.alphaConsoleAnchors,
+              browserConsoleAnchors: browserConsoleAnchors ?? message.browserConsoleAnchors,
               requestId: typeof event.request_id === 'string' ? event.request_id : message.requestId,
               source: typeof event.source === 'string' ? event.source : message.source,
               sourceId: typeof event.source_id === 'string' ? event.source_id : message.sourceId,
@@ -9506,13 +9557,6 @@ export default function App() {
                               streaming={messageIsStreaming}
                             />
                           )}
-                          {msg.browserProgress && (
-                            <BrowserRunCard
-                              progress={msg.browserProgress}
-                              streaming={messageIsStreaming}
-                              liveFrame={browserLiveFrames[msg.requestId || ''] || browserLiveFrames[msg.sourceId || '']}
-                            />
-                          )}
                           {msg.thinking && (
                             <AssistantCollapsibleSection
                               title="Thinking"
@@ -9542,6 +9586,8 @@ export default function App() {
                           <AssistantAlphaStreamBody
                             message={msg}
                             onStopAlpha={handleStopAlphaAgent}
+                            browserStreaming={messageIsStreaming}
+                            browserLiveFrame={browserLiveFrames[msg.requestId || ''] || browserLiveFrames[msg.sourceId || '']}
                           />
                           <AssistantMessageArtifacts
                             messageId={msg.id}

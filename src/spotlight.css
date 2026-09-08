@@ -2927,6 +2927,7 @@ kbd {
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 12px;
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+  object-fit: contain;
 }
 
 .deck-preview-lightbox-meta {
@@ -5101,7 +5102,7 @@ kbd {
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(0, 0, 0, 0.3);
-  cursor: zoom-in;
+  cursor: pointer;
 }
 
 .browser-run-live-frame img {
@@ -5110,6 +5111,35 @@ kbd {
   aspect-ratio: 16 / 10;
   object-fit: cover;
   object-position: top left;
+}
+
+.browser-run-expand-affordance {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(8, 9, 12, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  transform: scale(0.9);
+  transition: opacity 140ms ease, transform 140ms ease, background 140ms ease;
+  pointer-events: none;
+}
+
+.browser-run-live-frame:hover .browser-run-expand-affordance {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.browser-run-live-frame:hover {
+  border-color: rgba(255, 255, 255, 0.22);
 }
 
 .browser-run-live-dot {

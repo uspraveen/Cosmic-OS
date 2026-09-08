@@ -17,7 +17,7 @@
           "goal": {"type": "string"},
           "status": {
             "type": "string",
-            "enum": ["success", "incomplete", "failed", "credentials_needed"]
+            "enum": ["success", "incomplete", "failed", "credentials_needed", "cancelled"]
           },
           "summary": {
             "type": "string",

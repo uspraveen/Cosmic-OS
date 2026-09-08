@@ -46,6 +46,8 @@ interface ForegroundStreamSnapshot {
   alpha_terminal_log?: any[]
   docs_progress?: unknown
   tabular_progress?: unknown
+  slide_progress?: unknown
+  browser_progress?: unknown
   produced_artifacts?: any[]
   supporting_artifacts?: any[]
   response_blocks?: any[]
@@ -1160,6 +1162,8 @@ export class GatewayConnectionManager {
         alpha_terminal_log: Array.isArray(payload.alpha_terminal_log) ? payload.alpha_terminal_log : undefined,
         docs_progress: payload.docs_progress,
         tabular_progress: payload.tabular_progress,
+        slide_progress: payload.slide_progress,
+        browser_progress: payload.browser_progress,
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
         supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : undefined,
         response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
@@ -1210,6 +1214,8 @@ export class GatewayConnectionManager {
         alpha_terminal_log: Array.isArray(payload.alpha_terminal_log) ? payload.alpha_terminal_log : undefined,
         docs_progress: payload.docs_progress,
         tabular_progress: payload.tabular_progress,
+        slide_progress: payload.slide_progress,
+        browser_progress: payload.browser_progress,
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
         supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : undefined,
         response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
@@ -1281,6 +1287,8 @@ export class GatewayConnectionManager {
         ),
         docs_progress: payload.docs_progress,
         tabular_progress: payload.tabular_progress,
+        slide_progress: payload.slide_progress,
+        browser_progress: payload.browser_progress,
         completed: false,
         failed: false,
       })

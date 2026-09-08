@@ -243,6 +243,62 @@ def test_handle_browser_recall_session_requires_session_id(browser_agent):
     assert result.error.code == "INVALID_INPUT"
 
 
+class _FakeCancelRedis:
+    """Minimal async-redis stand-in for _watch_for_cancel: only .get() is used."""
+
+    def __init__(self, cancelled_after: int | None = None):
+        # None = never cancelled; otherwise cancel on the Nth+1 poll.
+        self._cancelled_after = cancelled_after
+        self._polls = 0
+
+    async def get(self, key: str):
+        self._polls += 1
+        if self._cancelled_after is not None and self._polls > self._cancelled_after:
+            return b"1"
+        return None
+
+
+def test_run_goal_with_cancel_watch_returns_result_when_not_cancelled(browser_agent, monkeypatch):
+    import asyncio
+
+    browser_agent.redis = _FakeCancelRedis(cancelled_after=None)
+
+    async def quick_coro():
+        await asyncio.sleep(0.05)
+        return {"status": "success"}
+
+    result = asyncio.run(
+        browser_agent._run_goal_with_cancel_watch(_recall_task("t_ok"), quick_coro())
+    )
+    assert result == {"status": "success"}
+
+
+def test_run_goal_with_cancel_watch_cancels_the_run(browser_agent):
+    import asyncio
+
+    from agents.browser_agent.agent import _BrowserRunCancelled
+
+    # Cancel flag is already "set" on the very first poll — no need to wait
+    # out the real 2s poll interval for this test to be fast.
+    browser_agent.redis = _FakeCancelRedis(cancelled_after=0)
+
+    cancelled_flag = {"ran_cleanup": False}
+
+    async def long_coro():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled_flag["ran_cleanup"] = True
+            raise
+        return {"status": "should_not_get_here"}
+
+    with pytest.raises(_BrowserRunCancelled):
+        asyncio.run(
+            browser_agent._run_goal_with_cancel_watch(_recall_task("t_cancel"), long_coro())
+        )
+    assert cancelled_flag["ran_cleanup"] is True
+
+
 def test_run_goal_with_missing_home_fails_gracefully(tmp_path, monkeypatch):
     monkeypatch.setenv("BROWSER_USE_HOME", str(tmp_path / "does-not-exist"))
     from agents.browser_agent.config import BrowserAgentConfig
