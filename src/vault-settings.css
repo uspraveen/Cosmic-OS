@@ -558,14 +558,23 @@
 }
 
 .vault-modal-overlay {
+  /* Rendered via portal to document.body — must sit above the settings
+     overlay (z-index 10000) while escaping its LiquidGlass transform. */
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: 10050;
   display: flex;
   align-items: center;
   justify-content: center;
   background: rgba(2, 6, 12, 0.55);
   backdrop-filter: blur(6px);
+}
+
+/* The settings panel's Roboto font-family doesn't inherit through the
+   portal — reapply it here. */
+.vault-modal-overlay,
+.vault-modal {
+  font-family: "Roboto", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
 }
 
 .vault-modal {

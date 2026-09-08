@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import './vault-settings.css'
 
 interface VaultPolicy {
@@ -706,15 +707,16 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
         ) : null}
       </div>
 
-      {editor ? (
-        <div
-          className="vault-modal-overlay"
-          role="dialog"
-          aria-modal="true"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setEditor(null)
-          }}
-        >
+      {editor
+        ? createPortal(
+            <div
+              className="vault-modal-overlay"
+              role="dialog"
+              aria-modal="true"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget) setEditor(null)
+              }}
+            >
           <div className="vault-modal">
             <header className="vault-modal-hero">
               <div className="vault-entry-icon" aria-hidden="true">
@@ -830,8 +832,10 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
               </button>
             </footer>
           </div>
-        </div>
-      ) : null}
+        </div>,
+            document.body,
+          )
+        : null}
     </div>
   )
 }
