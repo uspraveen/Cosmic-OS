@@ -59,6 +59,11 @@ class BrowserAgentConfig:
     headless: bool = True
     default_max_steps: int = 40
     run_timeout_sec: int = 840
+    # Budget for one AskUser interrupt round trip to the desktop (OTP, CAPTCHA,
+    # phone-approval, ambiguous forms). Longer than cosmic-browser-use's own
+    # 120s stdin-input default since a human now has to notice a desktop card
+    # instead of just typing at a terminal.
+    ask_user_wait_sec: int = 240
 
     working_dir_root: Path = BACKEND_ROOT
     artifacts_root: Path = BACKEND_ROOT / "runs" / "artifacts"
@@ -75,6 +80,7 @@ class BrowserAgentConfig:
             headless=_env_bool("BROWSER_AGENT_HEADLESS", True),
             default_max_steps=max(1, _env_int("BROWSER_AGENT_MAX_STEPS", 40)),
             run_timeout_sec=max(30, _env_int("BROWSER_AGENT_RUN_TIMEOUT_SEC", 840)),
+            ask_user_wait_sec=max(30, _env_int("BROWSER_AGENT_ASK_USER_TIMEOUT_SEC", 240)),
             working_dir_root=Path(_first_env("BROWSER_AGENT_WORKING_DIR_ROOT", default=str(BACKEND_ROOT))),
             artifacts_root=Path(_first_env("BROWSER_AGENT_ARTIFACTS_ROOT", default=str(BACKEND_ROOT / "runs" / "artifacts"))),
         )

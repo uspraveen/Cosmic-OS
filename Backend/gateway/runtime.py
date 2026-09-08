@@ -48,6 +48,7 @@ from .gmail_approval_store import GmailApprovalStore
 from .gmail_context_store import GmailContextStore
 from .sandbox_permission_store import SandboxPermissionStore
 from .vault.store import VaultStore, decrypt_entry_secrets
+from .browser_interrupts import BrowserInterruptManager
 from .slide_workflow_choice_store import SlideWorkflowChoiceStore
 from .memory import MemoryWriteAuditStore
 from .memory.client import (
@@ -408,6 +409,7 @@ class ActiveRequest:
     alpha_terminal_log: list[dict[str, Any]] = field(default_factory=list)
     alpha_console_anchors: dict[str, int] = field(default_factory=dict)
     slide_progress: dict[str, Any] | None = None
+    browser_progress: dict[str, Any] | None = None
     error_message: str = ""
 
 
@@ -508,6 +510,7 @@ class GatewayRuntime:
         self.gmail_approval_store = GmailApprovalStore(config.gmail_approvals_db_path)
         self.sandbox_permission_store = SandboxPermissionStore(config.sandbox_permissions_db_path)
         self.vault_store = VaultStore(config.vault_db_path)
+        self.browser_interrupts = BrowserInterruptManager()
         self.slide_workflow_choice_store = SlideWorkflowChoiceStore(
             config.slide_workflow_choices_db_path
         )
@@ -10409,6 +10412,7 @@ class GatewayRuntime:
                         "activity_log": state.activity_log,
                         "alpha_terminal_log": state.alpha_terminal_log,
                         "slide_progress": state.slide_progress,
+                        "browser_progress": state.browser_progress,
                         "response_blocks": state.response_blocks_snapshot,
                         "snapshot_seq": state.snapshot_seq or None,
                     },
@@ -10528,6 +10532,7 @@ class GatewayRuntime:
                     "activity_log": state.activity_log,
                     "alpha_terminal_log": state.alpha_terminal_log,
                     "slide_progress": state.slide_progress,
+                    "browser_progress": state.browser_progress,
                     "response_blocks": state.response_blocks_snapshot,
                     "snapshot_seq": None,
                 },
@@ -10636,6 +10641,7 @@ class GatewayRuntime:
                 "activity_log": state.activity_log,
                 "alpha_terminal_log": state.alpha_terminal_log,
                 "slide_progress": state.slide_progress,
+                "browser_progress": state.browser_progress,
                 "response_blocks": state.response_blocks_snapshot,
                 "snapshot_seq": state.snapshot_seq or None,
             },
@@ -10680,6 +10686,7 @@ class GatewayRuntime:
                     "activity_log": state.activity_log,
                     "alpha_terminal_log": state.alpha_terminal_log,
                     "slide_progress": state.slide_progress,
+                    "browser_progress": state.browser_progress,
                     "response_blocks": state.response_blocks_snapshot,
                     "snapshot_seq": state.snapshot_seq or None,
                     "completed": state.completed,
@@ -15148,6 +15155,7 @@ class GatewayRuntime:
                 "activity_log": state.activity_log,
                 "alpha_terminal_log": state.alpha_terminal_log,
                 "slide_progress": state.slide_progress,
+                "browser_progress": state.browser_progress,
                 "response_blocks": state.response_blocks_snapshot,
                 "snapshot_seq": state.snapshot_seq or None,
                 "backgrounded_at": state.backgrounded_at,
@@ -15171,6 +15179,7 @@ class GatewayRuntime:
                 "activity_log": state.activity_log,
                 "alpha_terminal_log": state.alpha_terminal_log,
                 "slide_progress": state.slide_progress,
+                "browser_progress": state.browser_progress,
                 "completed": state.completed,
                 "failed": state.failed,
                 "error": state.error_message or None,
@@ -16173,6 +16182,14 @@ class GatewayRuntime:
                 session_id=context["session_id"],
                 channel=context["channel"],
             )
+        browser_progress = payload.get("browser_progress")
+        if isinstance(browser_progress, dict):
+            forwarded["browser_progress"] = self._hydrate_browser_progress(
+                browser_progress,
+                request_id=context["request_id"],
+                session_id=context["session_id"],
+                channel=context["channel"],
+            )
         return forwarded
 
     def _hydrate_slide_progress(
@@ -16231,6 +16248,96 @@ class GatewayRuntime:
                 slide["preview_url"] = preview_url
         hydrated["slides"] = next_slides
         return hydrated
+
+    def _hydrate_browser_progress(
+        self,
+        payload: dict[str, Any],
+        *,
+        request_id: str,
+        session_id: str,
+        channel: str,
+    ) -> dict[str, Any]:
+        """Persist the browser agent's live step screenshot and mint a preview URL.
+
+        Mirrors `_hydrate_slide_progress` — the browser agent already stamped
+        the screenshot with an artifact_id/sha256 (see
+        `BrowserAgent._attach_progress_screenshot`) before emitting; this just
+        registers it and turns it into a URL the desktop `<img>` can load.
+        Any `interrupt` sub-object (AskUser question) passes through as-is —
+        it has no artifact to mint.
+        """
+        hydrated = dict(payload)
+        screenshot = payload.get("screenshot") if isinstance(payload.get("screenshot"), dict) else None
+        if screenshot:
+            shot = dict(screenshot)
+            artifact = {
+                key: value
+                for key, value in {
+                    "artifact_id": self._safe_text(shot.get("artifact_id")),
+                    "path": self._safe_text(shot.get("path")),
+                    "mime": self._safe_text(shot.get("mime")) or "image/jpeg",
+                    "filename": self._safe_text(shot.get("filename")),
+                    "sha256": self._safe_text(shot.get("sha256")),
+                    "kind": "output",
+                    "audience": "debug",
+                }.items()
+                if value not in (None, "", [], {})
+            }
+            if artifact.get("artifact_id") and artifact.get("path"):
+                try:
+                    self._cache_artifact_list(
+                        request_id=request_id,
+                        session_id=session_id,
+                        source_channel=channel,
+                        source_message_id=None,
+                        artifacts=self._normalize_produced_artifact_list([artifact]),
+                    )
+                except Exception:
+                    logger.debug(
+                        "gateway.browser_preview_persist_failed request_id=%s",
+                        request_id,
+                        exc_info=True,
+                    )
+                preview_url = self.mint_artifact_access_url(shot, purpose="ui_preview")
+                if preview_url:
+                    shot["preview_url"] = preview_url
+            hydrated["screenshot"] = shot
+        return hydrated
+
+    async def publish_browser_live_frame(self, *, task_id: str, frame: str) -> None:
+        """Fire-and-forget broadcast of one live CDP screencast frame.
+
+        Deliberately bypasses the Redis task.progress/activity-log pipeline —
+        at ~2-3 frames/sec that channel would flood the Flow timeline with
+        duplicate-ish entries and push real step history out of the capped
+        activity log. This mirrors `_publish_response_action_update`'s direct
+        `adapter.broadcast_all` instead: no persistence, no artifact
+        registration, no activity log entry — just the newest frame, live.
+        The client matches it to a message by request_id/task_id and never
+        stores it on the Message object, so it can't leak into history.
+        """
+        context = self._resolve_specialist_request_context(task_id)
+        if context is None:
+            return
+        event = {
+            "type": "browser.live_frame",
+            "task_id": task_id,
+            "request_id": context["request_id"],
+            "session_id": context["session_id"],
+            "frame": frame,
+            "timestamp": utcnow_iso(),
+        }
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            try:
+                await adapter.broadcast_all(event)
+            except Exception:
+                logger.debug(
+                    "gateway.browser_live_frame_broadcast_failed task_id=%s",
+                    task_id,
+                    exc_info=True,
+                )
 
     def _persist_specialist_completion_artifacts(
         self,
@@ -24579,6 +24686,8 @@ class GatewayRuntime:
             )
             if isinstance(event.get("slide_progress"), dict):
                 state.slide_progress = event["slide_progress"]
+            if isinstance(event.get("browser_progress"), dict):
+                state.browser_progress = event["browser_progress"]
             state.activity = progress_label or self._safe_text(event.get("message")) or state.activity
             activity_entry = self._build_task_activity_entry(event)
             if activity_entry:

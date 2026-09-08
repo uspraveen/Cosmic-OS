@@ -12,11 +12,15 @@ store, where only the deterministic CredentialFill action consumes them.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from shared.agent_runtime import AgentResult, AgentRuntime, TaskEnvelope
 from shared.contracts import AgentError
@@ -26,6 +30,28 @@ from .config import AGENT_ROOT, BrowserAgentConfig
 logger = logging.getLogger(__name__)
 
 BROWSER_AGENT_ID = "cosmic/browser-agent:1.0.0"
+
+_SCREENSHOT_MIME_BY_SUFFIX = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+
+# Cheap keyword sniff on the AskUser question text — cosmetic only, drives
+# whether the desktop card shows a masked password input, a plain text input,
+# or a generic one. Mirrors the wording cosmic-browser-use's own credential
+# governor uses (main.py:_detect_credential_handoff_reason) so the two stay
+# in sync without importing across the repo boundary.
+_PASSWORD_HINT_WORDS = ("password",)
+_CODE_HINT_WORDS = ("verification code", "security code", "one-time code", "otp", "mfa", "2fa")
+
+# Live view frame rate cap. CDP pushes a frame on every repaint, which can be
+# much faster than this during animations — we drop frames rather than slow
+# Chrome down, so the browser is never throttled by how fast the gateway/
+# desktop can keep up. ~2.5fps is plenty for "watch what it's doing", far
+# below anything that would stress the gateway broadcast path.
+_LIVE_FRAME_MIN_INTERVAL_SEC = 0.4
 
 
 class BrowserAgent(AgentRuntime):
@@ -92,6 +118,24 @@ class BrowserAgent(AgentRuntime):
         # Import late — pulls playwright + the whole cosmic-browser-use stack.
         from cosmic_browser_use.api import BrowserRunError, run_goal
 
+        # Accumulates the latest step/screenshot/interrupt so every progress
+        # emit (including AskUser interrupts, which don't have a new step of
+        # their own) carries the full live-view snapshot the desktop needs —
+        # otherwise the live screenshot would blink out while a question is
+        # pending. Mirrors the Slide Agent's LiveDeckProgress accumulator.
+        live_state: dict[str, Any] = {}
+
+        async def on_progress(info: dict[str, Any]) -> None:
+            await self._on_run_progress(task, info, live_state)
+
+        async def ask_user_handler(question: str) -> str:
+            return await self._ask_user_bridge(task, question, live_state)
+
+        live_frame_last_sent = {"at": 0.0}
+
+        async def on_live_frame(frame_b64: str) -> None:
+            await self._live_frame_bridge(task, frame_b64, live_frame_last_sent)
+
         try:
             result = await run_goal(
                 goal,
@@ -100,13 +144,9 @@ class BrowserAgent(AgentRuntime):
                 memory_mode=memory_mode,
                 headless=headless,
                 credentials=credentials,
-                on_progress=lambda info: self._emit_progress(
-                    task.task_id,
-                    f"Step {info.get('step')}: {info.get('description') or info.get('action_type')}",
-                    step=info.get("step"),
-                    action_type=info.get("action_type"),
-                    estimated_completion=info.get("estimated_completion"),
-                ),
+                on_progress=on_progress,
+                ask_user_handler=ask_user_handler,
+                on_live_frame=on_live_frame,
                 working_dir_root=str(self.config.working_dir_root),
                 run_timeout_sec=min(self.config.run_timeout_sec, self.max_task_duration_sec),
             )
@@ -304,6 +344,191 @@ class BrowserAgent(AgentRuntime):
             await self.emit_event(task_id, "task.progress", {"message": message, **payload})
         except Exception:
             logger.debug("browser_agent.progress_emit_failed task_id=%s", task_id, exc_info=True)
+
+    async def _on_run_progress(
+        self,
+        task: TaskEnvelope,
+        info: dict[str, Any],
+        live_state: dict[str, Any],
+    ) -> None:
+        """cosmic-browser-use's per-step hook — feeds the live BrowserRunCard."""
+        step = info.get("step")
+        description = str(info.get("description") or info.get("action_type") or "Working").strip()
+        live_state.update(
+            {
+                "step": step,
+                "max_steps": info.get("max_steps"),
+                "action_type": info.get("action_type"),
+                "description": description,
+                "url": info.get("url"),
+                "page_title": info.get("page_title"),
+                "elapsed_sec": info.get("elapsed_sec"),
+            }
+        )
+        screenshot = self._attach_progress_screenshot(task, info)
+        if screenshot:
+            live_state["screenshot"] = screenshot
+        live_state.pop("interrupt", None)
+        await self._emit_progress(
+            task.task_id,
+            f"Step {step}: {description}" if step else description,
+            step=step,
+            action_type=info.get("action_type"),
+            estimated_completion=info.get("estimated_completion"),
+            browser_progress=dict(live_state),
+        )
+
+    def _attach_progress_screenshot(
+        self,
+        task: TaskEnvelope,
+        info: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Copy this step's screenshot into the task artifact dir and stamp it
+        with an artifact id — mirrors SlideAgent._attach_preview_files /
+        _artifact_manifest so the gateway's existing artifact-preview pipeline
+        (mint_artifact_access_url) can serve it to the desktop unchanged."""
+        raw_path = info.get("screenshot_path")
+        if not raw_path:
+            return None
+        source = Path(str(raw_path))
+        if not source.is_file():
+            return None
+        try:
+            preview_dir = self.artifacts_root / task.task_id / "browser_agent" / "previews"
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            step = self._safe_int(info.get("step"), 0)
+            suffix = source.suffix.lower() or ".jpg"
+            destination = preview_dir / f"step-{step:03d}{suffix}"
+            if source.resolve() != destination.resolve():
+                shutil.copy2(source, destination)
+            digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+            resolved = destination.resolve()
+            try:
+                relative = resolved.relative_to(self.artifacts_root)
+                logical_path = (Path("runs") / "artifacts" / relative).as_posix()
+            except ValueError:
+                logical_path = resolved.as_posix()
+            return {
+                "artifact_id": f"art_{uuid4().hex[:12]}",
+                "path": logical_path,
+                "mime": _SCREENSHOT_MIME_BY_SUFFIX.get(suffix, "image/jpeg"),
+                "filename": destination.name,
+                "sha256": digest,
+            }
+        except OSError:
+            logger.debug(
+                "browser_agent.screenshot_attach_failed task_id=%s step=%s",
+                task.task_id,
+                info.get("step"),
+                exc_info=True,
+            )
+            return None
+
+    async def _live_frame_bridge(
+        self,
+        task: TaskEnvelope,
+        frame_b64: str,
+        last_sent: dict[str, float],
+    ) -> None:
+        """Forwards one CDP screencast frame to the gateway's live-frame relay.
+
+        Throttled client-side (frames arrive on Chrome's own repaint cadence,
+        which can far exceed what's worth shipping over the network) and
+        fire-and-forget: a slow or unreachable gateway just means this frame
+        (and maybe the next few) get dropped, never a stall in the browser
+        loop — start_live_screencast() already acks every CDP frame before
+        this is even called.
+        """
+        if not frame_b64:
+            return
+        now = time.monotonic()
+        if now - last_sent["at"] < _LIVE_FRAME_MIN_INTERVAL_SEC:
+            return
+        last_sent["at"] = now
+        try:
+            await self._http_client.post(
+                f"{self.gateway_url.rstrip('/')}/internal/browser/live-frame",
+                json={
+                    "task_id": task.task_id,
+                    "frame": f"data:image/jpeg;base64,{frame_b64}",
+                },
+                headers={"X-Internal-Token": self.gateway_internal_token},
+                timeout=5.0,
+            )
+        except Exception:
+            logger.debug("browser_agent.live_frame_send_failed task_id=%s", task.task_id, exc_info=True)
+
+    @staticmethod
+    def _classify_ask_user_kind(question: str) -> str:
+        lowered = question.lower()
+        if any(word in lowered for word in _PASSWORD_HINT_WORDS):
+            return "password"
+        if any(word in lowered for word in _CODE_HINT_WORDS):
+            return "verification_code"
+        return "generic"
+
+    async def _ask_user_bridge(
+        self,
+        task: TaskEnvelope,
+        question: str,
+        live_state: dict[str, Any],
+    ) -> str:
+        """Bridges cosmic-browser-use's AskUser action to the desktop.
+
+        Makes ONE blocking call to the gateway, which holds the connection
+        open until the user answers/skips on the live BrowserRunCard or the
+        wait times out. This is the one synchronous, two-way exception to the
+        otherwise one-way task.progress live-view channel — everything else
+        (OTP, CAPTCHA, phone-approval, ambiguous forms) already funnels
+        through this single AskUser action on the cosmic-browser-use side.
+        """
+        question = str(question or "").strip()
+        request_id = f"bwi_{uuid4().hex[:12]}"
+        kind = self._classify_ask_user_kind(question)
+        timeout_sec = max(5.0, float(self.config.ask_user_wait_sec))
+
+        live_state["interrupt"] = {
+            "request_id": request_id,
+            "question": question,
+            "kind": kind,
+            "status": "pending",
+        }
+        await self._emit_progress(task.task_id, question, browser_progress=dict(live_state))
+
+        async def _clear_interrupt() -> None:
+            live_state.pop("interrupt", None)
+            await self._emit_progress(task.task_id, "", browser_progress=dict(live_state))
+
+        try:
+            response = await self._http_client.post(
+                f"{self.gateway_url.rstrip('/')}/internal/browser/ask-user",
+                json={
+                    "request_id": request_id,
+                    "question": question,
+                    "kind": kind,
+                    "task_id": task.task_id,
+                    "session_id": task.session_id,
+                    "timeout_sec": timeout_sec,
+                },
+                headers={"X-Internal-Token": self.gateway_internal_token},
+                timeout=timeout_sec + 15.0,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            await _clear_interrupt()
+            raise RuntimeError(f"Could not reach the user for this question: {exc}") from exc
+
+        await _clear_interrupt()
+        status = str(result.get("status") or "")
+        if status == "answered":
+            answer = str(result.get("answer") or "").strip()
+            if answer:
+                return answer
+            raise RuntimeError("The user submitted an empty answer.")
+        if status == "skipped":
+            raise RuntimeError("The user skipped this question — continue without it if possible.")
+        raise RuntimeError(f"No response from the user within {int(timeout_sec)}s.")
 
     @staticmethod
     def _safe_int(value: Any, default: int) -> int:

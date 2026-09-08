@@ -91,6 +91,62 @@ def test_credentials_from_auth(browser_agent):
     assert browser_agent._credentials_from_auth() is None
 
 
+def test_classify_ask_user_kind(browser_agent):
+    assert browser_agent._classify_ask_user_kind("Please enter your password to continue.") == "password"
+    assert browser_agent._classify_ask_user_kind("What is the verification code sent to your phone?") == "verification_code"
+    assert browser_agent._classify_ask_user_kind("I see a CAPTCHA — can you solve it and tell me when done?") == "generic"
+
+
+def test_attach_progress_screenshot_copies_and_stamps_artifact(browser_agent, tmp_path):
+    from shared.contracts import TaskEnvelope
+
+    source = tmp_path / "raw_step_004.jpg"
+    source.write_bytes(b"fake-jpeg-bytes")
+    task = TaskEnvelope(
+        task_id="t_browser_shots",
+        task_list_id="list",
+        parent_task_id=None,
+        session_id="sess",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/browser-agent:1.0.0",
+        intent="browser.run",
+        input={},
+        idempotency_key="idem-shots",
+        signature="",
+    )
+
+    screenshot = browser_agent._attach_progress_screenshot(task, {"screenshot_path": str(source), "step": 4})
+    assert screenshot is not None
+    assert screenshot["filename"] == "step-004.jpg"
+    assert screenshot["mime"] == "image/jpeg"
+    assert screenshot["artifact_id"].startswith("art_")
+    assert len(screenshot["sha256"]) == 64
+    assert screenshot["path"] == "runs/artifacts/t_browser_shots/browser_agent/previews/step-004.jpg"
+
+    destination = browser_agent.artifacts_root / "t_browser_shots" / "browser_agent" / "previews" / "step-004.jpg"
+    assert destination.is_file()
+    assert destination.read_bytes() == b"fake-jpeg-bytes"
+
+
+def test_attach_progress_screenshot_missing_path_returns_none(browser_agent):
+    from shared.contracts import TaskEnvelope
+
+    task = TaskEnvelope(
+        task_id="t_browser_none",
+        task_list_id="list",
+        parent_task_id=None,
+        session_id="sess",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/browser-agent:1.0.0",
+        intent="browser.run",
+        input={},
+        idempotency_key="idem-none",
+        signature="",
+    )
+    assert browser_agent._attach_progress_screenshot(task, {"step": 1}) is None
+    assert browser_agent._attach_progress_screenshot(task, {"screenshot_path": "/no/such/file.jpg", "step": 1}) is None
+
+
 def test_run_goal_with_missing_home_fails_gracefully(tmp_path, monkeypatch):
     monkeypatch.setenv("BROWSER_USE_HOME", str(tmp_path / "does-not-exist"))
     from agents.browser_agent.config import BrowserAgentConfig

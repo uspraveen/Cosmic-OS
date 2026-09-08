@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 import uvicorn
 
+from .browser.routes import router as browser_router
 from .channels.routes import router as channel_router
 from .config import GatewayConfig
 from .automations.routes import router as automation_router
@@ -62,6 +63,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+app.include_router(browser_router)
 app.include_router(channel_router)
 app.include_router(automation_router)
 app.include_router(credential_router)

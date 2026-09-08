@@ -1,4 +1,4 @@
-import { CalendarDays, Check, ChevronRight, Code2, Copy, Mail, Maximize2, Mic, Minimize2, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
+import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, Mail, Maximize2, Mic, Minimize2, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
 import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
@@ -68,6 +68,7 @@ interface Message {
   emailBodyTruncated?: boolean
   progress?: DocsProgressState | TabularProgressState
   slideProgress?: SlideProgressState
+  browserProgress?: BrowserProgressState
   backgroundState?: 'working' | 'ready' | 'failed'
 }
 
@@ -101,6 +102,7 @@ interface BackgroundTask {
   alphaConsoleAnchors?: AlphaConsoleAnchor[]
   progress?: DocsProgressState | TabularProgressState
   slideProgress?: SlideProgressState
+  browserProgress?: BrowserProgressState
   producedArtifacts?: ProducedArtifact[]
   supportingArtifacts?: ProducedArtifact[]
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
@@ -150,6 +152,7 @@ interface GatewayForegroundStreamSnapshot {
   alphaConsoleAnchors?: AlphaConsoleAnchor[]
   progress?: DocsProgressState | TabularProgressState
   slideProgress?: SlideProgressState
+  browserProgress?: BrowserProgressState
   producedArtifacts?: ProducedArtifact[]
   supportingArtifacts?: ProducedArtifact[]
   responseBlocks?: ResponseBlock[]
@@ -392,6 +395,31 @@ interface SlideProgressState {
     slides: SlidePlanItem[]
   } | null
   slides: SlidePreviewItem[]
+}
+
+interface BrowserProgressScreenshot {
+  previewUrl: string
+  artifactId?: string
+}
+
+interface BrowserProgressInterrupt {
+  requestId: string
+  question: string
+  kind: 'password' | 'verification_code' | 'generic'
+  status: 'pending' | 'answered' | 'skipped'
+}
+
+interface BrowserProgressState {
+  kind: 'browser_run'
+  step?: number | null
+  maxSteps?: number | null
+  actionType?: string | null
+  description?: string
+  url?: string | null
+  pageTitle?: string | null
+  elapsedSec?: number | null
+  screenshot?: BrowserProgressScreenshot | null
+  interrupt?: BrowserProgressInterrupt | null
 }
 
 interface SurfaceLaunchState {
@@ -1186,6 +1214,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       activity: typeof item?.metadata?.activity === 'string' ? item.metadata.activity : undefined,
       progress: normalizeTabularProgress(item?.metadata?.tabular_progress) ?? normalizeDocsProgress(item?.metadata?.docs_progress),
       slideProgress: normalizeSlideProgress(item?.metadata?.slide_progress),
+      browserProgress: normalizeBrowserProgress(item?.metadata?.browser_progress),
     })))
 }
 
@@ -1253,6 +1282,9 @@ const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStr
   const slideProgress = normalizeSlideProgress(
     (value as any).slide_progress ?? (value as any).slideProgress,
   )
+  const browserProgress = normalizeBrowserProgress(
+    (value as any).browser_progress ?? (value as any).browserProgress,
+  )
   const failed = Boolean((value as any).failed)
   const error = typeof (value as any).error === 'string' && (value as any).error.trim()
     ? (value as any).error.trim()
@@ -1287,6 +1319,7 @@ const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStr
     alphaConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).alpha_console_anchors ?? (value as any).alphaConsoleAnchors),
     progress,
     slideProgress,
+    browserProgress,
     producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
     supportingArtifacts: normalizeSupportingArtifacts((value as any).supporting_artifacts ?? (value as any).supportingArtifacts),
     responseBlocks: normalizeResponseBlocks((value as any).response_blocks ?? (value as any).responseBlocks ?? (value as any).blocks),
@@ -1395,6 +1428,7 @@ const mergeHydratedMessages = (
       stopped: message.stopped ?? existing.stopped,
       progress: message.progress ?? existing.progress,
       slideProgress: message.slideProgress ?? existing.slideProgress,
+      browserProgress: message.browserProgress ?? existing.browserProgress,
       backgroundState: message.backgroundState ?? existing.backgroundState,
     }
   })
@@ -1750,6 +1784,49 @@ const normalizeSlideProgress = (value: unknown): SlideProgressState | undefined 
   }
 }
 
+const normalizeBrowserProgress = (value: unknown): BrowserProgressState | undefined => {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const raw = value as Record<string, any>
+  const screenshotRaw = raw.screenshot && typeof raw.screenshot === 'object' ? raw.screenshot : null
+  const previewUrl = typeof screenshotRaw?.preview_url === 'string' && screenshotRaw.preview_url.trim()
+    ? screenshotRaw.preview_url.trim()
+    : typeof screenshotRaw?.previewUrl === 'string' && screenshotRaw.previewUrl.trim()
+      ? screenshotRaw.previewUrl.trim()
+      : null
+  const screenshot: BrowserProgressScreenshot | null = previewUrl
+    ? { previewUrl, artifactId: typeof screenshotRaw?.artifact_id === 'string' ? screenshotRaw.artifact_id : undefined }
+    : null
+  const interruptRaw = raw.interrupt && typeof raw.interrupt === 'object' ? raw.interrupt : null
+  const requestId = typeof interruptRaw?.request_id === 'string' ? interruptRaw.request_id.trim() : ''
+  const question = typeof interruptRaw?.question === 'string' ? interruptRaw.question.trim() : ''
+  const interrupt: BrowserProgressInterrupt | null = requestId && question
+    ? {
+        requestId,
+        question,
+        kind: interruptRaw?.kind === 'password' || interruptRaw?.kind === 'verification_code'
+          ? interruptRaw.kind
+          : 'generic',
+        status: interruptRaw?.status === 'answered' || interruptRaw?.status === 'skipped'
+          ? interruptRaw.status
+          : 'pending',
+      }
+    : null
+  return {
+    kind: 'browser_run',
+    step: typeof raw.step === 'number' ? raw.step : null,
+    maxSteps: typeof raw.max_steps === 'number' ? raw.max_steps : null,
+    actionType: typeof raw.action_type === 'string' ? raw.action_type : null,
+    description: typeof raw.description === 'string' ? raw.description.trim() : undefined,
+    url: typeof raw.url === 'string' ? raw.url : null,
+    pageTitle: typeof raw.page_title === 'string' ? raw.page_title : null,
+    elapsedSec: typeof raw.elapsed_sec === 'number' ? raw.elapsed_sec : null,
+    screenshot,
+    interrupt,
+  }
+}
+
 const currentSlidePreview = (progress?: SlideProgressState | null): SlidePreviewItem | null => {
   if (!progress?.slides?.length) {
     return null
@@ -1815,6 +1892,7 @@ const normalizeBackgroundTask = (value: unknown): BackgroundTask | null => {
     alphaConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).alpha_console_anchors ?? (value as any).alphaConsoleAnchors),
     progress: normalizeTabularProgress((value as any).tabular_progress) ?? normalizeDocsProgress((value as any).docs_progress),
     slideProgress: normalizeSlideProgress((value as any).slide_progress ?? (value as any).slideProgress),
+    browserProgress: normalizeBrowserProgress((value as any).browser_progress ?? (value as any).browserProgress),
     producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
     supportingArtifacts: normalizeSupportingArtifacts((value as any).supporting_artifacts ?? (value as any).supportingArtifacts),
     sources: Array.isArray((value as any).sources) ? (value as any).sources : undefined,
@@ -2002,6 +2080,193 @@ const SlideBuildCard = ({
           <div className="deck-preview-lightbox-meta">
             {`Slide ${active.slideNumber} of ${progress.total || thumbs.length}`}
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const formatBrowserElapsed = (seconds?: number | null): string | null => {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return null
+  const total = Math.round(seconds)
+  if (total < 60) return `${total}s`
+  const minutes = Math.floor(total / 60)
+  const rest = total % 60
+  return rest > 0 ? `${minutes}m ${rest}s` : `${minutes}m`
+}
+
+const formatBrowserUrl = (url?: string | null): string => {
+  if (!url) return ''
+  try {
+    const parsed = new URL(url)
+    return `${parsed.hostname}${parsed.pathname === '/' ? '' : parsed.pathname}`
+  } catch {
+    return url.replace(/^https?:\/\//, '')
+  }
+}
+
+const BROWSER_INTERRUPT_KIND_LABEL: Record<BrowserProgressInterrupt['kind'], string> = {
+  password: 'Password requested',
+  verification_code: 'Verification code needed',
+  generic: 'Needs your input',
+}
+
+const BrowserRunCard = ({
+  progress,
+  streaming = false,
+  liveFrame,
+}: {
+  progress: BrowserProgressState
+  streaming?: boolean
+  /** Raw data: URI from the CDP screencast relay — true live video, refreshed
+   * several times a second. Preferred over progress.screenshot (a coarser
+   * step-boundary still) whenever present. */
+  liveFrame?: string
+}) => {
+  const [expanded, setExpanded] = useState(false)
+  const [answer, setAnswer] = useState('')
+  const [busy, setBusy] = useState<'answer' | 'skip' | null>(null)
+  const [error, setError] = useState('')
+  const [localStatus, setLocalStatus] = useState<'pending' | 'answered' | 'skipped'>(
+    progress.interrupt?.status || 'pending',
+  )
+  const interrupt = progress.interrupt
+  const requestId = interrupt?.requestId || ''
+
+  useEffect(() => {
+    setAnswer('')
+    setError('')
+    setBusy(null)
+    setLocalStatus(interrupt?.status || 'pending')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestId])
+
+  const isAwaitingInput = Boolean(interrupt) && localStatus === 'pending'
+  const statusLabel = isAwaitingInput ? 'Waiting for you' : streaming ? 'Running' : 'Done'
+  // Reuses the Slide Agent's stage color tokens (.docs-progress-stage.*) so
+  // this card matches the same amber/blue/green "attention/working/done"
+  // language instead of inventing a parallel palette.
+  const statusKey = isAwaitingInput ? 'prepare' : streaming ? 'render' : 'ready'
+  const displayUrl = formatBrowserUrl(progress.url)
+  const elapsed = formatBrowserElapsed(progress.elapsedSec)
+
+  const submitAnswer = async () => {
+    if (!requestId || busy) return
+    if (!answer.trim()) {
+      setError('An answer is required.')
+      return
+    }
+    setBusy('answer')
+    setError('')
+    try {
+      const bridge = window.cosmic?.browserRespondInterrupt
+      if (!bridge) throw new Error('Browser answer action is unavailable.')
+      const result = await bridge(requestId, answer.trim())
+      if (String(result?.status || '').trim() === 'ignored') {
+        throw new Error('This question was already answered or timed out.')
+      }
+      setLocalStatus('answered')
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Action failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const skip = async () => {
+    if (!requestId || busy) return
+    setBusy('skip')
+    setError('')
+    try {
+      const bridge = window.cosmic?.browserSkipInterrupt
+      if (!bridge) throw new Error('Browser skip action is unavailable.')
+      await bridge(requestId)
+      setLocalStatus('skipped')
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Action failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className={`slide-build-card browser-run-card${streaming ? ' streaming' : ''}`} role="status" aria-live="polite">
+      <div className="slide-build-head">
+        <span className="docs-progress-kicker">
+          <Globe size={12} aria-hidden style={{ marginRight: 5, verticalAlign: -2 }} />
+          Browser agent
+        </span>
+        <span className={`docs-progress-stage ${statusKey}`}>{statusLabel}</span>
+      </div>
+      <div className="slide-build-main">
+        {(liveFrame || progress.screenshot?.previewUrl) && (
+          <figure className="browser-run-live-frame" onClick={() => setExpanded(true)}>
+            {Boolean(liveFrame) && <span className="browser-run-live-dot" aria-hidden="true" />}
+            <img src={liveFrame || progress.screenshot?.previewUrl || ''} alt={progress.pageTitle || 'Live browser view'} draggable={false} />
+          </figure>
+        )}
+        <div className="slide-build-copy">
+          {progress.description && <div className="docs-progress-label">{progress.description}</div>}
+          <div className="browser-run-meta">
+            {typeof progress.step === 'number' && (
+              <span>Step {progress.step}{progress.maxSteps ? `/${progress.maxSteps}` : ''}</span>
+            )}
+            {elapsed && <span>{elapsed}</span>}
+            {displayUrl && <span className="browser-run-url" title={progress.url || ''}>{displayUrl}</span>}
+          </div>
+        </div>
+      </div>
+      {interrupt && (
+        <div className="assistant-action-card browser-run-interrupt" data-kind="browser_ask_user">
+          <div className="assistant-action-card-head">
+            <div className="assistant-action-card-heading">
+              <span className="assistant-action-card-icon" aria-hidden="true">
+                <Shield size={15} />
+              </span>
+              <div className="assistant-action-card-heading-copy">
+                <div className="assistant-action-card-kicker">{BROWSER_INTERRUPT_KIND_LABEL[interrupt.kind]}</div>
+                <div className="assistant-action-card-title">{interrupt.question}</div>
+              </div>
+            </div>
+            <div className="assistant-action-card-head-actions">
+              <div className={`assistant-action-card-status is-${localStatus}`}>{localStatus}</div>
+            </div>
+          </div>
+          {isAwaitingInput ? (
+            <>
+              <div className="assistant-action-card-form">
+                <label>
+                  <span>{interrupt.kind === 'password' ? 'Password' : interrupt.kind === 'verification_code' ? 'Code' : 'Your answer'}</span>
+                  <input
+                    type={interrupt.kind === 'password' ? 'password' : 'text'}
+                    value={answer}
+                    autoComplete="off"
+                    autoFocus
+                    onChange={(event) => setAnswer(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void submitAnswer()
+                    }}
+                    placeholder={interrupt.kind === 'verification_code' ? '123456' : 'Type your reply'}
+                  />
+                </label>
+              </div>
+              {error && <div className="assistant-action-card-error">{error}</div>}
+              <div className="assistant-action-card-actions">
+                <button type="button" className="assistant-action-button" disabled={Boolean(busy)} onClick={() => void skip()}>
+                  {busy === 'skip' ? 'Skipping…' : 'Skip'}
+                </button>
+                <button type="button" className="assistant-action-button is-primary" disabled={Boolean(busy)} onClick={() => void submitAnswer()}>
+                  {busy === 'answer' ? 'Sending…' : 'Send'}
+                </button>
+              </div>
+            </>
+          ) : null}
+        </div>
+      )}
+      {expanded && (liveFrame || progress.screenshot?.previewUrl) && (
+        <div className="deck-preview-lightbox" onClick={() => setExpanded(false)}>
+          <img src={liveFrame || progress.screenshot?.previewUrl || ''} alt={progress.pageTitle || 'Live browser view'} className="deck-preview-full" />
+          <div className="deck-preview-lightbox-meta">{progress.pageTitle || displayUrl}</div>
         </div>
       )}
     </div>
@@ -4522,6 +4787,12 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [pendingTaskInputs, setPendingTaskInputs] = useState<PendingTaskInput[]>([])
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([])
+  // Live browser-agent screencast frames, keyed by requestId (or taskId as a
+  // fallback). Deliberately NOT part of Message/BackgroundTask state — these
+  // arrive several times a second and must never be persisted to history;
+  // BrowserRunCard falls back to the coarser step-boundary screenshot
+  // artifact (which IS part of message state) once a run stops streaming.
+  const [browserLiveFrames, setBrowserLiveFrames] = useState<Record<string, string>>({})
   const [taskInputDrafts, setTaskInputDrafts] = useState<Record<string, string>>({})
   const [submittingTaskInputs, setSubmittingTaskInputs] = useState<Record<string, boolean>>({})
   const [backgroundTaskErrors, setBackgroundTaskErrors] = useState<Record<string, string>>({})
@@ -5062,6 +5333,7 @@ export default function App() {
           supportingArtifacts: nextTask.supportingArtifacts ?? item.supportingArtifacts,
           sources: nextTask.sources ?? item.sources,
           slideProgress: nextTask.slideProgress ?? item.slideProgress,
+          browserProgress: nextTask.browserProgress ?? item.browserProgress,
         }
       })
     })
@@ -5532,6 +5804,7 @@ export default function App() {
         alphaTerminalLog: mergeAlphaTerminalLogs(existingMessage?.alphaTerminalLog, stream.alphaTerminalLog),
         progress: stream.progress ?? existingMessage?.progress,
         slideProgress: stream.slideProgress ?? existingMessage?.slideProgress,
+        browserProgress: stream.browserProgress ?? existingMessage?.browserProgress,
         producedArtifacts: stream.producedArtifacts ?? existingMessage?.producedArtifacts,
         supportingArtifacts: stream.supportingArtifacts ?? existingMessage?.supportingArtifacts,
         responseBlocks: stream.responseBlocks ?? existingMessage?.responseBlocks,
@@ -6387,6 +6660,7 @@ export default function App() {
           docs_progress: docsProgress ?? (existingTask?.progress?.kind === 'docs_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'docs_parse' ? existingAssistantMessage.progress : undefined),
           tabular_progress: tabularProgress ?? (existingTask?.progress?.kind === 'tabular_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'tabular_parse' ? existingAssistantMessage.progress : undefined),
           slide_progress: (event as any)?.slide_progress ?? existingTask?.slideProgress ?? existingAssistantMessage?.slideProgress,
+          browser_progress: (event as any)?.browser_progress ?? existingTask?.browserProgress ?? existingAssistantMessage?.browserProgress,
           produced_artifacts: (event as any)?.produced_artifacts ?? existingTask?.producedArtifacts ?? existingAssistantMessage?.producedArtifacts,
           sources: Array.isArray((event as any)?.sources) ? (event as any).sources : existingTask?.sources ?? existingAssistantMessage?.sources,
           completed: false,
@@ -6451,6 +6725,7 @@ export default function App() {
           docs_progress: (event as any)?.docs_progress ?? (preservedTask?.progress?.kind === 'docs_parse' ? preservedTask.progress : undefined),
           tabular_progress: (event as any)?.tabular_progress ?? (preservedTask?.progress?.kind === 'tabular_parse' ? preservedTask.progress : undefined),
           slide_progress: (event as any)?.slide_progress ?? preservedTask?.slideProgress,
+          browser_progress: (event as any)?.browser_progress ?? preservedTask?.browserProgress,
           produced_artifacts: (event as any)?.produced_artifacts ?? preservedTask?.producedArtifacts,
           sources: Array.isArray((event as any)?.sources) ? (event as any).sources : preservedTask?.sources,
           completed: Boolean((event as any).completed ?? preservedTask?.completed),
@@ -6479,6 +6754,7 @@ export default function App() {
           alphaTerminalLog: foregroundTask?.alphaTerminalLog,
           progress: foregroundTask?.progress,
           slideProgress: foregroundTask?.slideProgress,
+          browserProgress: foregroundTask?.browserProgress,
           producedArtifacts: foregroundTask?.producedArtifacts,
           sources: foregroundTask?.sources,
         })
@@ -6544,6 +6820,7 @@ export default function App() {
           const tabularProgress = normalizeTabularProgress((event as any).tabular_progress)
           const progressState = tabularProgress ?? docsProgress
           const incomingSlideProgress = normalizeSlideProgress(event.slide_progress ?? event.slideProgress)
+          const incomingBrowserProgress = normalizeBrowserProgress(event.browser_progress ?? event.browserProgress)
           const alphaTerminalEntry = normalizeAlphaTerminalEntry((event as any).codex_terminal)
           const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working in the background...'
           const activityText = incomingSlideProgress?.label || progressState?.label || statusMessage || fallbackMessage
@@ -6569,6 +6846,7 @@ export default function App() {
             alphaTerminalLog: appendAlphaTerminalEntry(undefined, alphaTerminalEntry),
             progress: alphaTerminalEntry ? undefined : progressState,
             slideProgress: alphaTerminalEntry ? undefined : incomingSlideProgress,
+            browserProgress: alphaTerminalEntry ? undefined : incomingBrowserProgress,
           })
           patchBackgroundTask(requestId, (current) => ({
             ...current,
@@ -6583,6 +6861,7 @@ export default function App() {
             alphaTerminalLog: appendAlphaTerminalEntry(current.alphaTerminalLog, alphaTerminalEntry),
             progress: alphaTerminalEntry ? current.progress : (progressState ?? current.progress),
             slideProgress: alphaTerminalEntry ? current.slideProgress : (incomingSlideProgress ?? current.slideProgress),
+            browserProgress: alphaTerminalEntry ? current.browserProgress : (incomingBrowserProgress ?? current.browserProgress),
             completed: false,
           }))
           return
@@ -6786,6 +7065,7 @@ export default function App() {
         const tabularProgress = normalizeTabularProgress((event as any).tabular_progress)
         const progressState = tabularProgress ?? docsProgress
         const incomingSlideProgress = normalizeSlideProgress(event.slide_progress ?? event.slideProgress)
+        const incomingBrowserProgress = normalizeBrowserProgress(event.browser_progress ?? event.browserProgress)
         const alphaTerminalEntry = normalizeAlphaTerminalEntry((event as any).codex_terminal)
         const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working on your request...'
         const activityText = incomingSlideProgress?.label || progressState?.label || statusMessage || fallbackMessage
@@ -6821,6 +7101,7 @@ export default function App() {
                 : message.alphaConsoleAnchors,
               progress: alphaTerminalEntry ? message.progress : (progressState ?? message.progress),
               slideProgress: alphaTerminalEntry ? message.slideProgress : (incomingSlideProgress ?? message.slideProgress),
+              browserProgress: alphaTerminalEntry ? message.browserProgress : (incomingBrowserProgress ?? message.browserProgress),
               stopped: false,
             }
           })
@@ -6992,6 +7273,15 @@ export default function App() {
         if (isEventForActiveStream(event)) {
           setIsStreaming(false)
           clearActiveStreamingRefs()
+        }
+        return
+      }
+
+      if (eventType === 'browser.live_frame') {
+        const key = String((event as any).request_id || (event as any).task_id || '').trim()
+        const frame = typeof (event as any).frame === 'string' ? (event as any).frame : ''
+        if (key && frame) {
+          setBrowserLiveFrames((prev) => (prev[key] === frame ? prev : { ...prev, [key]: frame }))
         }
         return
       }
@@ -7690,6 +7980,7 @@ export default function App() {
         alphaTerminalLog: task.alphaTerminalLog,
         progress: task.progress,
         slideProgress: task.slideProgress,
+        browserProgress: task.browserProgress,
         producedArtifacts: task.producedArtifacts,
         sources: task.sources,
       })
@@ -8740,7 +9031,14 @@ export default function App() {
                                             streaming={!task.completed && !task.failed}
                                           />
                                         )}
-                                        {task.activity && !task.slideProgress && task.progress?.kind !== 'docs_parse' && task.progress?.kind !== 'tabular_parse' && (
+                                        {task.browserProgress && (
+                                          <BrowserRunCard
+                                            progress={task.browserProgress}
+                                            streaming={!task.completed && !task.failed}
+                                            liveFrame={browserLiveFrames[task.requestId || ''] || browserLiveFrames[task.taskId || '']}
+                                          />
+                                        )}
+                                        {task.activity && !task.slideProgress && !task.browserProgress && task.progress?.kind !== 'docs_parse' && task.progress?.kind !== 'tabular_parse' && (
                                           <div className="assistant-activity task-background-activity">{task.activity}</div>
                                         )}
                                         {task.partialThinking && (
@@ -9206,6 +9504,13 @@ export default function App() {
                               progress={msg.slideProgress}
                               showThumbs={!hasSlidePreviewBlocks(msg.responseBlocks)}
                               streaming={messageIsStreaming}
+                            />
+                          )}
+                          {msg.browserProgress && (
+                            <BrowserRunCard
+                              progress={msg.browserProgress}
+                              streaming={messageIsStreaming}
+                              liveFrame={browserLiveFrames[msg.requestId || ''] || browserLiveFrames[msg.sourceId || '']}
                             />
                           )}
                           {msg.thinking && (

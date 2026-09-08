@@ -2495,6 +2495,27 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('browser:respond-interrupt', async (_, requestId: string, answer: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/browser/interrupts/${encodeURIComponent(String(requestId || '').trim())}/respond`, {
+      method: 'POST',
+      body: { answer: String(answer || '') },
+    })
+  })
+
+  ipcMain.handle('browser:skip-interrupt', async (_, requestId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/browser/interrupts/${encodeURIComponent(String(requestId || '').trim())}/skip`, {
+      method: 'POST',
+    })
+  })
+
   ipcMain.handle(
     'gateway:get-system-metrics',
     async (

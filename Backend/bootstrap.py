@@ -986,6 +986,13 @@ def build_browser_agent_env_rendered(
     )
     mimo_api_url = pick_env(["MIMO_API_URL"])
     mimo_api_key = pick_env(["MIMO_API_KEY"])
+    # AskUser mid-run interrupts (OTP/CAPTCHA/phone-approval/ambiguous forms)
+    # now round-trip through the desktop instead of a CLI stdin prompt, so the
+    # deployed default needs to be longer than cosmic-browser-use's own 120s.
+    # ASK_USER_TIMEOUT is that inner wrapper timeout and must stay >= the
+    # browser agent's own wait budget or it cuts the wait short regardless.
+    ask_user_wait_sec = pick_env(["BROWSER_AGENT_ASK_USER_TIMEOUT_SEC"]) or "240"
+    ask_user_timeout = pick_env(["ASK_USER_TIMEOUT"]) or "240"
 
     overrides = {
         "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
@@ -996,6 +1003,8 @@ def build_browser_agent_env_rendered(
         # The specialist adds this directory to sys.path to import the
         # cosmic-browser-use core (main.py / browser_memory).
         "BROWSER_USE_HOME": str(DEFAULT_BROWSER_REPO_DIR / "cosmic-browser-use"),
+        "BROWSER_AGENT_ASK_USER_TIMEOUT_SEC": ask_user_wait_sec,
+        "ASK_USER_TIMEOUT": ask_user_timeout,
     }
     if meaningful_env_value(fireworks_api_key) is not None:
         overrides["FIREWORKS_API_KEY"] = fireworks_api_key

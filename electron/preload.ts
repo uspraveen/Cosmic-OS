@@ -191,6 +191,8 @@ contextBridge.exposeInMainWorld('cosmic', {
   vaultApprovePending: (requestId: string) => ipcRenderer.invoke('vault:approve-pending', requestId),
   vaultRejectPending: (requestId: string) => ipcRenderer.invoke('vault:reject-pending', requestId),
   vaultProvidePending: (requestId: string, payload: any) => ipcRenderer.invoke('vault:provide-pending', requestId, payload),
+  browserRespondInterrupt: (requestId: string, answer: string) => ipcRenderer.invoke('browser:respond-interrupt', requestId, answer),
+  browserSkipInterrupt: (requestId: string) => ipcRenderer.invoke('browser:skip-interrupt', requestId),
   onGatewayEvent: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('gateway:event', listener)
