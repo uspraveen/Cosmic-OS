@@ -932,6 +932,9 @@ def build_browser_agent_env_rendered(
         orchestrator_existing_env = read_peer_env("orchestrator.env", agent_env=False)
     if not gateway_existing_env:
         gateway_existing_env = read_peer_env("gateway.env", agent_env=False)
+    slide_existing_env = (existing_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
+    if not slide_existing_env:
+        slide_existing_env = read_peer_env(SLIDE_AGENT_ENV_NAME)
 
     redis_url = first_meaningful_value(
         external_env.get("REDIS_URL"),
@@ -957,12 +960,15 @@ def build_browser_agent_env_rendered(
         )
 
     # The browser agent rides whatever Fireworks credential the VM already
-    # carries (its own env first, then the orchestrator/gateway keys).
+    # carries (its own env first, then the slide agent's key, then the
+    # orchestrator/gateway keys). xAI comes from its own env or gateway.env.
     fireworks_api_key = first_meaningful_value(
         external_env.get("FIREWORKS_API_KEY"),
         external_env.get("BROWSER_AGENT_FIREWORKS_API_KEY"),
         existing_env.get("FIREWORKS_API_KEY"),
         existing_env.get("BROWSER_AGENT_FIREWORKS_API_KEY"),
+        external_env.get("SLIDE_AGENT_FIREWORKS_API_KEY"),
+        existing_env.get("SLIDE_AGENT_FIREWORKS_API_KEY"),
         orchestrator_external_env.get("ORCHESTRATOR_FIREWORKS_API_KEY"),
         orchestrator_external_env.get("FIREWORKS_API_KEY"),
         orchestrator_existing_env.get("ORCHESTRATOR_FIREWORKS_API_KEY"),
@@ -975,6 +981,8 @@ def build_browser_agent_env_rendered(
         existing_env.get("XAI_API_KEY"),
         orchestrator_external_env.get("XAI_API_KEY"),
         orchestrator_existing_env.get("XAI_API_KEY"),
+        gateway_external_env.get("XAI_API_KEY"),
+        gateway_existing_env.get("XAI_API_KEY"),
     )
     mimo_api_url = pick_env(["MIMO_API_URL"])
     mimo_api_key = pick_env(["MIMO_API_KEY"])

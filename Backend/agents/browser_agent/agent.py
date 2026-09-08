@@ -44,6 +44,7 @@ class BrowserAgent(AgentRuntime):
             gateway_internal_token=self.config.gateway_internal_token,
         )
         self.artifacts_root = self.config.artifacts_root.resolve()
+        self._usage_post_tasks: set = set()
 
     async def execute(self, task: TaskEnvelope) -> AgentResult | TaskInProgress:
         handler = getattr(self, f"handle_{task.intent.replace('.', '_')}", None)
@@ -229,6 +230,11 @@ class BrowserAgent(AgentRuntime):
                 if total_tokens <= 0 and requests <= 0:
                     continue
                 model_key = build_model_key(provider, model)
+                raw_usage = {
+                    "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                    "completion_tokens": int(usage.get("completion_tokens") or 0),
+                    "total_tokens": total_tokens,
+                }
                 event = build_usage_event(
                     metered_call=begin_metered_call(prefix="browser_run"),
                     source_component="agent",
@@ -239,9 +245,7 @@ class BrowserAgent(AgentRuntime):
                     route="specialist",
                     operation="agent.browser.run",
                     model_key=model_key,
-                    prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                    completion_tokens=int(usage.get("completion_tokens") or 0),
-                    total_tokens=total_tokens,
+                    raw_usage=raw_usage,
                     success=True,
                     metadata_json={
                         "aggregation": "run_rollup",
@@ -252,7 +256,7 @@ class BrowserAgent(AgentRuntime):
                 try:
                     import asyncio as _asyncio
 
-                    _asyncio.get_running_loop().create_task(
+                    task_ref = _asyncio.get_running_loop().create_task(
                         post_usage_event(
                             client=self._http_client,
                             gateway_url=self.gateway_url,
@@ -260,6 +264,9 @@ class BrowserAgent(AgentRuntime):
                             event=event,
                         )
                     )
+                    # Hold a reference — unreferenced tasks can be GC'd.
+                    self._usage_post_tasks.add(task_ref)
+                    task_ref.add_done_callback(self._usage_post_tasks.discard)
                 except Exception:
                     logger.debug("browser_agent.usage_post_failed task_id=%s", task.task_id, exc_info=True)
         except Exception:
