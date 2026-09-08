@@ -1664,6 +1664,68 @@ class ToolExecutor:
             wait_timeout_sec=295.0,
         )
 
+    async def _browser_task(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        goal = str(tool_input.get("goal") or "").strip()
+        if not goal:
+            return {"error": True, "message": "goal is required"}
+        payload: dict[str, Any] = {"goal": goal}
+        initial_url = str(tool_input.get("initial_url") or "").strip()
+        if initial_url:
+            payload["initial_url"] = initial_url
+        memory_mode = str(tool_input.get("memory_mode") or "").strip().lower()
+        if memory_mode:
+            payload["memory_mode"] = memory_mode
+        max_steps = self._coerce_int(tool_input.get("max_steps"), 0)
+        if max_steps > 0:
+            payload["max_steps"] = min(max_steps, 200)
+        credential_ref = str(tool_input.get("credential_ref") or "").strip()
+        if credential_ref:
+            # Resolved + injected into the child envelope's auth field at
+            # dispatch time; the plaintext never passes through model context.
+            payload["credential_ref"] = credential_ref
+        wait_timeout = self._coerce_float(tool_input.get("wait_timeout_sec"), 0.0)
+        return await self._dispatch_specialist_agent(
+            intent="browser.run",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/browser-agent:1.0.0",
+            wait_timeout_sec=min(max(wait_timeout, 0.0), 890.0) or 595.0,
+        )
+
+    async def _browser_credential_request(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        site = str(tool_input.get("site") or "").strip()
+        if not site:
+            return {"error": True, "message": "site is required"}
+        body: dict[str, Any] = {"site": site}
+        purpose = str(tool_input.get("purpose") or "").strip()
+        if purpose:
+            body["purpose"] = purpose
+        username_hint = str(tool_input.get("username_hint") or "").strip()
+        if username_hint:
+            body["username_hint"] = username_hint
+        if context is not None:
+            body["task_id"] = context.parent_task.task_id if context.parent_task else ""
+            body["session_id"] = context.session_id or ""
+            body["channel"] = context.channel or ""
+        response_payload = await self._request_gateway_json(
+            "POST",
+            "/internal/vault/browser-credential-request",
+            json_body=body,
+        )
+        if not isinstance(response_payload, dict):
+            return {"error": True, "message": "Gateway returned an invalid credential request response."}
+        return response_payload
+
     async def _firecrawl_recall_session(
         self,
         tool_input: dict[str, Any],
@@ -3224,6 +3286,12 @@ class ToolExecutor:
     def _coerce_int(self, value: Any, default: int) -> int:
         try:
             return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _coerce_float(self, value: Any, default: float) -> float:
+        try:
+            return float(value)
         except (TypeError, ValueError):
             return default
 

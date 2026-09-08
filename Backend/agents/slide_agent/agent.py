@@ -21,6 +21,7 @@ from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnve
 from shared.sqlite_client import connect_sync
 
 from .config import AGENT_ROOT, BACKEND_ROOT, SlideAgentConfig
+from .live_progress import LiveDeckProgress, compact_slide_plan, emit_slide_progress
 from .source_retriever import SlideSourceCollection
 
 
@@ -657,7 +658,32 @@ class SlideAgent(AgentRuntime):
         *args: Any,
     ) -> dict[str, Any]:
         await self._emit_progress(task.task_id, message)
-        worker = asyncio.create_task(asyncio.to_thread(func, *args))
+        loop = asyncio.get_running_loop()
+        tracker = LiveDeckProgress()
+
+        def on_progress(event: dict[str, Any]) -> None:
+            snapshot = tracker.apply(event)
+            snapshot = self._attach_preview_files(task, snapshot)
+            tracker.absorb_slides(snapshot.get("slides") if isinstance(snapshot.get("slides"), list) else None)
+            future = asyncio.run_coroutine_threadsafe(
+                self._emit_progress(
+                    task.task_id,
+                    str(snapshot.get("label") or message),
+                    stage=snapshot.get("stage"),
+                    slide_progress=snapshot,
+                ),
+                loop,
+            )
+            try:
+                future.result(timeout=1.5)
+            except Exception:
+                logger.debug(
+                    "slide_agent.live_progress_emit_failed task_id=%s",
+                    task.task_id,
+                    exc_info=True,
+                )
+
+        worker = asyncio.create_task(asyncio.to_thread(func, *args, on_progress=on_progress))
         elapsed_sec = 0
         heartbeat_sec = 20
         while not worker.done():
@@ -665,11 +691,13 @@ class SlideAgent(AgentRuntime):
             if done:
                 break
             elapsed_sec += heartbeat_sec
+            latest = tracker.snapshot()
             await self._emit_progress(
                 task.task_id,
                 f"{message} Still working after {elapsed_sec}s.",
-                stage="running",
+                stage=latest.get("stage") or "running",
                 elapsed_sec=elapsed_sec,
+                slide_progress=latest if latest.get("label") else None,
             )
         result = await worker
         return result if isinstance(result, dict) else {}
@@ -918,6 +946,7 @@ class SlideAgent(AgentRuntime):
         max_slides: int | None,
         validate: bool,
         content_plan: dict[str, Any] | None = None,
+        on_progress: Any = None,
     ) -> dict[str, Any]:
         from html_workflow import run_html_pipeline
 
@@ -927,6 +956,7 @@ class SlideAgent(AgentRuntime):
             max_slides=max_slides,
             validate=validate,
             content_plan=content_plan,
+            on_progress=on_progress,
         )
         result.setdefault("workflow", "html")
         return result
@@ -940,6 +970,7 @@ class SlideAgent(AgentRuntime):
         validate: bool,
         force_catalog: bool,
         content_plan: dict[str, Any] | None = None,
+        on_progress: Any = None,
     ) -> dict[str, Any]:
         from native_workflow import run_native_pipeline
 
@@ -951,6 +982,7 @@ class SlideAgent(AgentRuntime):
             content_plan=content_plan,
             template_path=template_path,
             force_catalog=force_catalog,
+            on_progress=on_progress,
         )
         result.setdefault("workflow", "advanced")
         return result
@@ -964,6 +996,7 @@ class SlideAgent(AgentRuntime):
         validate: bool,
         force_catalog: bool,
         content_plan: dict[str, Any] | None,
+        on_progress: Any = None,
     ) -> dict[str, Any]:
         from content_planner import plan_content
         from layout_selector import select_layouts
@@ -972,10 +1005,25 @@ class SlideAgent(AgentRuntime):
         catalog = self._ensure_catalog(template_path, force_catalog)
         plan = content_plan or plan_content(description, num_slides=max_slides)
         self._write_json(output_dir / "plan.json", plan)
+        emit_slide_progress(
+            on_progress,
+            stage="plan",
+            label="Deck plan is ready",
+            plan=compact_slide_plan(plan),
+            total=len(plan.get("slides") or []),
+            current=0,
+        )
 
         build_spec = select_layouts(plan, catalog, max_slides=max_slides)
         build_spec.setdefault("deck_title", plan.get("deck_title") or template_path.stem)
         self._write_json(output_dir / "build_spec.json", build_spec)
+        emit_slide_progress(
+            on_progress,
+            stage="design",
+            label="Filling the template layouts",
+            plan=compact_slide_plan(plan),
+            total=len(plan.get("slides") or []),
+        )
 
         result = run_builder(
             build_spec,
@@ -987,6 +1035,31 @@ class SlideAgent(AgentRuntime):
         result["content_plan"] = result.get("content_plan") or plan
         result["build_spec"] = result.get("build_spec") or build_spec
         result["template_catalog"] = catalog
+        for idx, raw in enumerate(result.get("slide_pngs") or []):
+            path = self._maybe_path(raw)
+            if path is None or not path.exists():
+                continue
+            slide = (plan.get("slides") or [None])[idx] if idx < len(plan.get("slides") or []) else {}
+            emit_slide_progress(
+                on_progress,
+                stage="render",
+                label=f"Rendered slide {idx + 1}",
+                slide_number=(slide or {}).get("slide_number") or (idx + 1),
+                title=(slide or {}).get("title") or "",
+                status="rendered",
+                png_path=str(path),
+                current=idx + 1,
+                total=len(plan.get("slides") or []),
+                plan=compact_slide_plan(plan),
+            )
+        emit_slide_progress(
+            on_progress,
+            stage="ready",
+            label="Slide deck is ready",
+            plan=compact_slide_plan(plan),
+            total=len(plan.get("slides") or []),
+            current=len(plan.get("slides") or []),
+        )
         return result
 
     def _select_template_for_request(
@@ -1285,7 +1358,7 @@ class SlideAgent(AgentRuntime):
                     task_id=task.task_id,
                     path=path,
                     mime=self._mime_for_path(path),
-                    kind="slide_preview",
+                    kind="output",
                     audience="deliverable",
                 )
             )
@@ -1391,7 +1464,7 @@ class SlideAgent(AgentRuntime):
                         task_id=task.task_id,
                         path=path,
                         mime=self._mime_for_path(path),
-                        kind="slide_preview",
+                        kind="output",
                         audience="deliverable",
                     )
                 )
@@ -1926,6 +1999,55 @@ class SlideAgent(AgentRuntime):
             target = self.config.templates_dir / f"{source_path.stem}-{uuid4().hex[:8]}{source_path.suffix}"
         shutil.copy2(source_path, target)
         return target.resolve()
+
+    def _attach_preview_files(
+        self,
+        task: TaskEnvelope,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Copy rendered PNGs into the task artifact dir and stamp artifact ids."""
+        slides = snapshot.get("slides") if isinstance(snapshot.get("slides"), list) else []
+        if not slides:
+            return snapshot
+        preview_dir = self._task_artifact_dir(task.task_id) / "previews"
+        next_slides: list[dict[str, Any]] = []
+        for item in slides:
+            if not isinstance(item, dict):
+                continue
+            enriched = dict(item)
+            png_path = self._maybe_path(item.get("png_path") or item.get("path"))
+            if png_path is None or not png_path.exists() or not png_path.is_file():
+                next_slides.append(enriched)
+                continue
+            try:
+                preview_dir.mkdir(parents=True, exist_ok=True)
+                number = int(item.get("slide_number") or 0) or (len(next_slides) + 1)
+                destination = preview_dir / f"slide-{number:02d}{png_path.suffix.lower() or '.png'}"
+                if png_path.resolve() != destination.resolve():
+                    shutil.copy2(png_path, destination)
+                manifest = self._artifact_manifest(
+                    task_id=task.task_id,
+                    path=destination,
+                    mime=self._mime_for_path(destination),
+                    kind="output",
+                    audience="deliverable",
+                )
+                enriched["path"] = manifest.path
+                enriched["artifact_id"] = manifest.artifact_id
+                enriched["mime"] = manifest.mime
+                enriched["filename"] = destination.name
+                enriched["sha256"] = manifest.sha256
+            except Exception:
+                logger.debug(
+                    "slide_agent.preview_attach_failed task_id=%s slide=%s",
+                    task.task_id,
+                    item.get("slide_number"),
+                    exc_info=True,
+                )
+            next_slides.append(enriched)
+        snapshot = dict(snapshot)
+        snapshot["slides"] = next_slides
+        return snapshot
 
     def _artifact_manifest(
         self,

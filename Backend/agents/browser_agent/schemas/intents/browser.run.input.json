@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "browser.run input",
+  "description": "Run one autonomous vision-based browser session for a single goal.",
+  "type": "object",
+  "required": ["goal"],
+  "properties": {
+    "goal": {
+      "type": "string",
+      "description": "Complete, self-contained instruction for the browser agent (what to do on the web, and what to bring back)."
+    },
+    "initial_url": {
+      "type": "string",
+      "description": "Optional URL to open before planning. Omit to let the agent navigate itself."
+    },
+    "max_steps": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200,
+      "description": "Upper bound on agent steps for this run."
+    },
+    "memory_mode": {
+      "type": "string",
+      "enum": ["off", "learn", "recall", "auto"],
+      "description": "Browser workflow memory mode. auto = recall previous site workflows then index this run; learn = index only; recall = replay only; off = no memory."
+    },
+    "headless": {
+      "type": "boolean",
+      "description": "Run Chromium headless (default true on the VM)."
+    },
+    "credential_ref": {
+      "type": "string",
+      "description": "Vault credential ref (vault:<entry_id>) from vault_lookup for the site that needs login. Resolved securely at dispatch; the model never sees the secret."
+    }
+  }
+}

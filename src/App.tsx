@@ -67,6 +67,7 @@ interface Message {
   emailBody?: string | null
   emailBodyTruncated?: boolean
   progress?: DocsProgressState | TabularProgressState
+  slideProgress?: SlideProgressState
   backgroundState?: 'working' | 'ready' | 'failed'
 }
 
@@ -99,6 +100,7 @@ interface BackgroundTask {
   alphaTerminalLog?: AlphaTerminalEntry[]
   alphaConsoleAnchors?: AlphaConsoleAnchor[]
   progress?: DocsProgressState | TabularProgressState
+  slideProgress?: SlideProgressState
   producedArtifacts?: ProducedArtifact[]
   supportingArtifacts?: ProducedArtifact[]
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
@@ -147,6 +149,7 @@ interface GatewayForegroundStreamSnapshot {
   alphaTerminalLog?: AlphaTerminalEntry[]
   alphaConsoleAnchors?: AlphaConsoleAnchor[]
   progress?: DocsProgressState | TabularProgressState
+  slideProgress?: SlideProgressState
   producedArtifacts?: ProducedArtifact[]
   supportingArtifacts?: ProducedArtifact[]
   responseBlocks?: ResponseBlock[]
@@ -250,7 +253,7 @@ interface ResponseSlotBlock {
 
 interface ResponseActionBlock {
   id: string
-  type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event' | 'sandbox_permission_request' | 'slide_workflow_choice' | 'vault_permission_request'
+  type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event' | 'sandbox_permission_request' | 'slide_workflow_choice' | 'vault_permission_request' | 'browser_credential_request'
   status?: string | null
   approvalId?: string | null
   permissionId?: string | null
@@ -290,6 +293,8 @@ interface ResponseActionBlock {
   requestId?: string | null
   action?: string | null
   siteDomain?: string | null
+  site?: string | null
+  usernameHint?: string | null
   username?: string | null
   purpose?: string | null
 }
@@ -318,6 +323,8 @@ interface ActivityLogEntry {
   agentLabel?: string | null
   intent?: string | null
   specialistEventType?: string | null
+  previewUrl?: string | null
+  slideNumber?: number | null
 }
 
 interface AlphaTerminalEntry {
@@ -356,6 +363,35 @@ interface TabularProgressState {
   current: number
   total: number
   percent: number
+}
+
+interface SlidePlanItem {
+  slideNumber: number
+  title: string
+  contentRole?: string
+}
+
+interface SlidePreviewItem {
+  slideNumber: number
+  title?: string
+  status?: string
+  previewUrl?: string | null
+}
+
+interface SlideProgressState {
+  kind: 'slide_build'
+  stage: string
+  label: string
+  detail?: string
+  current: number
+  total: number
+  percent: number
+  plan?: {
+    deckTitle?: string
+    deckTheme?: string
+    slides: SlidePlanItem[]
+  } | null
+  slides: SlidePreviewItem[]
 }
 
 interface SurfaceLaunchState {
@@ -605,7 +641,7 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
       })
       continue
     }
-    if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event' || type === 'sandbox_permission_request' || type === 'slide_workflow_choice' || type === 'vault_permission_request') {
+    if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event' || type === 'sandbox_permission_request' || type === 'slide_workflow_choice' || type === 'vault_permission_request' || type === 'browser_credential_request') {
       const stringList = (raw: unknown) => Array.isArray(raw)
         ? raw.map((value) => String(value || '').trim()).filter(Boolean)
         : []
@@ -666,6 +702,8 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
         requestId: typeof (item as any).request_id === 'string' ? (item as any).request_id.trim() : null,
         action: typeof (item as any).action === 'string' ? (item as any).action.trim() : null,
         siteDomain: typeof (item as any).site_domain === 'string' ? (item as any).site_domain.trim() : null,
+        site: typeof (item as any).site === 'string' ? (item as any).site.trim() : null,
+        usernameHint: typeof (item as any).username_hint === 'string' ? (item as any).username_hint.trim() : null,
         username: typeof (item as any).username === 'string' ? (item as any).username.trim() : null,
         purpose: typeof (item as any).purpose === 'string' ? (item as any).purpose.trim() : null,
       })
@@ -780,6 +818,7 @@ const appendActivityLogEntry = (
     nextEntry.agentId || '',
     nextEntry.intent || '',
     nextEntry.specialistEventType || '',
+    String(nextEntry.slideNumber || ''),
   ].join('\u241f')
   const hasDuplicate = existing.some((item) => {
     const itemId = String(item.id || '').trim()
@@ -799,11 +838,38 @@ const appendActivityLogEntry = (
       item.agentId || '',
       item.intent || '',
       item.specialistEventType || '',
+      String(item.slideNumber || ''),
     ].join('\u241f')
     return itemSignature === nextSignature
   })
   if (hasDuplicate) {
-    return existing
+    return existing.map((item) => {
+      const itemId = String(item.id || '').trim()
+      const sameId = Boolean(itemId && itemId === nextEntry.id)
+      const itemSignature = [
+        item.label,
+        item.detail || '',
+        item.status || '',
+        item.stage || '',
+        item.kind || '',
+        item.flowRole || '',
+        item.delegatedTaskId || '',
+        item.parentDelegatedTaskId || '',
+        item.specialistTaskId || '',
+        item.agentId || '',
+        item.intent || '',
+        item.specialistEventType || '',
+        String(item.slideNumber || ''),
+      ].join('\u241f')
+      if (!sameId && itemSignature !== nextSignature) {
+        return item
+      }
+      return {
+        ...item,
+        previewUrl: nextEntry.previewUrl || item.previewUrl,
+        detail: nextEntry.detail || item.detail,
+      }
+    })
   }
   return [...existing, nextEntry]
 }
@@ -881,6 +947,15 @@ const normalizeActivityLog = (value: unknown): ActivityLogEntry[] | undefined =>
         : typeof (item as any).specialistEventType === 'string' && (item as any).specialistEventType.trim()
           ? (item as any).specialistEventType.trim()
           : null,
+      previewUrl: typeof (item as any).preview_url === 'string' && (item as any).preview_url.trim()
+        ? (item as any).preview_url.trim()
+        : typeof (item as any).previewUrl === 'string' && (item as any).previewUrl.trim()
+          ? (item as any).previewUrl.trim()
+          : null,
+      slideNumber: Number.isFinite(Number((item as any).slide_number ?? (item as any).slideNumber))
+        && Number((item as any).slide_number ?? (item as any).slideNumber) > 0
+        ? Number((item as any).slide_number ?? (item as any).slideNumber)
+        : null,
     }
     const deduped = appendActivityLogEntry(normalized, entry)
     normalized.splice(0, normalized.length, ...deduped)
@@ -1015,6 +1090,8 @@ const buildProgressActivityEntries = (
   statusMessage: string,
   progressState?: DocsProgressState | TabularProgressState,
 ): Omit<ActivityLogEntry, 'id' | 'createdAt'>[] => {
+  const slideProgress = normalizeSlideProgress(event?.slide_progress ?? event?.slideProgress)
+  const slidePreview = currentSlidePreview(slideProgress)
   const specialistDelegations = Array.isArray(event?.specialist_delegations)
     ? event.specialist_delegations
     : []
@@ -1040,8 +1117,8 @@ const buildProgressActivityEntries = (
       label: activityText,
       detail: statusMessage && statusMessage !== activityText ? statusMessage : undefined,
       status: String(event?.status || '').trim() || null,
-      stage: progressState?.stage || null,
-      kind: 'specialist_flow',
+      stage: slideProgress?.stage || progressState?.stage || null,
+      kind: slideProgress ? 'slide_build' : 'specialist_flow',
       flowRole: 'specialist',
       parentDelegatedTaskId: String(specialist.attach_to_task_id || '').trim() || null,
       specialistTaskId: String(specialist.task_id || '').trim() || null,
@@ -1049,14 +1126,18 @@ const buildProgressActivityEntries = (
       agentLabel: String(specialist.agent_label || '').trim() || formatSpecialistAgentLabel(specialist.agent_id),
       intent: String(specialist.intent || '').trim() || null,
       specialistEventType: String(specialist.event_type || '').trim() || null,
+      previewUrl: slidePreview?.previewUrl || null,
+      slideNumber: slidePreview?.slideNumber || slideProgress?.current || null,
     }]
   }
   return [{
     label: activityText,
     detail: statusMessage || undefined,
     status: String(event?.status || '').trim() || null,
-    stage: progressState?.stage || null,
-    kind: progressState?.kind || 'generic',
+    stage: slideProgress?.stage || progressState?.stage || null,
+    kind: slideProgress?.kind || progressState?.kind || 'generic',
+    previewUrl: slidePreview?.previewUrl || null,
+    slideNumber: slidePreview?.slideNumber || slideProgress?.current || null,
   }]
 }
 
@@ -1104,6 +1185,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       emailBodyTruncated: Boolean(item?.metadata?.body_truncated),
       activity: typeof item?.metadata?.activity === 'string' ? item.metadata.activity : undefined,
       progress: normalizeTabularProgress(item?.metadata?.tabular_progress) ?? normalizeDocsProgress(item?.metadata?.docs_progress),
+      slideProgress: normalizeSlideProgress(item?.metadata?.slide_progress),
     })))
 }
 
@@ -1168,6 +1250,9 @@ const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStr
   const progress =
     normalizeTabularProgress((value as any).tabular_progress ?? (value as any).tabularProgress) ??
     normalizeDocsProgress((value as any).docs_progress ?? (value as any).docsProgress)
+  const slideProgress = normalizeSlideProgress(
+    (value as any).slide_progress ?? (value as any).slideProgress,
+  )
   const failed = Boolean((value as any).failed)
   const error = typeof (value as any).error === 'string' && (value as any).error.trim()
     ? (value as any).error.trim()
@@ -1201,6 +1286,7 @@ const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStr
     alphaTerminalLog: normalizeAlphaTerminalLog((value as any).alpha_terminal_log ?? (value as any).alphaTerminalLog),
     alphaConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).alpha_console_anchors ?? (value as any).alphaConsoleAnchors),
     progress,
+    slideProgress,
     producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
     supportingArtifacts: normalizeSupportingArtifacts((value as any).supporting_artifacts ?? (value as any).supportingArtifacts),
     responseBlocks: normalizeResponseBlocks((value as any).response_blocks ?? (value as any).responseBlocks ?? (value as any).blocks),
@@ -1308,6 +1394,7 @@ const mergeHydratedMessages = (
       emailBodyTruncated: message.emailBodyTruncated ?? existing.emailBodyTruncated,
       stopped: message.stopped ?? existing.stopped,
       progress: message.progress ?? existing.progress,
+      slideProgress: message.slideProgress ?? existing.slideProgress,
       backgroundState: message.backgroundState ?? existing.backgroundState,
     }
   })
@@ -1589,6 +1676,101 @@ const normalizeDocsProgress = (value: unknown): DocsProgressState | undefined =>
   }
 }
 
+const normalizeSlideProgress = (value: unknown): SlideProgressState | undefined => {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const label = String((value as any).label || '').trim()
+  if (!label) {
+    return undefined
+  }
+  const slides: SlidePreviewItem[] = []
+  for (const raw of Array.isArray((value as any).slides) ? (value as any).slides : []) {
+    if (!raw || typeof raw !== 'object') continue
+    const slideNumber = Number((raw as any).slide_number ?? (raw as any).slideNumber)
+    if (!Number.isFinite(slideNumber) || slideNumber <= 0) continue
+    const previewUrl = typeof (raw as any).preview_url === 'string' && (raw as any).preview_url.trim()
+      ? (raw as any).preview_url.trim()
+      : typeof (raw as any).previewUrl === 'string' && (raw as any).previewUrl.trim()
+        ? (raw as any).previewUrl.trim()
+        : null
+    slides.push({
+      slideNumber,
+      title: typeof (raw as any).title === 'string' ? (raw as any).title.trim() : '',
+      status: typeof (raw as any).status === 'string' ? (raw as any).status.trim() : undefined,
+      previewUrl,
+    })
+  }
+  const planRaw = (value as any).plan && typeof (value as any).plan === 'object' ? (value as any).plan : null
+  const planSlides: SlidePlanItem[] = []
+  for (const raw of Array.isArray(planRaw?.slides) ? planRaw.slides : []) {
+    if (!raw || typeof raw !== 'object') continue
+    const slideNumber = Number((raw as any).slide_number ?? (raw as any).slideNumber)
+    if (!Number.isFinite(slideNumber) || slideNumber <= 0) continue
+    planSlides.push({
+      slideNumber,
+      title: typeof (raw as any).title === 'string' ? (raw as any).title.trim() : '',
+      contentRole: typeof (raw as any).content_role === 'string'
+        ? (raw as any).content_role.trim()
+        : typeof (raw as any).contentRole === 'string'
+          ? (raw as any).contentRole.trim()
+          : undefined,
+    })
+  }
+  const total = Math.max(
+    1,
+    Number((value as any).total || 0) || slides.length || planSlides.length || 1,
+  )
+  const current = Math.max(0, Math.min(total, Number((value as any).current || 0) || 0))
+  const rawPercent = Number((value as any).percent || 0)
+  return {
+    kind: 'slide_build',
+    stage: String((value as any).stage || '').trim() || 'plan',
+    label,
+    detail: String((value as any).detail || '').trim() || undefined,
+    current,
+    total,
+    percent: Math.max(0, Math.min(1, Number.isFinite(rawPercent) ? rawPercent : 0)),
+    plan: planRaw
+      ? {
+          deckTitle: typeof planRaw.deck_title === 'string'
+            ? planRaw.deck_title.trim()
+            : typeof planRaw.deckTitle === 'string'
+              ? planRaw.deckTitle.trim()
+              : '',
+          deckTheme: typeof planRaw.deck_theme === 'string'
+            ? planRaw.deck_theme.trim()
+            : typeof planRaw.deckTheme === 'string'
+              ? planRaw.deckTheme.trim()
+              : '',
+          slides: planSlides,
+        }
+      : null,
+    slides,
+  }
+}
+
+const currentSlidePreview = (progress?: SlideProgressState | null): SlidePreviewItem | null => {
+  if (!progress?.slides?.length) {
+    return null
+  }
+  return progress.slides.find((item) => item.slideNumber === progress.current && item.previewUrl)
+    || [...progress.slides].reverse().find((item) => item.previewUrl)
+    || null
+}
+
+const SLIDE_PREVIEW_FILENAME = /^slide[-_ ]?\d+/i
+
+const isSlidePreviewBlock = (block: ResponseBlock): block is ResponseArtifactBlock => (
+  block.type === 'image_artifact'
+  && (
+    block.kind === 'slide_preview'
+    || SLIDE_PREVIEW_FILENAME.test(String(block.filename || ''))
+  )
+)
+
+const hasSlidePreviewBlocks = (blocks?: ResponseBlock[]) => Boolean(blocks?.some(isSlidePreviewBlock))
+
 const normalizeBackgroundTask = (value: unknown): BackgroundTask | null => {
   if (!value || typeof value !== 'object') {
     return null
@@ -1632,6 +1814,7 @@ const normalizeBackgroundTask = (value: unknown): BackgroundTask | null => {
     alphaTerminalLog: normalizeAlphaTerminalLog((value as any).alpha_terminal_log ?? (value as any).alphaTerminalLog),
     alphaConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).alpha_console_anchors ?? (value as any).alphaConsoleAnchors),
     progress: normalizeTabularProgress((value as any).tabular_progress) ?? normalizeDocsProgress((value as any).docs_progress),
+    slideProgress: normalizeSlideProgress((value as any).slide_progress ?? (value as any).slideProgress),
     producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
     supportingArtifacts: normalizeSupportingArtifacts((value as any).supporting_artifacts ?? (value as any).supportingArtifacts),
     sources: Array.isArray((value as any).sources) ? (value as any).sources : undefined,
@@ -1695,6 +1878,132 @@ const DocsProgressCard = ({ progress }: { progress: DocsProgressState }) => {
         <span>{percentLabel}</span>
         {showCount && <span>{progress.current}/{progress.total} docs</span>}
       </div>
+    </div>
+  )
+}
+
+const SLIDE_STAGE_LABELS: Record<string, string> = {
+  plan: 'Planning',
+  design: 'Designing',
+  render: 'Rendering',
+  qa: 'QA',
+  convert: 'Converting',
+  ready: 'Ready',
+}
+
+const SlideBuildCard = ({
+  progress,
+  showThumbs = true,
+  streaming = false,
+}: {
+  progress: SlideProgressState
+  showThumbs?: boolean
+  streaming?: boolean
+}) => {
+  const [planOpen, setPlanOpen] = useState(true)
+  const [activeIndex, setActiveIndex] = useState<number | null>(null)
+  const thumbs = progress.slides.filter((item) => item.previewUrl)
+  const planSlides = progress.plan?.slides || []
+  const stageKey = (progress.stage || '').toLowerCase()
+  const stageLabel = SLIDE_STAGE_LABELS[stageKey] || 'Working'
+  const percentLabel = `${Math.max(1, Math.round(progress.percent * 100))}%`
+  const active = activeIndex !== null ? thumbs[activeIndex] : null
+
+  useEffect(() => {
+    if (activeIndex === null) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setActiveIndex(null)
+      if (event.key === 'ArrowRight') setActiveIndex((prev) => (prev === null ? prev : Math.min(prev + 1, thumbs.length - 1)))
+      if (event.key === 'ArrowLeft') setActiveIndex((prev) => (prev === null ? prev : Math.max(prev - 1, 0)))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [activeIndex, thumbs.length])
+
+  return (
+    <div className={`slide-build-card${streaming ? ' streaming' : ''}`} role="status" aria-live="polite">
+      <div className="slide-build-head">
+        <span className="docs-progress-kicker">Slide agent</span>
+        <span className={`docs-progress-stage ${stageKey === 'ready' ? 'ready' : stageKey}`}>{stageLabel}</span>
+      </div>
+      <div className="slide-build-main">
+        <div className="slide-build-copy">
+          <div className="docs-progress-label">{progress.label}</div>
+          {progress.detail && <div className="docs-progress-detail">{progress.detail}</div>}
+          <div className="docs-progress-bar" aria-hidden="true">
+            <span className="docs-progress-bar-fill" style={{ width: `${Math.max(4, Math.round(progress.percent * 100))}%` }} />
+          </div>
+          <div className="docs-progress-foot">
+            <span>{percentLabel}</span>
+            {progress.total > 0 && (
+              <span>
+                {progress.current || thumbs.length}/{progress.total} slides
+              </span>
+            )}
+          </div>
+        </div>
+        {showThumbs && thumbs.length > 0 && (
+          <div className="slide-build-live-strip" aria-label="Live slide previews">
+            {thumbs.map((slide, index) => (
+              <figure
+                key={`${slide.slideNumber}-${slide.previewUrl}`}
+                className="slide-build-live-thumb"
+                onClick={() => setActiveIndex(index)}
+                title={`Slide ${slide.slideNumber}${slide.title ? ` — ${slide.title}` : ''}`}
+              >
+                <img src={slide.previewUrl || ''} alt={slide.title || `Slide ${slide.slideNumber}`} draggable={false} />
+                <figcaption>{slide.slideNumber}</figcaption>
+              </figure>
+            ))}
+          </div>
+        )}
+      </div>
+      {planSlides.length > 0 && (
+        <div className={`slide-build-plan ${planOpen ? 'open' : 'collapsed'}`}>
+          <button
+            type="button"
+            className="slide-build-plan-toggle"
+            onClick={() => setPlanOpen((current) => !current)}
+            aria-expanded={planOpen}
+          >
+            <ChevronRight className="assistant-collapsible-chevron" size={13} aria-hidden />
+            <span>Deck plan</span>
+            <span className="slide-build-plan-count">
+              {planSlides.length} {planSlides.length === 1 ? 'slide' : 'slides'}
+            </span>
+            {!planOpen && progress.plan?.deckTitle ? (
+              <span className="slide-build-plan-preview">{progress.plan.deckTitle}</span>
+            ) : null}
+          </button>
+          {planOpen && (
+            <div className="slide-build-plan-body">
+              {progress.plan?.deckTitle ? (
+                <div className="slide-build-plan-deck">{progress.plan.deckTitle}</div>
+              ) : null}
+              {progress.plan?.deckTheme ? (
+                <div className="slide-build-plan-theme">{progress.plan.deckTheme}</div>
+              ) : null}
+              <ol className="slide-build-plan-list">
+                {planSlides.map((slide) => (
+                  <li key={slide.slideNumber}>
+                    <span className="slide-build-plan-num">{slide.slideNumber}</span>
+                    <span className="slide-build-plan-title">{slide.title || `Slide ${slide.slideNumber}`}</span>
+                    {slide.contentRole ? <span className="slide-build-plan-role">{slide.contentRole}</span> : null}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+        </div>
+      )}
+      {active?.previewUrl && (
+        <div className="deck-preview-lightbox" onClick={() => setActiveIndex(null)}>
+          <img src={active.previewUrl} alt={active.title || `Slide ${active.slideNumber}`} className="deck-preview-full" />
+          <div className="deck-preview-lightbox-meta">
+            {`Slide ${active.slideNumber} of ${progress.total || thumbs.length}`}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1846,6 +2155,32 @@ const AssistantCollapsibleSection = ({
   )
 }
 
+const FlowGlyphOrThumb = ({
+  entry,
+  signal,
+  size,
+  iconSize,
+  active = false,
+}: {
+  entry: ActivityLogEntry
+  signal: ReturnType<typeof resolveAgentSignal>
+  size: number
+  iconSize: number
+  active?: boolean
+}) => {
+  if (entry.previewUrl) {
+    return (
+      <img
+        className={`assistant-flow-thumb${active ? ' is-active' : ''}`}
+        src={entry.previewUrl}
+        alt={entry.slideNumber ? `Slide ${entry.slideNumber}` : 'Slide preview'}
+        draggable={false}
+      />
+    )
+  }
+  return <AgentGlyph signal={signal} size={size} iconSize={iconSize} active={active} />
+}
+
 const AssistantFlowTimeline = memo(({
   entries,
   showLabel = true,
@@ -1890,7 +2225,7 @@ const AssistantFlowTimeline = memo(({
           return (
             <div key={entry.id} className="assistant-flow-node">
               <div className={`assistant-flow-item${isActive ? ' is-active' : ''}`}>
-                <AgentGlyph signal={signal} size={20} iconSize={18} active={isActive} />
+                <FlowGlyphOrThumb entry={entry} signal={signal} size={20} iconSize={18} active={isActive} />
                 <div className="assistant-flow-copy">
                   <div className="assistant-flow-title">
                     <span>{scrubAssistantProse(stripActorPrefix(entry.label, signal))}</span>
@@ -1908,7 +2243,7 @@ const AssistantFlowTimeline = memo(({
                     const childActive = streaming && isLastRoot && childIndex === children.length - 1
                     return (
                       <div key={child.id} className={`assistant-flow-item child${childActive ? ' is-active' : ''}`}>
-                        <AgentGlyph signal={childSignal} size={18} iconSize={16} active={childActive} />
+                        <FlowGlyphOrThumb entry={child} signal={childSignal} size={18} iconSize={16} active={childActive} />
                         <div className="assistant-flow-copy">
                           <div className="assistant-flow-title">
                             <span>{scrubAssistantProse(stripActorPrefix(child.label, childSignal))}</span>
@@ -3295,6 +3630,154 @@ const VaultPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) =
   )
 }
 
+const BrowserCredentialRequestCard = ({ block }: { block: ResponseActionBlock }) => {
+  const [status, setStatus] = useState(block.status || 'pending')
+  const [busy, setBusy] = useState<'provide' | 'reject' | null>(null)
+  const [error, setError] = useState('')
+  const [username, setUsername] = useState(block.usernameHint || '')
+  const [password, setPassword] = useState('')
+  const [totpSeed, setTotpSeed] = useState('')
+  const isPending = status.toLowerCase() === 'pending' && block.canRespond !== false
+  const siteLabel = block.siteDomain || block.title || block.site || 'this site'
+
+  useEffect(() => {
+    setStatus(block.status || 'pending')
+  }, [block.status])
+
+  const provide = async () => {
+    if (!block.requestId || busy || !isPending) return
+    if (!password.trim()) {
+      setError('A password is required.')
+      return
+    }
+    setBusy('provide')
+    setError('')
+    try {
+      const bridge = window.cosmic?.vaultProvidePending
+      if (!bridge) {
+        throw new Error('Credential action is unavailable.')
+      }
+      const result = await bridge(block.requestId, {
+        username: username.trim(),
+        password,
+        totp_seed: totpSeed.trim(),
+        save_to_vault: true,
+      })
+      if (String(result?.status || '').trim() === 'ignored') {
+        throw new Error('This request was already handled on another device.')
+      }
+      setStatus('approved')
+      setPassword('')
+      setTotpSeed('')
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Action failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const reject = async () => {
+    if (!block.requestId || busy || !isPending) return
+    setBusy('reject')
+    setError('')
+    try {
+      const bridge = window.cosmic?.vaultRejectPending
+      if (!bridge) {
+        throw new Error('Credential action is unavailable.')
+      }
+      await bridge(block.requestId)
+      setStatus('rejected')
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Action failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <section className="assistant-action-card" data-kind={block.type}>
+      <div className="assistant-action-card-head">
+        <div className="assistant-action-card-heading">
+          <span className="assistant-action-card-icon" aria-hidden="true">
+            <Shield size={15} />
+          </span>
+          <div className="assistant-action-card-heading-copy">
+            <div className="assistant-action-card-kicker">Browser needs credentials</div>
+            <div className="assistant-action-card-title">Add a login for {siteLabel}?</div>
+          </div>
+        </div>
+        <div className="assistant-action-card-head-actions">
+          <div className={`assistant-action-card-status is-${status.toLowerCase()}`}>
+            {status}
+          </div>
+        </div>
+      </div>
+      <div className="assistant-action-card-details">
+        {(block.siteDomain || block.site) && <div><span>Site</span>{block.siteDomain || block.site}</div>}
+        {block.purpose && <div><span>Reason</span>{block.purpose}</div>}
+        <div><span>Note</span>Saved encrypted in your password vault. The browser agent fills the login form for you — the password is never shown to any agent.</div>
+      </div>
+      {isPending ? (
+        <div className="assistant-action-card-form">
+          <label>
+            <span>Username or email</span>
+            <input
+              type="text"
+              value={username}
+              autoComplete="off"
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder={block.usernameHint || 'you@example.com'}
+            />
+          </label>
+          <label>
+            <span>Password</span>
+            <input
+              type="password"
+              value={password}
+              autoComplete="new-password"
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="Required"
+            />
+          </label>
+          <label>
+            <span>2FA seed (optional)</span>
+            <input
+              type="password"
+              value={totpSeed}
+              autoComplete="off"
+              onChange={(event) => setTotpSeed(event.target.value)}
+              placeholder="TOTP base32 seed — leave empty if none"
+            />
+          </label>
+        </div>
+      ) : null}
+      {error && <div className="assistant-action-card-error">{error}</div>}
+      <div className="assistant-action-card-actions">
+        {isPending ? (
+          <>
+            <button
+              type="button"
+              className="assistant-action-button"
+              disabled={Boolean(busy)}
+              onClick={() => void reject()}
+            >
+              {busy === 'reject' ? 'Denying…' : 'Deny'}
+            </button>
+            <button
+              type="button"
+              className="assistant-action-button is-primary"
+              disabled={Boolean(busy)}
+              onClick={() => void provide()}
+            >
+              {busy === 'provide' ? 'Saving…' : 'Save & continue'}
+            </button>
+          </>
+        ) : null}
+      </div>
+    </section>
+  )
+}
+
 const SLIDE_WORKFLOW_OPTIONS: Array<{
   value: 'advanced' | 'html' | 'template'
   label: string
@@ -3514,7 +3997,7 @@ const AssistantResponseBlocks = memo(({
     }
   }
   for (const block of blocks) {
-    if (block.type === 'image_artifact' && block.kind === 'slide_preview') {
+    if (isSlidePreviewBlock(block)) {
       previewRun.push(block)
       continue
     }
@@ -3544,6 +4027,9 @@ const AssistantResponseBlocks = memo(({
         }
         if (block.type === 'vault_permission_request') {
           return <VaultPermissionActionBlock key={block.id} block={block} />
+        }
+        if (block.type === 'browser_credential_request') {
+          return <BrowserCredentialRequestCard key={block.id} block={block} />
         }
         if (block.type === 'slide_workflow_choice') {
           return <SlideWorkflowChoiceBlock key={block.id} block={block} />
@@ -4575,6 +5061,7 @@ export default function App() {
           producedArtifacts: nextTask.producedArtifacts ?? item.producedArtifacts,
           supportingArtifacts: nextTask.supportingArtifacts ?? item.supportingArtifacts,
           sources: nextTask.sources ?? item.sources,
+          slideProgress: nextTask.slideProgress ?? item.slideProgress,
         }
       })
     })
@@ -5044,6 +5531,7 @@ export default function App() {
         activityLog: stream.activityLog ?? existingMessage?.activityLog,
         alphaTerminalLog: mergeAlphaTerminalLogs(existingMessage?.alphaTerminalLog, stream.alphaTerminalLog),
         progress: stream.progress ?? existingMessage?.progress,
+        slideProgress: stream.slideProgress ?? existingMessage?.slideProgress,
         producedArtifacts: stream.producedArtifacts ?? existingMessage?.producedArtifacts,
         supportingArtifacts: stream.supportingArtifacts ?? existingMessage?.supportingArtifacts,
         responseBlocks: stream.responseBlocks ?? existingMessage?.responseBlocks,
@@ -5898,6 +6386,7 @@ export default function App() {
           alpha_terminal_log: (event as any)?.alpha_terminal_log ?? existingTask?.alphaTerminalLog ?? existingAssistantMessage?.alphaTerminalLog,
           docs_progress: docsProgress ?? (existingTask?.progress?.kind === 'docs_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'docs_parse' ? existingAssistantMessage.progress : undefined),
           tabular_progress: tabularProgress ?? (existingTask?.progress?.kind === 'tabular_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'tabular_parse' ? existingAssistantMessage.progress : undefined),
+          slide_progress: (event as any)?.slide_progress ?? existingTask?.slideProgress ?? existingAssistantMessage?.slideProgress,
           produced_artifacts: (event as any)?.produced_artifacts ?? existingTask?.producedArtifacts ?? existingAssistantMessage?.producedArtifacts,
           sources: Array.isArray((event as any)?.sources) ? (event as any).sources : existingTask?.sources ?? existingAssistantMessage?.sources,
           completed: false,
@@ -5961,6 +6450,7 @@ export default function App() {
           alpha_terminal_log: (event as any)?.alpha_terminal_log ?? preservedTask?.alphaTerminalLog,
           docs_progress: (event as any)?.docs_progress ?? (preservedTask?.progress?.kind === 'docs_parse' ? preservedTask.progress : undefined),
           tabular_progress: (event as any)?.tabular_progress ?? (preservedTask?.progress?.kind === 'tabular_parse' ? preservedTask.progress : undefined),
+          slide_progress: (event as any)?.slide_progress ?? preservedTask?.slideProgress,
           produced_artifacts: (event as any)?.produced_artifacts ?? preservedTask?.producedArtifacts,
           sources: Array.isArray((event as any)?.sources) ? (event as any).sources : preservedTask?.sources,
           completed: Boolean((event as any).completed ?? preservedTask?.completed),
@@ -5988,6 +6478,7 @@ export default function App() {
           activityLog: foregroundTask?.activityLog,
           alphaTerminalLog: foregroundTask?.alphaTerminalLog,
           progress: foregroundTask?.progress,
+          slideProgress: foregroundTask?.slideProgress,
           producedArtifacts: foregroundTask?.producedArtifacts,
           sources: foregroundTask?.sources,
         })
@@ -6052,9 +6543,10 @@ export default function App() {
           const docsProgress = normalizeDocsProgress(event.docs_progress)
           const tabularProgress = normalizeTabularProgress((event as any).tabular_progress)
           const progressState = tabularProgress ?? docsProgress
+          const incomingSlideProgress = normalizeSlideProgress(event.slide_progress ?? event.slideProgress)
           const alphaTerminalEntry = normalizeAlphaTerminalEntry((event as any).codex_terminal)
           const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working in the background...'
-          const activityText = progressState?.label || statusMessage || fallbackMessage
+          const activityText = incomingSlideProgress?.label || progressState?.label || statusMessage || fallbackMessage
           const activityEntries = alphaTerminalEntry
             ? undefined
             : buildProgressActivityEntries(event, activityText, statusMessage, progressState)
@@ -6076,6 +6568,7 @@ export default function App() {
             ),
             alphaTerminalLog: appendAlphaTerminalEntry(undefined, alphaTerminalEntry),
             progress: alphaTerminalEntry ? undefined : progressState,
+            slideProgress: alphaTerminalEntry ? undefined : incomingSlideProgress,
           })
           patchBackgroundTask(requestId, (current) => ({
             ...current,
@@ -6088,7 +6581,8 @@ export default function App() {
               activityEntries,
             ),
             alphaTerminalLog: appendAlphaTerminalEntry(current.alphaTerminalLog, alphaTerminalEntry),
-            progress: alphaTerminalEntry ? current.progress : progressState,
+            progress: alphaTerminalEntry ? current.progress : (progressState ?? current.progress),
+            slideProgress: alphaTerminalEntry ? current.slideProgress : (incomingSlideProgress ?? current.slideProgress),
             completed: false,
           }))
           return
@@ -6291,9 +6785,10 @@ export default function App() {
         const docsProgress = normalizeDocsProgress(event.docs_progress)
         const tabularProgress = normalizeTabularProgress((event as any).tabular_progress)
         const progressState = tabularProgress ?? docsProgress
+        const incomingSlideProgress = normalizeSlideProgress(event.slide_progress ?? event.slideProgress)
         const alphaTerminalEntry = normalizeAlphaTerminalEntry((event as any).codex_terminal)
         const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working on your request...'
-        const activityText = progressState?.label || statusMessage || fallbackMessage
+        const activityText = incomingSlideProgress?.label || progressState?.label || statusMessage || fallbackMessage
         const activityEntries = alphaTerminalEntry
           ? undefined
           : buildProgressActivityEntries(event, activityText, statusMessage, progressState)
@@ -6324,7 +6819,8 @@ export default function App() {
                   measureAssistantStreamLength(message.content, message.responseBlocks),
                 )
                 : message.alphaConsoleAnchors,
-              progress: alphaTerminalEntry ? message.progress : progressState,
+              progress: alphaTerminalEntry ? message.progress : (progressState ?? message.progress),
+              slideProgress: alphaTerminalEntry ? message.slideProgress : (incomingSlideProgress ?? message.slideProgress),
               stopped: false,
             }
           })
@@ -6516,6 +7012,8 @@ export default function App() {
           || normalizedBlock.type === 'calendar_event'
           || normalizedBlock.type === 'sandbox_permission_request'
           || normalizedBlock.type === 'slide_workflow_choice'
+          || normalizedBlock.type === 'vault_permission_request'
+          || normalizedBlock.type === 'browser_credential_request'
         )) {
           setMessages((prev) => prev.map((message) => ({
             ...message,
@@ -7191,6 +7689,7 @@ export default function App() {
         activityLog: task.activityLog,
         alphaTerminalLog: task.alphaTerminalLog,
         progress: task.progress,
+        slideProgress: task.slideProgress,
         producedArtifacts: task.producedArtifacts,
         sources: task.sources,
       })
@@ -8234,7 +8733,14 @@ export default function App() {
                                         {task.progress?.kind === 'tabular_parse' && !String(task.partialContent || '').trim() && (
                                           <TabularProgressCard progress={task.progress} />
                                         )}
-                                        {task.activity && task.progress?.kind !== 'docs_parse' && task.progress?.kind !== 'tabular_parse' && (
+                                        {task.slideProgress && (
+                                          <SlideBuildCard
+                                            progress={task.slideProgress}
+                                            showThumbs
+                                            streaming={!task.completed && !task.failed}
+                                          />
+                                        )}
+                                        {task.activity && !task.slideProgress && task.progress?.kind !== 'docs_parse' && task.progress?.kind !== 'tabular_parse' && (
                                           <div className="assistant-activity task-background-activity">{task.activity}</div>
                                         )}
                                         {task.partialThinking && (
@@ -8694,6 +9200,13 @@ export default function App() {
                           )}
                           {msg.progress?.kind === 'tabular_parse' && !String(msg.content || '').trim() && (
                             <TabularProgressCard progress={msg.progress} />
+                          )}
+                          {msg.slideProgress && !(hasSlidePreviewBlocks(msg.responseBlocks) && !messageIsStreaming) && (
+                            <SlideBuildCard
+                              progress={msg.slideProgress}
+                              showThumbs={!hasSlidePreviewBlocks(msg.responseBlocks)}
+                              streaming={messageIsStreaming}
+                            />
                           )}
                           {msg.thinking && (
                             <AssistantCollapsibleSection

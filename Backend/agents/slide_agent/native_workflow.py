@@ -48,6 +48,7 @@ from html_workflow import (
     plan_html_theme,
     render_slide_html_files,
 )
+from live_progress import ProgressCallback, compact_slide_plan, emit_slide_progress
 from llm_client import call_llm_json, env_int
 from ooxml_validator import validate_pptx
 from template_cataloger import (
@@ -313,13 +314,31 @@ def _qa_workers(count: int) -> int:
     return max(1, min(env_int("NATIVE_QA_PARALLELISM", 4), count or 1))
 
 
-def _validate_pairs_parallel(pairs: list[tuple[dict, dict, Path]]) -> list[dict]:
+def _validate_pairs_parallel(
+    pairs: list[tuple[dict, dict, Path]],
+    *,
+    on_progress: ProgressCallback = None,
+) -> list[dict]:
     """Validate (manifest_item, plan_slide, png_path) triples concurrently."""
     results: list[dict | None] = [None] * len(pairs)
 
     def _one(index: int) -> None:
         item, slide, png_path = pairs[index]
-        results[index] = _validate_slide_render(png_path, slide, item["design"])
+        result = _validate_slide_render(png_path, slide, item["design"])
+        results[index] = result
+        verdict = str((result or {}).get("verdict") or "").strip().lower()
+        emit_slide_progress(
+            on_progress,
+            stage="qa",
+            label=f"QA slide {slide['slide_number']}",
+            detail=str((result or {}).get("summary") or "").strip() or None,
+            slide_number=slide["slide_number"],
+            title=slide.get("title") or item.get("title") or "",
+            status="pass" if verdict == "pass" else "qa",
+            png_path=str(png_path),
+            current=slide["slide_number"],
+            total=len(pairs),
+        )
 
     if len(pairs) > 1:
         with ThreadPoolExecutor(max_workers=_qa_workers(len(pairs))) as pool:
@@ -397,6 +416,7 @@ def _final_pptx_qa_rounds(
     layout_numbers: dict[int, int] | None,
     canvas_w: int,
     canvas_h: int,
+    on_progress: ProgressCallback = None,
 ) -> tuple[list[dict], list[Path]]:
     """Render the FINAL pptx and repair slides that fail visual review.
 
@@ -429,7 +449,7 @@ def _final_pptx_qa_rounds(
             for item, slide in zip(manifest, plan.get("slides", []), strict=False)
             if slide["slide_number"] - 1 < len(final_pngs)
         ]
-        validation_results = _validate_pairs_parallel(pairs)
+        validation_results = _validate_pairs_parallel(pairs, on_progress=on_progress)
         failed = {
             result["slide_number"]
             for result in validation_results
@@ -496,6 +516,7 @@ def run_native_pipeline(
     template_path: Path | None = None,
     catalog: dict | None = None,
     force_catalog: bool = False,
+    on_progress: ProgressCallback = None,
 ) -> dict:
     """Design in HTML, land as a native editable PPTX.
 
@@ -515,6 +536,15 @@ def run_native_pipeline(
         plan["slides"] = plan.get("slides", [])[:slide_cap]
     plan_path = output_dir / "plan.json"
     plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+    slides = plan.get("slides", [])
+    emit_slide_progress(
+        on_progress,
+        stage="plan",
+        label="Deck plan is ready",
+        plan=compact_slide_plan(plan),
+        total=len(slides),
+        current=0,
+    )
 
     template_mode = template_path is not None
     layout_numbers: dict[int, int] = {}
@@ -576,6 +606,17 @@ def run_native_pipeline(
             "design": design,
             "html_path": str(html_path),
         }
+        emit_slide_progress(
+            on_progress,
+            stage="design",
+            label=f"Designed slide {slide['slide_number']}: {slide['title']}",
+            slide_number=slide["slide_number"],
+            title=slide["title"],
+            status="designed",
+            current=slide["slide_number"],
+            total=len(slides),
+            plan=compact_slide_plan(plan),
+        )
 
     if design_workers > 1 and len(slides) > 1:
         with ThreadPoolExecutor(max_workers=design_workers) as pool:
@@ -588,13 +629,20 @@ def run_native_pipeline(
     manifest = [entry for entry in manifest if entry is not None]
 
     # Stage 1 QA: the HTML renders (cheap, catches most issues before conversion).
-    slide_pngs = render_slide_html_files(manifest, rendered_dir, canvas_width=canvas_w, canvas_height=canvas_h)
+    slide_pngs = render_slide_html_files(
+        manifest,
+        rendered_dir,
+        canvas_width=canvas_w,
+        canvas_height=canvas_h,
+        on_progress=on_progress,
+    )
 
     html_validation: list[dict] = []
     if validate:
         for repair_round in range(html_workflow.HTML_MAX_REPAIR_ROUNDS + 1):
             html_validation = _validate_pairs_parallel(
-                [(item, slide, Path(item["png_path"])) for item, slide in zip(manifest, slides, strict=False)]
+                [(item, slide, Path(item["png_path"])) for item, slide in zip(manifest, slides, strict=False)],
+                on_progress=on_progress,
             )
             failed = {
                 result["slide_number"]
@@ -612,7 +660,22 @@ def run_native_pipeline(
                 canvas_w=canvas_w,
                 canvas_h=canvas_h,
             )
-            slide_pngs = render_slide_html_files(manifest, rendered_dir, canvas_width=canvas_w, canvas_height=canvas_h)
+            slide_pngs = render_slide_html_files(
+                manifest,
+                rendered_dir,
+                canvas_width=canvas_w,
+                canvas_height=canvas_h,
+                on_progress=on_progress,
+            )
+
+    emit_slide_progress(
+        on_progress,
+        stage="convert",
+        label="Converting slides into an editable PowerPoint",
+        plan=compact_slide_plan(plan),
+        total=len(slides),
+        current=len(slides),
+    )
 
     # Conversion to native objects.
     deck_path = output_dir / "deck.pptx"
@@ -637,6 +700,7 @@ def run_native_pipeline(
         layout_numbers=layout_numbers or None,
         canvas_w=canvas_w,
         canvas_h=canvas_h,
+        on_progress=on_progress,
     )
 
     contact_pngs = final_pngs or slide_pngs
@@ -670,6 +734,28 @@ def run_native_pipeline(
     (output_dir / "build_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False),
         encoding="utf-8",
+    )
+    for idx, png in enumerate(contact_pngs):
+        slide = slides[idx] if idx < len(slides) else {}
+        emit_slide_progress(
+            on_progress,
+            stage="ready",
+            label=f"Slide {idx + 1} is ready",
+            slide_number=slide.get("slide_number") or (idx + 1),
+            title=slide.get("title") or "",
+            status="ready",
+            png_path=str(png),
+            current=idx + 1,
+            total=len(slides) or len(contact_pngs),
+            plan=compact_slide_plan(plan),
+        )
+    emit_slide_progress(
+        on_progress,
+        stage="ready",
+        label="Slide deck is ready",
+        plan=compact_slide_plan(plan),
+        total=len(slides) or len(contact_pngs),
+        current=len(slides) or len(contact_pngs),
     )
     return report
 

@@ -2479,6 +2479,22 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('vault:provide-pending', async (_, requestId: string, payload: any) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/vault/pending/${encodeURIComponent(String(requestId || '').trim())}/provide`, {
+      method: 'POST',
+      body: {
+        username: String(payload?.username || ''),
+        password: String(payload?.password || ''),
+        totp_seed: String(payload?.totp_seed || ''),
+        save_to_vault: payload?.save_to_vault !== false,
+      },
+    })
+  })
+
   ipcMain.handle(
     'gateway:get-system-metrics',
     async (

@@ -326,6 +326,7 @@ interface Window {
     vaultListPending: () => Promise<{ pending: any[] }>
     vaultApprovePending: (requestId: string) => Promise<{ status: string; request?: any; entry_id?: string | null }>
     vaultRejectPending: (requestId: string) => Promise<{ status: string; request?: any }>
+    vaultProvidePending: (requestId: string, payload: { username: string; password: string; totp_seed?: string; save_to_vault?: boolean }) => Promise<{ status: string; request?: any; entry_id?: string | null }>
     onGatewayEvent: (cb: (data: any) => void) => () => void
     onGatewayStatus: (cb: (data: GatewaySocketState['status']) => void) => () => void
     getGatewaySystemMetrics: (

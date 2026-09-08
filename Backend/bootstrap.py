@@ -65,7 +65,10 @@ DEFAULT_ENV_SEARCH_ROOTS = (
 )
 DEFAULT_MEMORY_REPO_DIR = BACKEND_ROOT.parent.parent / "cosmic-memory"
 DEFAULT_MEMORY_REPO_URL = "https://github.com/uspraveen/cosmic-memory.git"
+DEFAULT_BROWSER_REPO_DIR = BACKEND_ROOT.parent.parent / "cosmic-browser-use"
+DEFAULT_BROWSER_REPO_URL = "https://github.com/uspraveen/agent-browser-index.git"
 DEFAULT_MEMORY_REPO_REF = "main"
+DEFAULT_BROWSER_REPO_REF = ""
 DEFAULT_SYSTEM_ENV_DIR = Path("/etc/cosmic")
 DEFAULT_WHATSAPP_AUTH_DIR = Path("/var/lib/cosmic/whatsapp/auth")
 DEFAULT_DIAGRAM_PUPPETEER_CACHE_DIR = Path("/var/lib/cosmic/diagram-agent/puppeteer")
@@ -136,6 +139,10 @@ SLIDE_AGENT_ENV_NAME = "slide-agent.env"
 SLIDE_AGENT_SERVICE_NAME = "cosmic-slide-agent.service"
 SLIDE_AGENT_ID = "cosmic/slide-agent:1.0.0"
 SLIDE_AGENT_DEFAULT_INSTANCE_ID = "slide-agent-1"
+BROWSER_AGENT_ENV_NAME = "browser-agent.env"
+BROWSER_AGENT_SERVICE_NAME = "cosmic-browser-agent.service"
+BROWSER_AGENT_ID = "cosmic/browser-agent:1.0.0"
+BROWSER_AGENT_DEFAULT_INSTANCE_ID = "browser-agent-1"
 ALPHA_AGENT_ENV_NAME = "alpha-agent.env"
 ALPHA_AGENT_SERVICE_NAME = "cosmic-alpha-agent.service"
 ALPHA_AGENT_ID = "cosmic/alpha-agent:1.0.0"
@@ -864,6 +871,131 @@ def build_firecrawl_agent_env_rendered(
 
 def firecrawl_agent_is_configured(env_values: Dict[str, str]) -> bool:
     return meaningful_env_value(env_values.get("FIRECRAWL_API_KEY")) is not None
+
+
+def browser_agent_repo_env_path() -> Path:
+    return BACKEND_ROOT / "agents" / "browser_agent" / "agent.env"
+
+
+def browser_agent_repo_env_example_path() -> Path:
+    return BACKEND_ROOT / "agents" / "browser_agent" / "agent.env.example"
+
+
+def browser_agent_system_env_path(system_env_dir: Optional[Path] = None) -> Path:
+    return (
+        (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "agents" / BROWSER_AGENT_ENV_NAME
+    )
+
+
+def resolve_browser_agent_env_source() -> Path:
+    repo_env = browser_agent_repo_env_path()
+    if repo_env.exists():
+        return repo_env
+    return browser_agent_repo_env_example_path()
+
+
+def build_browser_agent_env_rendered(
+    *,
+    signing_secret: str,
+    shared_internal_token: str,
+    system_env_dir: Optional[Path] = None,
+    existing_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+    external_env_by_name: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[Path, str, Dict[str, str]]:
+    source_path = resolve_browser_agent_env_source()
+    source_raw = source_path.read_text(encoding="utf-8")
+    source_data = parse_env_text(source_raw)
+    existing_env = (existing_env_by_name or {}).get(BROWSER_AGENT_ENV_NAME, {})
+    external_env = (external_env_by_name or {}).get(BROWSER_AGENT_ENV_NAME, {})
+    orchestrator_existing_env = (existing_env_by_name or {}).get("orchestrator.env", {})
+    orchestrator_external_env = (external_env_by_name or {}).get("orchestrator.env", {})
+    gateway_existing_env = (existing_env_by_name or {}).get("gateway.env", {})
+    gateway_external_env = (external_env_by_name or {}).get("gateway.env", {})
+
+    redis_url = first_meaningful_value(
+        external_env.get("REDIS_URL"),
+        existing_env.get("REDIS_URL"),
+        source_data.get("REDIS_URL"),
+        orchestrator_external_env.get("REDIS_URL"),
+        orchestrator_existing_env.get("REDIS_URL"),
+        "redis://127.0.0.1:6379/0",
+    )
+    gateway_url = first_meaningful_value(
+        external_env.get("GATEWAY_URL"),
+        existing_env.get("GATEWAY_URL"),
+        source_data.get("GATEWAY_URL"),
+        "http://127.0.0.1:8080",
+    )
+
+    def pick_env(names: Sequence[str], default: Optional[str] = None) -> Optional[str]:
+        return first_meaningful_value(
+            *(external_env.get(name) for name in names),
+            *(existing_env.get(name) for name in names),
+            *(source_data.get(name) for name in names),
+            default,
+        )
+
+    # The browser agent rides whatever Fireworks credential the VM already
+    # carries (its own env first, then the orchestrator/gateway keys).
+    fireworks_api_key = first_meaningful_value(
+        external_env.get("FIREWORKS_API_KEY"),
+        external_env.get("BROWSER_AGENT_FIREWORKS_API_KEY"),
+        existing_env.get("FIREWORKS_API_KEY"),
+        existing_env.get("BROWSER_AGENT_FIREWORKS_API_KEY"),
+        orchestrator_external_env.get("ORCHESTRATOR_FIREWORKS_API_KEY"),
+        orchestrator_external_env.get("FIREWORKS_API_KEY"),
+        orchestrator_existing_env.get("ORCHESTRATOR_FIREWORKS_API_KEY"),
+        orchestrator_existing_env.get("FIREWORKS_API_KEY"),
+        gateway_external_env.get("FIREWORKS_API_KEY"),
+        gateway_existing_env.get("FIREWORKS_API_KEY"),
+    )
+    xai_api_key = first_meaningful_value(
+        external_env.get("XAI_API_KEY"),
+        existing_env.get("XAI_API_KEY"),
+        orchestrator_external_env.get("XAI_API_KEY"),
+        orchestrator_existing_env.get("XAI_API_KEY"),
+    )
+    mimo_api_url = pick_env(["MIMO_API_URL"])
+    mimo_api_key = pick_env(["MIMO_API_KEY"])
+
+    overrides = {
+        "REDIS_URL": redis_url or "redis://127.0.0.1:6379/0",
+        "GATEWAY_URL": gateway_url or "http://127.0.0.1:8080",
+        "GATEWAY_INTERNAL_TOKEN": shared_internal_token,
+        "AGENT_SECRET": signing_secret,
+        "INSTANCE_ID": BROWSER_AGENT_DEFAULT_INSTANCE_ID,
+        # The specialist adds this directory to sys.path to import the
+        # cosmic-browser-use core (main.py / browser_memory).
+        "BROWSER_USE_HOME": str(DEFAULT_BROWSER_REPO_DIR / "cosmic-browser-use"),
+    }
+    if meaningful_env_value(fireworks_api_key) is not None:
+        overrides["FIREWORKS_API_KEY"] = fireworks_api_key
+    if meaningful_env_value(xai_api_key) is not None:
+        overrides["XAI_API_KEY"] = xai_api_key
+    if meaningful_env_value(mimo_api_url) is not None:
+        overrides["MIMO_API_URL"] = mimo_api_url
+    if meaningful_env_value(mimo_api_key) is not None:
+        overrides["MIMO_API_KEY"] = mimo_api_key
+
+    rendered = render_env_with_overrides(source_raw, overrides)
+    rendered_data = parse_env_text(rendered)
+    return browser_agent_system_env_path(system_env_dir), rendered, rendered_data
+
+
+def browser_agent_is_configured(env_values: Dict[str, str]) -> bool:
+    return (
+        meaningful_env_value(env_values.get("FIREWORKS_API_KEY")) is not None
+        and meaningful_env_value(env_values.get("GATEWAY_INTERNAL_TOKEN")) is not None
+    )
+
+
+def read_browser_agent_system_env(
+    system_env_dir: Optional[Path] = None,
+) -> Dict[str, str]:
+    env_path = browser_agent_system_env_path(system_env_dir)
+    if not env_path.exists():
+        return {}
+    return parse_env_text(read_text_file(env_path, use_sudo=True))
 
 
 def read_firecrawl_agent_system_env(
@@ -5594,6 +5726,27 @@ def materialize_bootstrap_env_files(
         )
     )
 
+    browser_repo_env_path = browser_agent_repo_env_path()
+    _browser_dest_path, browser_repo_rendered, _browser_repo_env = (
+        build_browser_agent_env_rendered(
+            signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+            shared_internal_token=overrides_by_dest["gateway.env"][
+                "GATEWAY_INTERNAL_TOKEN"
+            ],
+            system_env_dir=system_env_dir,
+            existing_env_by_name=existing_env_by_name,
+            external_env_by_name=external_env_by_name,
+        )
+    )
+    browser_repo_env_path.parent.mkdir(parents=True, exist_ok=True)
+    browser_repo_env_path.write_text(browser_repo_rendered, encoding="utf-8")
+    written.append(browser_repo_env_path)
+    log(
+        "Materialized repo env file from bootstrap inputs: {0}".format(
+            browser_repo_env_path
+        )
+    )
+
     docs_parser_repo_path = docs_parser_agent_repo_env_path()
     _docs_parser_dest_path, docs_parser_rendered, _docs_parser_env = (
         build_docs_parser_agent_env_rendered(
@@ -5932,6 +6085,23 @@ def install_service_env_files(
         )
         installed.append(firecrawl_dest_path)
         log("Installed system env file: {0}".format(firecrawl_dest_path))
+
+    browser_dest_path, browser_rendered, _browser_env = build_browser_agent_env_rendered(
+        signing_secret=overrides_by_dest["gateway.env"]["GATEWAY_SIGNING_SECRET"],
+        shared_internal_token=overrides_by_dest["gateway.env"][
+            "GATEWAY_INTERNAL_TOKEN"
+        ],
+        system_env_dir=system_env_dir,
+    )
+    run(["install", "-d", "-m", "755", str(browser_dest_path.parent)], use_sudo=True)
+    if browser_dest_path.exists():
+        log("System env file already exists: {0}".format(browser_dest_path))
+    else:
+        install_text_file(
+            browser_dest_path, browser_rendered, mode="600", use_sudo=True
+        )
+        installed.append(browser_dest_path)
+        log("Installed system env file: {0}".format(browser_dest_path))
 
     docs_parser_dest_path, docs_parser_rendered, _docs_parser_env = (
         build_docs_parser_agent_env_rendered(
@@ -7013,6 +7183,35 @@ def sync_service_env_files(
         )
         if changed_keys:
             synced.append(firecrawl_dest_path)
+
+    browser_dest_path_sync = browser_agent_system_env_path(system_env_dir)
+    if browser_dest_path_sync.exists():
+        browser_existing_by_name: Dict[str, Dict[str, str]] = {
+            BROWSER_AGENT_ENV_NAME: parse_env_text(
+                read_text_file(browser_dest_path_sync, use_sudo=True)
+            ),
+        }
+        _browser_sync_dest, browser_sync_rendered, _browser_sync_env = (
+            build_browser_agent_env_rendered(
+                signing_secret=overrides_by_dest["gateway.env"][
+                    "GATEWAY_SIGNING_SECRET"
+                ],
+                shared_internal_token=overrides_by_dest["gateway.env"][
+                    "GATEWAY_INTERNAL_TOKEN"
+                ],
+                system_env_dir=system_env_dir,
+                existing_env_by_name=browser_existing_by_name,
+            )
+        )
+        changed_keys = sync_env_file(
+            browser_dest_path_sync,
+            source_raw=browser_sync_rendered,
+            create_missing=False,
+            use_sudo=True,
+            mode="600",
+        )
+        if changed_keys:
+            synced.append(browser_dest_path_sync)
 
     docs_parser_dest_path = docs_parser_agent_system_env_path(system_env_dir)
     if docs_parser_dest_path.exists():
@@ -8126,6 +8325,80 @@ def setup_cosmic_memory(
     )
 
 
+def ensure_browser_repo_checkout(
+    browser_repo_dir: Path, browser_repo_url: str, browser_repo_ref: str
+) -> Path:
+    resolved = Path(browser_repo_dir).expanduser()
+    if resolved.exists():
+        if not resolved.is_dir():
+            raise BootstrapError(
+                "cosmic-browser-use repo path is not a directory: {0}".format(resolved)
+            )
+        if (resolved / "cosmic-browser-use" / "main.py").exists():
+            return resolved
+        if (resolved / "main.py").exists():
+            return resolved
+        if any(resolved.iterdir()):
+            raise BootstrapError(
+                "cosmic-browser-use checkout target exists but is not a valid repo: {0}".format(
+                    resolved
+                )
+            )
+    ensure_git_available()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    clone_command = ["git", "clone", "--depth", "1"]
+    normalized_ref = meaningful_env_value(browser_repo_ref)
+    if normalized_ref is not None:
+        clone_command.extend(["--branch", normalized_ref])
+    clone_command.extend([browser_repo_url, str(resolved)])
+    run_with_retry(clone_command)
+    return resolved
+
+
+def setup_cosmic_browser_use(
+    venv_path: Path,
+    browser_repo_dir: Path,
+    *,
+    browser_repo_url: str,
+    browser_repo_ref: str,
+) -> None:
+    """Provision the cosmic-browser-use checkout for the browser specialist.
+
+    Clones the repo as a sibling of the Cosmic-OS repo (same layout as
+    cosmic-memory), installs its Python requirements into the backend venv,
+    and installs the Chromium binary playwright drives on the VM.
+    """
+    if not is_linux():
+        raise BootstrapError("This bootstrap flow currently targets Linux VMs only.")
+
+    python_path = venv_python_path(venv_path)
+    if not python_path.exists():
+        raise BootstrapError(
+            "Missing venv python executable at {0}".format(python_path)
+        )
+
+    browser_repo = ensure_browser_repo_checkout(
+        browser_repo_dir, browser_repo_url, browser_repo_ref
+    )
+
+    core_dir = browser_repo / "cosmic-browser-use"
+    if not core_dir.exists():
+        core_dir = browser_repo
+    requirements_path = core_dir / "requirements.txt"
+    if requirements_path.exists():
+        log("Installing cosmic-browser-use requirements from {0}".format(requirements_path))
+        run_with_retry(
+            [str(python_path), "-m", "pip", "install", "-r", str(requirements_path)],
+            cwd=browser_repo,
+        )
+
+    log("Installing Playwright Chromium for the browser agent")
+    run_with_retry(
+        [str(python_path), "-m", "playwright", "install", "chromium"],
+        cwd=browser_repo,
+    )
+
+
 def setup_vm_edge(
     edge_setup_script: Path,
     gateway_env_path: Path,
@@ -8174,8 +8447,12 @@ def bootstrap(
     memory_repo_dir: Path | None = None,
     memory_repo_url: str = DEFAULT_MEMORY_REPO_URL,
     memory_repo_ref: str = DEFAULT_MEMORY_REPO_REF,
+    browser_repo_dir: Path | None = None,
+    browser_repo_url: str = DEFAULT_BROWSER_REPO_URL,
+    browser_repo_ref: str = DEFAULT_BROWSER_REPO_REF,
 ) -> None:
     enable_memory = memory_repo_dir is not None
+    enable_browser_agent = browser_repo_dir is not None
     setup_env_files(env_search_roots)
     if meaningful_env_value(bootstrap_token) is not None:
         materialize_bootstrap_env_files(
@@ -8194,6 +8471,13 @@ def bootstrap(
             memory_repo_dir,
             memory_repo_url=memory_repo_url,
             memory_repo_ref=memory_repo_ref,
+        )
+    if browser_repo_dir is not None:
+        setup_cosmic_browser_use(
+            venv_path,
+            browser_repo_dir,
+            browser_repo_url=browser_repo_url,
+            browser_repo_ref=browser_repo_ref,
         )
     setup_whatsapp_bridge(bridge_dir)
     setup_diagram_renderers()
@@ -8425,6 +8709,16 @@ def provision_vm(
         log(
             "Alpha agent is installed but disabled; set ALPHA_AGENT_ENABLED=true to enable the alpha agent service."
         )
+    browser_env = read_browser_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+    enable_browser_agent = browser_agent_is_configured(browser_env)
+    if enable_browser_agent:
+        log(
+            "Browser agent env is configured; bootstrap will enable and start the browser agent service."
+        )
+    else:
+        log(
+            "Browser agent env is not configured; bootstrap will install the unit but skip enabling the browser agent service."
+        )
     installed = install_systemd_units(
         systemd_template_dir,
         enable_units=enable_units,
@@ -8492,6 +8786,11 @@ def provision_vm(
             + (
                 [ALPHA_AGENT_SERVICE_NAME]
                 if enable_units and enable_alpha_agent
+                else []
+            )
+            + (
+                [BROWSER_AGENT_SERVICE_NAME]
+                if enable_units and enable_browser_agent
                 else []
             )
         ),
@@ -8584,6 +8883,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-memory",
         action="store_true",
         help="Skip cosmic-memory checkout/install, memory.env materialization, and Neo4j provisioning.",
+    )
+    parser.add_argument(
+        "--browser-repo-dir",
+        default=str(DEFAULT_BROWSER_REPO_DIR),
+        help="cosmic-browser-use checkout path for the browser agent. Existing repos are reused; missing paths are cloned from --browser-repo-url. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--browser-repo-url",
+        default=DEFAULT_BROWSER_REPO_URL,
+        help="Public cosmic-browser-use Git URL used when --browser-repo-dir does not exist. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--browser-repo-ref",
+        default="",
+        help="Branch or tag to clone for cosmic-browser-use when bootstrap fetches it. Default: remote HEAD.",
+    )
+    parser.add_argument(
+        "--skip-browser-agent",
+        action="store_true",
+        help="Skip cosmic-browser-use checkout/install and Chromium provisioning.",
     )
     parser.add_argument(
         "--skip-edge",
@@ -8709,6 +9028,19 @@ def main() -> int:
         meaningful_env_value(getattr(args, "memory_repo_ref", ""))
         or DEFAULT_MEMORY_REPO_REF
     )
+    browser_repo_dir = (
+        Path(str(getattr(args, "browser_repo_dir", ""))).expanduser()
+        if not bool(getattr(args, "skip_browser_agent", False))
+        and meaningful_env_value(getattr(args, "browser_repo_dir", "")) is not None
+        else None
+    )
+    browser_repo_url = (
+        meaningful_env_value(getattr(args, "browser_repo_url", ""))
+        or DEFAULT_BROWSER_REPO_URL
+    )
+    browser_repo_ref = (
+        meaningful_env_value(getattr(args, "browser_repo_ref", "")) or ""
+    )
     bootstrap_token = meaningful_env_value(
         getattr(args, "bootstrap_token", "")
     ) or meaningful_env_value(os.getenv("COSMIC_BOOTSTRAP_TOKEN"))
@@ -8775,6 +9107,13 @@ def main() -> int:
                     memory_repo_url=memory_repo_url,
                     memory_repo_ref=memory_repo_ref,
                 )
+            if browser_repo_dir is not None:
+                setup_cosmic_browser_use(
+                    venv_path,
+                    browser_repo_dir,
+                    browser_repo_url=browser_repo_url,
+                    browser_repo_ref=browser_repo_ref,
+                )
         elif command == "setup-whatsapp-bridge":
             setup_whatsapp_bridge(bridge_dir)
         elif command == "setup-codex-cli":
@@ -8834,6 +9173,8 @@ def main() -> int:
             enable_slide_agent = slide_agent_is_configured(slide_env)
             alpha_env = read_alpha_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
             enable_alpha_agent = alpha_agent_is_configured(alpha_env)
+            browser_env = read_browser_agent_system_env(DEFAULT_SYSTEM_ENV_DIR)
+            enable_browser_agent = browser_agent_is_configured(browser_env)
             installed = install_systemd_units(
                 systemd_template_dir,
                 enable_units=bool(getattr(args, "enable", False)),
@@ -8913,6 +9254,12 @@ def main() -> int:
                         if enable_alpha_agent and bool(getattr(args, "enable", False))
                         else []
                     )
+                    + (
+                        [BROWSER_AGENT_SERVICE_NAME]
+                        if enable_browser_agent
+                        and bool(getattr(args, "enable", False))
+                        else []
+                    )
                 ),
                 include_memory_env=memory_repo_dir is not None,
             )
@@ -8955,6 +9302,9 @@ def main() -> int:
                 memory_repo_dir=memory_repo_dir,
                 memory_repo_url=memory_repo_url,
                 memory_repo_ref=memory_repo_ref,
+                browser_repo_dir=browser_repo_dir,
+                browser_repo_url=browser_repo_url,
+                browser_repo_ref=browser_repo_ref,
             )
         else:
             bootstrap(
@@ -8973,6 +9323,9 @@ def main() -> int:
                 memory_repo_dir=memory_repo_dir,
                 memory_repo_url=memory_repo_url,
                 memory_repo_ref=memory_repo_ref,
+                browser_repo_dir=browser_repo_dir,
+                browser_repo_url=browser_repo_url,
+                browser_repo_ref=browser_repo_ref,
             )
     except BootstrapError as exc:
         print("Bootstrap failed: {0}".format(exc), file=sys.stderr)

@@ -5013,6 +5013,219 @@ kbd {
   font-weight: 600;
 }
 
+.slide-build-card {
+  width: var(--response-block-width, min(100%, 720px));
+  margin-bottom: 12px;
+  padding: 14px 15px 12px;
+  border-radius: var(--response-radius-card, 18px);
+  border: var(--response-hairline, 1px) solid var(--response-separator, rgba(255, 255, 255, 0.08));
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.028)),
+    rgba(11, 14, 19, 0.5);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 18px 34px rgba(0, 0, 0, 0.16);
+  backdrop-filter: blur(18px);
+}
+
+.slide-build-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.slide-build-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 4px;
+}
+
+.slide-build-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.slide-build-live-strip {
+  display: flex;
+  gap: 8px;
+  flex: 0 1 auto;
+  max-width: 48%;
+  overflow-x: auto;
+  padding: 2px 0 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.slide-build-live-thumb {
+  position: relative;
+  flex: 0 0 132px;
+  margin: 0;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #f4f0e6;
+  cursor: zoom-in;
+}
+
+.slide-build-live-thumb img {
+  display: block;
+  width: 132px;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  object-position: top left;
+}
+
+.slide-build-live-thumb figcaption {
+  position: absolute;
+  top: 5px;
+  left: 6px;
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.62);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.docs-progress-stage.plan,
+.docs-progress-stage.design {
+  color: rgba(255, 233, 186, 0.98);
+  background: rgba(196, 143, 50, 0.15);
+  border-color: rgba(196, 143, 50, 0.22);
+}
+
+.docs-progress-stage.render,
+.docs-progress-stage.qa {
+  color: rgba(153, 221, 255, 0.98);
+  background: rgba(72, 156, 202, 0.16);
+  border-color: rgba(72, 156, 202, 0.24);
+}
+
+.docs-progress-stage.convert {
+  color: rgba(205, 219, 255, 0.98);
+  background: rgba(93, 119, 216, 0.18);
+  border-color: rgba(93, 119, 216, 0.24);
+}
+
+.slide-build-plan {
+  margin-top: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.slide-build-plan-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.slide-build-plan-toggle .assistant-collapsible-chevron {
+  transition: transform 160ms ease;
+}
+
+.slide-build-plan.open .slide-build-plan-toggle .assistant-collapsible-chevron {
+  transform: rotate(90deg);
+}
+
+.slide-build-plan-count,
+.slide-build-plan-preview {
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.slide-build-plan-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slide-build-plan-body {
+  padding: 0 12px 10px;
+}
+
+.slide-build-plan-deck {
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.slide-build-plan-theme {
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+}
+
+.slide-build-plan-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.slide-build-plan-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.slide-build-plan-num {
+  flex: 0 0 16px;
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.slide-build-plan-title {
+  min-width: 0;
+}
+
+.slide-build-plan-role {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 11px;
+}
+
+.assistant-flow-thumb {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 22px;
+  object-fit: cover;
+  object-position: top left;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #f4f0e6;
+}
+
+.assistant-flow-item.child .assistant-flow-thumb {
+  flex-basis: 36px;
+  width: 36px;
+  height: 20px;
+}
+
+.assistant-flow-thumb.is-active {
+  box-shadow: 0 0 0 1px rgba(153, 221, 255, 0.45);
+}
+
 /* --- INLINE HISTORY MODE --- */
 .cosmic {
   /* Existing styles... */

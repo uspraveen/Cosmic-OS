@@ -407,6 +407,7 @@ class ActiveRequest:
     activity_log: list[dict[str, Any]] = field(default_factory=list)
     alpha_terminal_log: list[dict[str, Any]] = field(default_factory=list)
     alpha_console_anchors: dict[str, int] = field(default_factory=dict)
+    slide_progress: dict[str, Any] | None = None
     error_message: str = ""
 
 
@@ -5123,11 +5124,28 @@ class GatewayRuntime:
         if not title and entry_id:
             entry = self.vault_store.get_entry(entry_id) or {}
             title = self._safe_text(entry.get("title"))
+        action = self._safe_text(pending.get("action")) or "use_entry"
+        if action == "browser_credential_request":
+            return {
+                "id": f"vault_request:{request_id}",
+                "type": "browser_credential_request",
+                "request_id": request_id,
+                "action": action,
+                "entry_id": entry_id,
+                "title": title,
+                "site": self._safe_text(payload.get("site")) or self._safe_text(payload.get("site_domain")),
+                "site_domain": self._safe_text(payload.get("site_domain")),
+                "username_hint": self._safe_text(payload.get("username_hint")),
+                "purpose": self._safe_text(pending.get("purpose")),
+                "status": status,
+                "can_respond": status == "pending",
+                "created_at": self._safe_text(pending.get("created_at")),
+            }
         return {
             "id": f"vault_request:{request_id}",
             "type": "vault_permission_request",
             "request_id": request_id,
-            "action": self._safe_text(pending.get("action")) or "use_entry",
+            "action": action,
             "entry_id": entry_id,
             "title": title,
             "username": self._safe_text(payload.get("username")),
@@ -5143,7 +5161,7 @@ class GatewayRuntime:
         request_id = self._safe_text(pending.get("request_id")) or ""
         self._persist_response_action_status(
             approval_id=request_id,
-            block_type="vault_permission_request",
+            block_type=self._safe_text(block.get("type")) or "vault_permission_request",
             status=self._safe_text(block.get("status")) or "pending",
         )
         self._persist_response_action_block(block)
@@ -5153,7 +5171,9 @@ class GatewayRuntime:
         payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
         request_id = self._safe_text(pending.get("request_id")) or ""
         action = self._safe_text(pending.get("action")) or "use_entry"
-        if action == "add_entry":
+        if action == "browser_credential_request":
+            summary = f"The browser agent needs credentials for {payload.get('title') or 'a site'} to finish its task"
+        elif action == "add_entry":
             summary = f"Cosmic wants to save credentials for {payload.get('title') or 'a site'} in your vault"
         else:
             summary = f"Cosmic wants to use your saved login for {payload.get('title') or 'a site'}"
@@ -5237,6 +5257,81 @@ class GatewayRuntime:
             )
         return {"status": "approved", "request": approved, "entry_id": entry_id}
 
+    async def provide_browser_credentials(
+        self,
+        request_id: str,
+        *,
+        username: str,
+        password: str,
+        totp_seed: str = "",
+        save_to_vault: bool = True,
+    ) -> dict[str, Any]:
+        """User filled the browser credential addition card.
+
+        Stores the entry (source=agent, attributed to the browser task),
+        resolves the pending request, and schedules the turn continuation that
+        hands the credential_ref back to the orchestrator model — the values
+        themselves never enter any model context.
+        """
+        pending = self.vault_store.get_pending(request_id)
+        if not pending:
+            raise ValueError("Vault request not found.")
+        status = self._safe_text(pending.get("status"))
+        if status != "pending":
+            return {
+                "status": "ignored",
+                "request": pending,
+                "reason": f"request_is_{status or 'unknown'}",
+            }
+        action = self._safe_text(pending.get("action")) or "use_entry"
+        if action != "browser_credential_request":
+            return {
+                "status": "ignored",
+                "request": pending,
+                "reason": f"action_is_{action or 'unknown'}",
+            }
+        payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
+        site_url = self._safe_text(payload.get("site_url")) or self._safe_text(payload.get("site"))
+        title = self._safe_text(payload.get("title")) or site_url or "site"
+        task_id = self._safe_text(pending.get("task_id"))
+
+        entry_id = None
+        if save_to_vault:
+            entry = self.vault_store.add_entry(
+                {
+                    "title": title,
+                    "site_url": site_url,
+                    "username": username,
+                    # The store encrypts plaintext secret fields itself.
+                    "password": password,
+                    "totp_seed": totp_seed,
+                    "notes": f"Added via browser agent credential request ({request_id})",
+                    "tags": ["browser-agent"],
+                    "source": "agent",
+                    "created_by_task_id": task_id,
+                }
+            )
+            entry_id = entry.get("entry_id")
+            self.vault_store.append_audit(entry_id, "user", "browser_provide_saved", task_id)
+        else:
+            self.vault_store.append_audit(None, "user", "browser_provide_skipped_save", task_id)
+
+        approved = self.vault_store.mark_pending(request_id, "approved")
+        if approved:
+            await self._publish_vault_request_block({**approved, "status": "approved", "entry_id": entry_id})
+            self._schedule_background_task(
+                self._continue_turn_after_vault(
+                    {
+                        **approved,
+                        "status": "approved",
+                        "entry_id": entry_id,
+                        "payload": {**payload, "credential_ref": f"vault:{entry_id}" if entry_id else ""},
+                    }
+                ),
+                name=f"vault-continuation-{request_id}",
+            )
+        return {"status": "approved", "request": approved, "entry_id": entry_id}
+
     async def reject_vault_request(self, request_id: str, *, note: str | None = None) -> dict[str, Any]:
         pending = self.vault_store.get_pending(request_id)
         if not pending:
@@ -5259,12 +5354,39 @@ class GatewayRuntime:
                 detail=note,
             )
             await self._publish_vault_request_block(rejected)
+            if self._safe_text(rejected.get("action")) == "browser_credential_request":
+                # The orchestrator turn is waiting on this card — resume it so
+                # the model can proceed without login instead of hanging.
+                self._schedule_background_task(
+                    self._continue_turn_after_vault(rejected),
+                    name=f"vault-continuation-{request_id}",
+                )
         return {"status": "rejected", "request": rejected}
 
     def _compose_vault_continuation_query(self, pending: dict[str, Any]) -> str:
         action = self._safe_text(pending.get("action")) or "use_entry"
         payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
         title = self._safe_text(payload.get("title")) or "the site"
+        if action == "browser_credential_request":
+            if pending.get("status") == "rejected":
+                return (
+                    "[VAULT CONTINUATION — system message, not from the user]\n"
+                    f"The user declined to add credentials for {title}. Continue the browser task without "
+                    "login where possible, or report what could not be completed and why."
+                )
+            credential_ref = self._safe_text(payload.get("credential_ref"))
+            if credential_ref:
+                return (
+                    "[VAULT CONTINUATION — system message, not from the user]\n"
+                    f"The user added credentials for {title} to the password vault "
+                    f"(credential_ref: {credential_ref}). Call browser_task again with this credential_ref "
+                    "for the same goal. Do not call vault_lookup or ask the user again."
+                )
+            return (
+                "[VAULT CONTINUATION — system message, not from the user]\n"
+                f"The user responded to the credential request for {title} but no entry was saved. "
+                "Continue without login where possible, or report what could not be completed."
+            )
         if action == "add_entry":
             return (
                 "[VAULT CONTINUATION — system message, not from the user]\n"
@@ -10286,6 +10408,7 @@ class GatewayRuntime:
                         "activity": state.activity,
                         "activity_log": state.activity_log,
                         "alpha_terminal_log": state.alpha_terminal_log,
+                        "slide_progress": state.slide_progress,
                         "response_blocks": state.response_blocks_snapshot,
                         "snapshot_seq": state.snapshot_seq or None,
                     },
@@ -10404,6 +10527,7 @@ class GatewayRuntime:
                     "activity": state.activity,
                     "activity_log": state.activity_log,
                     "alpha_terminal_log": state.alpha_terminal_log,
+                    "slide_progress": state.slide_progress,
                     "response_blocks": state.response_blocks_snapshot,
                     "snapshot_seq": None,
                 },
@@ -10511,6 +10635,7 @@ class GatewayRuntime:
                 "activity": state.activity,
                 "activity_log": state.activity_log,
                 "alpha_terminal_log": state.alpha_terminal_log,
+                "slide_progress": state.slide_progress,
                 "response_blocks": state.response_blocks_snapshot,
                 "snapshot_seq": state.snapshot_seq or None,
             },
@@ -10554,6 +10679,7 @@ class GatewayRuntime:
                     "activity": state.activity,
                     "activity_log": state.activity_log,
                     "alpha_terminal_log": state.alpha_terminal_log,
+                    "slide_progress": state.slide_progress,
                     "response_blocks": state.response_blocks_snapshot,
                     "snapshot_seq": state.snapshot_seq or None,
                     "completed": state.completed,
@@ -13613,6 +13739,44 @@ class GatewayRuntime:
             "intent": self._safe_text(specialist.get("intent")),
             "specialist_event_type": self._safe_text(specialist.get("event_type")),
         }
+        slide_progress = (
+            event.get("slide_progress")
+            if isinstance(event.get("slide_progress"), dict)
+            else None
+        )
+        if isinstance(slide_progress, dict):
+            current = slide_progress.get("current")
+            slides = (
+                slide_progress.get("slides")
+                if isinstance(slide_progress.get("slides"), list)
+                else []
+            )
+            match = next(
+                (
+                    item
+                    for item in slides
+                    if isinstance(item, dict)
+                    and item.get("slide_number") == current
+                    and self._safe_text(item.get("preview_url"))
+                ),
+                None,
+            )
+            if match is None:
+                match = next(
+                    (
+                        item
+                        for item in reversed(slides)
+                        if isinstance(item, dict) and self._safe_text(item.get("preview_url"))
+                    ),
+                    None,
+                )
+            if isinstance(match, dict):
+                preview_url = self._safe_text(match.get("preview_url"))
+                if preview_url:
+                    metadata["preview_url"] = preview_url
+                slide_number = match.get("slide_number")
+                if slide_number not in (None, "", [], {}):
+                    metadata["slide_number"] = slide_number
         return {key: value for key, value in metadata.items() if value}
 
     def _normalize_activity_log(
@@ -13650,25 +13814,36 @@ class GatewayRuntime:
                 "specialist_event_type": self._safe_text(
                     entry.get("specialist_event_type")
                 ),
+                "preview_url": self._safe_text(
+                    entry.get("preview_url") or entry.get("previewUrl")
+                ),
+                "slide_number": entry.get("slide_number")
+                if entry.get("slide_number") not in (None, "", [], {})
+                else entry.get("slideNumber"),
             }
             last = normalized[-1] if normalized else None
             if (
                 last
                 and last.get("label") == item["label"]
-                and (last.get("detail") or "") == (item["detail"] or "")
-                and (last.get("status") or "") == (item["status"] or "")
-                and (last.get("stage") or "") == (item["stage"] or "")
-                and (last.get("kind") or "") == (item["kind"] or "")
-                and (last.get("flow_role") or "") == (item.get("flow_role") or "")
-                and (last.get("delegated_task_id") or "")
-                == (item.get("delegated_task_id") or "")
-                and (last.get("parent_delegated_task_id") or "")
-                == (item.get("parent_delegated_task_id") or "")
                 and (last.get("specialist_task_id") or "")
                 == (item.get("specialist_task_id") or "")
+                and (last.get("slide_number") or "") == (item.get("slide_number") or "")
+                and (last.get("kind") or "") == (item.get("kind") or "")
+                and (
+                    (last.get("detail") or "") == (item.get("detail") or "")
+                    or bool(item.get("preview_url"))
+                )
             ):
+                if item.get("preview_url"):
+                    last["preview_url"] = item["preview_url"]
+                if item.get("detail"):
+                    last["detail"] = item["detail"]
+                if item.get("status"):
+                    last["status"] = item["status"]
                 continue
-            normalized.append(item)
+            normalized.append(
+                {key: value for key, value in item.items() if value not in (None, "", [], {})}
+            )
         if len(normalized) > limit:
             normalized = normalized[-limit:]
         return normalized
@@ -14972,6 +15147,7 @@ class GatewayRuntime:
                 "activity": state.activity,
                 "activity_log": state.activity_log,
                 "alpha_terminal_log": state.alpha_terminal_log,
+                "slide_progress": state.slide_progress,
                 "response_blocks": state.response_blocks_snapshot,
                 "snapshot_seq": state.snapshot_seq or None,
                 "backgrounded_at": state.backgrounded_at,
@@ -14994,6 +15170,7 @@ class GatewayRuntime:
                 "activity": state.activity or "Working on your request...",
                 "activity_log": state.activity_log,
                 "alpha_terminal_log": state.alpha_terminal_log,
+                "slide_progress": state.slide_progress,
                 "completed": state.completed,
                 "failed": state.failed,
                 "error": state.error_message or None,
@@ -15988,7 +16165,72 @@ class GatewayRuntime:
         if codex_terminal is not None:
             forwarded["codex_terminal"] = codex_terminal
             forwarded["message"] = ""
+        slide_progress = payload.get("slide_progress")
+        if isinstance(slide_progress, dict):
+            forwarded["slide_progress"] = self._hydrate_slide_progress(
+                slide_progress,
+                request_id=context["request_id"],
+                session_id=context["session_id"],
+                channel=context["channel"],
+            )
         return forwarded
+
+    def _hydrate_slide_progress(
+        self,
+        payload: dict[str, Any],
+        *,
+        request_id: str,
+        session_id: str,
+        channel: str,
+    ) -> dict[str, Any]:
+        """Persist live slide PNG artifacts and mint preview URLs for the desktop."""
+        hydrated = dict(payload)
+        slides = payload.get("slides") if isinstance(payload.get("slides"), list) else []
+        artifacts: list[dict[str, Any]] = []
+        next_slides: list[dict[str, Any]] = []
+        for raw in slides:
+            if not isinstance(raw, dict):
+                continue
+            slide = dict(raw)
+            artifact = {
+                key: value
+                for key, value in {
+                    "artifact_id": self._safe_text(slide.get("artifact_id")),
+                    "path": self._safe_text(slide.get("path") or slide.get("png_path")),
+                    "mime": self._safe_text(slide.get("mime")) or "image/png",
+                    "filename": self._safe_text(slide.get("filename")),
+                    "sha256": self._safe_text(slide.get("sha256")),
+                    "kind": "output",
+                    "audience": "deliverable",
+                }.items()
+                if value not in (None, "", [], {})
+            }
+            if artifact.get("artifact_id") and artifact.get("path"):
+                artifacts.append(artifact)
+            next_slides.append(slide)
+        if artifacts:
+            try:
+                self._cache_artifact_list(
+                    request_id=request_id,
+                    session_id=session_id,
+                    source_channel=channel,
+                    source_message_id=None,
+                    artifacts=self._normalize_produced_artifact_list(artifacts),
+                )
+            except Exception:
+                logger.debug(
+                    "gateway.slide_preview_persist_failed request_id=%s",
+                    request_id,
+                    exc_info=True,
+                )
+        for slide in next_slides:
+            if not self._safe_text(slide.get("artifact_id")):
+                continue
+            preview_url = self.mint_artifact_access_url(slide, purpose="ui_preview")
+            if preview_url:
+                slide["preview_url"] = preview_url
+        hydrated["slides"] = next_slides
+        return hydrated
 
     def _persist_specialist_completion_artifacts(
         self,
@@ -24335,6 +24577,8 @@ class GatewayRuntime:
                 if isinstance(progress_state, dict)
                 else None
             )
+            if isinstance(event.get("slide_progress"), dict):
+                state.slide_progress = event["slide_progress"]
             state.activity = progress_label or self._safe_text(event.get("message")) or state.activity
             activity_entry = self._build_task_activity_entry(event)
             if activity_entry:

@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "browser.run output",
+  "description": "Result of one browser run.",
+  "type": "object",
+  "required": ["goal", "status"],
+  "properties": {
+    "goal": {"type": "string"},
+    "status": {
+      "type": "string",
+      "enum": ["success", "incomplete", "failed", "credentials_needed"],
+      "description": "success = goal achieved; incomplete = ran out of steps without confirming completion; failed = hard failure; credentials_needed = login required but no vault credentials were provisioned."
+    },
+    "answer": {
+      "type": "string",
+      "description": "Final answer extracted from the run's saved notes (empty when status is credentials_needed or failed)."
+    },
+    "steps_taken": {"type": "integer"},
+    "duration_sec": {"type": "number"},
+    "run_dir": {
+      "type": "string",
+      "description": "Run artifacts directory (screenshots, steps.jsonl debug log)."
+    },
+    "needs_credentials": {
+      "type": "object",
+      "description": "Present only when status=credentials_needed.",
+      "properties": {
+        "status": {"type": "string"},
+        "site": {"type": "string", "description": "URL or domain where login blocked the goal."},
+        "reason": {"type": "string"}
+      }
+    },
+    "next_action": {"type": "string"},
+    "credential_hint": {"type": "string"}
+  }
+}

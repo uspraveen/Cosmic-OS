@@ -275,6 +275,17 @@ def _x_search_progress(tool_input: dict[str, Any]) -> str:
     return f"Searching X for: {query}" if query else "Searching X..."
 
 
+def _browser_task_progress(tool_input: dict[str, Any]) -> str:
+    goal = str(tool_input.get("goal") or "").strip()
+    if goal:
+        short = goal[:80] + ("..." if len(goal) > 80 else "")
+        return f"Running browser agent: {short}"
+    return "Running browser agent..."
+
+
+def _browser_credential_request_progress(tool_input: dict[str, Any]) -> str:
+    site = str(tool_input.get("site") or "").strip()
+    return f"Requesting credentials for {site}..." if site else "Requesting site credentials..."
 def _x_recall_progress(tool_input: dict[str, Any]) -> str:
     session_id = str(tool_input.get("session_id") or "").strip()
     return f"Reviewing prior X search runs for {session_id}..." if session_id else "Reviewing prior X search runs..."
@@ -540,6 +551,99 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Delegate specialist work by exact intent after discovery. For Alpha project work, pass artifact_ids/input_artifacts for large files or parsed documents instead of pasting their full contents into the input; bundle ids alone are metadata, while artifact references let Alpha receive concrete workspace files.",
         progress_builder=_delegate_to_agent_progress,
         handler_method="_delegate_to_agent",
+    ),
+    ToolSpec(
+        name="browser_task",
+        api_definition={
+            "name": "browser_task",
+            "description": (
+                "Run one autonomous vision-based browser session for a single goal (search, navigate, log in with vault "
+                "credentials, extract data, parallel multi-page extraction). Use this for tasks that need a real browser "
+                "driving a real website — dynamic pages, logins, visual layouts, or sites without an API. One goal per call; "
+                "phrase it as a complete self-contained instruction for a web agent. If the site needs login, first call "
+                "vault_lookup for the site and pass the credential_ref here; the resolved secret is injected securely and "
+                "never enters your context. If the run ends with status=credentials_needed, provision credentials via "
+                "browser_credential_request and call browser_task again with the resulting credential_ref. "
+                "Runs can take minutes; an in_progress response is normal — poll again with the same idempotency key."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "Complete, self-contained instruction for the browser agent: what to do on the web and what to bring back.",
+                    },
+                    "initial_url": {
+                        "type": "string",
+                        "description": "Optional URL to open before planning. Omit to let the agent navigate itself.",
+                    },
+                    "max_steps": {
+                        "type": "integer",
+                        "description": "Optional upper bound on agent steps (default 40).",
+                    },
+                    "memory_mode": {
+                        "type": "string",
+                        "enum": ["off", "learn", "recall", "auto"],
+                        "description": "Browser workflow memory mode: auto reuses learned site workflows and indexes this run; learn indexes only; recall replays only; off disables memory (default).",
+                    },
+                    "credential_ref": {
+                        "type": "string",
+                        "description": "Vault credential ref (vault:<entry_id>) from vault_lookup when the site needs login.",
+                    },
+                    "wait_timeout_sec": {
+                        "type": "number",
+                        "description": "How long to wait for completion before returning an in-progress result.",
+                    },
+                },
+                "required": ["goal"],
+            },
+        },
+        group="specialists",
+        prompt_summary=(
+            "Autonomous vision-based browser agent (real Chromium on the VM): navigates dynamic sites, logs in with vault "
+            "credentials, extracts data, runs parallel multi-page extraction. One self-contained goal per call."
+        ),
+        progress_builder=_browser_task_progress,
+        handler_method="_browser_task",
+    ),
+    ToolSpec(
+        name="browser_credential_request",
+        api_definition={
+            "name": "browser_credential_request",
+            "description": (
+                "Ask the user to add site credentials (username/password) so the browser agent can log in. "
+                "Use this when a browser_task ended with status=credentials_needed, or when you know the site "
+                "requires login and no vault entry exists. The user gets a credential addition card in the "
+                "desktop app; on completion this request resolves automatically and the turn continues with a "
+                "credential_ref you can pass to browser_task. NEVER use this to ask for credentials you already "
+                "have a vault ref for."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "site": {
+                        "type": "string",
+                        "description": "The site domain or URL that needs credentials (e.g. 'app.example.com' or the login page URL).",
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": "One line why login is needed (e.g. 'Downloading invoices requires an account login').",
+                    },
+                    "username_hint": {
+                        "type": "string",
+                        "description": "Optional username/email hint discovered on the page (e.g. a pre-filled email).",
+                    },
+                },
+                "required": ["site"],
+            },
+        },
+        group="specialists",
+        prompt_summary=(
+            "Ask the user to add site credentials via the desktop credential card when the browser agent needs "
+            "to log in and no vault entry exists. Resolves automatically with a credential_ref."
+        ),
+        progress_builder=_browser_credential_request_progress,
+        handler_method="_browser_credential_request",
     ),
     ToolSpec(
         name="cosmic_code_execution",

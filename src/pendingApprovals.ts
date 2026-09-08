@@ -22,6 +22,7 @@ export interface ApprovalLikeBlock {
 const APPROVAL_BLOCK_TYPES = new Set([
   'sandbox_permission_request',
   'vault_permission_request',
+  'browser_credential_request',
   'gmail_draft_approval',
   'agent_email_draft_approval',
   'calendar_event',

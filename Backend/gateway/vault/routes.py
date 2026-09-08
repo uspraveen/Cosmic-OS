@@ -92,6 +92,27 @@ class AgentSaveEntryRequest(BaseModel):
     purpose: str | None = None
 
 
+class BrowserCredentialRequest(BaseModel):
+    """Browser agent asks the orchestrator for credentials for a site.
+
+    Carries no secrets — the USER provides them on the credential addition
+    card in the desktop app.
+    """
+    site: str
+    purpose: str | None = None
+    username_hint: str | None = None
+    task_id: str | None = None
+    session_id: str | None = None
+    channel: str | None = None
+
+
+class BrowserProvideCredentialsRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+    totp_seed: str = ""
+    save_to_vault: bool = True
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -512,3 +533,81 @@ def _encrypt_or_empty(value: str) -> str:
     from ..credentials.encryption import encrypt_token_str
 
     return encrypt_token_str(str(value or ""))
+
+
+@router.post("/internal/vault/browser-credential-request")
+async def internal_browser_credential_request(body: BrowserCredentialRequest, request: Request):
+    """Browser agent requests credentials for a site.
+
+    Creates a pending request and surfaces the credential addition card in the
+    desktop app, where the USER enters the credentials. Nothing is stored and
+    no secret crosses this endpoint (it cannot — the agent doesn't have them).
+    """
+    _check_internal_token(request)
+    runtime = request.app.state.gateway_runtime
+    store = _get_store(request)
+    site = str(body.site or "").strip()
+    if not site:
+        raise HTTPException(status_code=400, detail="site is required.")
+    site_domain = derive_site_domain(site) or site
+    pending = await runtime.create_vault_pending_and_notify(
+        {
+            "action": "browser_credential_request",
+            "task_id": body.task_id,
+            "session_id": body.session_id,
+            "channel": body.channel,
+            "purpose": body.purpose,
+            "payload": {
+                "title": site_domain,
+                "site": site,
+                "site_url": site if site.startswith("http") else "",
+                "site_domain": site_domain,
+                "username_hint": str(body.username_hint or ""),
+                "origin": "browser_agent",
+            },
+        }
+    )
+    store.append_audit(
+        None,
+        "orchestrator",
+        "browser_credential_requested",
+        body.task_id,
+        result="permission_required",
+        detail=pending.get("request_id"),
+    )
+    return {
+        "status": "permission_required",
+        "request_id": pending.get("request_id"),
+        "_cosmic_ui": {
+            "render": "trusted_inline_block",
+            "block_type": "browser_credential_request",
+            "request_id": pending.get("request_id"),
+            "summary": (
+                f"Waiting for credentials for {site_domain} — the browser agent will continue automatically."
+            ),
+        },
+    }
+
+
+@router.post("/channels/vault/pending/{request_id}/provide")
+async def provide_browser_credentials(request_id: str, body: BrowserProvideCredentialsRequest, request: Request):
+    """Desktop user filled the credential addition card.
+
+    Stores the entry in the vault (source=agent, attributed to the browser
+    task), resolves the pending request, and schedules the orchestrator turn
+    continuation so the browser run is re-dispatched with the credential_ref.
+    """
+    _check_local_token(request)
+    runtime = request.app.state.gateway_runtime
+    if not str(body.password or "").strip():
+        raise HTTPException(status_code=400, detail="password is required.")
+    result = await runtime.provide_browser_credentials(
+        request_id,
+        username=str(body.username or "").strip(),
+        password=str(body.password or ""),
+        totp_seed=str(body.totp_seed or "").strip(),
+        save_to_vault=body.save_to_vault,
+    )
+    if result.get("status") == "ignored":
+        return result
+    return {"status": result.get("status", "ok"), "request": result.get("request"), "entry_id": result.get("entry_id")}

@@ -15,6 +15,7 @@ from typing import Any
 from asset_manager import resolve_icon, resolve_photo
 from content_planner import plan_content
 from llm_client import call_llm_json, env_int
+from live_progress import ProgressCallback, compact_slide_plan, emit_slide_progress
 from ooxml_validator import validate_pptx
 from pptx_writer import build_pptx_from_images
 from template_cataloger import LIBREOFFICE_PATH, _run, create_numbered_collage
@@ -837,6 +838,7 @@ def render_slide_html_files(
     *,
     canvas_width: int | None = None,
     canvas_height: int | None = None,
+    on_progress: ProgressCallback = None,
 ) -> list[Path]:
     """Render each slide HTML to PNG using Playwright.
 
@@ -861,6 +863,17 @@ def render_slide_html_files(
             page.locator(".slide").first.screenshot(path=str(png_path), animations="disabled")
             item["png_path"] = str(png_path)
             slide_pngs.append(png_path)
+            emit_slide_progress(
+                on_progress,
+                stage="render",
+                label=f"Rendered slide {item['slide_number']}",
+                slide_number=item["slide_number"],
+                title=item.get("title") or "",
+                status="rendered",
+                png_path=str(png_path),
+                current=item["slide_number"],
+                total=len(manifest),
+            )
     finally:
         browser.close()
         pw.stop()
@@ -899,7 +912,12 @@ def plan_html_theme(plan: dict, description: str) -> dict:
     return call_llm_json(messages, temperature=0.2, response_schema=THEME_JSON_SCHEMA)
 
 
-def _validate_manifest_parallel(manifest: list[dict], plan: dict) -> list[dict]:
+def _validate_manifest_parallel(
+    manifest: list[dict],
+    plan: dict,
+    *,
+    on_progress: ProgressCallback = None,
+) -> list[dict]:
     """Review every rendered slide concurrently; results keep slide order."""
     pairs = [
         (item, slide, Path(item["png_path"]))
@@ -910,7 +928,21 @@ def _validate_manifest_parallel(manifest: list[dict], plan: dict) -> list[dict]:
 
     def _one(index: int) -> None:
         item, slide, png_path = pairs[index]
-        results[index] = _validate_slide_render(png_path, slide, item["design"])
+        result = _validate_slide_render(png_path, slide, item["design"])
+        results[index] = result
+        verdict = str((result or {}).get("verdict") or "").strip().lower()
+        emit_slide_progress(
+            on_progress,
+            stage="qa",
+            label=f"QA slide {slide['slide_number']}",
+            detail=str((result or {}).get("summary") or "").strip() or None,
+            slide_number=slide["slide_number"],
+            title=slide.get("title") or item.get("title") or "",
+            status="pass" if verdict == "pass" else "qa",
+            png_path=str(png_path),
+            current=slide["slide_number"],
+            total=len(pairs),
+        )
 
     if workers > 1 and len(pairs) > 1:
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -930,6 +962,7 @@ def run_html_pipeline(
     max_slides: int | None = None,
     validate: bool = True,
     content_plan: dict | None = None,
+    on_progress: ProgressCallback = None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     html_dir = output_dir / "html"
@@ -942,13 +975,22 @@ def run_html_pipeline(
         plan["slides"] = plan.get("slides", [])[:slide_cap]
     plan_path = output_dir / "plan.json"
     plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+    slides = plan.get("slides", [])
+    emit_slide_progress(
+        on_progress,
+        stage="plan",
+        label="Deck plan is ready",
+        plan=compact_slide_plan(plan),
+        total=len(slides),
+        current=0,
+    )
 
     theme = plan_html_theme(plan, description)
     theme_path = output_dir / "theme.json"
     theme_path.write_text(json.dumps(theme, indent=2, ensure_ascii=False), encoding="utf-8")
 
     manifest: list[dict] = []
-    for slide in plan.get("slides", []):
+    for slide in slides:
         slide_dir = html_dir / f"slide-{slide['slide_number']:02d}-{_safe_name(slide['title'])}"
         slide_dir.mkdir(parents=True, exist_ok=True)
         assets = _prepare_slide_assets(slide, slide_dir)
@@ -962,15 +1004,26 @@ def run_html_pipeline(
             "design": design,
             "html_path": str(html_path),
         })
+        emit_slide_progress(
+            on_progress,
+            stage="design",
+            label=f"Designed slide {slide['slide_number']}: {slide['title']}",
+            slide_number=slide["slide_number"],
+            title=slide["title"],
+            status="designed",
+            current=slide["slide_number"],
+            total=len(slides),
+            plan=compact_slide_plan(plan),
+        )
 
-    slide_pngs = render_slide_html_files(manifest, rendered_dir)
+    slide_pngs = render_slide_html_files(manifest, rendered_dir, on_progress=on_progress)
 
     validation_results: list[dict] = []
     if validate:
         for repair_round in range(HTML_MAX_REPAIR_ROUNDS + 1):
-            validation_results = _validate_manifest_parallel(manifest, plan)
+            validation_results = _validate_manifest_parallel(manifest, plan, on_progress=on_progress)
             failed: list[int] = []
-            for item, slide in zip(manifest, plan.get("slides", []), strict=False):
+            for item, slide in zip(manifest, slides, strict=False):
                 result = next(
                     (v for v in validation_results if v["slide_number"] == slide["slide_number"]),
                     None,
@@ -981,7 +1034,7 @@ def run_html_pipeline(
             if not failed or repair_round >= HTML_MAX_REPAIR_ROUNDS:
                 break
 
-            for item, slide in zip(manifest, plan.get("slides", []), strict=False):
+            for item, slide in zip(manifest, slides, strict=False):
                 if slide["slide_number"] not in failed:
                     continue
                 validation = next(v for v in validation_results if v["slide_number"] == slide["slide_number"])
@@ -989,7 +1042,16 @@ def run_html_pipeline(
                 item["design"] = repaired
                 item["speaker_notes"] = repaired.get("speaker_notes") or item["speaker_notes"]
                 _write_slide_html(Path(item["html_path"]).parent, theme, repaired)
-            slide_pngs = render_slide_html_files(manifest, rendered_dir)
+            slide_pngs = render_slide_html_files(manifest, rendered_dir, on_progress=on_progress)
+
+    emit_slide_progress(
+        on_progress,
+        stage="convert",
+        label="Packaging the slide deck",
+        plan=compact_slide_plan(plan),
+        total=len(slides),
+        current=len(slides),
+    )
 
     collage_path: Path | None = output_dir / "contact-sheet.png"
     try:
@@ -1022,5 +1084,13 @@ def run_html_pipeline(
     (output_dir / "build_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False),
         encoding="utf-8",
+    )
+    emit_slide_progress(
+        on_progress,
+        stage="ready",
+        label="Slide deck is ready",
+        plan=compact_slide_plan(plan),
+        total=len(slides),
+        current=len(slides),
     )
     return report

@@ -1,0 +1,75 @@
+agent_id: cosmic/browser-agent:1.0.0
+display_name: Browser Agent
+description: >
+  Vision-based browser automation specialist built on cosmic-browser-use. Drives a
+  real (headless) Chromium to accomplish web goals: search, navigate, log in with
+  vault-provisioned credentials, extract data (including parallel multi-page
+  extraction), and report a final answer with full run artifacts.
+
+intents:
+  - name: browser.run
+    description: Run one autonomous browser session for a single goal.
+    input_schema: schemas/intents/browser.run.input.json
+    output_schema: schemas/intents/browser.run.output.json
+    timeout_sec: 900
+    usage_hints:
+      - One goal per run; phrase it as a complete self-contained instruction for a web agent ("Get the engineering job openings and salaries from the World Labs careers page").
+      - If the site requires login and the user's vault has an entry, call vault_lookup first and pass the credential_ref this tool returns; the orchestrator injects the resolved secret securely (the model never sees it).
+      - If the run ends with status=credentials_needed, provision credentials via the credential request flow and delegate browser.run again with the new credential_ref.
+      - Use memory_mode=auto to reuse previously learned site workflows, learn to index a successful run for later recall. Keep off for one-off tasks.
+      - Browser runs can take several minutes. A first response of in_progress is normal — poll again with the same idempotency key.
+
+artifact_types:
+  - browser_run_dir
+
+policies:
+  network_access: true
+  writable_paths:
+    - runs
+    - agents/browser_agent
+  tool_access: []
+  allowed_senders:
+    - cosmic/orchestrator:1.0.0
+  intent_authorization:
+    browser.run: [cosmic/orchestrator:1.0.0]
+
+sla:
+  max_concurrency: 1
+  heartbeat_interval_sec: 10
+  heartbeat_ttl_sec: 30
+  max_task_duration_sec: 900
+  health_endpoint: /health
+  retry_policy:
+    max_attempts: 1
+    backoff: exponential
+    backoff_base_sec: 2
+    backoff_max_sec: 60
+    retryable_codes:
+      - TIMEOUT
+      - NETWORK_ERROR
+      - RATE_LIMITED
+    non_retryable_codes:
+      - INVALID_INPUT
+      - BROWSER_RUN_FAILED
+      - INTERNAL_ERROR
+
+stream_key: streams:cosmic/browser-agent:1.0.0
+
+model_requirements:
+  internal_llm:
+    required: true
+    provider: openai_compatible
+    default_model_key: fireworks:accounts/fireworks/models/glm-5p3-flash
+    env_model: BROWSER_AGENT_MODEL
+    env_api_key: FIREWORKS_API_KEY
+    env_base_url: FIREWORKS_BASE_URL
+    notes:
+      - The browser agent runs its own base brain (Fireworks GLM) and escalation
+        brain (xAI grok) internally; orchestrator delegation carries only the goal.
+
+version_info:
+  semver: 1.0.0
+  released_at: "2026-09-08"
+  deprecated_at: null
+  remove_after: null
+  changelog: CHANGELOG.md
