@@ -557,61 +557,38 @@
   font-variant-numeric: tabular-nums;
 }
 
-.vault-modal-overlay {
-  /* Rendered via portal to document.body — must sit above the settings
-     overlay (z-index 10000) while escaping its LiquidGlass transform.
-     No backdrop-filter here on purpose: this overlay stacks on top of the
-     settings overlay's own full-screen blur, and nested backdrop-filter
-     sampling on a transparent window freezes the Electron compositor. */
-  position: fixed;
-  inset: 0;
-  z-index: 10050;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(2, 6, 12, 0.72);
-}
+/* ── Inline credential editor ───────────────────────────────────────────
+   Lives in the page flow (no overlay, no portal) — an expanding card that
+   borrows the entry-card chrome with the hero header band. */
 
-/* The settings panel's Roboto font-family doesn't inherit through the
-   portal — reapply it here. */
-.vault-modal-overlay,
-.vault-modal {
-  font-family: "Roboto", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
-}
-
-.vault-modal {
+.vault-editor-card {
   display: flex;
   flex-direction: column;
-  width: min(480px, calc(100vw - 48px));
-  max-height: calc(100vh - 80px);
   border-radius: 18px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: linear-gradient(180deg, #121417, #0a0b0d);
   box-shadow:
-    0 30px 70px rgba(0, 0, 0, 0.5),
+    0 14px 36px rgba(0, 0, 0, 0.24),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
   overflow: hidden;
 }
 
-/* Modal header carries the same stepped-dark title-card treatment as the
-   page hero, with the vault's white shield tile anchoring it. */
-.vault-modal-hero {
+.vault-editor-hero {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 18px 20px;
+  padding: 16px 18px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
     rgba(0, 0, 0, 0.18);
-  flex-shrink: 0;
 }
 
-.vault-modal-hero-copy {
+.vault-editor-hero-copy {
   min-width: 0;
 }
 
-.vault-modal-hero h3 {
+.vault-editor-hero h3 {
   margin: 0;
   font-size: 15.5px;
   font-weight: 700;
@@ -619,21 +596,18 @@
   color: #fff;
 }
 
-.vault-modal-hero p {
+.vault-editor-hero p {
   margin: 4px 0 0;
   font-size: 12px;
   line-height: 1.45;
   color: rgba(255, 255, 255, 0.52);
 }
 
-.vault-modal-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 16px 20px 4px;
+.vault-editor-body {
+  padding: 14px 18px 4px;
 }
 
-.vault-modal-group-label {
+.vault-editor-group-label {
   margin: 14px 0 -4px 2px;
   font-size: 11px;
   font-weight: 700;
@@ -642,11 +616,11 @@
   color: rgba(255, 255, 255, 0.45);
 }
 
-.vault-modal-group-label:first-child {
+.vault-editor-group-label:first-child {
   margin-top: 0;
 }
 
-.vault-modal-group-label em {
+.vault-editor-group-label em {
   font-style: normal;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -737,13 +711,11 @@
   color: rgba(255, 255, 255, 0.35);
 }
 
-.vault-modal-actions {
+.vault-editor-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 16px;
-  padding: 14px 20px;
+  margin-top: 14px;
+  padding: 12px 18px 16px;
   border-top: 1px solid rgba(255, 255, 255, 0.07);
-  background: rgba(0, 0, 0, 0.18);
-  flex-shrink: 0;
 }
