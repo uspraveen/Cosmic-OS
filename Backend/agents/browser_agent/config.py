@@ -68,10 +68,20 @@ class BrowserAgentConfig:
     working_dir_root: Path = BACKEND_ROOT
     artifacts_root: Path = BACKEND_ROOT / "runs" / "artifacts"
 
+    # Session recall ledger (browser.recall_session) — mirrors the Firecrawl
+    # specialist's own session-runs store exactly (agents/firecrawl_web_scrape
+    # /store/data/firecrawl_session_runs.db): a small SQLite index of what was
+    # asked/found per run, so the orchestrator can look up prior browser work
+    # without launching a browser. Does not duplicate cosmic-browser-use's own
+    # per-run logs/checkpoints — it just indexes and points at them.
+    store_root: Path = AGENT_ROOT / "store"
+    session_db_path: Path = AGENT_ROOT / "store" / "data" / "browser_session_runs.db"
+
     @classmethod
     def from_env(cls) -> "BrowserAgentConfig":
         default_home = BACKEND_ROOT.parent.parent / "cosmic-browser-use" / "cosmic-browser-use"
         home = Path(_first_env("BROWSER_USE_HOME", default=str(default_home)))
+        store_root = Path(_first_env("BROWSER_AGENT_STORE_ROOT", default=str(AGENT_ROOT / "store")))
         return cls(
             redis_url=_first_env("REDIS_URL", default="redis://127.0.0.1:6379/0"),
             gateway_url=_first_env("GATEWAY_URL", default="http://127.0.0.1:8080"),
@@ -83,6 +93,8 @@ class BrowserAgentConfig:
             ask_user_wait_sec=max(30, _env_int("BROWSER_AGENT_ASK_USER_TIMEOUT_SEC", 240)),
             working_dir_root=Path(_first_env("BROWSER_AGENT_WORKING_DIR_ROOT", default=str(BACKEND_ROOT))),
             artifacts_root=Path(_first_env("BROWSER_AGENT_ARTIFACTS_ROOT", default=str(BACKEND_ROOT / "runs" / "artifacts"))),
+            store_root=store_root,
+            session_db_path=store_root / "data" / "browser_session_runs.db",
         )
 
     def ensure_import_path(self) -> Path:

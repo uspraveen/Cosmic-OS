@@ -12,6 +12,7 @@ _DOCS_AGENT_ID = "cosmic/docs-parser-agent:1.0.0"
 _TABULAR_AGENT_ID = "cosmic/tabular-agent:1.0.0"
 _FIRECRAWL_AGENT_ID = "cosmic/firecrawl-web-scrape-agent:1.0.0"
 _X_SEARCH_AGENT_ID = "cosmic/x-twitter-search-agent:1.0.0"
+_BROWSER_AGENT_ID = "cosmic/browser-agent:1.0.0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,14 +258,6 @@ def _firecrawl_extract_progress(tool_input: dict[str, Any]) -> str:
     return "Extracting structured data via Firecrawl..."
 
 
-def _firecrawl_agent_progress(tool_input: dict[str, Any]) -> str:
-    prompt = str(tool_input.get("prompt") or "").strip()
-    if prompt:
-        short = prompt[:80] + ("..." if len(prompt) > 80 else "")
-        return f"Firecrawl autonomous agent: {short}"
-    return "Running Firecrawl autonomous agent..."
-
-
 def _firecrawl_recall_progress(tool_input: dict[str, Any]) -> str:
     session_id = str(tool_input.get("session_id") or "").strip()
     return f"Reviewing prior Firecrawl runs for {session_id}..." if session_id else "Reviewing prior Firecrawl runs..."
@@ -281,6 +274,11 @@ def _browser_task_progress(tool_input: dict[str, Any]) -> str:
         short = goal[:80] + ("..." if len(goal) > 80 else "")
         return f"Running browser agent: {short}"
     return "Running browser agent..."
+
+
+def _browser_recall_progress(tool_input: dict[str, Any]) -> str:
+    session_id = str(tool_input.get("session_id") or "").strip()
+    return f"Reviewing prior browser runs for {session_id}..." if session_id else "Reviewing prior browser runs..."
 
 
 def _browser_credential_request_progress(tool_input: dict[str, Any]) -> str:
@@ -559,12 +557,18 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "description": (
                 "Run one autonomous vision-based browser session for a single goal (search, navigate, log in with vault "
                 "credentials, extract data, parallel multi-page extraction). Use this for tasks that need a real browser "
-                "driving a real website — dynamic pages, logins, visual layouts, or sites without an API. One goal per call; "
-                "phrase it as a complete self-contained instruction for a web agent. If the site needs login, first call "
-                "vault_lookup for the site and pass the credential_ref here; the resolved secret is injected securely and "
-                "never enters your context. If the run ends with status=credentials_needed, provision credentials via "
-                "browser_credential_request and call browser_task again with the resulting credential_ref. "
-                "Runs can take minutes; an in_progress response is normal — poll again with the same idempotency key."
+                "driving a real website — dynamic pages, logins, visual layouts, or sites without an API. "
+                "Prefer firecrawl_scrape/firecrawl_extract instead when the page is read-only and needs no login or "
+                "interaction — they are much faster and cheaper than driving a full browser; reach for this tool when "
+                "the site needs an authenticated session, JS-heavy interaction (clicking, filling forms, multi-step "
+                "navigation), or firecrawl has already failed on it. One goal per call; phrase it as a complete "
+                "self-contained instruction for a web agent. If the site needs login, first call vault_lookup for the "
+                "site and pass the credential_ref here; the resolved secret is injected securely and never enters your "
+                "context. If the run ends with status=credentials_needed, provision credentials via "
+                "browser_credential_request and call browser_task again with the resulting credential_ref. Consider "
+                "browser_recall_session first if the user is asking about a site you likely already browsed this "
+                "session. Runs can take minutes; an in_progress response is normal — poll again with the same "
+                "idempotency key."
             ),
             "input_schema": {
                 "type": "object",
@@ -605,6 +609,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         ),
         progress_builder=_browser_task_progress,
         handler_method="_browser_task",
+        exposed_to_model=False,
+        specialist_agent_id=_BROWSER_AGENT_ID,
     ),
     ToolSpec(
         name="browser_credential_request",
@@ -644,6 +650,46 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         ),
         progress_builder=_browser_credential_request_progress,
         handler_method="_browser_credential_request",
+        exposed_to_model=False,
+        specialist_agent_id=_BROWSER_AGENT_ID,
+    ),
+    ToolSpec(
+        name="browser_recall_session",
+        api_definition={
+            "name": "browser_recall_session",
+            "description": (
+                "Read the browser agent's private run ledger for a prior session — no browser is launched. "
+                "Use this when the user references prior browser work (\"what did we find\", \"check that page "
+                "again\") or a repeat visit to an already-browsed site might already have the answer. Not a "
+                "default preamble before every browser_task — for a clearly new goal, just call browser_task."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID whose browser runs should be recalled.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional keyword filter matched against each run's goal, summary, and target domain. Omit for the most recent runs.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of browser runs to return. Default 10.",
+                        "default": 10,
+                    },
+                },
+                "required": ["session_id"],
+            },
+        },
+        group="specialists",
+        prompt_summary="Cheap recall of the browser agent's private session ledger — what it already visited/found this session, with no browser launch.",
+        progress_builder=_browser_recall_progress,
+        handler_method="_browser_recall_session",
+        read_only=True,
+        exposed_to_model=False,
+        specialist_agent_id=_BROWSER_AGENT_ID,
     ),
     ToolSpec(
         name="cosmic_code_execution",
@@ -1697,7 +1743,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "firecrawl_scrape",
             "description": (
                 "Use the Firecrawl specialist agent to scrape a live web page into robust formats such as markdown, html, links, images, or a screenshot. "
-                "Prefer this over plain web_fetch when you need page rendering resilience or structured scrape outputs. "
+                "Prefer this over plain web_fetch when you need page rendering resilience or structured scrape outputs, and prefer it over browser_task "
+                "for any read-only page that needs no login or interaction — it is much faster and cheaper than driving a full browser. "
+                "Reach for browser_task instead only when the page needs an authenticated session or JS-heavy interaction (clicking, filling forms, multi-step navigation). "
                 "Inline markdown/HTML in the tool result is excerpted only; when *_truncated flags or truncation_detected are present, "
                 "load the full body with artifact_read using the matching path from the returned artifacts list (for example page.md or page.raw.html). "
                 "You can also call firecrawl_recall_session to list prior Firecrawl runs for this session. "
@@ -1854,46 +1902,6 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Structured extraction via the Firecrawl specialist agent for schema-shaped outputs, list building, and multi-page research tasks. Returns null for absent fields; not for image-locked numbers (use screenshot+vision).",
         progress_builder=_firecrawl_extract_progress,
         handler_method="_firecrawl_extract",
-        exposed_to_model=False,
-        specialist_agent_id=_FIRECRAWL_AGENT_ID,
-    ),
-    ToolSpec(
-        name="firecrawl_agent",
-        api_definition={
-            "name": "firecrawl_agent",
-            "description": (
-                "Run the Firecrawl autonomous AI agent to search, navigate, and extract data from the web given a natural-language prompt. "
-                "Use this only when simpler firecrawl_scrape or firecrawl_extract have failed or are clearly insufficient — "
-                "for example when the right URLs are unknown, multi-page interaction is needed, or a complex extraction requires autonomous navigation. "
-                "Do not default to this mode; prefer firecrawl_scrape and firecrawl_extract first."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "Natural-language description of the data to find and extract. Be specific and descriptive.",
-                    },
-                    "urls": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional seed URLs to focus the agent on. When omitted the agent discovers URLs autonomously.",
-                    },
-                    "schema": {
-                        "type": "object",
-                        "description": "Optional JSON schema describing the desired structured output shape.",
-                    },
-                },
-                "required": ["prompt"],
-            },
-        },
-        group="research",
-        prompt_summary=(
-            "Autonomous Firecrawl AI agent for complex extractions when scrape/extract are insufficient. "
-            "Searches, navigates, and extracts autonomously. Use only as a fallback."
-        ),
-        progress_builder=_firecrawl_agent_progress,
-        handler_method="_firecrawl_agent",
         exposed_to_model=False,
         specialist_agent_id=_FIRECRAWL_AGENT_ID,
     ),

@@ -13,17 +13,20 @@ store, where only the deterministic CredentialFill action consumes them.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import shutil
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from shared.agent_runtime import AgentResult, AgentRuntime, TaskEnvelope
 from shared.contracts import AgentError
+from shared.sqlite_client import connect_sync
 
 from .config import AGENT_ROOT, BrowserAgentConfig
 
@@ -52,6 +55,25 @@ _CODE_HINT_WORDS = ("verification code", "security code", "one-time code", "otp"
 # desktop can keep up. ~2.5fps is plenty for "watch what it's doing", far
 # below anything that would stress the gateway broadcast path.
 _LIVE_FRAME_MIN_INTERVAL_SEC = 0.4
+
+# Session recall ledger (browser.recall_session) — mirrors the Firecrawl
+# specialist's firecrawl_session_runs table exactly (same columns' spirit,
+# adapted for a goal-oriented run instead of a URL-keyed scrape). Indexes
+# already-existing run artifacts; never duplicates their content.
+_SESSION_RUNS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS browser_session_runs (
+    task_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    status TEXT NOT NULL,
+    target_url TEXT,
+    summary TEXT NOT NULL,
+    artifact_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_browser_session_runs_session_created
+ON browser_session_runs (session_id, created_at DESC);
+"""
 
 
 class BrowserAgent(AgentRuntime):
@@ -151,22 +173,42 @@ class BrowserAgent(AgentRuntime):
                 run_timeout_sec=min(self.config.run_timeout_sec, self.max_task_duration_sec),
             )
         except BrowserRunError as exc:
+            self._record_session_run(
+                task,
+                goal=goal,
+                status="failed",
+                summary=str(exc).strip()[:400] or f"Failed: {goal[:150]}",
+                target_url=live_state.get("url"),
+                screenshot=live_state.get("screenshot"),
+                run_dir=None,
+            )
             return self._failed("BROWSER_RUN_FAILED", str(exc), retryable=False, next_action="escalate")
         except Exception as exc:
             logger.exception("browser_agent.run_failed task_id=%s", task.task_id)
+            self._record_session_run(
+                task,
+                goal=goal,
+                status="failed",
+                summary=f"Failed: {goal[:150]}",
+                target_url=live_state.get("url"),
+                screenshot=live_state.get("screenshot"),
+                run_dir=None,
+            )
             return self._failed("INTERNAL_ERROR", f"Browser run failed: {exc}", retryable=False, next_action="escalate")
 
         self._post_run_usage(task, result)
 
         status = str(result.get("status") or "incomplete")
         needs_credentials = result.get("needs_credentials")
+        answer = str(result.get("answer") or "")
+        run_dir = str(result.get("run_dir") or "")
         output: dict[str, Any] = {
             "goal": goal,
             "status": status,
-            "answer": str(result.get("answer") or ""),
+            "answer": answer,
             "steps_taken": int(result.get("steps_taken") or 0),
             "duration_sec": result.get("duration_sec"),
-            "run_dir": str(result.get("run_dir") or ""),
+            "run_dir": run_dir,
         }
         if needs_credentials:
             output["needs_credentials"] = needs_credentials
@@ -176,11 +218,151 @@ class BrowserAgent(AgentRuntime):
                 "credential request flow (browser_credential_request), then re-run browser.run "
                 "with the resulting credential_ref."
             )
+        recall_summary = str(result.get("recall_summary") or "").strip()
+        self._record_session_run(
+            task,
+            goal=goal,
+            status=status,
+            summary=recall_summary or answer[:400] or f"{status.capitalize()}: {goal[:150]}",
+            target_url=live_state.get("url"),
+            screenshot=live_state.get("screenshot"),
+            run_dir=run_dir or None,
+        )
         await self._emit_progress(
             task.task_id,
             f"Browser run finished: {status} ({output['steps_taken']} steps)",
         )
         return AgentResult(status="completed", output=output, artifacts=[], error=None)
+
+    async def handle_browser_recall_session(self, task: TaskEnvelope) -> AgentResult:
+        """Look up prior browser.run work for a session. No browser is launched —
+        this only reads the session ledger _record_session_run writes to."""
+        session_id = str(task.input.get("session_id") or "").strip()
+        if not session_id:
+            return self._failed("INVALID_INPUT", "browser.recall_session requires a session_id.")
+        query = str(task.input.get("query") or "").strip()
+        limit = self._safe_int(task.input.get("limit"), 10)
+        limit = min(max(limit, 1), 50)
+        entries = self._load_session_entries(session_id=session_id, query=query, limit=limit)
+        if entries:
+            response = f"Found {len(entries)} browser run{'s' if len(entries) != 1 else ''} for {session_id}."
+        elif query:
+            response = f"No browser runs matching {query!r} were recorded for {session_id}."
+        else:
+            response = f"No browser runs were recorded for {session_id}."
+        return AgentResult(
+            status="completed",
+            output={"response": response, "session_id": session_id, "entries": entries},
+            artifacts=[],
+            error=None,
+        )
+
+    def _record_session_run(
+        self,
+        task: TaskEnvelope,
+        *,
+        goal: str,
+        status: str,
+        summary: str,
+        target_url: str | None,
+        screenshot: dict[str, Any] | None,
+        run_dir: str | None,
+    ) -> None:
+        """Index this run into the session recall ledger. Never raises — a
+        broken ledger write must not fail an otherwise-successful browser run,
+        same non-fatal-by-design philosophy as the rest of this file."""
+        try:
+            session_id = str(task.session_id or "").strip() or "no_session"
+            artifact_refs: list[dict[str, Any]] = []
+            if isinstance(screenshot, dict) and screenshot.get("artifact_id"):
+                artifact_refs.append(
+                    {
+                        "kind": "screenshot",
+                        "artifact_id": screenshot.get("artifact_id"),
+                        "path": screenshot.get("path"),
+                    }
+                )
+            if run_dir:
+                artifact_refs.append({"kind": "run_dir", "path": run_dir})
+            created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            with connect_sync(self.config.session_db_path) as connection:
+                connection.executescript(_SESSION_RUNS_TABLE_SQL)
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO browser_session_runs (
+                        task_id, session_id, goal, status, target_url,
+                        summary, artifact_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task.task_id,
+                        session_id,
+                        goal.strip()[:2000],
+                        status,
+                        (target_url or "").strip() or None,
+                        summary.strip()[:2000],
+                        json.dumps(artifact_refs, ensure_ascii=False),
+                        created_at,
+                    ),
+                )
+        except Exception:
+            logger.debug(
+                "browser_agent.session_run_record_failed task_id=%s", task.task_id, exc_info=True
+            )
+
+    def _load_session_entries(
+        self, *, session_id: str, query: str, limit: int
+    ) -> list[dict[str, Any]]:
+        try:
+            with connect_sync(self.config.session_db_path) as connection:
+                connection.executescript(_SESSION_RUNS_TABLE_SQL)
+                if query:
+                    like = f"%{query.lower()}%"
+                    rows = connection.execute(
+                        """
+                        SELECT task_id, goal, status, summary, target_url, artifact_json, created_at
+                        FROM browser_session_runs
+                        WHERE session_id = ?
+                          AND (
+                            lower(goal) LIKE ? OR lower(summary) LIKE ? OR lower(coalesce(target_url, '')) LIKE ?
+                          )
+                        ORDER BY created_at DESC, task_id DESC
+                        LIMIT ?
+                        """,
+                        (session_id, like, like, like, limit),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT task_id, goal, status, summary, target_url, artifact_json, created_at
+                        FROM browser_session_runs
+                        WHERE session_id = ?
+                        ORDER BY created_at DESC, task_id DESC
+                        LIMIT ?
+                        """,
+                        (session_id, limit),
+                    ).fetchall()
+        except Exception:
+            logger.debug("browser_agent.session_run_load_failed session_id=%s", session_id, exc_info=True)
+            return []
+        entries: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                artifact_refs = json.loads(row["artifact_json"] or "[]")
+            except (TypeError, ValueError):
+                artifact_refs = []
+            entries.append(
+                {
+                    "task_id": row["task_id"],
+                    "goal": row["goal"],
+                    "status": row["status"],
+                    "summary": row["summary"],
+                    "target_url": row["target_url"],
+                    "artifact_refs": artifact_refs if isinstance(artifact_refs, list) else [],
+                    "created_at": row["created_at"],
+                }
+            )
+        return entries
 
     _ARTIFACT_CONTEXT_MAX_CHARS = 20000
     _TEXT_SUFFIXES = (

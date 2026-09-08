@@ -12,6 +12,7 @@ intents:
     output_schema: schemas/intents/firecrawl.scrape.output.json
     timeout_sec: 120
     usage_hints:
+      - Prefer this over the browser agent (browser.run) for any read-only page that needs no login or interaction — it's much faster and cheaper than driving a full browser. Use the browser agent instead when the page needs an authenticated session or JS-heavy interaction (clicking, filling forms, multi-step navigation).
       - When the data you need is rendered as an image, read it visually one of two ways - scrape the direct image URL (e.g. a .png chart/table), or request formats:["screenshot"] which is captured full-page by default so content below the fold is included. Both surface an image artifact for the vision model.
       - A direct image URL is fetched as an image artifact even though Firecrawl cannot parse binary images; prefer it when you know the exact image URL.
       - Set screenshot_full_page:false only if you specifically want the top viewport instead of the whole page.

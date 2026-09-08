@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "browser.recall_session input",
+  "description": "Look up prior browser.run work for a session — no browser is launched.",
+  "type": "object",
+  "required": ["session_id"],
+  "properties": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Session ID whose browser runs should be recalled."
+    },
+    "query": {
+      "type": "string",
+      "description": "Optional keyword filter matched against each run's goal, summary, and target domain (case-insensitive substring match). Omit to return the most recent runs."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 10
+    }
+  }
+}

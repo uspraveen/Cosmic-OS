@@ -14,10 +14,22 @@ intents:
     timeout_sec: 900
     usage_hints:
       - One goal per run; phrase it as a complete self-contained instruction for a web agent ("Get the engineering job openings and salaries from the World Labs careers page").
+      - For a read-only page that needs no login or interaction, prefer the Firecrawl specialist's scrape/extract intents instead — they are much faster and cheaper than driving a full browser. Reach for this intent when the page needs an authenticated session or JS-heavy interaction (clicking, filling forms, multi-step navigation).
       - If the site requires login and the user's vault has an entry, call vault_lookup first and pass the credential_ref this tool returns; the orchestrator injects the resolved secret securely (the model never sees it).
       - If the run ends with status=credentials_needed, provision credentials via the credential request flow and delegate browser.run again with the new credential_ref.
       - Use memory_mode=auto to reuse previously learned site workflows, learn to index a successful run for later recall. Keep off for one-off tasks.
       - Browser runs can take several minutes. A first response of in_progress is normal — poll again with the same idempotency key.
+      - Before starting a new run, consider browser.recall_session if the user's request references prior browser work this session (e.g. "what did we find", "check that page again") — it's a cheap lookup with no browser launch.
+
+  - name: browser.recall_session
+    description: Recall previous browser.run work stored in the agent's session ledger. No browser is launched.
+    input_schema: schemas/intents/browser.recall_session.input.json
+    output_schema: schemas/intents/browser.recall_session.output.json
+    timeout_sec: 30
+    usage_hints:
+      - Use this when the user references prior browser work — "what did we find", "check that page again", a site you likely already visited this session — before deciding a fresh browser.run is needed.
+      - Not a default preamble to every browser.run: for a clearly new goal, just run it. This is for the ambiguous/repeat case, the same way alpha.recall_project is used before alpha.execute only when project identity is ambiguous.
+      - Pass query to filter by keyword (matched against goal, summary, and target domain); omit it to get the most recent runs for the session.
 
 artifact_types:
   - browser_run_dir
@@ -27,11 +39,13 @@ policies:
   writable_paths:
     - runs
     - agents/browser_agent
+    - agents/browser_agent/store
   tool_access: []
   allowed_senders:
     - cosmic/orchestrator:1.0.0
   intent_authorization:
     browser.run: [cosmic/orchestrator:1.0.0]
+    browser.recall_session: [cosmic/orchestrator:1.0.0]
 
 sla:
   max_concurrency: 1

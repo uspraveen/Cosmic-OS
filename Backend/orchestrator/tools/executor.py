@@ -1641,29 +1641,6 @@ class ToolExecutor:
         )
         return enrich_firecrawl_tool_result(result) if isinstance(result, dict) else result
 
-    async def _firecrawl_agent(
-        self,
-        tool_input: dict[str, Any],
-        *,
-        context: ToolExecutionContext | None = None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "prompt": str(tool_input.get("prompt") or "").strip(),
-        }
-        urls = self._normalize_string_list(tool_input.get("urls"))
-        if urls:
-            payload["urls"] = urls
-        schema = tool_input.get("schema")
-        if isinstance(schema, dict) and schema:
-            payload["schema"] = schema
-        return await self._dispatch_specialist_agent(
-            intent="firecrawl.agent",
-            payload=payload,
-            context=context,
-            agent_id="cosmic/firecrawl-web-scrape-agent:1.0.0",
-            wait_timeout_sec=295.0,
-        )
-
     async def _browser_task(
         self,
         tool_input: dict[str, Any],
@@ -1725,6 +1702,29 @@ class ToolExecutor:
         if not isinstance(response_payload, dict):
             return {"error": True, "message": "Gateway returned an invalid credential request response."}
         return response_payload
+
+    async def _browser_recall_session(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "session_id": str(tool_input.get("session_id") or "").strip() or (context.session_id if context else ""),
+        }
+        query = str(tool_input.get("query") or "").strip()
+        if query:
+            payload["query"] = query
+        limit = self._coerce_int(tool_input.get("limit"), 10)
+        if limit > 0:
+            payload["limit"] = min(max(limit, 1), 50)
+        return await self._dispatch_specialist_agent(
+            intent="browser.recall_session",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/browser-agent:1.0.0",
+            wait_timeout_sec=35.0,
+        )
 
     async def _firecrawl_recall_session(
         self,
