@@ -912,6 +912,27 @@ def build_browser_agent_env_rendered(
     gateway_existing_env = (existing_env_by_name or {}).get("gateway.env", {})
     gateway_external_env = (external_env_by_name or {}).get("gateway.env", {})
 
+    # Fresh-VM fallback: when callers pass no env dicts (install_service_env_files),
+    # read the orchestrator/gateway env files from disk so the browser agent
+    # inherits whatever Fireworks/xAI credentials the VM already carries —
+    # same pattern as the slide agent renderer's read_peer_env.
+    def read_peer_env(env_name: str, *, agent_env: bool = True) -> Dict[str, str]:
+        base = system_env_dir or DEFAULT_SYSTEM_ENV_DIR
+        path = (base / "agents" / env_name) if agent_env else (base / env_name)
+        if not path.exists():
+            return {}
+        try:
+            if is_linux():
+                return parse_env_text(read_text_file(path, use_sudo=True))
+            return parse_env_text(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    if not orchestrator_existing_env:
+        orchestrator_existing_env = read_peer_env("orchestrator.env", agent_env=False)
+    if not gateway_existing_env:
+        gateway_existing_env = read_peer_env("gateway.env", agent_env=False)
+
     redis_url = first_meaningful_value(
         external_env.get("REDIS_URL"),
         existing_env.get("REDIS_URL"),
