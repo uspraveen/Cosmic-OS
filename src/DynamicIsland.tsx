@@ -3,6 +3,12 @@ import { ArrowLeft, BellRing, Power, RefreshCw, RotateCw, Video } from 'lucide-r
 import { motion, AnimatePresence } from 'framer-motion'
 import './island.css'
 import Settings, { type SettingsView } from './Settings'
+import {
+  consumeVaultEditorRestoreOnShow,
+  isVaultEditorVisible,
+  noteVaultEditorDismissed,
+  noteVaultEditorHide,
+} from './vaultEditorSession'
 import WeatherAnimation from './WeatherAnimation'
 import DotBurstCheckmark from './DotBurstCheckmark'
 import AgentWorkSlide, { type AgentWorkPayload } from './AgentWorkSlide'
@@ -437,6 +443,27 @@ export default function DynamicIsland({
   const reopenSettingsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const authHandoffAtRef = useRef(0)
   const [isAnchored, setIsAnchored] = useState(false)
+
+  // Hide must get the vault editor off the screen so the user can copy a
+  // password elsewhere. Esc closes Settings before cosmic:hiding, so we
+  // remember a just-dismissed form and restore it on show the same way.
+
+  useEffect(() => {
+    const offHiding = window.cosmic?.onHiding(() => {
+      noteVaultEditorHide()
+      if (showSettingsRef.current && isVaultEditorVisible()) setShowSettings(false)
+    })
+    const offShown = window.cosmic?.onShown(() => {
+      if (reopenSettingsAfterAuthRef.current) return
+      if (!consumeVaultEditorRestoreOnShow()) return
+      setSettingsInitialView('vault')
+      setShowSettings(true)
+    })
+    return () => {
+      offHiding?.()
+      offShown?.()
+    }
+  }, [])
 
   // Voice State
   const [voiceActive, setVoiceActive] = useState(false)
@@ -2928,6 +2955,9 @@ export default function DynamicIsland({
             if (Date.now() - authHandoffAtRef.current > SETTINGS_AUTH_HANDOFF_CLOSE_WINDOW_MS) {
               reopenSettingsAfterAuthRef.current = false
             }
+            // Esc closes this panel before cosmic:hiding arrives. Remember the
+            // live vault form so the hide handler can still restore it on show.
+            noteVaultEditorDismissed()
             setShowSettings(false)
           }}
           keyStatus={keyStatus}

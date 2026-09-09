@@ -1,4 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  getVaultEditorDraft,
+  setVaultEditorDraft,
+  setVaultEditorVisible,
+  type VaultEditorDraft,
+} from './vaultEditorSession'
 import './vault-settings.css'
 
 interface VaultPolicy {
@@ -52,15 +58,7 @@ interface PasswordVaultSettingsProps {
   active: boolean
 }
 
-type EditorState = {
-  entryId: string | null
-  title: string
-  siteUrl: string
-  username: string
-  password: string
-  totpSeed: string
-  notes: string
-}
+type EditorState = VaultEditorDraft
 
 const EMPTY_EDITOR: EditorState = {
   entryId: null,
@@ -164,9 +162,20 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
   const [revealedPassword, setRevealedPassword] = useState('')
   const [totpState, setTotpState] = useState<{ entryId: string; code: string; seconds: number } | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
-  const [editor, setEditor] = useState<EditorState | null>(null)
+  const [editor, setEditorState] = useState<EditorState | null>(() => getVaultEditorDraft())
   const [saving, setSaving] = useState(false)
   const editorRef = useRef<HTMLDivElement | null>(null)
+
+  const setEditor = useCallback((next: EditorState | null) => {
+    setVaultEditorDraft(next)
+    setVaultEditorVisible(next !== null)
+    setEditorState(next)
+  }, [])
+
+  useEffect(() => {
+    setVaultEditorVisible(editor !== null)
+    return () => setVaultEditorVisible(false)
+  }, [editor])
 
   const refresh = useCallback(async () => {
     if (!window.cosmic?.vaultListEntries) return
@@ -280,7 +289,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
           }
         : { ...EMPTY_EDITOR },
     )
-  }, [])
+  }, [setEditor])
 
   const handleSave = useCallback(async () => {
     if (!editor || saving) return
@@ -314,7 +323,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
     } finally {
       setSaving(false)
     }
-  }, [editor, saving, refresh])
+  }, [editor, saving, refresh, setEditor])
 
   const handleDelete = useCallback(async (entry: VaultEntry) => {
     if (!window.cosmic?.vaultDeleteEntry) return
