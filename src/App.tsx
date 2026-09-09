@@ -2847,79 +2847,85 @@ const BrowserRunCard = ({
           className={`deck-preview-lightbox browser-run-lightbox ${PORTAL_SURFACE_CLASS}${drivingLive ? ' is-driving' : ''}`}
           onClick={() => { if (!driving) setExpanded(false) }}
         >
-          <img
-            ref={frameElementRef}
-            src={zoomFrame || frame}
-            alt={progress.pageTitle || 'Live browser view'}
-            className="deck-preview-full"
-            decoding="async"
-            draggable={false}
-            // Pointer handlers are always attached but only produce events
-            // while the run has actually parked: sending input to a browser
-            // the agent is still driving would have the two fighting over the
-            // same page.
-            onClick={(event) => event.stopPropagation()}
-            onPointerDown={(event) => {
-              if (!drivingLive) return
-              event.stopPropagation()
-              event.preventDefault()
-              const point = pointAt(event.clientX, event.clientY)
-              if (point) queueInput(mouseInputEvent('mousePressed', point, event))
-            }}
-            onPointerUp={(event) => {
-              if (!drivingLive) return
-              event.stopPropagation()
-              const point = pointAt(event.clientX, event.clientY)
-              if (point) queueInput(mouseInputEvent('mouseReleased', point, event))
-            }}
-            onPointerMove={(event) => {
-              if (!drivingLive) return
-              const point = pointAt(event.clientX, event.clientY)
-              if (point) queueInput(mouseInputEvent('mouseMoved', point, event))
-            }}
-            onWheel={(event) => {
-              if (!drivingLive) return
-              const point = pointAt(event.clientX, event.clientY)
-              if (point) queueInput(mouseInputEvent('mouseWheel', point, event))
-            }}
-            onContextMenu={(event) => { if (drivingLive) event.preventDefault() }}
-          />
-          <div className="browser-run-lightbox-bar" onClick={(event) => event.stopPropagation()}>
-            {canTakeOver && !driving && (
-              <button type="button" className="browser-run-takeover-button" onClick={() => void takeControl()}>
-                <MousePointerClick size={13} />
-                Take control
+          <div className="browser-run-stage" onClick={(event) => event.stopPropagation()}>
+            <div className="browser-run-lightbox-bar">
+              <span className="browser-run-lightbox-title" title={progress.pageTitle || displayUrl}>
+                {progress.pageTitle || displayUrl || 'Live browser view'}
+              </span>
+              <div className="browser-run-lightbox-actions">
+                {canTakeOver && !driving && (
+                  <button type="button" className="browser-run-takeover-button" onClick={() => void takeControl()}>
+                    <MousePointerClick size={13} />
+                    Take control
+                  </button>
+                )}
+                {driving && (
+                  <>
+                    <span className={`browser-run-takeover-state${drivingLive ? ' is-live' : ''}`}>
+                      {drivingLive ? 'You have control' : 'Pausing at the current step…'}
+                    </span>
+                    <button
+                      type="button"
+                      className="browser-run-takeover-button is-primary"
+                      onClick={() => void handBack()}
+                    >
+                      Give back
+                    </button>
+                  </>
+                )}
+              </div>
+              <button
+                type="button"
+                className="browser-run-lightbox-close"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  if (driving) void handBack()
+                  else setExpanded(false)
+                }}
+                aria-label={driving ? 'Hand control back' : 'Close expanded view'}
+              >
+                <X size={16} />
               </button>
-            )}
-            {driving && (
-              <>
-                <span className={`browser-run-takeover-state${drivingLive ? ' is-live' : ''}`}>
-                  {drivingLive ? 'You have control' : 'Pausing at the current step…'}
-                </span>
-                <button
-                  type="button"
-                  className="browser-run-takeover-button is-primary"
-                  onClick={() => void handBack()}
-                >
-                  Give back
-                </button>
-              </>
-            )}
-            <button
-              type="button"
-              className="browser-run-lightbox-close"
-              onClick={(event) => {
+            </div>
+            {takeoverError && <div className="browser-run-takeover-error">{takeoverError}</div>}
+            <img
+              ref={frameElementRef}
+              src={zoomFrame || frame}
+              alt={progress.pageTitle || 'Live browser view'}
+              className="deck-preview-full"
+              decoding="async"
+              draggable={false}
+              // Pointer handlers are always attached but only produce events
+              // while the run has actually parked: sending input to a browser
+              // the agent is still driving would have the two fighting over the
+              // same page.
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => {
+                if (!drivingLive) return
                 event.stopPropagation()
-                if (driving) void handBack()
-                else setExpanded(false)
+                event.preventDefault()
+                const point = pointAt(event.clientX, event.clientY)
+                if (point) queueInput(mouseInputEvent('mousePressed', point, event))
               }}
-              aria-label={driving ? 'Hand control back' : 'Close expanded view'}
-            >
-              <X size={16} />
-            </button>
+              onPointerUp={(event) => {
+                if (!drivingLive) return
+                event.stopPropagation()
+                const point = pointAt(event.clientX, event.clientY)
+                if (point) queueInput(mouseInputEvent('mouseReleased', point, event))
+              }}
+              onPointerMove={(event) => {
+                if (!drivingLive) return
+                const point = pointAt(event.clientX, event.clientY)
+                if (point) queueInput(mouseInputEvent('mouseMoved', point, event))
+              }}
+              onWheel={(event) => {
+                if (!drivingLive) return
+                const point = pointAt(event.clientX, event.clientY)
+                if (point) queueInput(mouseInputEvent('mouseWheel', point, event))
+              }}
+              onContextMenu={(event) => { if (drivingLive) event.preventDefault() }}
+            />
           </div>
-          {takeoverError && <div className="browser-run-takeover-error">{takeoverError}</div>}
-          <div className="deck-preview-lightbox-meta">{progress.pageTitle || displayUrl}</div>
         </div>,
         document.body,
       )}

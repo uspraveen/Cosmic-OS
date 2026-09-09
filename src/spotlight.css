@@ -5477,17 +5477,65 @@ kbd {
   background: rgba(3, 4, 6, 0.94);
 }
 
-/* The lightbox control rail. Sits above the frame rather than over it, so
-   nothing the user needs to click is ever competing with the page they are
-   driving. */
+/* The expanded browser frame. The control rail is a chrome strip attached to
+   the top of the frame itself — not floating in a viewport corner — so the
+   controls live where the eyes already are, and the panel reads as one
+   window: title bar, then the page. The strip sits above the frame rather
+   than over it, so nothing the user needs to click is ever competing with
+   the page they are driving. */
+.browser-run-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  max-width: min(92vw, 1500px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  background: rgba(10, 11, 14, 0.9);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+/* The frame styling moved to the stage; the image is now just the content
+   below the chrome bar. The bar's height (34px controls + 12px padding +
+   2px border) comes off the image budget, so the whole panel still fits the
+   82vh the lightbox always used. */
+.browser-run-stage .deck-preview-full {
+  max-width: 100%;
+  max-height: calc(82vh - 48px);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
 .browser-run-lightbox-bar {
-  position: absolute;
-  top: 20px;
-  right: 20px;
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 6px 8px 6px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0));
   z-index: 1;
+}
+
+/* The page title lives in the chrome bar — the same pill that used to float
+   at the bottom of the viewport, promoted to where a browser puts it. */
+.browser-run-lightbox-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: default;
+}
+
+.browser-run-lightbox-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .browser-run-takeover-button {
@@ -5540,11 +5588,15 @@ kbd {
   color: rgba(190, 240, 214, 0.95);
 }
 
+/* Anchored to the stage, just under the chrome bar — the failure belongs to
+   the takeover the user asked for, not to a corner of the screen. */
 .browser-run-takeover-error {
   position: absolute;
-  top: 62px;
-  right: 20px;
-  max-width: 320px;
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  max-width: min(320px, 80%);
   padding: 7px 11px;
   border-radius: 9px;
   border: 1px solid rgba(240, 150, 150, 0.28);
@@ -5560,10 +5612,13 @@ kbd {
   cursor: default;
 }
 
-.browser-run-lightbox.is-driving .deck-preview-full {
-  cursor: default;
+.browser-run-lightbox.is-driving .browser-run-stage {
   border-color: rgba(120, 200, 160, 0.45);
   box-shadow: 0 0 0 1px rgba(120, 200, 160, 0.25), 0 30px 80px rgba(0, 0, 0, 0.5);
+}
+
+.browser-run-lightbox.is-driving .deck-preview-full {
+  cursor: default;
   -webkit-user-select: none;
   user-select: none;
 }
