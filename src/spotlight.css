@@ -5102,109 +5102,128 @@ kbd {
   text-align: center;
 }
 
+/* ── Live browser run card ────────────────────────────────────────────
+   Same shell as the other progress cards, in three bands: identity and
+   status, a miniature browser window beside what the run is doing right
+   now, and the trail of steps it just took.
+
+   The dot-matrix language of the Alpha and Vault hero marks is reused
+   here as instrumentation rather than as a watermark — the elapsed clock
+   and the step track are drawn from that same dot field, so the mark pays
+   for its space by carrying the two numbers that actually move during a
+   run. Lit / unlit / glow are card-scoped custom properties so the whole
+   instrument cluster re-tones from one place. */
 .browser-run-card {
   position: relative;
   overflow: hidden;
+  --browser-run-lit: rgba(214, 240, 255, 0.95);
+  --browser-run-glow: rgba(124, 200, 255, 0.55);
+  --browser-run-unlit: rgba(255, 255, 255, 0.055);
 }
 
-/* Quiet identity mark for the card, in the same dot-matrix language as the
-   Alpha and Vault settings headers (field of dots + a masked glyph, two-pass
-   stroke for a soft glow under a crisp line) — scaled down and kept low-
-   opacity since this card's actual content is the live screenshot, not the
-   mark. Sits behind the head row, bleeding off the top-right corner. */
-.browser-run-mark {
-  position: absolute;
-  top: -16px;
-  right: -14px;
-  width: 108px;
-  height: 84px;
-  z-index: 0;
-  pointer-events: none;
-  opacity: 0.55;
-  transition: opacity 500ms ease;
+/* Tones track the same attention / working / done language as the
+   .docs-progress-stage pills above them. */
+.browser-run-card.is-waiting {
+  --browser-run-lit: rgba(255, 233, 186, 0.96);
+  --browser-run-glow: rgba(230, 170, 60, 0.5);
 }
 
-.browser-run-mark.is-live {
-  animation: browser-run-mark-breathe 4.4s ease-in-out infinite;
+.browser-run-card.is-done {
+  --browser-run-lit: rgba(255, 255, 255, 0.6);
+  --browser-run-glow: rgba(255, 255, 255, 0.12);
 }
 
-@keyframes browser-run-mark-breathe {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 0.85; }
+.browser-run-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.browser-run-card .slide-build-head,
-.browser-run-card .slide-build-main,
-.browser-run-card .browser-run-interrupt {
+.browser-run-head .docs-progress-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── the miniature browser window ─────────────────────────────────── */
+.browser-run-body {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 11px;
+}
+
+.browser-run-viewport {
   position: relative;
-  z-index: 1;
-}
-
-.browser-run-live-frame {
-  position: relative;
-  flex: 0 0 220px;
+  flex: 0 1 224px;
+  min-width: 180px;
+  align-self: flex-start;
   margin: 0;
   border-radius: 10px;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  background: rgba(0, 0, 0, 0.34);
   cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
-.browser-run-live-frame img {
-  display: block;
-  width: 220px;
-  aspect-ratio: 16 / 10;
-  object-fit: cover;
-  object-position: top left;
-}
-
-.browser-run-expand-affordance {
-  position: absolute;
-  right: 7px;
-  bottom: 7px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  color: rgba(255, 255, 255, 0.92);
-  background: rgba(8, 9, 12, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  backdrop-filter: blur(4px);
-  opacity: 0;
-  transform: scale(0.9);
-  transition: opacity 140ms ease, transform 140ms ease, background 140ms ease;
-  pointer-events: none;
-}
-
-.browser-run-live-frame:hover .browser-run-expand-affordance {
-  opacity: 1;
-  transform: scale(1);
-}
-
-.browser-run-live-frame:hover {
+.browser-run-viewport:hover {
   border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
 }
 
-.browser-run-live-dot {
-  position: absolute;
-  top: 8px;
-  left: 8px;
+.browser-run-chrome {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 7px 3px 6px;
-  border-radius: 999px;
-  background: rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(4px);
+  gap: 7px;
+  height: 22px;
+  padding: 0 8px;
+  background: rgba(255, 255, 255, 0.055);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
 }
 
-.browser-run-live-dot::before {
+.browser-run-chrome-dots {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 3.5px;
+}
+
+.browser-run-chrome-dots i {
+  width: 4.5px;
+  height: 4.5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.17);
+}
+
+.browser-run-chrome-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 9.5px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.browser-run-livetag {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(255, 140, 140, 0.9);
+}
+
+.browser-run-livetag::before {
   content: '';
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: rgba(255, 92, 92, 0.95);
   box-shadow: 0 0 6px rgba(255, 92, 92, 0.85);
@@ -5213,28 +5232,226 @@ kbd {
 
 @keyframes browser-run-live-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.45; transform: scale(0.82); }
+  50% { opacity: 0.42; transform: scale(0.78); }
 }
 
-.browser-run-meta {
-  margin-top: 10px;
+.browser-run-shot {
+  position: relative;
+  display: block;
+}
+
+.browser-run-shot img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  object-position: top left;
+}
+
+.browser-run-expand {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 11px;
-  font-weight: 600;
+  justify-content: center;
+  width: 23px;
+  height: 23px;
+  border-radius: 7px;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(8, 9, 12, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  transform: scale(0.9);
+  transition: opacity 140ms ease, transform 140ms ease;
+  pointer-events: none;
 }
 
-.browser-run-url {
+.browser-run-viewport:hover .browser-run-expand {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* ── what the run is doing, and the instruments ───────────────────── */
+.browser-run-stage {
+  flex: 1 1 210px;
   min-width: 0;
-  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.browser-run-locus {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: rgba(153, 221, 255, 0.85);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.browser-run-action {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 14px;
+  font-weight: 640;
+  line-height: 1.35;
+  letter-spacing: -0.005em;
+}
+
+.browser-run-instruments {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+/* A recessed panel so the matrix reads as a display rather than as more
+   card surface. */
+.browser-run-readout {
+  display: inline-flex;
+  align-items: center;
+  gap: 11px;
+  max-width: 100%;
+  padding: 7px 11px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.26), rgba(0, 0, 0, 0.13));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    inset 0 0 22px rgba(0, 0, 0, 0.26);
+}
+
+.browser-run-matrix,
+.browser-run-track svg {
+  display: block;
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.browser-run-readout-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.browser-run-readout-label b {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.44);
+}
+
+.browser-run-readout-label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
   font-weight: 600;
+  color: rgba(255, 255, 255, 0.32);
+}
+
+.browser-run-track {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.browser-run-track-label {
+  white-space: nowrap;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+/* No declared step budget — a travelling scan says "still going" without
+   inventing a denominator. */
+.browser-run-track-scan {
+  opacity: 0.09;
+  animation: browser-run-track-scan 2.1s linear infinite;
+}
+
+@keyframes browser-run-track-scan {
+  0%, 55%, 100% { opacity: 0.09; }
+  22% { opacity: 0.85; }
+}
+
+/* ── the last few steps ───────────────────────────────────────────── */
+.browser-run-trail {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 10px 0 0;
+  list-style: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.browser-run-trail::before {
+  content: '';
+  position: absolute;
+  left: 2.5px;
+  top: 18px;
+  bottom: 9px;
+  width: 1px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.12));
+}
+
+.browser-run-trail li {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-left: 14px;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.browser-run-trail li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6.5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.browser-run-trail li.is-latest {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.browser-run-trail li.is-latest::before {
+  background: var(--browser-run-lit);
+  box-shadow: 0 0 7px var(--browser-run-glow);
+}
+
+.browser-run-trail-step {
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 9.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.26);
+}
+
+.browser-run-trail-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .browser-run-interrupt {
@@ -5242,6 +5459,13 @@ kbd {
   margin-top: 12px;
   margin-inline: 0;
   padding: 14px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .browser-run-livetag::before,
+  .browser-run-track-scan {
+    animation: none;
+  }
 }
 
 .docs-progress-stage.plan,

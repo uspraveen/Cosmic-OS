@@ -32,6 +32,7 @@ import { groupEmailThreads, stripEmailEnvelope, type EmailThreadUnit } from './e
 import { findPendingApprovals } from './pendingApprovals'
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
+import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
 
 export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'task' | 'meeting' | 'spaces'
@@ -423,6 +424,11 @@ interface BrowserProgressState {
   elapsedSec?: number | null
   screenshot?: BrowserProgressScreenshot | null
   interrupt?: BrowserProgressInterrupt | null
+  /** Steps the run has already finished, oldest first. The agent only ever
+   * reports the step it is on right now, so this is accumulated client-side
+   * as progress events land (see mergeBrowserProgress) — without it the card
+   * has a single orphaned status line and no sense of where the run has been. */
+  trail?: BrowserRunTrailEntry[]
 }
 
 interface SurfaceLaunchState {
@@ -1433,7 +1439,7 @@ const mergeHydratedMessages = (
       stopped: message.stopped ?? existing.stopped,
       progress: message.progress ?? existing.progress,
       slideProgress: message.slideProgress ?? existing.slideProgress,
-      browserProgress: message.browserProgress ?? existing.browserProgress,
+      browserProgress: mergeBrowserProgress(existing.browserProgress, message.browserProgress),
       backgroundState: message.backgroundState ?? existing.backgroundState,
     }
   })
@@ -1832,8 +1838,16 @@ const normalizeBrowserProgress = (value: unknown): BrowserProgressState | undefi
     elapsedSec: typeof raw.elapsed_sec === 'number' ? raw.elapsed_sec : null,
     screenshot,
     interrupt,
+    // Live state gets folded back into event payloads on the task-mirror
+    // paths, so an already accumulated trail has to survive the round trip.
+    trail: normalizeBrowserTrail(raw.trail),
   }
 }
+
+const mergeBrowserProgress = (
+  previous: BrowserProgressState | undefined,
+  incoming: BrowserProgressState | undefined,
+): BrowserProgressState | undefined => mergeBrowserRunProgress(previous, incoming)
 
 const currentSlidePreview = (progress?: SlideProgressState | null): SlidePreviewItem | null => {
   if (!progress?.slides?.length) {
@@ -2095,13 +2109,52 @@ const SlideBuildCard = ({
   )
 }
 
-const formatBrowserElapsed = (seconds?: number | null): string | null => {
-  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return null
-  const total = Math.round(seconds)
-  if (total < 60) return `${total}s`
-  const minutes = Math.floor(total / 60)
+/** Elapsed as a fixed-width matrix readout: mm:ss, h:mm:ss past the hour,
+ * and a dashed placeholder before the agent has reported any timing so the
+ * instrument keeps its footprint instead of popping in. */
+const formatBrowserClock = (seconds: number | null): string => {
+  if (seconds === null) return '--:--'
+  const total = Math.max(0, Math.floor(seconds))
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
   const rest = total % 60
-  return rest > 0 ? `${minutes}m ${rest}s` : `${minutes}m`
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(rest)}` : `${pad(minutes)}:${pad(rest)}`
+}
+
+const formatBrowserStartedAt = (elapsed: number | null): string => {
+  if (elapsed === null) return ''
+  try {
+    return new Date(Date.now() - elapsed * 1000)
+      .toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      .toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+/** The agent stamps elapsed_sec once per step, so a card left alone between
+ * steps would show a frozen clock. Anchor on each reported reading and count
+ * forward from it locally while the run is live; the moment it stops, fall
+ * back to the last reading the agent actually sent rather than to local drift. */
+const useBrowserElapsed = (elapsedSec: number | null | undefined, live: boolean): number | null => {
+  const anchorRef = useRef<{ base: number; at: number } | null>(null)
+  const [, tick] = useState(0)
+  const reported = typeof elapsedSec === 'number' && Number.isFinite(elapsedSec) && elapsedSec >= 0
+    ? elapsedSec
+    : null
+  if (reported !== null && anchorRef.current?.base !== reported) {
+    anchorRef.current = { base: reported, at: Date.now() }
+  }
+  useEffect(() => {
+    if (!live) return undefined
+    const timer = window.setInterval(() => tick((value) => value + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [live])
+  const anchor = anchorRef.current
+  if (!anchor) return null
+  if (!live) return anchor.base
+  return anchor.base + Math.max(0, (Date.now() - anchor.at) / 1000)
 }
 
 const formatBrowserUrl = (url?: string | null): string => {
@@ -2122,61 +2175,153 @@ const BROWSER_INTERRUPT_KIND_LABEL: Record<BrowserProgressInterrupt['kind'], str
   generic: 'Needs your input',
 }
 
-/** Quiet dot-matrix identity mark for the live browser card — same technique
- * as the Alpha/Vault settings headers (a field of dots, faded by a gradient
- * mask, plus a second full-opacity pass masked to a glyph silhouette with a
- * soft blurred glow under a crisp line), scaled down to a corner watermark
- * and given a slow breathe while the run is actually live, so the same
- * identity mark used elsewhere in the app also carries a hint of activity
- * here instead of being purely decorative. */
-const BrowserRunMark = ({ live }: { live?: boolean }) => {
-  // Multiple browser cards can be on screen at once (several messages, or
-  // the same run mirrored into the Tasks panel) — SVG def ids are global to
-  // the document, so each instance needs its own to avoid one card's mask
-  // silently borrowing another's.
+/** 5x7 cells, one string per row — only the glyphs a clock needs. */
+const BROWSER_MATRIX_FONT: Record<string, string[]> = {
+  '0': ['01110', '10001', '10011', '10101', '11001', '10001', '01110'],
+  '1': ['00100', '01100', '00100', '00100', '00100', '00100', '01110'],
+  '2': ['01110', '10001', '00001', '00010', '00100', '01000', '11111'],
+  '3': ['11111', '00010', '00110', '00001', '00001', '10001', '01110'],
+  '4': ['00010', '00110', '01010', '10010', '11111', '00010', '00010'],
+  '5': ['11111', '10000', '11110', '00001', '00001', '10001', '01110'],
+  '6': ['00110', '01000', '10000', '11110', '10001', '10001', '01110'],
+  '7': ['11111', '00001', '00010', '00100', '01000', '01000', '01000'],
+  '8': ['01110', '10001', '10001', '01110', '10001', '10001', '01110'],
+  '9': ['01110', '10001', '10001', '01111', '00001', '00010', '01100'],
+  '-': ['00000', '00000', '00000', '01110', '00000', '00000', '00000'],
+  ':': ['0', '0', '1', '0', '1', '0', '0'],
+  ' ': ['0', '0', '0', '0', '0', '0', '0'],
+}
+
+/** The dot-matrix language of the Alpha and Vault hero marks — a field of
+ * dots with a lit glyph over it, the lit pass doubled through a blur so a soft
+ * glow sits under the crisp one — used here to *say something* rather than as
+ * a corner watermark: the glyph is the run's elapsed time. Unlit cells stay
+ * drawn, which is what makes it read as a panel instead of as type. */
+const BrowserMatrixReadout = ({ text }: { text: string }) => {
   const uid = useId()
-  const dotGridId = `browserDotGrid-${uid}`
-  const fieldFadeId = `browserFieldFade-${uid}`
-  const fieldMaskId = `browserFieldMask-${uid}`
-  const dotBlurId = `browserDotBlur-${uid}`
-  const glyphMaskId = `browserGlyphMask-${uid}`
+  const glowId = `browserMatrixGlow-${uid}`
+  // Past an hour the readout gains two characters; step the pitch down so it
+  // keeps its footprint in the column instead of pushing the label out.
+  const pitch = text.length > 5 ? 3.5 : 4.4
+  const radius = text.length > 5 ? 1.15 : 1.45
+  const rows = 7
+  let columns = 0
+  const glyphs: { cells: string[]; x: number; width: number }[] = []
+  for (const char of text) {
+    const cells = BROWSER_MATRIX_FONT[char] || BROWSER_MATRIX_FONT[' ']
+    if (glyphs.length > 0) columns += 1
+    glyphs.push({ cells, x: columns, width: cells[0].length })
+    columns += cells[0].length
+  }
+  const lit: [number, number][] = []
+  const unlit: [number, number][] = []
+  glyphs.forEach(({ cells, x, width }) => {
+    for (let row = 0; row < rows; row += 1) {
+      for (let column = 0; column < width; column += 1) {
+        const point: [number, number] = [
+          (x + column) * pitch + pitch / 2,
+          row * pitch + pitch / 2,
+        ]
+        if (cells[row][column] === '1') {
+          lit.push(point)
+        } else {
+          unlit.push(point)
+        }
+      }
+    }
+  })
+  const dots = (points: [number, number][], key: string) => points.map(([cx, cy], index) => (
+    <circle key={`${key}-${index}`} cx={cx} cy={cy} r={radius} />
+  ))
+  const width = columns * pitch
+  const height = rows * pitch
   return (
-    <div className={`browser-run-mark${live ? ' is-live' : ''}`} aria-hidden="true">
-      <svg width="108" height="84" viewBox="0 0 108 84" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <pattern id={dotGridId} width="3" height="3" patternUnits="userSpaceOnUse">
-            <circle cx="1.5" cy="1.5" r="0.95" fill="#fff" />
-          </pattern>
-          <linearGradient id={fieldFadeId} x1="0.15" y1="0" x2="0.85" y2="1">
-            <stop offset="0.1" stopColor="#000" />
-            <stop offset="0.7" stopColor="#fff" />
-          </linearGradient>
-          <mask id={fieldMaskId} maskUnits="userSpaceOnUse" x="0" y="0" width="108" height="84">
-            <rect width="108" height="84" fill={`url(#${fieldFadeId})`} />
-          </mask>
-          <filter id={dotBlurId} x="-40%" y="-40%" width="180%" height="180%">
-            <feGaussianBlur stdDeviation="0.8" />
-          </filter>
-          <mask id={glyphMaskId} maskUnits="userSpaceOnUse" x="0" y="0" width="108" height="84">
-            <rect width="108" height="84" fill="#000" />
-            <g transform="translate(62 14) scale(1.7)" stroke="#fff" strokeLinecap="round" strokeLinejoin="round" fill="none">
-              <g strokeWidth="2.2" filter={`url(#${dotBlurId})`}>
-                <circle cx="12" cy="12" r="9" />
-                <path d="M3 12h18" />
-                <path d="M12 3c2.75 2.45 4.3 5.6 4.3 9s-1.55 6.55-4.3 9c-2.75-2.45-4.3-5.6-4.3-9S9.25 5.45 12 3Z" />
-              </g>
-              <g strokeWidth="1">
-                <circle cx="12" cy="12" r="9" />
-                <path d="M3 12h18" />
-                <path d="M12 3c2.75 2.45 4.3 5.6 4.3 9s-1.55 6.55-4.3 9c-2.75-2.45-4.3-5.6-4.3-9S9.25 5.45 12 3Z" />
-              </g>
-            </g>
-          </mask>
-        </defs>
-        <rect width="108" height="84" fill={`url(#${dotGridId})`} opacity="0.16" mask={`url(#${fieldMaskId})`} />
-        <rect width="108" height="84" fill={`url(#${dotGridId})`} mask={`url(#${glyphMaskId})`} />
-      </svg>
-    </div>
+    <svg
+      className="browser-run-matrix"
+      width={width}
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      role="img"
+      aria-label={`Elapsed ${text}`}
+    >
+      <defs>
+        <filter id={glowId} x="-160%" y="-160%" width="420%" height="420%">
+          <feGaussianBlur stdDeviation={radius * 1.2} />
+        </filter>
+      </defs>
+      <g fill="var(--browser-run-unlit)">{dots(unlit, 'off')}</g>
+      <g fill="var(--browser-run-glow)" filter={`url(#${glowId})`}>{dots(lit, 'glow')}</g>
+      <g fill="var(--browser-run-lit)">{dots(lit, 'on')}</g>
+    </svg>
+  )
+}
+
+const BROWSER_TRACK_DOTS = 14
+
+/** Step progress in the same dots. One dot per step while the budget is small
+ * enough to be countable, proportional beyond that, and a travelling scan when
+ * the agent never declared a max — an honest "still going" instead of a
+ * progress bar that would have to invent a denominator. */
+const BrowserStepTrack = ({
+  step,
+  maxSteps,
+  live,
+}: {
+  step: number | null
+  maxSteps: number | null
+  live: boolean
+}) => {
+  const uid = useId()
+  const glowId = `browserTrackGlow-${uid}`
+  const pitch = 8.5
+  const radius = 2.1
+  const total = maxSteps && maxSteps > 0 ? maxSteps : 0
+  const count = total > 0 ? Math.min(total, BROWSER_TRACK_DOTS) : BROWSER_TRACK_DOTS
+  const filled = total > 0
+    ? Math.max(0, Math.min(count, Math.round(((step ?? 0) / total) * count)))
+    : 0
+  const width = count * pitch
+  const height = pitch
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true">
+      <defs>
+        <filter id={glowId} x="-160%" y="-160%" width="420%" height="420%">
+          <feGaussianBlur stdDeviation="1.7" />
+        </filter>
+      </defs>
+      {Array.from({ length: count }, (_, index) => {
+        const cx = index * pitch + pitch / 2
+        const cy = pitch / 2
+        if (total <= 0) {
+          return (
+            <circle
+              key={index}
+              className="browser-run-track-scan"
+              cx={cx}
+              cy={cy}
+              r={radius}
+              fill="var(--browser-run-lit)"
+              style={{
+                animationDelay: `${(index * 0.09).toFixed(2)}s`,
+                animationPlayState: live ? 'running' : 'paused',
+              }}
+            />
+          )
+        }
+        if (index < filled - 1) {
+          return <circle key={index} cx={cx} cy={cy} r={radius} fill="var(--browser-run-lit)" opacity={0.5} />
+        }
+        if (index === filled - 1) {
+          return (
+            <Fragment key={index}>
+              <circle cx={cx} cy={cy} r={radius + 0.6} fill="var(--browser-run-glow)" filter={`url(#${glowId})`} />
+              <circle cx={cx} cy={cy} r={radius} fill="var(--browser-run-lit)" />
+            </Fragment>
+          )
+        }
+        return <circle key={index} cx={cx} cy={cy} r={radius} fill="var(--browser-run-unlit)" />
+      })}
+    </svg>
   )
 }
 
@@ -2216,8 +2361,20 @@ const BrowserRunCard = ({
   // this card matches the same amber/blue/green "attention/working/done"
   // language instead of inventing a parallel palette.
   const statusKey = isAwaitingInput ? 'prepare' : streaming ? 'render' : 'ready'
+  const tone = isAwaitingInput ? 'is-waiting' : streaming ? 'is-live' : 'is-done'
   const displayUrl = formatBrowserUrl(progress.url)
-  const elapsed = formatBrowserElapsed(progress.elapsedSec)
+  const frame = liveFrame || progress.screenshot?.previewUrl || ''
+  const elapsedSeconds = useBrowserElapsed(progress.elapsedSec, streaming)
+  const clock = formatBrowserClock(elapsedSeconds)
+  // Only trustworthy while the run is live: on a reloaded transcript the
+  // stored elapsed is a duration from some past run, so "now minus it" would
+  // name a start time that never happened.
+  const startedAt = streaming ? formatBrowserStartedAt(elapsedSeconds) : ''
+  const step = typeof progress.step === 'number' ? progress.step : null
+  const maxSteps = typeof progress.maxSteps === 'number' && progress.maxSteps > 0 ? progress.maxSteps : null
+  const trail = (progress.trail || []).slice(-3)
+  const headline = String(progress.description || '').trim()
+    || (isAwaitingInput ? 'Paused until you answer' : streaming ? 'Working…' : 'Browser run finished')
 
   const submitAnswer = async () => {
     if (!requestId || busy) return
@@ -2283,34 +2440,80 @@ const BrowserRunCard = ({
   }
 
   return (
-    <div className={`slide-build-card browser-run-card${streaming ? ' streaming' : ''}`} role="status" aria-live="polite">
-      <BrowserRunMark live={streaming} />
-      <div className="slide-build-head">
+    <div
+      className={`slide-build-card browser-run-card ${tone}${streaming ? ' streaming' : ''}`}
+      role="status"
+      aria-live="polite"
+    >
+      <div className="browser-run-head">
         <span className="docs-progress-kicker">
-          <Globe size={12} aria-hidden style={{ marginRight: 5, verticalAlign: -2 }} />
+          <Globe size={12} aria-hidden />
           Browser agent
         </span>
         <span className={`docs-progress-stage ${statusKey}`}>{statusLabel}</span>
       </div>
-      <div className="slide-build-main">
-        {(liveFrame || progress.screenshot?.previewUrl) && (
-          <figure className="browser-run-live-frame" onClick={() => setExpanded(true)}>
-            {Boolean(liveFrame) && <span className="browser-run-live-dot" aria-hidden="true" />}
-            <img src={liveFrame || progress.screenshot?.previewUrl || ''} alt={progress.pageTitle || 'Live browser view'} draggable={false} />
-            <span className="browser-run-expand-affordance" aria-hidden="true">
-              <Maximize2 size={13} />
+      <div className="browser-run-body">
+        {Boolean(frame) && (
+          <figure className="browser-run-viewport" onClick={() => setExpanded(true)}>
+            {/* The live still is framed as the browser window it actually is,
+                so the URL bar carries the location instead of it being a
+                stray chip in the meta row. */}
+            <div className="browser-run-chrome">
+              <span className="browser-run-chrome-dots" aria-hidden="true"><i /><i /><i /></span>
+              <span className="browser-run-chrome-url" title={progress.url || ''}>
+                {displayUrl || 'opening…'}
+              </span>
+              {Boolean(liveFrame) && <span className="browser-run-livetag">Live</span>}
+            </div>
+            <span className="browser-run-shot">
+              <img src={frame} alt={progress.pageTitle || 'Live browser view'} draggable={false} />
+              <span className="browser-run-expand" aria-hidden="true">
+                <Maximize2 size={13} />
+              </span>
             </span>
           </figure>
         )}
-        <div className="slide-build-copy">
-          {progress.description && <div className="docs-progress-label">{progress.description}</div>}
-          <div className="browser-run-meta">
-            {typeof progress.step === 'number' && (
-              <span>Step {progress.step}{progress.maxSteps ? `/${progress.maxSteps}` : ''}</span>
+        <div className="browser-run-stage">
+          {/* Before the first still lands there is no URL bar to carry the
+              location, so it gets its own line rather than disappearing. */}
+          {!frame && Boolean(displayUrl) && (
+            <div className="browser-run-locus" title={progress.url || ''}>{displayUrl}</div>
+          )}
+          <div className="browser-run-action">{headline}</div>
+          <div className="browser-run-instruments">
+            <div className="browser-run-readout">
+              <BrowserMatrixReadout text={clock} />
+              <span className="browser-run-readout-label">
+                <b>Elapsed</b>
+                {Boolean(startedAt) && <span>started {startedAt}</span>}
+              </span>
+            </div>
+            {step !== null && (
+              <div className="browser-run-track">
+                {(maxSteps !== null || streaming) && (
+                  <BrowserStepTrack step={step} maxSteps={maxSteps} live={streaming} />
+                )}
+                <span className="browser-run-track-label">
+                  {maxSteps !== null ? `Step ${step} / ${maxSteps}` : `Step ${step}`}
+                </span>
+              </div>
             )}
-            {elapsed && <span>{elapsed}</span>}
-            {displayUrl && <span className="browser-run-url" title={progress.url || ''}>{displayUrl}</span>}
           </div>
+          {trail.length > 0 && (
+            <ol className="browser-run-trail">
+              {trail.map((entry, index) => (
+                <li
+                  key={`${entry.step ?? 'step'}-${index}`}
+                  className={index === trail.length - 1 ? 'is-latest' : undefined}
+                >
+                  {entry.step !== null && (
+                    <span className="browser-run-trail-step">{String(entry.step).padStart(2, '0')}</span>
+                  )}
+                  <span className="browser-run-trail-text" title={entry.text}>{entry.text}</span>
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
       </div>
       {interrupt && (
@@ -2372,9 +2575,9 @@ const BrowserRunCard = ({
           ) : null}
         </div>
       )}
-      {expanded && (liveFrame || progress.screenshot?.previewUrl) && createPortal(
+      {expanded && Boolean(frame) && createPortal(
         <div className="deck-preview-lightbox" onClick={() => setExpanded(false)}>
-          <img src={liveFrame || progress.screenshot?.previewUrl || ''} alt={progress.pageTitle || 'Live browser view'} className="deck-preview-full" />
+          <img src={frame} alt={progress.pageTitle || 'Live browser view'} className="deck-preview-full" />
           <div className="deck-preview-lightbox-meta">{progress.pageTitle || displayUrl}</div>
         </div>,
         document.body,
@@ -5471,7 +5674,7 @@ export default function App() {
           supportingArtifacts: nextTask.supportingArtifacts ?? item.supportingArtifacts,
           sources: nextTask.sources ?? item.sources,
           slideProgress: nextTask.slideProgress ?? item.slideProgress,
-          browserProgress: nextTask.browserProgress ?? item.browserProgress,
+          browserProgress: mergeBrowserProgress(item.browserProgress, nextTask.browserProgress),
         }
       })
     })
@@ -5942,7 +6145,7 @@ export default function App() {
         alphaTerminalLog: mergeAlphaTerminalLogs(existingMessage?.alphaTerminalLog, stream.alphaTerminalLog),
         progress: stream.progress ?? existingMessage?.progress,
         slideProgress: stream.slideProgress ?? existingMessage?.slideProgress,
-        browserProgress: stream.browserProgress ?? existingMessage?.browserProgress,
+        browserProgress: mergeBrowserProgress(existingMessage?.browserProgress, stream.browserProgress),
         producedArtifacts: stream.producedArtifacts ?? existingMessage?.producedArtifacts,
         supportingArtifacts: stream.supportingArtifacts ?? existingMessage?.supportingArtifacts,
         responseBlocks: stream.responseBlocks ?? existingMessage?.responseBlocks,
@@ -6999,7 +7202,7 @@ export default function App() {
             alphaTerminalLog: appendAlphaTerminalEntry(current.alphaTerminalLog, alphaTerminalEntry),
             progress: alphaTerminalEntry ? current.progress : (progressState ?? current.progress),
             slideProgress: alphaTerminalEntry ? current.slideProgress : (incomingSlideProgress ?? current.slideProgress),
-            browserProgress: alphaTerminalEntry ? current.browserProgress : (incomingBrowserProgress ?? current.browserProgress),
+            browserProgress: alphaTerminalEntry ? current.browserProgress : mergeBrowserProgress(current.browserProgress, incomingBrowserProgress),
             completed: false,
           }))
           return
@@ -7250,7 +7453,7 @@ export default function App() {
                 : message.browserConsoleAnchors,
               progress: alphaTerminalEntry ? message.progress : (progressState ?? message.progress),
               slideProgress: alphaTerminalEntry ? message.slideProgress : (incomingSlideProgress ?? message.slideProgress),
-              browserProgress: alphaTerminalEntry ? message.browserProgress : (incomingBrowserProgress ?? message.browserProgress),
+              browserProgress: alphaTerminalEntry ? message.browserProgress : mergeBrowserProgress(message.browserProgress, incomingBrowserProgress),
               stopped: false,
             }
           })
