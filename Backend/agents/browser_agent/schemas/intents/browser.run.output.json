@@ -32,6 +32,24 @@
     },
     "next_action": {"type": "string"},
     "credential_hint": {"type": "string"},
+    "artifacts": {
+      "type": "array",
+      "description": "Long extracts the run offloaded to its own note store, saved as readable files. When `answer` summarizes or points at one of these, load it with artifact_read using the entry's `path` before answering from the summary alone.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {"type": "string"},
+          "path": {"type": "string", "description": "Logical path to pass to artifact_read."},
+          "mime": {"type": "string"},
+          "filename": {"type": "string"},
+          "audience": {"type": "string"},
+          "note_id": {"type": "string", "description": "The run's internal note id this file came from."},
+          "title": {"type": "string"},
+          "contains": {"type": "string", "description": "One-line description of what was offloaded."}
+        }
+      }
+    },
+    "artifact_hint": {"type": "string"},
     "user_interrupts": {
       "type": "array",
       "description": "Every AskUser question raised mid-run and its outcome, for post-hoc visibility only — these were resolved directly between the browser agent and the desktop, not by the orchestrator. Answers to password/verification_code questions are never included, only whether one was provided.",

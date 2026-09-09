@@ -424,6 +424,13 @@ interface BrowserProgressState {
   elapsedSec?: number | null
   screenshot?: BrowserProgressScreenshot | null
   interrupt?: BrowserProgressInterrupt | null
+  /** Terminal marker stamped by the agent when the run itself ends. The card
+   * cannot infer this from `streaming`, which tracks the whole assistant
+   * response — the orchestrator keeps writing long after its specialist
+   * finished, which left the card reading "Running" with a live clock while
+   * the answer was already on screen. Absent on runs that predate it, which
+   * simply falls back to the old streaming-only behaviour. */
+  phase?: 'running' | 'finished' | 'failed' | 'cancelled'
   /** Steps the run has already finished, oldest first. The agent only ever
    * reports the step it is on right now, so this is accumulated client-side
    * as progress events land (see mergeBrowserProgress) — without it the card
@@ -1836,6 +1843,11 @@ const normalizeBrowserProgress = (value: unknown): BrowserProgressState | undefi
     url: typeof raw.url === 'string' ? raw.url : null,
     pageTitle: typeof raw.page_title === 'string' ? raw.page_title : null,
     elapsedSec: typeof raw.elapsed_sec === 'number' ? raw.elapsed_sec : null,
+    phase: raw.phase === 'finished' || raw.phase === 'failed' || raw.phase === 'cancelled'
+      ? raw.phase
+      : raw.phase === 'running'
+        ? 'running'
+        : undefined,
     screenshot,
     interrupt,
     // Live state gets folded back into event payloads on the task-mirror
@@ -2338,6 +2350,7 @@ const BrowserRunCard = ({
   liveFrame?: string
 }) => {
   const [expanded, setExpanded] = useState(false)
+  const [frameFailed, setFrameFailed] = useState(false)
   const [answer, setAnswer] = useState('')
   const [busy, setBusy] = useState<'answer' | 'skip' | null>(null)
   const [error, setError] = useState('')
@@ -2355,26 +2368,81 @@ const BrowserRunCard = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestId])
 
-  const isAwaitingInput = Boolean(interrupt) && localStatus === 'pending'
-  const statusLabel = isAwaitingInput ? 'Waiting for you' : streaming ? 'Running' : 'Done'
+  useEffect(() => {
+    setFrameFailed(false)
+  }, [liveFrame, progress.screenshot?.previewUrl])
+
+  // `streaming` is the whole assistant response's state; `phase` is the run's
+  // own. The run almost always ends first, so everything that means "still
+  // happening" keys off `live`, not off `streaming`.
+  const runEnded = Boolean(progress.phase && progress.phase !== 'running')
+  const live = streaming && !runEnded
+  const isAwaitingInput = Boolean(interrupt) && localStatus === 'pending' && !runEnded
+  const statusLabel = isAwaitingInput
+    ? 'Waiting for you'
+    : progress.phase === 'failed'
+      ? 'Failed'
+      : progress.phase === 'cancelled'
+        ? 'Stopped'
+        : live
+          ? 'Running'
+          : 'Done'
   // Reuses the Slide Agent's stage color tokens (.docs-progress-stage.*) so
   // this card matches the same amber/blue/green "attention/working/done"
   // language instead of inventing a parallel palette.
-  const statusKey = isAwaitingInput ? 'prepare' : streaming ? 'render' : 'ready'
-  const tone = isAwaitingInput ? 'is-waiting' : streaming ? 'is-live' : 'is-done'
+  const statusKey = isAwaitingInput
+    ? 'prepare'
+    : progress.phase === 'failed' || progress.phase === 'cancelled'
+      ? 'failed'
+      : live
+        ? 'render'
+        : 'ready'
+  const tone = isAwaitingInput ? 'is-waiting' : live ? 'is-live' : 'is-done'
   const displayUrl = formatBrowserUrl(progress.url)
-  const frame = liveFrame || progress.screenshot?.previewUrl || ''
-  const elapsedSeconds = useBrowserElapsed(progress.elapsedSec, streaming)
+  const resolvedFrame = liveFrame || progress.screenshot?.previewUrl || ''
+  const frame = frameFailed && !liveFrame ? '' : resolvedFrame
+  const elapsedSeconds = useBrowserElapsed(progress.elapsedSec, live)
   const clock = formatBrowserClock(elapsedSeconds)
   // Only trustworthy while the run is live: on a reloaded transcript the
   // stored elapsed is a duration from some past run, so "now minus it" would
   // name a start time that never happened.
-  const startedAt = streaming ? formatBrowserStartedAt(elapsedSeconds) : ''
+  const startedAt = live ? formatBrowserStartedAt(elapsedSeconds) : ''
   const step = typeof progress.step === 'number' ? progress.step : null
   const maxSteps = typeof progress.maxSteps === 'number' && progress.maxSteps > 0 ? progress.maxSteps : null
   const trail = (progress.trail || []).slice(-3)
   const headline = String(progress.description || '').trim()
-    || (isAwaitingInput ? 'Paused until you answer' : streaming ? 'Working…' : 'Browser run finished')
+    || (isAwaitingInput ? 'Paused until you answer' : live ? 'Working…' : 'Browser run finished')
+
+  // The expanded view samples the live feed instead of following it frame for
+  // frame: a full-viewport lightbox re-decoding a fresh multi-hundred-KB data
+  // URI at up to 1500px on every screencast frame is what made opening it feel
+  // like the app had hung. Still visibly live, at a fraction of the cost.
+  const frameRef = useRef(frame)
+  frameRef.current = frame
+  const [zoomFrame, setZoomFrame] = useState('')
+  useEffect(() => {
+    if (!expanded) {
+      setZoomFrame('')
+      return undefined
+    }
+    setZoomFrame(frameRef.current)
+    const timer = window.setInterval(() => setZoomFrame(frameRef.current), 700)
+    return () => window.clearInterval(timer)
+  }, [expanded])
+
+  // Never let the lightbox become a trap: it covers the whole window, so it
+  // needs a key that always closes it, not just a click on the backdrop.
+  useEffect(() => {
+    if (!expanded) return undefined
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        setExpanded(false)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [expanded])
 
   const submitAnswer = async () => {
     if (!requestId || busy) return
@@ -2441,7 +2509,7 @@ const BrowserRunCard = ({
 
   return (
     <div
-      className={`slide-build-card browser-run-card ${tone}${streaming ? ' streaming' : ''}`}
+      className={`slide-build-card browser-run-card ${tone}${live ? ' streaming' : ''}`}
       role="status"
       aria-live="polite"
     >
@@ -2463,10 +2531,18 @@ const BrowserRunCard = ({
               <span className="browser-run-chrome-url" title={progress.url || ''}>
                 {displayUrl || 'opening…'}
               </span>
-              {Boolean(liveFrame) && <span className="browser-run-livetag">Live</span>}
+              {Boolean(liveFrame) && live && <span className="browser-run-livetag">Live</span>}
             </div>
             <span className="browser-run-shot">
-              <img src={frame} alt={progress.pageTitle || 'Live browser view'} draggable={false} />
+              <img
+                src={frame}
+                alt={progress.pageTitle || 'Live browser view'}
+                draggable={false}
+                decoding="async"
+                // A restored transcript can carry a preview URL whose signature
+                // has expired; drop the frame rather than show a broken image.
+                onError={() => setFrameFailed(true)}
+              />
               <span className="browser-run-expand" aria-hidden="true">
                 <Maximize2 size={13} />
               </span>
@@ -2490,8 +2566,8 @@ const BrowserRunCard = ({
             </div>
             {step !== null && (
               <div className="browser-run-track">
-                {(maxSteps !== null || streaming) && (
-                  <BrowserStepTrack step={step} maxSteps={maxSteps} live={streaming} />
+                {(maxSteps !== null || live) && (
+                  <BrowserStepTrack step={step} maxSteps={maxSteps} live={live} />
                 )}
                 <span className="browser-run-track-label">
                   {maxSteps !== null ? `Step ${step} / ${maxSteps}` : `Step ${step}`}
@@ -2576,8 +2652,24 @@ const BrowserRunCard = ({
         </div>
       )}
       {expanded && Boolean(frame) && createPortal(
-        <div className="deck-preview-lightbox" onClick={() => setExpanded(false)}>
-          <img src={frame} alt={progress.pageTitle || 'Live browser view'} className="deck-preview-full" />
+        <div className="deck-preview-lightbox browser-run-lightbox" onClick={() => setExpanded(false)}>
+          <img
+            src={zoomFrame || frame}
+            alt={progress.pageTitle || 'Live browser view'}
+            className="deck-preview-full"
+            decoding="async"
+          />
+          <button
+            type="button"
+            className="browser-run-lightbox-close"
+            onClick={(event) => {
+              event.stopPropagation()
+              setExpanded(false)
+            }}
+            aria-label="Close expanded view"
+          >
+            <X size={16} />
+          </button>
           <div className="deck-preview-lightbox-meta">{progress.pageTitle || displayUrl}</div>
         </div>,
         document.body,
@@ -4787,7 +4879,7 @@ const AssistantAlphaStreamBody = ({
         if (segment.kind === 'alpha_console') {
           return (
             <AlphaAgentConsole
-              key={`alpha-console-${segment.taskId || 'default'}-${index}`}
+              key={`alpha-console-${segment.taskId || 'default'}`}
               entries={message.activityLog}
               terminalLog={message.alphaTerminalLog}
               requestId={message.requestId}
@@ -4800,7 +4892,7 @@ const AssistantAlphaStreamBody = ({
         if (segment.kind === 'browser_run') {
           return message.browserProgress ? (
             <BrowserRunCard
-              key={`browser-run-${segment.taskId || 'default'}-${index}`}
+              key={`browser-run-${segment.taskId || 'default'}`}
               progress={message.browserProgress}
               streaming={browserStreaming}
               liveFrame={browserLiveFrame}

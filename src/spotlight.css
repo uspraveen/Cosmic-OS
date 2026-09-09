@@ -5116,9 +5116,12 @@ kbd {
 .browser-run-card {
   position: relative;
   overflow: hidden;
-  --browser-run-lit: rgba(214, 240, 255, 0.95);
-  --browser-run-glow: rgba(124, 200, 255, 0.55);
-  --browser-run-unlit: rgba(255, 255, 255, 0.055);
+  /* Neutral by design: the dots are an instrument, not an accent. Colour on
+     this card is reserved for the status pill and for the one state that is
+     actually asking for something (is-waiting, below). */
+  --browser-run-lit: rgba(238, 241, 245, 0.95);
+  --browser-run-glow: rgba(255, 255, 255, 0.34);
+  --browser-run-unlit: rgba(255, 255, 255, 0.05);
 }
 
 /* Tones track the same attention / working / done language as the
@@ -5129,8 +5132,16 @@ kbd {
 }
 
 .browser-run-card.is-done {
-  --browser-run-lit: rgba(255, 255, 255, 0.6);
-  --browser-run-glow: rgba(255, 255, 255, 0.12);
+  --browser-run-lit: rgba(255, 255, 255, 0.56);
+  --browser-run-glow: rgba(255, 255, 255, 0.1);
+}
+
+/* No stage token exists for a run that ended badly — the other progress
+   cards have no failure state — so this one is scoped to the card. */
+.browser-run-card .docs-progress-stage.failed {
+  color: rgba(255, 198, 198, 0.98);
+  background: rgba(190, 70, 70, 0.16);
+  border-color: rgba(190, 70, 70, 0.26);
 }
 
 .browser-run-head {
@@ -5309,6 +5320,9 @@ kbd {
   flex-direction: column;
   align-items: flex-start;
   gap: 10px;
+  /* Set in from the copy above and the trail below, so the cluster reads as
+     instrumentation rather than as another line of text. */
+  margin-left: 12px;
 }
 
 /* A recessed panel so the matrix reads as a display rather than as more
@@ -5320,11 +5334,11 @@ kbd {
   max-width: 100%;
   padding: 7px 11px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.055);
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0.26), rgba(0, 0, 0, 0.13));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: linear-gradient(180deg, #05060a, #010203);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.03),
-    inset 0 0 22px rgba(0, 0, 0, 0.26);
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    inset 0 0 26px rgba(0, 0, 0, 0.6);
 }
 
 .browser-run-matrix,
@@ -5452,6 +5466,39 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The deck preview blurs the whole viewport behind itself, which is fine for
+   a static slide. Behind a live screencast it re-composites on every frame,
+   which is what made expanding the browser card feel like a freeze. The
+   backdrop here is already all but opaque, so the blur bought nothing. */
+.deck-preview-lightbox.browser-run-lightbox {
+  backdrop-filter: none;
+  background: rgba(3, 4, 6, 0.94);
+}
+
+.browser-run-lightbox-close {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(16, 18, 22, 0.85);
+  color: rgba(255, 255, 255, 0.86);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.browser-run-lightbox-close:hover {
+  background: rgba(30, 33, 40, 0.92);
+  border-color: rgba(255, 255, 255, 0.24);
+  color: #fff;
 }
 
 .browser-run-interrupt {

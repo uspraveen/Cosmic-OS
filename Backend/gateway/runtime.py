@@ -20866,6 +20866,23 @@ class GatewayRuntime:
                 if request_state is not None and request_state.alpha_console_anchors
                 else self._alpha_console_anchors_from_terminal_log(alpha_terminal_log)
             )
+            # The live browser card is driven entirely by browser_progress, and
+            # until now that only ever existed on the in-flight stream — so
+            # reopening the response screen (which rebuilds messages from
+            # stored history) dropped the card entirely, exactly the way the
+            # Alpha console would if alpha_terminal_log were not persisted
+            # right below. Carried from the request state, falling back to the
+            # task notebook for a run that finished in the background.
+            browser_progress = (
+                event.get("browser_progress")
+                if isinstance(event.get("browser_progress"), dict)
+                else request_state.browser_progress
+                if request_state is not None and isinstance(request_state.browser_progress, dict)
+                else task_notebook.get("browser_progress")
+                if isinstance(task_notebook, dict)
+                and isinstance(task_notebook.get("browser_progress"), dict)
+                else None
+            )
             assistant_message_id = store_assistant_message(
                 str(event.get("content") or ""),
                 awaiting_reply=bool(event.get("awaiting_reply")),
@@ -20899,6 +20916,7 @@ class GatewayRuntime:
                     "activity_log": activity_log,
                     "alpha_terminal_log": alpha_terminal_log,
                     "alpha_console_anchors": alpha_console_anchors,
+                    "browser_progress": browser_progress,
                 },
                 channel=event_channel,
                 route="opus",

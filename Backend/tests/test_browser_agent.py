@@ -442,3 +442,123 @@ def test_run_goal_with_missing_home_fails_gracefully(tmp_path, monkeypatch):
     config = BrowserAgentConfig.from_env()
     with pytest.raises(RuntimeError, match="checkout not found"):
         config.ensure_import_path()
+
+
+# ── Large-note handoff ────────────────────────────────────────────────────
+# cosmic-browser-use parks long extracts in its own large_notes.jsonl and
+# leaves a `[LargeNote:ln_...]` pointer behind. The final answer is lifted from
+# the run's last note, so a run whose report was offloaded used to hand the
+# orchestrator a pointer into a store it cannot reach.
+
+def _write_large_notes(run_dir: Path, entries: list[dict]) -> None:
+    import json
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with open(run_dir / "large_notes.jsonl", "w", encoding="utf-8") as handle:
+        for entry in entries:
+            handle.write(json.dumps(entry) + "\n")
+
+
+def test_persist_large_notes_writes_readable_artifacts(browser_agent, tmp_path):
+    run_dir = tmp_path / "run"
+    _write_large_notes(run_dir, [
+        {
+            "id": "ln_20260909_003440_00001",
+            "title": "Antler US residency report",
+            "contains": "cohort dates and deadlines",
+            "why": "too long for a normal note",
+            "summary": "Applications reviewed year-round.",
+            "url": "https://www.antler.co/locations/usa",
+            "content": "# Findings\nApplications are open year-round.",
+        },
+    ])
+
+    manifests, refs, paths = browser_agent._persist_large_notes(_task({}), str(run_dir))
+
+    assert len(manifests) == 1 and len(refs) == 1
+    note_path = paths["ln_20260909_003440_00001"]
+    # The orchestrator's artifact_read takes this logical form.
+    assert note_path.startswith("runs/artifacts/")
+    assert refs[0]["path"] == note_path
+    assert refs[0]["mime"] == "text/markdown"
+    assert refs[0]["contains"] == "cohort dates and deadlines"
+    assert manifests[0].audience == "supporting"
+    assert manifests[0].source_url == "https://www.antler.co/locations/usa"
+
+    written = (browser_agent.artifacts_root / Path(note_path).relative_to("runs/artifacts")).read_text(encoding="utf-8")
+    assert "Applications are open year-round." in written
+    assert "Antler US residency report" in written
+    assert "https://www.antler.co/locations/usa" in written
+
+
+def test_persist_large_notes_skips_empty_and_malformed_lines(browser_agent, tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "large_notes.jsonl").write_text(
+        '\n{"id": "ln_1", "content": "kept"}\nnot json\n{"id": "ln_2", "content": "   "}\n{"no_id": true}\n',
+        encoding="utf-8",
+    )
+
+    manifests, refs, paths = browser_agent._persist_large_notes(_task({}), str(run_dir))
+
+    assert list(paths) == ["ln_1"]
+    assert len(manifests) == len(refs) == 1
+
+
+def test_persist_large_notes_without_a_store_is_a_no_op(browser_agent, tmp_path):
+    assert browser_agent._persist_large_notes(_task({}), "") == ([], [], {})
+    assert browser_agent._persist_large_notes(_task({}), str(tmp_path / "missing")) == ([], [], {})
+
+
+def test_resolve_large_note_pointers_points_at_the_artifact(browser_agent):
+    answer = (
+        "[LargeNote:ln_1 | contains: cohort dates | source: antler.co | "
+        "why: too long | summary: open year-round]"
+    )
+    resolved = browser_agent._resolve_large_note_pointers(
+        answer,
+        {"ln_1": "runs/artifacts/t_browser_1/browser_agent/notes/ln_1.md"},
+    )
+    assert "runs/artifacts/t_browser_1/browser_agent/notes/ln_1.md" in resolved
+    assert "artifact_read" in resolved
+    # The pointer's own one-line description is genuinely useful — keep it.
+    assert "contains: cohort dates" in resolved
+    assert "[LargeNote:ln_1" not in resolved
+
+
+def test_resolve_large_note_pointers_leaves_a_plain_answer_alone(browser_agent):
+    answer = "Applications are open year-round."
+    assert browser_agent._resolve_large_note_pointers(answer, {"ln_1": "p.md"}) == answer
+    assert browser_agent._resolve_large_note_pointers(answer, {}) == answer
+
+
+# ── Terminal progress ─────────────────────────────────────────────────────
+# The desktop card's only other signal is whether the assistant's whole
+# response is still streaming, which outlives the run by a long way.
+
+@pytest.mark.asyncio
+async def test_emit_terminal_progress_marks_the_run_over(browser_agent):
+    emitted: list[dict] = []
+
+    async def fake_emit_event(task_id, event_type, payload):
+        emitted.append({"task_id": task_id, "type": event_type, **payload})
+
+    browser_agent.emit_event = fake_emit_event
+    live_state = {"step": 7, "description": "Read the results", "interrupt": {"request_id": "r1"}}
+
+    await browser_agent._emit_terminal_progress(
+        _task({}),
+        live_state,
+        phase="finished",
+        status="success",
+        message="Browser run finished: success (7 steps)",
+    )
+
+    assert len(emitted) == 1
+    progress = emitted[0]["browser_progress"]
+    assert progress["phase"] == "finished"
+    assert progress["status"] == "success"
+    # A question that was never answered must not outlive the run.
+    assert "interrupt" not in progress
+    # The last step's context is kept, so the card still reads sensibly.
+    assert progress["step"] == 7

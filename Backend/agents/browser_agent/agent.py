@@ -26,7 +26,7 @@ from typing import Any
 from uuid import uuid4
 
 from shared.agent_runtime import AgentResult, AgentRuntime, TaskEnvelope
-from shared.contracts import AgentError
+from shared.contracts import AgentError, ArtifactManifest
 from shared.sqlite_client import connect_sync
 
 from .config import AGENT_ROOT, BrowserAgentConfig
@@ -250,6 +250,13 @@ class BrowserAgent(AgentRuntime):
                 screenshot=live_state.get("screenshot"),
                 run_dir=None,
             )
+            await self._emit_terminal_progress(
+                task,
+                live_state,
+                phase="cancelled",
+                status="cancelled",
+                message="Browser run stopped by the user.",
+            )
             return self._failed("CANCELLED", "Browser run was stopped by the user.", retryable=False, next_action="skip")
         except BrowserRunError as exc:
             self._record_session_run(
@@ -260,6 +267,13 @@ class BrowserAgent(AgentRuntime):
                 target_url=live_state.get("url"),
                 screenshot=live_state.get("screenshot"),
                 run_dir=None,
+            )
+            await self._emit_terminal_progress(
+                task,
+                live_state,
+                phase="failed",
+                status="failed",
+                message="Browser run failed.",
             )
             return self._failed("BROWSER_RUN_FAILED", str(exc), retryable=False, next_action="escalate")
         except Exception as exc:
@@ -273,6 +287,13 @@ class BrowserAgent(AgentRuntime):
                 screenshot=live_state.get("screenshot"),
                 run_dir=None,
             )
+            await self._emit_terminal_progress(
+                task,
+                live_state,
+                phase="failed",
+                status="failed",
+                message="Browser run failed.",
+            )
             return self._failed("INTERNAL_ERROR", f"Browser run failed: {exc}", retryable=False, next_action="escalate")
 
         self._post_run_usage(task, result)
@@ -281,6 +302,11 @@ class BrowserAgent(AgentRuntime):
         needs_credentials = result.get("needs_credentials")
         answer = str(result.get("answer") or "")
         run_dir = str(result.get("run_dir") or "")
+        # Anything the run offloaded to its own large-note store becomes a
+        # real artifact here, and the dangling pointers the answer may carry
+        # are rewritten to name it — see _persist_large_notes.
+        note_manifests, note_refs, note_paths = self._persist_large_notes(task, run_dir)
+        answer = self._resolve_large_note_pointers(answer, note_paths)
         output: dict[str, Any] = {
             "goal": goal,
             "status": status,
@@ -289,6 +315,12 @@ class BrowserAgent(AgentRuntime):
             "duration_sec": result.get("duration_sec"),
             "run_dir": run_dir,
         }
+        if note_refs:
+            output["artifacts"] = note_refs
+            output["artifact_hint"] = (
+                "The run offloaded long extracts to these files. Load one with "
+                "artifact_read using its path before answering from the summary alone."
+            )
         if interrupt_log:
             # Post-hoc visibility only — the orchestrator was never in the
             # real-time loop for any of these (they're resolved directly
@@ -314,11 +346,14 @@ class BrowserAgent(AgentRuntime):
             screenshot=live_state.get("screenshot"),
             run_dir=run_dir or None,
         )
-        await self._emit_progress(
-            task.task_id,
-            f"Browser run finished: {status} ({output['steps_taken']} steps)",
+        await self._emit_terminal_progress(
+            task,
+            live_state,
+            phase="finished",
+            status=status,
+            message=f"Browser run finished: {status} ({output['steps_taken']} steps)",
         )
-        return AgentResult(status="completed", output=output, artifacts=[], error=None)
+        return AgentResult(status="completed", output=output, artifacts=note_manifests, error=None)
 
     async def handle_browser_recall_session(self, task: TaskEnvelope) -> AgentResult:
         """Look up prior browser.run work for a session. No browser is launched —
@@ -646,6 +681,175 @@ class BrowserAgent(AgentRuntime):
             browser_progress=dict(live_state),
         )
 
+    async def _emit_terminal_progress(
+        self,
+        task: TaskEnvelope,
+        live_state: dict[str, Any],
+        *,
+        phase: str,
+        status: str,
+        message: str,
+    ) -> None:
+        """Stamp the run as over on the live-progress channel.
+
+        Without this the desktop card has no way to know: its only other
+        signal is whether the *assistant's whole response* is still streaming,
+        and the orchestrator keeps writing long after its specialist finished
+        — so the card sat at "Running" with a ticking clock while the answer
+        was already being written. Reuses the same browser_progress channel
+        the per-step readings ride on, so nothing new has to be plumbed."""
+        live_state["phase"] = phase
+        live_state["status"] = status
+        live_state.pop("interrupt", None)
+        await self._emit_progress(
+            task.task_id,
+            message,
+            browser_progress=dict(live_state),
+        )
+
+    def _persist_large_notes(
+        self,
+        task: TaskEnvelope,
+        run_dir: str,
+    ) -> tuple[list[ArtifactManifest], list[dict[str, str]], dict[str, str]]:
+        """Surface the run's offloaded large notes as real COSMIC artifacts.
+
+        cosmic-browser-use parks big extracts (long tables, article bodies,
+        DOM dumps) in its own `large_notes.jsonl` under the run directory and
+        leaves a `[LargeNote:ln_...]` pointer in the agent's in-context notes.
+        Those pointers are meaningful only inside that run's own process — but
+        they leak outward, because the final answer is lifted from the last
+        note, so a run whose report was offloaded hands the orchestrator a
+        pointer to a store it cannot reach. It then tries `artifact_read` on
+        the pointer text and gets nothing.
+
+        Writing each note into the task's artifact dir the way the Firecrawl
+        agent writes scrape bodies closes that gap with the pipeline that
+        already exists: the orchestrator reads them with the same
+        `artifact_read(path=...)` it uses for every other specialist's files.
+
+        Returns (manifests, compact refs, {note_id: logical_path}).
+        """
+        manifests: list[ArtifactManifest] = []
+        refs: list[dict[str, str]] = []
+        paths_by_id: dict[str, str] = {}
+        if not run_dir:
+            return manifests, refs, paths_by_id
+        source = Path(run_dir) / "large_notes.jsonl"
+        if not source.is_file():
+            return manifests, refs, paths_by_id
+        try:
+            lines = source.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            logger.debug("browser_agent.large_notes_read_failed task_id=%s", task.task_id, exc_info=True)
+            return manifests, refs, paths_by_id
+
+        notes_dir = self.artifacts_root / task.task_id / "browser_agent" / "notes"
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            note_id = str(entry.get("id") or "").strip()
+            content = str(entry.get("content") or "")
+            if not note_id or not content.strip():
+                continue
+            body = self._render_large_note(entry)
+            try:
+                notes_dir.mkdir(parents=True, exist_ok=True)
+                destination = notes_dir / f"{self._safe_filename(note_id)}.md"
+                destination.write_text(body, encoding="utf-8")
+            except OSError:
+                logger.debug(
+                    "browser_agent.large_note_write_failed task_id=%s note_id=%s",
+                    task.task_id,
+                    note_id,
+                    exc_info=True,
+                )
+                continue
+            logical_path = self._logical_artifact_path(destination)
+            manifest = ArtifactManifest(
+                artifact_id=f"art_{uuid4().hex[:12]}",
+                task_id=task.task_id,
+                mime="text/markdown",
+                sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                path=logical_path,
+                source_url=str(entry.get("url") or "") or None,
+                created_by_agent=self.agent_id,
+                audience="supporting",
+            )
+            manifests.append(manifest)
+            ref: dict[str, str] = {
+                "artifact_id": manifest.artifact_id,
+                "path": logical_path,
+                "mime": "text/markdown",
+                "filename": destination.name,
+                "audience": "supporting",
+                "note_id": note_id,
+            }
+            title = str(entry.get("title") or "").strip()
+            contains = str(entry.get("contains") or "").strip()
+            if title:
+                ref["title"] = title[:160]
+            if contains:
+                ref["contains"] = contains[:200]
+            refs.append(ref)
+            paths_by_id[note_id] = logical_path
+        return manifests, refs, paths_by_id
+
+    @staticmethod
+    def _render_large_note(entry: dict[str, Any]) -> str:
+        """The note's own metadata as a small front-matter block, then the
+        body — so a reader landing on the file alone knows what it is and
+        where it came from."""
+        header = [f"# {str(entry.get('title') or entry.get('id') or 'Browser note').strip()}"]
+        for label, key in (("Contains", "contains"), ("Why", "why"), ("Summary", "summary"), ("Source", "url")):
+            value = str(entry.get(key) or "").strip()
+            if value:
+                header.append(f"- **{label}:** {value}")
+        header.append("")
+        return "\n".join(header) + "\n" + str(entry.get("content") or "")
+
+    @staticmethod
+    def _safe_filename(value: str) -> str:
+        cleaned = "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in str(value))
+        return cleaned.strip("-") or "note"
+
+    def _logical_artifact_path(self, path: Path) -> str:
+        resolved = path.resolve()
+        try:
+            relative = resolved.relative_to(self.artifacts_root.resolve())
+        except ValueError:
+            return resolved.as_posix()
+        return (Path("runs") / "artifacts" / relative).as_posix()
+
+    def _resolve_large_note_pointers(
+        self,
+        answer: str,
+        paths_by_id: dict[str, str],
+    ) -> str:
+        """Rewrite `[LargeNote:ln_...]` pointers into the artifact path that
+        now holds the same text, so the orchestrator can follow them.
+
+        The pointer's own descriptive tail is kept — it is a genuinely useful
+        one-line summary of what was offloaded — and only the dangling id is
+        replaced with something readable.
+        """
+        if not answer or not paths_by_id:
+            return answer
+        rewritten = answer
+        for note_id, logical_path in paths_by_id.items():
+            rewritten = rewritten.replace(
+                f"[LargeNote:{note_id}",
+                f"[Saved to artifact {logical_path} (read it with artifact_read) | note {note_id}",
+            )
+        return rewritten
+
     def _attach_progress_screenshot(
         self,
         task: TaskEnvelope,
@@ -670,12 +874,7 @@ class BrowserAgent(AgentRuntime):
             if source.resolve() != destination.resolve():
                 shutil.copy2(source, destination)
             digest = hashlib.sha256(destination.read_bytes()).hexdigest()
-            resolved = destination.resolve()
-            try:
-                relative = resolved.relative_to(self.artifacts_root)
-                logical_path = (Path("runs") / "artifacts" / relative).as_posix()
-            except ValueError:
-                logical_path = resolved.as_posix()
+            logical_path = self._logical_artifact_path(destination)
             return {
                 "artifact_id": f"art_{uuid4().hex[:12]}",
                 "path": logical_path,
