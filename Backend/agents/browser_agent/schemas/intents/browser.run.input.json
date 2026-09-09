@@ -19,6 +19,24 @@
       "maximum": 200,
       "description": "Upper bound on agent steps for this run."
     },
+    "max_step_extensions": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5,
+      "description": "How many times the run may ask to continue after reaching max_steps. Each request is only granted if the run has made verified progress recently. 0 disables extensions (hard stop at max_steps)."
+    },
+    "step_extension_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 60,
+      "description": "Steps added per granted extension."
+    },
+    "max_total_steps": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 300,
+      "description": "Absolute ceiling across all extensions."
+    },
     "memory_mode": {
       "type": "string",
       "enum": ["off", "learn", "recall", "auto"],

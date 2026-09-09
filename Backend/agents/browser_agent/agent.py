@@ -179,6 +179,20 @@ class BrowserAgent(AgentRuntime):
         if memory_mode not in {"off", "learn", "recall", "auto"}:
             memory_mode = "off"
         max_steps = self._safe_int(task.input.get("max_steps"), self.config.default_max_steps)
+        # How far the run may be extended if it reaches that ceiling with real
+        # progress behind it. The orchestrator sets this at dispatch, when it
+        # knows how hard the goal is; the run itself only ever decides whether
+        # a given extension is deserved, never how much rope exists.
+        max_step_extensions = self._safe_int(
+            task.input.get("max_step_extensions"), self.config.default_max_step_extensions
+        )
+        step_extension_size = self._safe_int(
+            task.input.get("step_extension_size"), self.config.default_step_extension_size
+        )
+        max_total_steps = max(
+            max_steps,
+            self._safe_int(task.input.get("max_total_steps"), self.config.default_max_total_steps),
+        )
         headless = self.config.headless
         if isinstance(task.input.get("headless"), bool):
             headless = task.input["headless"]
@@ -230,6 +244,9 @@ class BrowserAgent(AgentRuntime):
                     goal,
                     initial_url=initial_url,
                     max_steps=max_steps,
+                    max_step_extensions=max_step_extensions,
+                    step_extension_size=step_extension_size,
+                    max_total_steps=max_total_steps,
                     memory_mode=memory_mode,
                     headless=headless,
                     credentials=credentials,
@@ -315,6 +332,22 @@ class BrowserAgent(AgentRuntime):
             "duration_sec": result.get("duration_sec"),
             "run_dir": run_dir,
         }
+        stop_reason = str(result.get("stop_reason") or "").strip()
+        step_extensions = result.get("step_extensions") or []
+        if stop_reason:
+            output["stop_reason"] = stop_reason
+        if step_extensions:
+            # Post-hoc visibility, same shape as user_interrupts: what the run
+            # asked for when it ran out of room, and what was decided.
+            output["step_extensions"] = step_extensions
+        if stop_reason == "step_budget_exhausted":
+            output["next_action"] = output.get("next_action") or "consider_rerun"
+            output["step_budget_hint"] = (
+                "The run stopped because it reached its step ceiling, not because it finished. "
+                "`answer` and `artifacts` hold what it did gather. If the remaining work is small "
+                "and specific, re-run browser.run with a narrower goal naming exactly what is still "
+                "missing — a fresh run with a tighter goal beats a longer one with the same goal."
+            )
         if note_refs:
             output["artifacts"] = note_refs
             output["artifact_hint"] = (
@@ -351,6 +384,7 @@ class BrowserAgent(AgentRuntime):
             live_state,
             phase="finished",
             status=status,
+            stop_reason=stop_reason,
             message=f"Browser run finished: {status} ({output['steps_taken']} steps)",
         )
         return AgentResult(status="completed", output=output, artifacts=note_manifests, error=None)
@@ -697,6 +731,7 @@ class BrowserAgent(AgentRuntime):
         phase: str,
         status: str,
         message: str,
+        stop_reason: str = "",
     ) -> None:
         """Stamp the run as over on the live-progress channel.
 
@@ -708,6 +743,7 @@ class BrowserAgent(AgentRuntime):
         the per-step readings ride on, so nothing new has to be plumbed."""
         live_state["phase"] = phase
         live_state["status"] = status
+        live_state["stop_reason"] = stop_reason
         live_state.pop("interrupt", None)
         await self._emit_progress(
             task.task_id,

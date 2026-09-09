@@ -32,6 +32,26 @@
     },
     "next_action": {"type": "string"},
     "credential_hint": {"type": "string"},
+    "stop_reason": {
+      "type": "string",
+      "description": "Why the run ended when status is not success. 'step_budget_exhausted' means it reached its step ceiling with work still outstanding — the answer and artifacts are partial, not final."
+    },
+    "step_budget_hint": {"type": "string"},
+    "step_extensions": {
+      "type": "array",
+      "description": "Every time the run reached its step ceiling and asked to continue, with the decision and why. Granted only when recent steps showed verified progress.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "at_step": {"type": "integer"},
+          "granted": {"type": "boolean"},
+          "steps_added": {"type": "integer"},
+          "new_ceiling": {"type": "integer"},
+          "reason": {"type": "string"},
+          "elapsed_sec": {"type": "number"}
+        }
+      }
+    },
     "artifacts": {
       "type": "array",
       "description": "Long extracts the run offloaded to its own note store, saved as readable files. When `answer` summarizes or points at one of these, load it with artifact_read using the entry's `path` before answering from the summary alone.",

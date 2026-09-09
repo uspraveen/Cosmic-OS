@@ -568,7 +568,11 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "browser_credential_request and call browser_task again with the resulting credential_ref. Consider "
                 "browser_recall_session first if the user is asking about a site you likely already browsed this "
                 "session. Runs can take minutes; an in_progress response is normal — poll again with the same "
-                "idempotency key. The result may include artifacts: long extracts the run saved to files instead "
+                "idempotency key. A run that reaches its step ceiling asks to continue and is granted "
+                "more only if it made verified progress, so a result with stop_reason=step_budget_exhausted "
+                "means it genuinely ran out of road with work outstanding - its answer is partial, and the "
+                "better follow-up is a fresh browser_task with a narrower goal naming only what is missing, "
+                "not the same goal again. The result may include artifacts: long extracts the run saved to files instead "
                 "of inlining — when answer summarizes or points at one, read it with artifact_read using its path "
                 "before answering from the summary alone. The result may include user_interrupts: every question the agent asked the user "
                 "mid-run (OTP, bot check, ambiguous form choice) and how it was resolved — you were not in that "
@@ -588,7 +592,12 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "max_steps": {
                         "type": "integer",
-                        "description": "Optional upper bound on agent steps (default 40).",
+                        "description": (
+                            "Upper bound on agent steps before it must ask to continue (default 40). "
+                            "Size it to the task: ~15 for a single-page lookup, 60+ when several "
+                            "records or pages must be opened. Under-budgeting is the most common "
+                            "cause of a partial answer."
+                        ),
                     },
                     "memory_mode": {
                         "type": "string",

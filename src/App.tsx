@@ -431,6 +431,12 @@ interface BrowserProgressState {
    * the answer was already on screen. Absent on runs that predate it, which
    * simply falls back to the old streaming-only behaviour. */
   phase?: 'running' | 'finished' | 'failed' | 'cancelled'
+  /** The agent's own verdict on the run. A run that ends is not a run that
+   * succeeded: `incomplete` and `step_budget_exhausted` both arrive with
+   * phase 'finished', and showing them as "Done" claimed a result nobody
+   * got. */
+  runStatus?: string
+  stopReason?: string
   /** Steps the run has already finished, oldest first. The agent only ever
    * reports the step it is on right now, so this is accumulated client-side
    * as progress events land (see mergeBrowserProgress) — without it the card
@@ -1843,6 +1849,8 @@ const normalizeBrowserProgress = (value: unknown): BrowserProgressState | undefi
     url: typeof raw.url === 'string' ? raw.url : null,
     pageTitle: typeof raw.page_title === 'string' ? raw.page_title : null,
     elapsedSec: typeof raw.elapsed_sec === 'number' ? raw.elapsed_sec : null,
+    runStatus: typeof raw.status === 'string' ? raw.status.trim() : undefined,
+    stopReason: typeof raw.stop_reason === 'string' ? raw.stop_reason.trim() : undefined,
     phase: raw.phase === 'finished' || raw.phase === 'failed' || raw.phase === 'cancelled'
       ? raw.phase
       : raw.phase === 'running'
@@ -2179,6 +2187,39 @@ const formatBrowserUrl = (url?: string | null): string => {
   }
 }
 
+interface BrowserRunOutcome {
+  label: string
+  stage: string
+  /** Only set when the last step's description would misrepresent the ending —
+   * "Scrolled down by 500px" is a poor summary of a run that ran out of road. */
+  headline?: string
+}
+
+/** How a finished run actually ended. Everything that is not an outright
+ * success reads as one, so the card stops reporting "Done" for a run that
+ * gave up: the step track is full at that point too, which together claimed
+ * a completed job nobody got. */
+const resolveBrowserOutcome = (progress: BrowserProgressState): BrowserRunOutcome => {
+  if (progress.phase === 'failed') return { label: 'Failed', stage: 'failed' }
+  if (progress.phase === 'cancelled') return { label: 'Stopped', stage: 'failed' }
+  if (progress.stopReason === 'step_budget_exhausted') {
+    return {
+      label: 'Out of steps',
+      stage: 'prepare',
+      headline: 'Ran out of steps before finishing — results are partial',
+    }
+  }
+  const status = String(progress.runStatus || '').trim()
+  if (status === 'credentials_needed') {
+    return { label: 'Needs sign-in', stage: 'prepare', headline: 'Stopped at a login it had no credentials for' }
+  }
+  if (status === 'failed') return { label: 'Failed', stage: 'failed' }
+  if (status === 'incomplete') {
+    return { label: 'Incomplete', stage: 'prepare', headline: 'Stopped before the goal was confirmed — results are partial' }
+  }
+  return { label: 'Done', stage: 'ready' }
+}
+
 const BROWSER_INTERRUPT_KIND_LABEL: Record<BrowserProgressInterrupt['kind'], string> = {
   password: 'Password requested',
   verification_code: 'Verification code needed',
@@ -2378,25 +2419,14 @@ const BrowserRunCard = ({
   const runEnded = Boolean(progress.phase && progress.phase !== 'running')
   const live = streaming && !runEnded
   const isAwaitingInput = Boolean(interrupt) && localStatus === 'pending' && !runEnded
-  const statusLabel = isAwaitingInput
-    ? 'Waiting for you'
-    : progress.phase === 'failed'
-      ? 'Failed'
-      : progress.phase === 'cancelled'
-        ? 'Stopped'
-        : live
-          ? 'Running'
-          : 'Done'
+  // A finished run is not necessarily a successful one. Reaching the step
+  // ceiling, or stopping short of the goal, both arrive as phase 'finished'.
+  const outcome = runEnded ? resolveBrowserOutcome(progress) : null
+  const statusLabel = isAwaitingInput ? 'Waiting for you' : outcome ? outcome.label : live ? 'Running' : 'Done'
   // Reuses the Slide Agent's stage color tokens (.docs-progress-stage.*) so
   // this card matches the same amber/blue/green "attention/working/done"
   // language instead of inventing a parallel palette.
-  const statusKey = isAwaitingInput
-    ? 'prepare'
-    : progress.phase === 'failed' || progress.phase === 'cancelled'
-      ? 'failed'
-      : live
-        ? 'render'
-        : 'ready'
+  const statusKey = isAwaitingInput ? 'prepare' : outcome ? outcome.stage : live ? 'render' : 'ready'
   const tone = isAwaitingInput ? 'is-waiting' : live ? 'is-live' : 'is-done'
   const displayUrl = formatBrowserUrl(progress.url)
   const resolvedFrame = liveFrame || progress.screenshot?.previewUrl || ''
@@ -2410,7 +2440,8 @@ const BrowserRunCard = ({
   const step = typeof progress.step === 'number' ? progress.step : null
   const maxSteps = typeof progress.maxSteps === 'number' && progress.maxSteps > 0 ? progress.maxSteps : null
   const trail = (progress.trail || []).slice(-3)
-  const headline = String(progress.description || '').trim()
+  const headline = (outcome?.headline)
+    || String(progress.description || '').trim()
     || (isAwaitingInput ? 'Paused until you answer' : live ? 'Working…' : 'Browser run finished')
 
   // The expanded view samples the live feed instead of following it frame for

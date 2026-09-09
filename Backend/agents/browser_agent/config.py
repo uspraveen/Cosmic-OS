@@ -58,6 +58,12 @@ class BrowserAgentConfig:
 
     headless: bool = True
     default_max_steps: int = 40
+    # Step-budget extension policy. A run that reaches its ceiling asks
+    # whether to continue instead of stopping mid-thought; these bound what it
+    # can be granted. Set extensions to 0 to restore a hard stop.
+    default_max_step_extensions: int = 2
+    default_step_extension_size: int = 15
+    default_max_total_steps: int = 90
     run_timeout_sec: int = 840
     # Budget for one AskUser interrupt round trip to the desktop (OTP, CAPTCHA,
     # phone-approval, ambiguous forms). Longer than cosmic-browser-use's own
@@ -89,6 +95,9 @@ class BrowserAgentConfig:
             browser_use_home=home,
             headless=_env_bool("BROWSER_AGENT_HEADLESS", True),
             default_max_steps=max(1, _env_int("BROWSER_AGENT_MAX_STEPS", 40)),
+            default_max_step_extensions=max(0, _env_int("BROWSER_AGENT_MAX_STEP_EXTENSIONS", 2)),
+            default_step_extension_size=max(0, _env_int("BROWSER_AGENT_STEP_EXTENSION_SIZE", 15)),
+            default_max_total_steps=max(1, _env_int("BROWSER_AGENT_MAX_TOTAL_STEPS", 90)),
             run_timeout_sec=max(30, _env_int("BROWSER_AGENT_RUN_TIMEOUT_SEC", 840)),
             ask_user_wait_sec=max(30, _env_int("BROWSER_AGENT_ASK_USER_TIMEOUT_SEC", 240)),
             working_dir_root=Path(_first_env("BROWSER_AGENT_WORKING_DIR_ROOT", default=str(BACKEND_ROOT))),
