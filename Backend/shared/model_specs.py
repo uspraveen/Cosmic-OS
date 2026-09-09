@@ -66,6 +66,8 @@ def infer_model_provider(base_url: str | None, model: str | None) -> str:
         return "fireworks"
     if "api.x.ai" in normalized:
         return "xai"
+    if "browser-use.com" in normalized:
+        return "browser_use"
     if "api.groq.com" in normalized:
         return "groq"
     if "api.anthropic.com" in normalized:

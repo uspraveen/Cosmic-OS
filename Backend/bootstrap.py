@@ -984,6 +984,17 @@ def build_browser_agent_env_rendered(
         gateway_external_env.get("XAI_API_KEY"),
         gateway_existing_env.get("XAI_API_KEY"),
     )
+    # browser-use hosted cloud model (bu-2-0) — new default base brain. Only
+    # this agent uses it today, so no peer-env fallback chain like Fireworks/xAI.
+    browser_use_api_key = first_meaningful_value(
+        external_env.get("BROWSER_USE_API_KEY"),
+        existing_env.get("BROWSER_USE_API_KEY"),
+        source_data.get("BROWSER_USE_API_KEY"),
+    )
+    # "bu" (default) or "legacy" — see cosmic-browser-use/cli_labels.py
+    # resolve_browser_agent_model_set(). Passed through only when an operator
+    # has actually set it; otherwise the specialist's own default applies.
+    browser_agent_model_set = pick_env(["BROWSER_AGENT_MODEL_SET"])
     mimo_api_url = pick_env(["MIMO_API_URL"])
     mimo_api_key = pick_env(["MIMO_API_KEY"])
     # AskUser mid-run interrupts (OTP/CAPTCHA/phone-approval/ambiguous forms)
@@ -1010,6 +1021,10 @@ def build_browser_agent_env_rendered(
         overrides["FIREWORKS_API_KEY"] = fireworks_api_key
     if meaningful_env_value(xai_api_key) is not None:
         overrides["XAI_API_KEY"] = xai_api_key
+    if meaningful_env_value(browser_use_api_key) is not None:
+        overrides["BROWSER_USE_API_KEY"] = browser_use_api_key
+    if meaningful_env_value(browser_agent_model_set) is not None:
+        overrides["BROWSER_AGENT_MODEL_SET"] = browser_agent_model_set
     if meaningful_env_value(mimo_api_url) is not None:
         overrides["MIMO_API_URL"] = mimo_api_url
     if meaningful_env_value(mimo_api_key) is not None:

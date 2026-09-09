@@ -562,16 +562,24 @@ class BrowserAgent(AgentRuntime):
         try:
             from shared.usage import build_model_key, build_usage_event, begin_metered_call, post_usage_event
 
-            brains = (
-                ("base", "fireworks", str(os.getenv("BROWSER_AGENT_MODEL") or os.getenv("FIREWORKS_DEFAULT_MODEL") or "accounts/fireworks/models/glm-5p3-flash")),
-                ("frontier", "xai", str(os.getenv("XAI_MODEL") or "grok-4.6")),
-            )
-            for tier, provider, model in brains:
+            # Fallback guesses only — used when the reporting cosmic-browser-use
+            # checkout predates get_stats() tagging usage with the provider/model
+            # it actually used. The base/escalation pair now varies by model set
+            # (BROWSER_AGENT_MODEL_SET=bu default vs legacy), so a fixed guess
+            # would misattribute cost; prefer whatever the run itself reported.
+            brains_fallback = {
+                "base": ("fireworks", str(os.getenv("BROWSER_AGENT_MODEL") or os.getenv("FIREWORKS_DEFAULT_MODEL") or "accounts/fireworks/models/glm-5p3-flash")),
+                "frontier": ("xai", str(os.getenv("XAI_MODEL") or "grok-4.6")),
+            }
+            for tier in ("base", "frontier"):
                 usage = llm_usage.get(tier) if isinstance(llm_usage.get(tier), dict) else {}
                 total_tokens = int(usage.get("total_tokens") or 0)
                 requests = int(usage.get("requests") or 0)
                 if total_tokens <= 0 and requests <= 0:
                     continue
+                fallback_provider, fallback_model = brains_fallback[tier]
+                provider = str(usage.get("provider") or "").strip() or fallback_provider
+                model = str(usage.get("model") or "").strip() or fallback_model
                 model_key = build_model_key(provider, model)
                 raw_usage = {
                     "prompt_tokens": int(usage.get("prompt_tokens") or 0),
