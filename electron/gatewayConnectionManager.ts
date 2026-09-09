@@ -1447,6 +1447,25 @@ export class GatewayConnectionManager {
     }
   }
 
+  /** Human takeover input for a live browser run.
+   *
+   * On the socket rather than an HTTP route because this is a stream, not a
+   * command: one click is three events and a drag is dozens, and a request
+   * each would put a public-internet round trip between the hand and the
+   * cursor. Silently no-ops when the socket is down - input is realtime, and
+   * a dropped event is worth less than a thrown error in a mousemove handler.
+   */
+  sendBrowserInput(taskId: string, events: Record<string, unknown>[]) {
+    const id = String(taskId || '').trim()
+    if (!id || !Array.isArray(events) || events.length === 0) return
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return
+    try {
+      this.sendJson({ type: 'browser.input', task_id: id, events })
+    } catch {
+      // The socket closed between the check and the send.
+    }
+  }
+
   private sendPing() {
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
     this.sendJson({

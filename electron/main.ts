@@ -2527,6 +2527,38 @@ app.whenReady().then(() => {
     })
   })
 
+  // Pause and resume are one click each, so they can afford an HTTP request
+  // and the honest 404 it returns when the run has already finished. Input
+  // does not go through here - see sendBrowserInput.
+  ipcMain.handle('browser:pause-run', async (_, taskId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/browser/runs/${encodeURIComponent(String(taskId || '').trim())}/pause`, {
+      method: 'POST',
+    })
+  })
+
+  ipcMain.handle('browser:resume-run', async (_, taskId: string, note: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, `/channels/browser/runs/${encodeURIComponent(String(taskId || '').trim())}/resume`, {
+      method: 'POST',
+      body: { note: String(note || '') },
+    })
+  })
+
+  ipcMain.on('browser:input', (_, taskId: string, events: Record<string, unknown>[]) => {
+    try {
+      gatewayConnectionManager?.sendBrowserInput(taskId, events)
+    } catch {
+      // Never let a dropped input event surface as an error dialog.
+    }
+  })
+
   ipcMain.handle('browser:skip-interrupt', async (_, requestId: string) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

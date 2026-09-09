@@ -43,6 +43,17 @@ class RespondInterruptRequest(BaseModel):
     answer: str = ""
 
 
+class TakeoverControlRequest(BaseModel):
+    """Pause/resume for a live browser run.
+
+    Input does not come through here - it rides the desktop websocket, because
+    one HTTP round trip per mouse move over the public internet is not input.
+    Pause and resume are one click each and can afford a request.
+    """
+
+    note: str = ""
+
+
 def _check_local_token(request: Request) -> None:
     runtime = request.app.state.gateway_runtime
     expected = runtime.config.local_api_token
@@ -116,6 +127,39 @@ async def internal_live_frame(body: LiveFrameRequest, request: Request) -> dict[
     runtime = request.app.state.gateway_runtime
     await runtime.publish_browser_live_frame(task_id=task_id, frame=frame)
     return {"status": "ok"}
+
+
+@router.post("/channels/browser/runs/{task_id}/pause")
+async def pause_run(task_id: str, request: Request) -> dict[str, Any]:
+    """Ask a live run to park at its next step boundary and hand over.
+
+    The run does not stop here - it finishes the action it is in, so the page
+    the user is handed is a settled one, and only then parks. The desktop
+    learns it actually happened from the browser_progress takeover flag, never
+    from this response.
+    """
+    _check_local_token(request)
+    runtime = request.app.state.gateway_runtime
+    delivered = await runtime.publish_browser_takeover_control(
+        task_id=str(task_id or "").strip(),
+        payload={"op": "pause"},
+    )
+    if not delivered:
+        raise HTTPException(status_code=404, detail="No live browser run for that task.")
+    return {"status": "pausing", "task_id": task_id}
+
+
+@router.post("/channels/browser/runs/{task_id}/resume")
+async def resume_run(task_id: str, body: TakeoverControlRequest, request: Request) -> dict[str, Any]:
+    _check_local_token(request)
+    runtime = request.app.state.gateway_runtime
+    delivered = await runtime.publish_browser_takeover_control(
+        task_id=str(task_id or "").strip(),
+        payload={"op": "resume", "note": str(body.note or "")[:500]},
+    )
+    if not delivered:
+        raise HTTPException(status_code=404, detail="No live browser run for that task.")
+    return {"status": "resuming", "task_id": task_id}
 
 
 @router.post("/channels/browser/interrupts/{request_id}/respond")

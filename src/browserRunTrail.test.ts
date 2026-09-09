@@ -109,3 +109,24 @@ describe('normalizeBrowserTrail', () => {
     expect(normalizeBrowserTrail('trail')).toBeUndefined()
   })
 })
+
+describe('mergeBrowserRunProgress: run identity', () => {
+  it('carries the task id through a patch that omits it', () => {
+    // Pause, resume and takeover input are all addressed at the task id. A
+    // partial progress patch must not leave the card showing a run it can no
+    // longer talk to.
+    const merged = mergeBrowserRunProgress(
+      { taskId: 'task-1', description: 'Opened the page' },
+      { description: 'Clicked apply' },
+    )
+    expect(merged?.taskId).toBe('task-1')
+  })
+
+  it('lets a new run replace the id', () => {
+    const merged = mergeBrowserRunProgress(
+      { taskId: 'task-1', description: 'a' },
+      { taskId: 'task-2', description: 'b' },
+    )
+    expect(merged?.taskId).toBe('task-2')
+  })
+})

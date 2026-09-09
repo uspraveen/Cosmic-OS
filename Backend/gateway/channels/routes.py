@@ -651,6 +651,12 @@ async def verify_websocket_auth(websocket: WebSocket, runtime: GatewayRuntime) -
     return True
 
 
+# Upper bound on input events accepted in one websocket frame. Generous for a
+# real burst of mouse moves, small enough that a malformed or hostile client
+# cannot hand the agent an unbounded list to walk.
+_MAX_TAKEOVER_INPUT_BATCH = 64
+
+
 async def _handle_realtime_websocket_message(
     payload: dict[str, Any],
     *,
@@ -673,6 +679,26 @@ async def _handle_realtime_websocket_message(
                 "server_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             },
             channel=channel,
+        )
+        return
+
+    if message_type == "browser.input":
+        # Human takeover input for a live browser run. On the websocket rather
+        # than an HTTP route because this is a stream, not a command: a click
+        # is three events and a drag is dozens, and a request each would put a
+        # public-internet round trip between the hand and the cursor.
+        #
+        # Everything here is untrusted. The gateway does not interpret the
+        # events at all - it forwards them to the agent, which validates every
+        # one against a whitelist of CDP Input methods before anything reaches
+        # a page. See BrowserController._normalize_human_input.
+        task_id = str(payload.get("task_id") or "").strip()
+        events = payload.get("events")
+        if not task_id or not isinstance(events, list) or not events:
+            return
+        await runtime.publish_browser_takeover_control(
+            task_id=task_id,
+            payload={"op": "input", "events": events[:_MAX_TAKEOVER_INPUT_BATCH]},
         )
         return
 

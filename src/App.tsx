@@ -1,4 +1,4 @@
-import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, Mail, Maximize2, Mic, Minimize2, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
+import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, Mail, Maximize2, Mic, Minimize2, MousePointerClick, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
 import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
@@ -34,6 +34,13 @@ import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
+import {
+  coalesceInputEvents,
+  keyInputEvent,
+  mapPointerToFrame,
+  mouseInputEvent,
+  type TakeoverInputEvent,
+} from './browserTakeoverInput'
 
 export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'task' | 'meeting' | 'spaces'
@@ -438,6 +445,13 @@ interface BrowserProgressState {
    * got. */
   runStatus?: string
   stopReason?: string
+  /** Which run this is, so the card can address pause/resume/input at it.
+   * Without this the card can show a run but not talk to one. */
+  taskId?: string | null
+  /** 'active' while a human has the wheel. Set on the pause edge rather than
+   * at the next step, because during a takeover there may not be a next step
+   * for several minutes. */
+  takeover?: string
   /** Steps the run has already finished, oldest first. The agent only ever
    * reports the step it is on right now, so this is accumulated client-side
    * as progress events land (see mergeBrowserProgress) — without it the card
@@ -1851,6 +1865,12 @@ const normalizeBrowserProgress = (value: unknown): BrowserProgressState | undefi
     pageTitle: typeof raw.page_title === 'string' ? raw.page_title : null,
     elapsedSec: typeof raw.elapsed_sec === 'number' ? raw.elapsed_sec : null,
     runStatus: typeof raw.status === 'string' ? raw.status.trim() : undefined,
+    taskId: typeof raw.task_id === 'string' && raw.task_id.trim()
+      ? raw.task_id.trim()
+      : typeof raw.taskId === 'string' && raw.taskId.trim()
+        ? raw.taskId.trim()
+        : undefined,
+    takeover: typeof raw.takeover === 'string' ? raw.takeover.trim() : undefined,
     stopReason: typeof raw.stop_reason === 'string' ? raw.stop_reason.trim() : undefined,
     phase: raw.phase === 'finished' || raw.phase === 'failed' || raw.phase === 'cancelled'
       ? raw.phase
@@ -2472,12 +2492,122 @@ const BrowserRunCard = ({
   //    document.body, outside all of them, so it stayed painted over an app
   //    that believed it was hidden - and by then the window was click-through,
   //    which is exactly how it looked frozen.
+  // --- Human takeover -------------------------------------------------
+  // `driving` is this client's intent to hold the wheel; progress.takeover is
+  // the run's own confirmation that it actually parked. They are separate
+  // because pausing is not instant: the run finishes the action it is in
+  // first, so the page handed over is a settled one.
+  const taskId = String(progress.taskId || '').trim()
+  const runPaused = progress.takeover === 'active'
+  const [driving, setDriving] = useState(false)
+  const [takeoverError, setTakeoverError] = useState('')
+  const canTakeOver = Boolean(taskId) && live && !isAwaitingInput
+  const frameElementRef = useRef<HTMLImageElement | null>(null)
+
+  useEffect(() => {
+    // The run ending, or the lightbox closing, always ends the takeover here
+    // too — a control surface over a browser nobody is driving is a trap.
+    if (!expanded || runEnded) setDriving(false)
+  }, [expanded, runEnded])
+
+  // Input is batched to one send per animation frame. A pointer emits moves at
+  // display rate; a message each would spend an internet round trip per frame
+  // of hand movement delivering positions that were already stale.
+  const inputQueue = useRef<TakeoverInputEvent[]>([])
+  const flushHandle = useRef<number | null>(null)
+  const flushInput = useCallback(() => {
+    flushHandle.current = null
+    const batch = coalesceInputEvents(inputQueue.current)
+    inputQueue.current = []
+    if (!batch.length || !taskId) return
+    window.cosmic?.browserSendInput?.(taskId, batch as unknown as Record<string, unknown>[])
+  }, [taskId])
+  const queueInput = useCallback((event: TakeoverInputEvent | null) => {
+    if (!event) return
+    inputQueue.current.push(event)
+    if (flushHandle.current === null) {
+      flushHandle.current = window.requestAnimationFrame(flushInput)
+    }
+  }, [flushInput])
+  useEffect(() => () => {
+    if (flushHandle.current !== null) window.cancelAnimationFrame(flushHandle.current)
+  }, [])
+
+  const frameGeometry = useCallback(() => {
+    const element = frameElementRef.current
+    if (!element) return null
+    const rect = element.getBoundingClientRect()
+    return {
+      rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+      naturalWidth: element.naturalWidth,
+      naturalHeight: element.naturalHeight,
+    }
+  }, [])
+
+  const pointAt = useCallback((clientX: number, clientY: number) => {
+    const geometry = frameGeometry()
+    return geometry ? mapPointerToFrame(geometry, clientX, clientY) : null
+  }, [frameGeometry])
+
+  const takeControl = useCallback(async () => {
+    if (!taskId) return
+    setTakeoverError('')
+    setDriving(true)
+    try {
+      const bridge = window.cosmic?.browserPauseRun
+      if (!bridge) throw new Error('Takeover is unavailable.')
+      await bridge(taskId)
+    } catch (error) {
+      setDriving(false)
+      setTakeoverError(error instanceof Error ? error.message : 'Could not pause the run.')
+    }
+  }, [taskId])
+
+  const handBack = useCallback(async () => {
+    if (!taskId) return
+    setDriving(false)
+    try {
+      await window.cosmic?.browserResumeRun?.(taskId, '')
+    } catch {
+      // The run may already have resumed itself on the takeover timeout.
+    }
+  }, [taskId])
+
+  // Keyboard only while actually driving, and captured, so keys reach the page
+  // instead of the app underneath. Escape is kept for leaving: a full-screen
+  // surface that swallows every key needs one that always gets out.
+  useEffect(() => {
+    if (!driving || !runPaused) return undefined
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      queueInput(keyInputEvent(event.type === 'keydown' ? 'keyDown' : 'keyUp', event))
+    }
+    window.addEventListener('keydown', onKey, true)
+    window.addEventListener('keyup', onKey, true)
+    return () => {
+      window.removeEventListener('keydown', onKey, true)
+      window.removeEventListener('keyup', onKey, true)
+    }
+  }, [driving, runPaused, queueInput])
+
+  const drivingLive = driving && runPaused
+
   // One condition for both the portal and its exits, so the Escape claim can
   // never outlive the surface that asked for it.
   const lightboxOpen = expanded && Boolean(frame)
   useEffect(() => {
     if (!lightboxOpen) return undefined
-    const close = () => setExpanded(false)
+    // Tiered: while driving, Escape gives the wheel back rather than closing
+    // the view, so one key never both drops control and hides the browser.
+    const close = () => {
+      if (drivingRef.current) {
+        void handBackRef.current()
+        return
+      }
+      setExpanded(false)
+    }
     window.cosmic?.setEscapeCapture?.(true)
     const offEscape = window.cosmic?.onEscape?.(close)
     const offHiding = window.cosmic?.onHiding?.(close)
@@ -2497,6 +2627,13 @@ const BrowserRunCard = ({
       window.removeEventListener('keydown', onKeyDown, true)
     }
   }, [lightboxOpen])
+
+  // Read through refs so the Escape effect is not torn down and re-armed on
+  // every takeover state change — re-arming races the main-process claim.
+  const drivingRef = useRef(false)
+  drivingRef.current = drivingLive
+  const handBackRef = useRef(handBack)
+  handBackRef.current = handBack
 
   const submitAnswer = async () => {
     if (!requestId || busy) return
@@ -2707,26 +2844,81 @@ const BrowserRunCard = ({
       )}
       {lightboxOpen && createPortal(
         <div
-          className={`deck-preview-lightbox browser-run-lightbox ${PORTAL_SURFACE_CLASS}`}
-          onClick={() => setExpanded(false)}
+          className={`deck-preview-lightbox browser-run-lightbox ${PORTAL_SURFACE_CLASS}${drivingLive ? ' is-driving' : ''}`}
+          onClick={() => { if (!driving) setExpanded(false) }}
         >
           <img
+            ref={frameElementRef}
             src={zoomFrame || frame}
             alt={progress.pageTitle || 'Live browser view'}
             className="deck-preview-full"
             decoding="async"
-          />
-          <button
-            type="button"
-            className="browser-run-lightbox-close"
-            onClick={(event) => {
+            draggable={false}
+            // Pointer handlers are always attached but only produce events
+            // while the run has actually parked: sending input to a browser
+            // the agent is still driving would have the two fighting over the
+            // same page.
+            onClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => {
+              if (!drivingLive) return
               event.stopPropagation()
-              setExpanded(false)
+              event.preventDefault()
+              const point = pointAt(event.clientX, event.clientY)
+              if (point) queueInput(mouseInputEvent('mousePressed', point, event))
             }}
-            aria-label="Close expanded view"
-          >
-            <X size={16} />
-          </button>
+            onPointerUp={(event) => {
+              if (!drivingLive) return
+              event.stopPropagation()
+              const point = pointAt(event.clientX, event.clientY)
+              if (point) queueInput(mouseInputEvent('mouseReleased', point, event))
+            }}
+            onPointerMove={(event) => {
+              if (!drivingLive) return
+              const point = pointAt(event.clientX, event.clientY)
+              if (point) queueInput(mouseInputEvent('mouseMoved', point, event))
+            }}
+            onWheel={(event) => {
+              if (!drivingLive) return
+              const point = pointAt(event.clientX, event.clientY)
+              if (point) queueInput(mouseInputEvent('mouseWheel', point, event))
+            }}
+            onContextMenu={(event) => { if (drivingLive) event.preventDefault() }}
+          />
+          <div className="browser-run-lightbox-bar" onClick={(event) => event.stopPropagation()}>
+            {canTakeOver && !driving && (
+              <button type="button" className="browser-run-takeover-button" onClick={() => void takeControl()}>
+                <MousePointerClick size={13} />
+                Take control
+              </button>
+            )}
+            {driving && (
+              <>
+                <span className={`browser-run-takeover-state${drivingLive ? ' is-live' : ''}`}>
+                  {drivingLive ? 'You have control' : 'Pausing at the current step…'}
+                </span>
+                <button
+                  type="button"
+                  className="browser-run-takeover-button is-primary"
+                  onClick={() => void handBack()}
+                >
+                  Give back
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              className="browser-run-lightbox-close"
+              onClick={(event) => {
+                event.stopPropagation()
+                if (driving) void handBack()
+                else setExpanded(false)
+              }}
+              aria-label={driving ? 'Hand control back' : 'Close expanded view'}
+            >
+              <X size={16} />
+            </button>
+          </div>
+          {takeoverError && <div className="browser-run-takeover-error">{takeoverError}</div>}
           <div className="deck-preview-lightbox-meta">{progress.pageTitle || displayUrl}</div>
         </div>,
         document.body,

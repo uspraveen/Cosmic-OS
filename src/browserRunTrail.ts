@@ -22,6 +22,10 @@ export interface BrowserRunProgressLike {
   description?: string
   screenshot?: unknown
   trail?: BrowserRunTrailEntry[]
+  /** Which run this is. Carried forward like the screenshot: a partial patch
+   * that omits it must not leave the card unable to address the run it is
+   * showing (pause, resume and takeover input all need it). */
+  taskId?: string | null
 }
 
 /** Enough history for the card (which shows three) plus room to re-render
@@ -81,5 +85,6 @@ export const mergeBrowserRunProgress = <T extends BrowserRunProgressLike>(
     ...incoming,
     trail: trail.length > 0 ? trail : undefined,
     screenshot: incoming.screenshot ?? previous.screenshot ?? null,
+    taskId: incoming.taskId ?? previous.taskId,
   } as T
 }

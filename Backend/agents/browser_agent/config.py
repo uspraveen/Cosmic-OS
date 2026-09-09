@@ -64,6 +64,10 @@ class BrowserAgentConfig:
     default_max_step_extensions: int = 2
     default_step_extension_size: int = 15
     default_max_total_steps: int = 90
+    # Ceiling on one human takeover. A parked run is holding a browser, a CDP
+    # session and a step budget, so it must not be able to hold them until the
+    # run timeout because someone walked away mid-handover.
+    takeover_timeout_sec: float = 900.0
     run_timeout_sec: int = 840
     # Budget for one AskUser interrupt round trip to the desktop (OTP, CAPTCHA,
     # phone-approval, ambiguous forms). Longer than cosmic-browser-use's own
@@ -98,6 +102,7 @@ class BrowserAgentConfig:
             default_max_step_extensions=max(0, _env_int("BROWSER_AGENT_MAX_STEP_EXTENSIONS", 2)),
             default_step_extension_size=max(0, _env_int("BROWSER_AGENT_STEP_EXTENSION_SIZE", 15)),
             default_max_total_steps=max(1, _env_int("BROWSER_AGENT_MAX_TOTAL_STEPS", 90)),
+            takeover_timeout_sec=float(max(30, _env_int("BROWSER_AGENT_TAKEOVER_TIMEOUT_SEC", 900))),
             run_timeout_sec=max(30, _env_int("BROWSER_AGENT_RUN_TIMEOUT_SEC", 840)),
             ask_user_wait_sec=max(30, _env_int("BROWSER_AGENT_ASK_USER_TIMEOUT_SEC", 240)),
             working_dir_root=Path(_first_env("BROWSER_AGENT_WORKING_DIR_ROOT", default=str(BACKEND_ROOT))),

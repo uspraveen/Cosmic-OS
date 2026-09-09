@@ -111,6 +111,13 @@ _BLOCKED_HINT_PHRASES = (
 # desktop can keep up. ~2.5fps is plenty for "watch what it's doing", far
 # below anything that would stress the gateway broadcast path.
 _LIVE_FRAME_MIN_INTERVAL_SEC = 0.4
+# While a human is driving, the feed is not a progress indicator any more - it
+# is their screen, and 2.5fps is unusable for aiming a click. The agent and the
+# gateway are on the same host, so this hop is loopback and can afford it; the
+# expensive leg (gateway to desktop) is a websocket either way.
+_LIVE_FRAME_TAKEOVER_INTERVAL_SEC = 0.06
+# Redis channel the gateway publishes takeover control on, per task.
+_TAKEOVER_CHANNEL_PREFIX = "browser_takeover:"
 
 # Session recall ledger (browser.recall_session) — mirrors the Firecrawl
 # specialist's firecrawl_session_runs table exactly (same columns' spirit,
@@ -208,14 +215,17 @@ class BrowserAgent(AgentRuntime):
         await self._emit_progress(task.task_id, f"Starting browser run: {goal[:120]}")
 
         # Import late — pulls playwright + the whole cosmic-browser-use stack.
-        from cosmic_browser_use.api import BrowserRunError, run_goal
+        from cosmic_browser_use.api import BrowserRunError, TakeoverSession, run_goal
 
         # Accumulates the latest step/screenshot/interrupt so every progress
         # emit (including AskUser interrupts, which don't have a new step of
         # their own) carries the full live-view snapshot the desktop needs —
         # otherwise the live screenshot would blink out while a question is
         # pending. Mirrors the Slide Agent's LiveDeckProgress accumulator.
-        live_state: dict[str, Any] = {}
+        # task_id rides along so the desktop card can address pause/resume and
+        # input back at this exact run. Without it the card can render a run
+        # but has no way to talk to one.
+        live_state: dict[str, Any] = {"task_id": task.task_id}
         # Every AskUser question this run makes, with its outcome — surfaced
         # to the orchestrator in the final result (see `user_interrupts`
         # below) so it has full knowledge of what its specialist needed from
@@ -232,10 +242,38 @@ class BrowserAgent(AgentRuntime):
         async def ask_user_handler(question: str, model_kind: str) -> str:
             return await self._ask_user_bridge(task, question, model_kind, live_state, interrupt_log)
 
-        live_frame_last_sent = {"at": 0.0}
+        live_frame_last_sent = {"at": 0.0, "interval": _LIVE_FRAME_MIN_INTERVAL_SEC}
 
         async def on_live_frame(frame_b64: str) -> None:
             await self._live_frame_bridge(task, frame_b64, live_frame_last_sent)
+
+        # Human takeover. The session is the library's; this process only
+        # relays the desktop onto it and reports the edges back.
+        takeover_session = TakeoverSession(timeout_sec=self.config.takeover_timeout_sec)
+        takeover_log: list[dict[str, Any]] = []
+
+        async def on_takeover_state(phase: str, record: Any) -> None:
+            # The card has to say "you have control" the instant the run
+            # parks, and the feed has to speed up for the same instant, so
+            # both happen on this edge rather than on the next step - there
+            # may not be a next step for many minutes.
+            paused = phase == "paused"
+            live_frame_last_sent["interval"] = (
+                _LIVE_FRAME_TAKEOVER_INTERVAL_SEC if paused else _LIVE_FRAME_MIN_INTERVAL_SEC
+            )
+            live_state["takeover"] = "active" if paused else ""
+            if not paused:
+                entry = record.to_dict() if hasattr(record, "to_dict") else {}
+                takeover_log.append(entry)
+            await self._emit_progress(
+                task.task_id,
+                "You have control of the browser" if paused else "Agent resumed",
+                browser_progress=dict(live_state),
+            )
+
+        takeover_watch = asyncio.ensure_future(
+            self._watch_for_takeover(task.task_id, takeover_session)
+        )
 
         try:
             result = await self._run_goal_with_cancel_watch(
@@ -255,6 +293,8 @@ class BrowserAgent(AgentRuntime):
                     on_live_frame=on_live_frame,
                     working_dir_root=str(self.config.working_dir_root),
                     run_timeout_sec=min(self.config.run_timeout_sec, self.max_task_duration_sec),
+                    takeover_session=takeover_session,
+                    on_takeover_state=on_takeover_state,
                 ),
             )
         except _BrowserRunCancelled:
@@ -312,6 +352,14 @@ class BrowserAgent(AgentRuntime):
                 message="Browser run failed.",
             )
             return self._failed("INTERNAL_ERROR", f"Browser run failed: {exc}", retryable=False, next_action="escalate")
+        finally:
+            # One Redis pub/sub connection per run; every exit path above
+            # returns, so without this each task would leak one.
+            takeover_watch.cancel()
+            try:
+                await takeover_watch
+            except (asyncio.CancelledError, Exception):
+                pass
 
         self._post_run_usage(task, result)
 
@@ -332,6 +380,19 @@ class BrowserAgent(AgentRuntime):
             "duration_sec": result.get("duration_sec"),
             "run_dir": run_dir,
         }
+        # Prefer the run's own ledger; fall back to what the state callback
+        # saw, which is all that exists if the run died before returning.
+        takeovers = result.get("takeovers") or takeover_log
+        if takeovers:
+            output["takeovers"] = takeovers
+            output["takeover_hint"] = (
+                "A human paused this run and drove the browser themselves. The steps around "
+                "each takeover are theirs, not the agent's - if you are deciding what still "
+                "needs doing, read the takeover summary before assuming the agent did it."
+            )
+        paused_sec = float(result.get("paused_sec") or 0)
+        if paused_sec:
+            output["paused_sec"] = round(paused_sec, 1)
         stop_reason = str(result.get("stop_reason") or "").strip()
         step_extensions = result.get("step_extensions") or []
         if stop_reason:
@@ -953,7 +1014,7 @@ class BrowserAgent(AgentRuntime):
         if not frame_b64:
             return
         now = time.monotonic()
-        if now - last_sent["at"] < _LIVE_FRAME_MIN_INTERVAL_SEC:
+        if now - last_sent["at"] < last_sent.get("interval", _LIVE_FRAME_MIN_INTERVAL_SEC):
             return
         last_sent["at"] = now
         try:
@@ -1007,6 +1068,55 @@ class BrowserAgent(AgentRuntime):
                 try:
                     await watch_future
                 except (asyncio.CancelledError, Exception):
+                    pass
+
+    async def _watch_for_takeover(self, task_id: str, session: Any) -> None:
+        """Relay desktop takeover control onto the run's takeover session.
+
+        Redis pub/sub rather than the 2s polling the cancel flag uses: pausing
+        can tolerate a poll, but input cannot - a mouse move that lands a
+        second late is not input, it is a glitch. Subscribing costs one
+        connection for the life of the run.
+
+        Never fatal. If this listener dies the run simply carries on
+        un-pausable, which is the behaviour before takeover existed.
+        """
+        channel_name = f"{_TAKEOVER_CHANNEL_PREFIX}{task_id}"
+        pubsub = None
+        try:
+            pubsub = self.redis.pubsub()
+            await pubsub.subscribe(channel_name)
+            async for message in pubsub.listen():
+                if not isinstance(message, dict) or message.get("type") != "message":
+                    continue
+                try:
+                    payload = json.loads(message.get("data") or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                op = str(payload.get("op") or "").strip()
+                if op == "pause":
+                    session.request_pause()
+                elif op == "resume":
+                    session.resume(str(payload.get("note") or ""))
+                elif op == "input":
+                    events = payload.get("events")
+                    if not isinstance(events, list):
+                        events = [payload.get("event")]
+                    for event in events:
+                        if isinstance(event, dict):
+                            session.submit_input(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("browser_agent.takeover_watch_failed task_id=%s", task_id, exc_info=True)
+        finally:
+            if pubsub is not None:
+                try:
+                    await pubsub.unsubscribe(channel_name)
+                    await pubsub.aclose()
+                except Exception:
                     pass
 
     async def _watch_for_cancel(self, task_id: str) -> None:

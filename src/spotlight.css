@@ -5477,10 +5477,99 @@ kbd {
   background: rgba(3, 4, 6, 0.94);
 }
 
-.browser-run-lightbox-close {
+/* The lightbox control rail. Sits above the frame rather than over it, so
+   nothing the user needs to click is ever competing with the page they are
+   driving. */
+.browser-run-lightbox-bar {
   position: absolute;
   top: 20px;
   right: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 1;
+}
+
+.browser-run-takeover-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(16, 18, 22, 0.85);
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.browser-run-takeover-button:hover {
+  background: rgba(30, 33, 40, 0.92);
+  border-color: rgba(255, 255, 255, 0.24);
+  color: #fff;
+}
+
+.browser-run-takeover-button.is-primary {
+  border-color: rgba(120, 200, 160, 0.4);
+  color: rgba(190, 240, 214, 0.95);
+}
+
+.browser-run-takeover-state {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(10, 11, 14, 0.8);
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* Amber while the pause is still landing, green once the run has actually
+   parked — the same "attention / working / done" language the card uses, so
+   "asked for control" never looks like "has control". */
+.browser-run-takeover-state.is-live {
+  border-color: rgba(120, 200, 160, 0.35);
+  background: rgba(24, 44, 34, 0.72);
+  color: rgba(190, 240, 214, 0.95);
+}
+
+.browser-run-takeover-error {
+  position: absolute;
+  top: 62px;
+  right: 20px;
+  max-width: 320px;
+  padding: 7px 11px;
+  border-radius: 9px;
+  border: 1px solid rgba(240, 150, 150, 0.28);
+  background: rgba(48, 22, 24, 0.9);
+  color: rgba(255, 214, 214, 0.94);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* While driving, the frame is a screen, not a picture: no zoom-out cursor
+   inviting a click that would close the view, and no drag-to-save. */
+.deck-preview-lightbox.browser-run-lightbox.is-driving {
+  cursor: default;
+}
+
+.browser-run-lightbox.is-driving .deck-preview-full {
+  cursor: default;
+  border-color: rgba(120, 200, 160, 0.45);
+  box-shadow: 0 0 0 1px rgba(120, 200, 160, 0.25), 0 30px 80px rgba(0, 0, 0, 0.5);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.browser-run-lightbox-close {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;

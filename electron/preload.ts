@@ -205,6 +205,12 @@ contextBridge.exposeInMainWorld('cosmic', {
   vaultProvidePending: (requestId: string, payload: any) => ipcRenderer.invoke('vault:provide-pending', requestId, payload),
   browserRespondInterrupt: (requestId: string, answer: string) => ipcRenderer.invoke('browser:respond-interrupt', requestId, answer),
   browserSkipInterrupt: (requestId: string) => ipcRenderer.invoke('browser:skip-interrupt', requestId),
+  browserPauseRun: (taskId: string) => ipcRenderer.invoke('browser:pause-run', taskId),
+  browserResumeRun: (taskId: string, note: string) => ipcRenderer.invoke('browser:resume-run', taskId, note),
+  // send, not invoke: fire-and-forget so a burst of mouse events never awaits
+  // a round trip through the main process.
+  browserSendInput: (taskId: string, events: Record<string, unknown>[]) =>
+    ipcRenderer.send('browser:input', taskId, events),
   onGatewayEvent: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('gateway:event', listener)

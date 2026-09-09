@@ -37,6 +37,31 @@
       "description": "Why the run ended when status is not success. 'step_budget_exhausted' means it reached its step ceiling with work still outstanding — the answer and artifacts are partial, not final."
     },
     "step_budget_hint": {"type": "string"},
+    "takeover_hint": {"type": "string"},
+    "paused_sec": {
+      "type": "number",
+      "description": "Seconds this run spent parked while a human drove the browser. Excluded from the agent's own time budget."
+    },
+    "takeovers": {
+      "type": "array",
+      "description": "Every time a human paused the run and drove the browser themselves. The page state after one is their work, not the agent's - read the summary before assuming the agent did it.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "duration_sec": {"type": "number"},
+          "url_before": {"type": "string"},
+          "url_after": {"type": "string"},
+          "new_origins": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Sites the human gained signed-in state for during the takeover."
+          },
+          "human_note": {"type": "string"},
+          "summary": {"type": "string"},
+          "timed_out": {"type": "boolean"}
+        }
+      }
+    },
     "step_extensions": {
       "type": "array",
       "description": "Every time the run reached its step ceiling and asked to continue, with the decision and why. Granted only when recent steps showed verified progress.",

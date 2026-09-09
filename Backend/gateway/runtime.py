@@ -16327,17 +16327,61 @@ class GatewayRuntime:
             "frame": frame,
             "timestamp": utcnow_iso(),
         }
+        # Addressed to the session that owns the run, not broadcast to every
+        # connected client. At the old 2.5fps the waste was invisible; a
+        # takeover streams at ~16fps, and every phone on the account was being
+        # sent full JPEG frames of a browser it cannot show.
+        session_id = context.get("session_id")
         for adapter in self.registry.adapters.values():
             if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
                 continue
             try:
-                await adapter.broadcast_all(event)
+                if session_id:
+                    await adapter.broadcast_to_session(session_id, event)
+                else:
+                    await adapter.broadcast_all(event)
             except Exception:
                 logger.debug(
                     "gateway.browser_live_frame_broadcast_failed task_id=%s",
                     task_id,
                     exc_info=True,
                 )
+
+    async def publish_browser_takeover_control(
+        self,
+        *,
+        task_id: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        """Send one takeover control message to the agent running `task_id`.
+
+        Redis pub/sub, not the task stream: this carries live input as well as
+        pause/resume, and an input event that arrives a second late is not
+        input, it is a glitch. The agent subscribes for the life of the run
+        (BrowserAgent._watch_for_takeover) and drops anything it does not
+        recognise, so an unknown op here is inert rather than dangerous.
+
+        Returns False when there is nothing listening - no Redis, or a task id
+        that maps to no live request - so callers can answer the desktop
+        honestly instead of pretending the click landed.
+        """
+        if self._redis is None:
+            return False
+        if self._resolve_specialist_request_context(task_id) is None:
+            return False
+        try:
+            await self._redis.publish(
+                f"browser_takeover:{task_id}",
+                json.dumps(payload, separators=(",", ":")),
+            )
+            return True
+        except Exception:
+            logger.debug(
+                "gateway.browser_takeover_publish_failed task_id=%s",
+                task_id,
+                exc_info=True,
+            )
+            return False
 
     def _persist_specialist_completion_artifacts(
         self,
