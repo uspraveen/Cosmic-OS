@@ -148,3 +148,12 @@ ehthumbs.db
 Desktop.ini
 .Spotlight-V100
 .Trashes
+NUL
+
+# Tooling / incremental build state
+.zcode/
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
