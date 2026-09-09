@@ -49,6 +49,18 @@ contextBridge.exposeInMainWorld('cosmic', {
     return () => ipcRenderer.removeListener('cosmic:hiding', listener)
   },
 
+  /** Claim Escape for a modal surface. While claimed, main routes Escape to
+   *  `onEscape` instead of hiding the whole window, so the topmost layer
+   *  closes first. Main drops the claim whenever the window hides or the
+   *  renderer reloads, so a leaked claim can never make Escape a dead key. */
+  setEscapeCapture: (active: boolean) => ipcRenderer.send('cosmic:escape-capture', active),
+
+  onEscape: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('cosmic:escape', listener)
+    return () => ipcRenderer.removeListener('cosmic:escape', listener)
+  },
+
   onMediaUpdate: (cb: (data: any) => void) => {
     const listener = (_: any, data: any) => cb(data)
     ipcRenderer.on('media:update', listener)

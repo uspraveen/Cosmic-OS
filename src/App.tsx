@@ -33,6 +33,7 @@ import { findPendingApprovals } from './pendingApprovals'
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
+import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
 
 export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'task' | 'meeting' | 'spaces'
@@ -2461,19 +2462,41 @@ const BrowserRunCard = ({
     return () => window.clearInterval(timer)
   }, [expanded])
 
-  // Never let the lightbox become a trap: it covers the whole window, so it
-  // needs a key that always closes it, not just a click on the backdrop.
+  // Never let the lightbox become a trap. It covers the whole window, so a
+  // backdrop click is not enough of an exit:
+  //  - Escape never reached this listener at all. Main claims it first
+  //    (before-input-event) and calls preventDefault, so the key has to be
+  //    asked for over IPC rather than simply bound here.
+  //  - Hiding the window (Ctrl+Shift+Space, or Escape falling through to the
+  //    same handler) only fades the app's own surfaces. This is portaled to
+  //    document.body, outside all of them, so it stayed painted over an app
+  //    that believed it was hidden - and by then the window was click-through,
+  //    which is exactly how it looked frozen.
+  // One condition for both the portal and its exits, so the Escape claim can
+  // never outlive the surface that asked for it.
+  const lightboxOpen = expanded && Boolean(frame)
   useEffect(() => {
-    if (!expanded) return undefined
+    if (!lightboxOpen) return undefined
+    const close = () => setExpanded(false)
+    window.cosmic?.setEscapeCapture?.(true)
+    const offEscape = window.cosmic?.onEscape?.(close)
+    const offHiding = window.cosmic?.onHiding?.(close)
+    // Fallback for any context without the Electron bridge, where nothing
+    // upstream is intercepting the key.
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.stopPropagation()
-        setExpanded(false)
+        close()
       }
     }
     window.addEventListener('keydown', onKeyDown, true)
-    return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [expanded])
+    return () => {
+      window.cosmic?.setEscapeCapture?.(false)
+      offEscape?.()
+      offHiding?.()
+      window.removeEventListener('keydown', onKeyDown, true)
+    }
+  }, [lightboxOpen])
 
   const submitAnswer = async () => {
     if (!requestId || busy) return
@@ -2682,8 +2705,11 @@ const BrowserRunCard = ({
           ) : null}
         </div>
       )}
-      {expanded && Boolean(frame) && createPortal(
-        <div className="deck-preview-lightbox browser-run-lightbox" onClick={() => setExpanded(false)}>
+      {lightboxOpen && createPortal(
+        <div
+          className={`deck-preview-lightbox browser-run-lightbox ${PORTAL_SURFACE_CLASS}`}
+          onClick={() => setExpanded(false)}
+        >
           <img
             src={zoomFrame || frame}
             alt={progress.pageTitle || 'Live browser view'}
@@ -6917,15 +6943,13 @@ export default function App() {
     const handleMouseMove = (e: MouseEvent) => {
       const el = document.elementFromPoint(e.clientX, e.clientY)
       if (!el) return
-      const island = !!el.closest('.island')
-      const settings = !!el.closest('.settings-overlay')
-      const overlay = searchState !== 'hidden' && !!el.closest('.overlay')
-
-      const cronNotice = !!el.closest('.cron-result-shell')
-      // Overlay must stay interactive for clicks, but must not count as
-      // island hover — otherwise Cosmic UI keeps the full home slide open.
-      const islandHover = island || settings
-      const isInteractive = islandHover || overlay || cronNotice
+      // Shared with the portal-surface contract in windowInteractivity: a
+      // surface portaled out of `.overlay` is invisible to this walk unless it
+      // opts back in, and a surface the pointer cannot reach cannot be clicked
+      // or closed.
+      const { islandHovered: islandHover, interactive: isInteractive } = hitTestPointerTarget(el, {
+        searchVisible: searchState !== 'hidden',
+      })
 
       if (lastIsland !== islandHover) {
         lastIsland = islandHover

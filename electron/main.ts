@@ -1850,6 +1850,10 @@ function sizeToDisplay(reason: SizeToDisplayReason = 'show', onSettled?: () => v
   applyDisplayBounds(getTargetDisplay(), reason, onSettled)
 }
 
+// Set by the renderer while a modal surface wants Escape for itself. Cleared
+// on every hide and on any navigation, so it cannot outlive its owner.
+let escapeCaptured = false
+
 function loadMainWindow() {
   if (!win) return
   if (VITE_DEV_SERVER_URL) win.loadURL(VITE_DEV_SERVER_URL)
@@ -1860,6 +1864,7 @@ function toggleSearch() {
   if (!win) return
   if (searchVisible) {
     searchVisible = false
+    escapeCaptured = false
     win.webContents.send('cosmic:hiding')
     win.setIgnoreMouseEvents(true, { forward: true })
   } else {
@@ -1930,8 +1935,22 @@ function createWindow() {
       return
     }
     event.preventDefault()
+    // A modal surface (the expanded browser view) gets first refusal: Escape
+    // should peel off the top layer before it hides the whole window. Without
+    // this the renderer never saw the key at all - preventDefault stops it
+    // here - so a full-screen overlay had no way to bind it.
+    if (escapeCaptured) {
+      win?.webContents.send('cosmic:escape')
+      return
+    }
     toggleSearch()
   })
+
+  // A claim belongs to one live surface in one loaded page. Anything that ends
+  // that page ends the claim, so Escape can never be left pointing at a
+  // listener that no longer exists.
+  win.webContents.on('did-start-navigation', () => { escapeCaptured = false })
+  win.webContents.on('render-process-gone', () => { escapeCaptured = false })
 
   win.setIgnoreMouseEvents(true, { forward: true })
 }
@@ -2071,6 +2090,8 @@ app.whenReady().then(() => {
 
   ipcMain.on('cosmic:hide', () => { if (searchVisible) toggleSearch() })
   ipcMain.on('cosmic:toggle', toggleSearch)
+
+  ipcMain.on('cosmic:escape-capture', (_event, active) => { escapeCaptured = Boolean(active) })
 
   ipcMain.on('set-ignore-mouse-events', (event, ignore, options) => {
     const w = BrowserWindow.fromWebContents(event.sender)

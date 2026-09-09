@@ -32,6 +32,8 @@ interface Window {
     toggle: () => void
     onShown: (cb: () => void) => () => void
     onHiding: (cb: () => void) => () => void
+    setEscapeCapture: (active: boolean) => void
+    onEscape: (cb: () => void) => () => void
     onMediaUpdate: (cb: (data: any) => void) => () => void
     onWindowUpdate: (cb: (data: any) => void) => () => void
     onWeatherUpdate: (cb: (data: any) => void) => () => void
