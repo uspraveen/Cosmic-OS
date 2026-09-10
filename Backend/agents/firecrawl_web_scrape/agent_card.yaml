@@ -13,6 +13,7 @@ intents:
     timeout_sec: 120
     usage_hints:
       - Prefer this over the browser agent (browser.run) for any read-only page that needs no login or interaction — it's much faster and cheaper than driving a full browser. Use the browser agent instead when the page needs an authenticated session or JS-heavy interaction (clicking, filling forms, multi-step navigation).
+      - Discovery for an acting task (find-then-act) — when a goal needs the browser agent to act on a page it first has to find, scrape here to resolve the exact URL, then delegate browser.run with that URL as initial_url and the page named in the goal. Locating pages by in-browser traversal costs browser minutes; a scrape here is seconds. Only for pages viewable without the user's session — logged-in pages must be found by the browser agent itself.
       - When the data you need is rendered as an image, read it visually one of two ways - scrape the direct image URL (e.g. a .png chart/table), or request formats:["screenshot"] which is captured full-page by default so content below the fold is included. Both surface an image artifact for the vision model.
       - A direct image URL is fetched as an image artifact even though Firecrawl cannot parse binary images; prefer it when you know the exact image URL.
       - Set screenshot_full_page:false only if you specifically want the top viewport instead of the whole page.

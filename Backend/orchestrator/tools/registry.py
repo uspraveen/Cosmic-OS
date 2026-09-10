@@ -561,7 +561,14 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "Prefer firecrawl_scrape/firecrawl_extract instead when the page is read-only and needs no login or "
                 "interaction — they are much faster and cheaper than driving a full browser; reach for this tool when "
                 "the site needs an authenticated session, JS-heavy interaction (clicking, filling forms, multi-step "
-                "navigation), or firecrawl has already failed on it. One goal per call; phrase it as a complete "
+                "navigation), or firecrawl has already failed on it. When a goal starts with discovery — find the "
+                "right posting/page/document, then act on it — resolve the exact URL first with "
+                "firecrawl_scrape/firecrawl_extract (or a search) and pin this run to it via initial_url plus a goal "
+                "that names the page: locating pages by in-browser traversal spends browser-priced steps on what a "
+                "seconds-cheap scrape answers. Skip the pre-resolution when the target needs the user's authenticated "
+                "session (a cloud scrape cannot see those pages) or the candidates are not enumerable — the browser "
+                "agent finds its own way there. "
+                "One goal per call; phrase it as a complete "
                 "self-contained instruction for a web agent. If the site needs login, first call vault_lookup for the "
                 "site and pass the credential_ref here; the resolved secret is injected securely and never enters your "
                 "context. If the run ends with status=credentials_needed, provision credentials via "
@@ -590,7 +597,12 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "initial_url": {
                         "type": "string",
-                        "description": "Optional URL to open before planning. Omit to let the agent navigate itself.",
+                        "description": (
+                            "Optional URL to open before planning. Omit to let the agent navigate itself. When a "
+                            "discovery step (firecrawl_scrape, firecrawl_extract, a search) already resolved the exact "
+                            "page, pin it here and name that page in the goal — the run then spends its steps acting, "
+                            "not searching."
+                        ),
                     },
                     "max_steps": {
                         "type": "integer",

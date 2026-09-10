@@ -14,7 +14,7 @@ intents:
     timeout_sec: 900
     usage_hints:
       - Do not delegate a new deck request here until the user has chosen workflow=advanced, workflow=html, or workflow=template, unless the user explicitly passed workflow=auto or provided a template.
-      - Advanced mode is the default — it designs each slide and converts it into a fully editable native PPTX. It works with or without a template: with a template it builds on the template's own theme and layouts; without one it plans and locks a theme itself.
+      - Advanced mode is the default — it designs each slide and converts it into a fully editable native PPTX. It works with or without a template — with a template it builds on the template's own theme and layouts; without one it plans and locks a theme itself.
       - HTML mode is fast and produces an image-backed, non-editable PPTX.
       - Template mode is slower and produces an editable PPTX by filling an uploaded template's existing layouts (or an auto-selected template from the agent templates folder).
       - The Slide Agent has internal visual sourcing tools for stock photos, web research, generated images, and bounded local Python asset generation. When the user asks for visuals inside the deck, let the Slide Agent source them internally instead of pre-generating them in the orchestrator.
