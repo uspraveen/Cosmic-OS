@@ -2831,6 +2831,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "personalized newspaper: rewritten headlines and body copy in COSMIC's voice, with a "
                 "few relevant images when you have trustworthy direct URLs. Provide the lead plus "
                 "themed sections with semantic layout intents; the renderer handles final layout. "
+                "Never publish placeholder or test stories. "
                 "Rejected editions come back with an actionable error, and the response lists any "
                 "soft layout downgrades."
             ),

@@ -20,6 +20,7 @@ Work rules:
 - Images: a couple of visuals carry a paper — aim for the lead and up to two more, using each article's own main image when you have a URL you trust. Skip icons, logos, avatars, and anything you cannot verify.
 - You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections, at most {max_stories} stories total).
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
+- If publish_prophet_edition is rejected, correct the specific problem and republish the real edition. Never publish placeholder, sample, or test stories.
 - After the publish succeeds, reply with one short line confirming the edition is ready."""
 
 PROPHET_EVENING_PROMPT = """Compose today's evening edition of The Daily Prophet — COSMIC's personalized newspaper for this user.
@@ -32,6 +33,7 @@ Work rules:
 - Images: a couple of visuals carry a paper — aim for the lead and up to two more, using each article's own main image when you have a URL you trust. Skip icons, logos, avatars, and anything you cannot verify.
 - You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections, at most {max_stories} stories total).
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
+- If publish_prophet_edition is rejected, correct the specific problem and republish the real edition. Never publish placeholder, sample, or test stories.
 - After the publish succeeds, reply with one short line confirming the edition is ready."""
 
 

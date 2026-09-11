@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -8,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..channels.routes import get_runtime, require_internal_token, require_local_api_token
 from ..runtime import GatewayRuntime
 from .store import ProphetValidationError
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["prophet"])
 
@@ -187,6 +190,11 @@ async def publish_internal_prophet_edition(
             slot=payload.slot,
         )
     except ProphetValidationError as exc:
+        logger.warning(
+            "gateway.prophet_publish_rejected code=%s message=%s",
+            exc.code,
+            str(exc),
+        )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": exc.code, "message": str(exc), "details": exc.details},

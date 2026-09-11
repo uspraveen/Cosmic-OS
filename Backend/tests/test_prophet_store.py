@@ -147,20 +147,41 @@ def test_dedup_warns_on_repeat(tmp_path: Path) -> None:
     assert any("appeared in a recent edition" in warning for warning in result["warnings"])
 
 
-def test_story_cap_enforced(tmp_path: Path) -> None:
+def test_story_cap_trims_lowest_importance(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.update_settings({"max_stories": 5})
     payload = _edition()
     payload["sections"][0]["stories"] = [
         {
             "headline": f"Story {index}",
+            "importance": 70 - index,
             "source": {"name": "Wire", "url": f"https://example.com/{index}"},
         }
         for index in range(8)
     ]
+    result = store.publish_edition(payload)
+    assert result["story_count"] == 5
+    assert any("Trimmed" in warning for warning in result["warnings"])
+
+
+def test_placeholder_editions_are_rejected(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    payload = _edition()
+    payload.pop("lead")
+    payload["sections"] = [
+        {
+            "id": "test",
+            "label": "Test",
+            "stories": [
+                {"headline": "Test story one"},
+                {"headline": "Test story two"},
+                {"headline": "Test story three"},
+            ],
+        }
+    ]
     with pytest.raises(ProphetValidationError) as excinfo:
         store.publish_edition(payload)
-    assert excinfo.value.code == "story_cap_exceeded"
+    assert excinfo.value.code == "placeholder_edition"
 
 
 def test_lead_auto_promoted(tmp_path: Path) -> None:

@@ -40,6 +40,10 @@ DEFAULT_SECTIONS: tuple[dict[str, Any], ...] = (
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _HEADLINE_KEY_RE = re.compile(r"[^a-z0-9]+")
+_PLACEHOLDER_HEADLINE_RE = re.compile(
+    r"^(?:test|sample|placeholder|demo|example|untitled|headline|story)\b",
+    re.IGNORECASE,
+)
 _WEAK_IMAGE_HINTS = (
     "favicon",
     "apple-touch-icon",
@@ -344,11 +348,52 @@ def validate_edition_payload(
     if total_stories <= 0:
         raise ProphetValidationError("An edition needs stories.", code="empty_edition")
     if total_stories > max_stories:
-        raise ProphetValidationError(
-            f"Edition has {total_stories} stories; the configured cap is {max_stories}.",
-            code="story_cap_exceeded",
-            details={"story_count": total_stories, "max_stories": max_stories},
+        overflow = total_stories - max_stories
+        removable = sorted(
+            (
+                (section, story)
+                for section in sections
+                for story in section["stories"]
+            ),
+            key=lambda item: item[1].get("importance", 0),
         )
+        removed = 0
+        for section, story in removable:
+            if removed >= overflow:
+                break
+            section["stories"] = [
+                item for item in section["stories"] if item is not story
+            ]
+            removed += 1
+        sections = [section for section in sections if section["stories"]]
+        if removed:
+            warnings.append(
+                f"Trimmed {removed} lower-importance stories to honor the {max_stories}-story cap."
+            )
+        total_stories = (1 if lead else 0) + sum(
+            len(section["stories"]) for section in sections
+        )
+        if total_stories <= 0:
+            raise ProphetValidationError("An edition needs stories.", code="empty_edition")
+
+    published_headlines = [
+        story["headline"]
+        for story in (
+            ([lead] if lead else [])
+            + [story for section in sections for story in section["stories"]]
+        )
+    ]
+    if published_headlines:
+        placeholder_hits = [
+            headline
+            for headline in published_headlines
+            if _PLACEHOLDER_HEADLINE_RE.match(headline)
+        ]
+        if len(placeholder_hits) == len(published_headlines):
+            raise ProphetValidationError(
+                "This edition looks like placeholder or test content. Publish the real edition.",
+                code="placeholder_edition",
+            )
 
     def _image_stories() -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
