@@ -4658,6 +4658,13 @@ def test_prophet_og_image_parser_reads_meta_tags() -> None:
     assert _parse_prophet_og_image(reversed_attrs) == {
         "url": "https://cdn.example.com/two.jpg"
     }
+    x_page = (
+        '<meta property="og:image" content="https://pbs.twimg.com/profile_images/1/abc.jpg">'
+        '{"url":"https:\\/\\/pbs.twimg.com\\/media\\/GABC123?format=jpg&name=large"}'
+    )
+    assert _parse_prophet_og_image(x_page) == {
+        "url": "https://pbs.twimg.com/media/GABC123?format=jpg&name=large"
+    }
     assert _parse_prophet_og_image('<meta property="og:image" content="https://x.com/logo.png">') is None
     assert _parse_prophet_og_image("") is None
 

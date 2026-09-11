@@ -293,8 +293,12 @@ _HEARTBEAT_OFFLINE_SUPPRESS_RE = re.compile(
     r"chat (?:is |are )?silent|user still offline|nothing time-ripe for a mobile push)",
     re.IGNORECASE,
 )
-PROPHET_IMAGE_ENRICH_LIMIT = 3
+PROPHET_IMAGE_ENRICH_LIMIT = 5
 PROPHET_IMAGE_ENRICH_TIMEOUT_SEC = 8.0
+_PROPHET_MEDIA_IMAGE_RE = re.compile(
+    r"https://pbs\.twimg\.com/(?:media|tweet_video_thumb|amplify_video_thumb|ext_tw_video_thumb)/[^\"'\\]+",
+    re.IGNORECASE,
+)
 _PROPHET_OG_IMAGE_PATTERNS = (
     re.compile(
         r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)["\']',
@@ -312,7 +316,7 @@ _PROPHET_OG_IMAGE_ALT_RE = re.compile(
 
 
 def _parse_prophet_og_image(html_text: str) -> dict[str, str] | None:
-    text = str(html_text or "")
+    text = str(html_text or "").replace("\\/", "/")
     if not text:
         return None
     image_url = ""
@@ -321,11 +325,15 @@ def _parse_prophet_og_image(html_text: str) -> dict[str, str] | None:
         if match:
             image_url = match.group(1).strip()
             break
-    if not image_url:
-        return None
-    image_url = image_url.replace("&amp;", "&").strip()
+    if not image_url.startswith(("http://", "https://")) or is_weak_image_url(image_url):
+        media_match = _PROPHET_MEDIA_IMAGE_RE.search(text)
+        if media_match:
+            image_url = media_match.group(0).strip()
+        else:
+            return None
     if not image_url.startswith(("http://", "https://")) or is_weak_image_url(image_url):
         return None
+    image_url = image_url.replace("&amp;", "&").strip()
     image: dict[str, str] = {"url": image_url}
     alt_match = _PROPHET_OG_IMAGE_ALT_RE.search(text)
     if alt_match:
@@ -9705,7 +9713,12 @@ class GatewayRuntime:
                 url = _source_url(story)
                 if url:
                     ranked.append((story, url))
-        ranked.sort(key=lambda item: item[0].get("importance", 0) or 0, reverse=True)
+        ranked.sort(
+            key=lambda item: (
+                1 if self._is_social_source_url(item[1]) else 0,
+                -(item[0].get("importance", 0) or 0),
+            )
+        )
         for item in ranked:
             if len(targets) >= PROPHET_IMAGE_ENRICH_LIMIT:
                 break
@@ -9728,6 +9741,11 @@ class GatewayRuntime:
             if isinstance(image, dict) and image.get("url"):
                 story["image"] = image
         return work
+
+    @staticmethod
+    def _is_social_source_url(url: str) -> bool:
+        lowered = str(url or "").casefold()
+        return "x.com/" in lowered or "twitter.com/" in lowered or "t.co/" in lowered
 
     async def _fetch_prophet_image(
         self, client: httpx.AsyncClient, page_url: str
