@@ -13,7 +13,11 @@ import pytest
 
 from orchestrator.config import OrchestratorConfig
 from orchestrator.prompts import build_agentic_system_prompt, get_prompt_asset_hashes
-from orchestrator.runtime import ActiveTaskRun, OrchestratorRuntime
+from orchestrator.runtime import (
+    PROPHET_CRON_TOOL_ITERATIONS,
+    ActiveTaskRun,
+    OrchestratorRuntime,
+)
 from shared import TaskEnvelope, sign_task_envelope, utcnow
 
 
@@ -127,6 +131,28 @@ def _signed_task(signing_secret: str) -> TaskEnvelope:
 
 def _fake_sse(event: str, payload: dict[str, object]) -> object:
     return type("SSE", (), {"event": event, "data": json.dumps(payload)})()
+
+
+def test_prophet_cron_gets_deeper_tool_budget(tmp_path) -> None:
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        max_tool_iterations=25,
+        task_ledger_db_path=tmp_path / "task_ledger_budget.db",
+    )
+    runtime = OrchestratorRuntime(config)
+    base = _signed_task("signing-secret")
+    prophet_task = base.model_copy(
+        update={"source": "cron", "source_id": "prophet.morning"}
+    )
+    review_task = base.model_copy(
+        update={"source": "cron", "source_id": "system.weekly_my_tools_review"}
+    )
+    chat_task = base.model_copy(update={"source": "user", "source_id": "desktop"})
+
+    assert runtime._max_iterations_for_task(prophet_task) == PROPHET_CRON_TOOL_ITERATIONS
+    assert runtime._max_iterations_for_task(review_task) == 25
+    assert runtime._max_iterations_for_task(chat_task) == 25
 
 
 @pytest.mark.asyncio

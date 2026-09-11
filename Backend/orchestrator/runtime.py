@@ -76,6 +76,9 @@ from .visual_enrichment import VisualEnrichmentCoordinator
 logger = logging.getLogger(__name__)
 
 _PARALLEL_SAFE_TOOLS = get_parallel_safe_local_tool_names()
+# Daily Prophet editions are research-heavy and must still end with a publish
+# tool call, so they get a deeper iteration budget than a normal chat turn.
+PROPHET_CRON_TOOL_ITERATIONS = 45
 
 
 @dataclass(slots=True)
@@ -421,6 +424,13 @@ class OrchestratorRuntime:
     #  AGENTIC LOOP
     # ════════════════════════════════════════════════════════════
 
+    def _max_iterations_for_task(self, task: TaskEnvelope) -> int:
+        configured = int(self.config.max_tool_iterations or 0)
+        source_id = str(task.source_id or "").strip()
+        if task.source == "cron" and source_id.startswith("prophet."):
+            return max(configured, PROPHET_CRON_TOOL_ITERATIONS)
+        return configured
+
     async def stream_task(self, task: TaskEnvelope) -> AsyncIterator[dict[str, Any]]:
         if not verify_task_envelope(task, self.config.signing_secret):
             raise RuntimeError("TaskEnvelope signature verification failed.")
@@ -524,7 +534,7 @@ class OrchestratorRuntime:
                 else None,
             )
             tools = get_model_tool_definitions(self._featured_specialist_agent_ids())
-            max_iterations = self.config.max_tool_iterations
+            max_iterations = self._max_iterations_for_task(task)
 
             iteration = 0
             full_response_text = ""
@@ -1342,7 +1352,7 @@ class OrchestratorRuntime:
                 *self._messages_to_openai_chat(messages),
             ]
             tools = self._tools_to_openai_chat(get_local_tool_definitions(self._featured_specialist_agent_ids()))
-            max_iterations = self.config.max_tool_iterations
+            max_iterations = self._max_iterations_for_task(task)
             visual_coordinator = (
                 VisualEnrichmentCoordinator(
                     config=self.config,
