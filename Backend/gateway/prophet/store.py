@@ -21,6 +21,7 @@ PROPHET_MIN_STORIES = 5
 PROPHET_MAX_STORIES_HARD_CAP = 30
 PROPHET_DEFAULT_MAX_STORIES = 15
 PROPHET_DEDUP_WINDOW_DAYS = 3
+PROPHET_MAX_IMAGES = 4
 
 VALID_LAYOUTS = ("feature", "columns", "briefs", "gallery", "essay")
 VALID_ROLES = ("lead", "feature", "standard", "brief", "pull_quote", "image_led")
@@ -39,6 +40,18 @@ DEFAULT_SECTIONS: tuple[dict[str, Any], ...] = (
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _HEADLINE_KEY_RE = re.compile(r"[^a-z0-9]+")
+_WEAK_IMAGE_HINTS = (
+    "favicon",
+    "apple-touch-icon",
+    "sprite",
+    "placeholder",
+    "logo",
+    "avatar",
+    "gravatar",
+    "1x1",
+    "pixel.gif",
+    "blank.gif",
+)
 
 
 class ProphetValidationError(ValueError):
@@ -125,6 +138,11 @@ def _normalize_image(raw: Any) -> dict[str, str] | None:
         return None
     url = _clean_text(raw.get("url"), limit=2000)
     if not url:
+        return None
+    lowered = url.casefold()
+    if lowered.startswith(("data:", "javascript:")) or lowered.endswith(".svg"):
+        return None
+    if any(hint in lowered for hint in _WEAK_IMAGE_HINTS):
         return None
     image: dict[str, str] = {"url": url}
     for key, limit in (("caption", 400), ("credit", 200)):
@@ -326,6 +344,44 @@ def validate_edition_payload(
             code="story_cap_exceeded",
             details={"story_count": total_stories, "max_stories": max_stories},
         )
+
+    def _image_stories() -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        if lead is not None and _story_has_image(lead):
+            items.append(lead)
+        for section in sections:
+            for story in section["stories"]:
+                if _story_has_image(story):
+                    items.append(story)
+        return items
+
+    seen_urls: set[str] = set()
+    for story in _image_stories():
+        image_url = str((story.get("image") or {}).get("url") or "")
+        if image_url and image_url in seen_urls:
+            story.pop("image", None)
+            warnings.append(f"Removed a duplicate image from '{story['headline'][:60]}'.")
+            continue
+        seen_urls.add(image_url)
+
+    visual_stories = _image_stories()
+    if len(visual_stories) > PROPHET_MAX_IMAGES:
+        keep_ids: set[int] = set()
+        if lead is not None and _story_has_image(lead):
+            keep_ids.add(id(lead))
+        ranked = sorted(
+            (story for story in visual_stories if id(story) not in keep_ids),
+            key=lambda item: item.get("importance", 0),
+            reverse=True,
+        )
+        for story in ranked[: max(0, PROPHET_MAX_IMAGES - len(keep_ids))]:
+            keep_ids.add(id(story))
+        for story in visual_stories:
+            if id(story) not in keep_ids:
+                story.pop("image", None)
+                warnings.append(
+                    f"Trimmed an extra image from '{story['headline'][:60]}' to keep the paper clean."
+                )
 
     normalized: dict[str, Any] = {
         "schema_version": PROPHET_SCHEMA_VERSION,

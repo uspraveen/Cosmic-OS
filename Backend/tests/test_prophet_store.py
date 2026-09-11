@@ -199,3 +199,57 @@ def test_list_editions_summary(tmp_path: Path) -> None:
     editions = store.list_editions(limit=5)
     assert len(editions) == 1
     assert editions[0]["headlines"][0]["headline"] == "Lead story about agents"
+
+
+def test_image_cap_keeps_lead_and_top_stories(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    payload = _edition()
+    payload["sections"][0]["stories"] = [
+        {
+            "headline": f"Visual {index}",
+            "importance": 80 - index,
+            "image": {"url": f"https://example.com/photo-{index}.jpg"},
+        }
+        for index in range(8)
+    ]
+    result = store.publish_edition(payload)
+    edition = result["edition"]
+    stories = ([edition["lead"]] if edition.get("lead") else []) + [
+        story for section in edition["sections"] for story in section["stories"]
+    ]
+    with_images = [
+        story
+        for story in stories
+        if isinstance(story.get("image"), dict) and story["image"].get("url")
+    ]
+    assert len(with_images) <= 4
+    assert edition["lead"]["image"]["url"].endswith("lead.jpg")
+    assert any("Trimmed an extra image" in warning for warning in result["warnings"])
+
+
+def test_weak_and_duplicate_images_are_dropped(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    payload = _edition()
+    payload["lead"]["image"] = {"url": "https://example.com/logo.png"}
+    stories = payload["sections"][0]["stories"]
+    stories[0]["image"] = {"url": "https://example.com/icon.svg"}
+    stories[1]["image"] = {"url": "https://example.com/shared-photo.jpg"}
+    payload["sections"].append(
+        {
+            "id": "extra",
+            "label": "Extra",
+            "stories": [
+                {
+                    "headline": "Duplicate visual",
+                    "image": {"url": "https://example.com/shared-photo.jpg"},
+                }
+            ],
+        }
+    )
+    result = store.publish_edition(payload)
+    edition = result["edition"]
+    assert "image" not in edition["lead"]
+    assert "image" not in edition["sections"][0]["stories"][0]
+    extra = next(section for section in edition["sections"] if section["id"] == "extra")
+    assert "image" not in extra["stories"][0]
+    assert any("duplicate image" in warning for warning in result["warnings"])

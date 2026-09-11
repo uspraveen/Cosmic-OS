@@ -74,9 +74,11 @@ Curator (orchestrator tool) may only add/remove/mute `inferred` entries; user-ad
 ## Generation pipeline
 
 - The cron prompt is compact but strict: write the user's own edition (rewrite headlines and body copy in
-  COSMIC's voice, connect stories to the user's world), keep research bounded, include image URLs for the
-  lead and most stories, and always end with `publish_prophet_edition`. Sources are unrestricted
-  (web search, Perplexity, X, Firecrawl, browser, specialist delegation).
+  COSMIC's voice, connect stories to the user's world), keep research bounded, suggest a few trustworthy
+  images (lead plus a couple of stories), and always end with `publish_prophet_edition`. Sources are
+  unrestricted (web search, Perplexity, X, Firecrawl, browser, specialist delegation). The store drops
+  weak image sources (logos, icons, avatars, SVGs, duplicates) and caps the edition at four images,
+  keeping the lead and the highest-importance stories.
 - Fresh context packet per run (`prophet/context.py`): settings summary, enabled sections, active
   interests, muted topics, preferred sources, and the last three days of shown headlines for dedup.
 - The run response is suppressed from chat when `prophet_store.find_edition_by_request_id()` finds a
@@ -108,7 +110,8 @@ Tool group: `prophet` ("Daily Prophet") in the orchestrator prompt catalog.
   `src/prophetFeed.test.ts`.
 - `SpacesControlCenter.tsx`: feed-driven `renderProphetPage()` with masthead, lead, sections, image
   figures with captions/credits, empty/error states, refresh + polling, `onGatewayEvent` live refresh,
-  and a glass settings panel (schedule, cap, sections, interests, sources, paper style).
+  and a settings view built from the app's glass cards (schedule, cap, sections, interests, sources,
+  paper style) that replaces the paper while open.
 - Story source links open a glass hover preview (headline, image, domain, open-in-browser) instead of a
   bare link.
 - `spaces-control.css`: the paper canvas is scoped to `.prophet-page` with selectable styles

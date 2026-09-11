@@ -17,7 +17,7 @@ This is not a headline dump. Write the user's own edition: choose the stories th
 Work rules:
 - Do not ask the user anything and do not narrate your process.
 - Keep research bounded and prioritize quality over quantity; do not chase every thread or start long delegations late.
-- Include visuals: give the lead and most stories a relevant direct image URL (from the source page or a clearly relevant image), with captions and credits when known. Never invent image URLs.
+- Images are a seasoning, not the meal: suggest one for the lead and at most two or three other stories, and only when you have a direct image URL you are confident will render (prefer the article's own main image). Skip icons, logos, avatars, and anything you cannot verify.
 - You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections, at most {max_stories} stories total).
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
 - After the publish succeeds, reply with one short line confirming the edition is ready."""
@@ -29,7 +29,7 @@ This is the evening wrap: what developed during the day, what the user will want
 Work rules:
 - Do not ask the user anything and do not narrate your process.
 - Keep research bounded and prioritize quality over quantity; do not chase every thread or start long delegations late.
-- Include visuals: give the lead and most stories a relevant direct image URL (from the source page or a clearly relevant image), with captions and credits when known. Never invent image URLs.
+- Images are a seasoning, not the meal: suggest one for the lead and at most two or three other stories, and only when you have a direct image URL you are confident will render (prefer the article's own main image). Skip icons, logos, avatars, and anything you cannot verify.
 - You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections, at most {max_stories} stories total).
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
 - After the publish succeeds, reply with one short line confirming the edition is ready."""
