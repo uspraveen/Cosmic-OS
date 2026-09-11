@@ -26,6 +26,25 @@ interface GatewayPendingDocumentAttachment {
   sizeBytes: number
 }
 
+interface ScreenshotRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+interface ScreenshotBeginPayload {
+  frame: Uint8Array
+  geometry: {
+    bounds: ScreenshotRect
+    workArea: ScreenshotRect
+  }
+  frameSize: {
+    width: number
+    height: number
+  }
+}
+
 interface Window {
   cosmic?: {
     hide: () => void
@@ -423,5 +442,16 @@ interface Window {
     onMeetingAnswerChunk: (cb: (data: { question: string; chunk: string }) => void) => () => void
     onMeetingFinal: (cb: (data: any) => void) => () => void
     onMeetingSettings: (cb: (data: { name_on_call?: string; mic_sensitivity?: number; update_interval_sec?: number }) => void) => () => void
+
+    // Screenshot snipper
+    onScreenshotBegin: (cb: (data: ScreenshotBeginPayload) => void) => () => void
+    onScreenshotEnd: (cb: (data: { reason?: string }) => void) => () => void
+    commitScreenshot: (payload: { rect: ScreenshotRect }) => Promise<{
+      ok: boolean
+      width?: number
+      height?: number
+      error?: string
+    }>
+    cancelScreenshot: () => void
   }
 }

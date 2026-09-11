@@ -21,6 +21,10 @@
 /** Marker for surfaces portaled to document.body that still want clicks. */
 export const PORTAL_SURFACE_CLASS = 'cosmic-portal-surface'
 
+/** The frozen-frame screenshot snipper. It owns the whole window while active,
+ *  so it must accept clicks even when the main surface is hidden. */
+export const SCREENSHOT_LAYER_CLASS = 'screenshot-layer'
+
 /** The minimum of `Element` this needs — kept structural so it can be tested
  *  without a DOM. */
 export interface PointerHitTarget {
@@ -39,12 +43,19 @@ export interface PointerHitResult {
  * @param options.searchVisible whether the main search/chat surface is on screen;
  *   while it is hidden its DOM may still exist, and stale surfaces must not
  *   capture clicks meant for the desktop
+ * @param options.screenshotActive whether the snipper owns the screen; it is a
+ *   deliberate full-window click target regardless of surface visibility, and
+ *   must never count as island hover
  */
 export const hitTestPointerTarget = (
   target: PointerHitTarget | null,
-  options: { searchVisible: boolean },
+  options: { searchVisible: boolean; screenshotActive?: boolean },
 ): PointerHitResult => {
   if (!target) return { islandHovered: false, interactive: false }
+  const screenshot = Boolean(options.screenshotActive && target.closest(`.${SCREENSHOT_LAYER_CLASS}`))
+  if (screenshot) {
+    return { islandHovered: false, interactive: true }
+  }
   const island = Boolean(target.closest('.island'))
   const settings = Boolean(target.closest('.settings-overlay'))
   // The overlay must stay interactive for clicks, but must not count as island

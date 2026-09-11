@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { PORTAL_SURFACE_CLASS, hitTestPointerTarget, type PointerHitTarget } from './windowInteractivity'
+import {
+  PORTAL_SURFACE_CLASS,
+  SCREENSHOT_LAYER_CLASS,
+  hitTestPointerTarget,
+  type PointerHitTarget,
+} from './windowInteractivity'
 
 /** A stand-in for the element under the pointer: `ancestors` is the set of
  *  selectors that `closest` would match from that point. */
@@ -58,5 +63,23 @@ describe('hitTestPointerTarget', () => {
 
   it('keeps the cron notice interactive regardless of surface visibility', () => {
     expect(hitTestPointerTarget(at('.cron-result-shell'), hidden).interactive).toBe(true)
+  })
+
+  it('keeps the screenshot layer interactive even while the app is hidden', () => {
+    expect(hitTestPointerTarget(at(`.${SCREENSHOT_LAYER_CLASS}`), { ...hidden, screenshotActive: true }))
+      .toEqual({ islandHovered: false, interactive: true })
+  })
+
+  it('keeps a control inside the screenshot layer interactive', () => {
+    const handle = at(`.${SCREENSHOT_LAYER_CLASS}`, '.screenshot-selection')
+    expect(hitTestPointerTarget(handle, { ...hidden, screenshotActive: true }).interactive).toBe(true)
+  })
+
+  it('does not let a stale screenshot layer capture clicks once inactive', () => {
+    expect(hitTestPointerTarget(at(`.${SCREENSHOT_LAYER_CLASS}`), { ...hidden, screenshotActive: false }).interactive).toBe(false)
+  })
+
+  it('does not count the screenshot layer as island hover', () => {
+    expect(hitTestPointerTarget(at(`.${SCREENSHOT_LAYER_CLASS}`), { ...visible, screenshotActive: true }).islandHovered).toBe(false)
   })
 })

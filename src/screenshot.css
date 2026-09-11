@@ -1,0 +1,164 @@
+/* Frozen-frame screenshot snipper. Owns the whole window while active and sits
+   above every other Cosmic surface (settings overlays cap out at z-index
+   20000). The frozen frame was captured before this layer appeared, so none of
+   this chrome can leak into the final image. */
+
+.screenshot-layer {
+  position: fixed;
+  inset: 0;
+  /* Above every Cosmic surface, including the hover-tooltip layer (999999). */
+  z-index: 1000000;
+  overflow: hidden;
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+.screenshot-frozen-frame {
+  position: absolute;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.screenshot-selection {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, 0.92);
+  outline: 1px solid rgba(0, 0, 0, 0.55);
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.48);
+  cursor: move;
+  box-sizing: border-box;
+}
+
+.screenshot-size-label {
+  position: absolute;
+  top: -28px;
+  left: 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(15, 15, 18, 0.82);
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.screenshot-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  border-radius: 2px;
+  box-sizing: border-box;
+}
+
+.screenshot-handle.handle-nw {
+  top: -5px;
+  left: -5px;
+  cursor: nwse-resize;
+}
+
+.screenshot-handle.handle-n {
+  top: -5px;
+  left: 50%;
+  margin-left: -5px;
+  cursor: ns-resize;
+}
+
+.screenshot-handle.handle-ne {
+  top: -5px;
+  right: -5px;
+  cursor: nesw-resize;
+}
+
+.screenshot-handle.handle-e {
+  top: 50%;
+  right: -5px;
+  margin-top: -5px;
+  cursor: ew-resize;
+}
+
+.screenshot-handle.handle-se {
+  bottom: -5px;
+  right: -5px;
+  cursor: nwse-resize;
+}
+
+.screenshot-handle.handle-s {
+  bottom: -5px;
+  left: 50%;
+  margin-left: -5px;
+  cursor: ns-resize;
+}
+
+.screenshot-handle.handle-sw {
+  bottom: -5px;
+  left: -5px;
+  cursor: nesw-resize;
+}
+
+.screenshot-handle.handle-w {
+  top: 50%;
+  left: -5px;
+  margin-top: -5px;
+  cursor: ew-resize;
+}
+
+.screenshot-hints {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: rgba(15, 15, 18, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.screenshot-hint-strong {
+  color: rgba(255, 255, 255, 0.96);
+  font-weight: 600;
+}
+
+.screenshot-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  z-index: 1000001;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(15, 15, 18, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 12.5px;
+  line-height: 1.3;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: screenshot-toast-in 0.18s ease;
+}
+
+@keyframes screenshot-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}

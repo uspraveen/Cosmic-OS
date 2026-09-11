@@ -374,4 +374,19 @@ contextBridge.exposeInMainWorld('cosmic', {
     return () => ipcRenderer.removeListener('integration:event', listener)
   },
   readClipboardImageAttachment: () => ipcRenderer.invoke('gateway:read-clipboard-image'),
+
+  // --- SCREENSHOT SNIPPER ---
+  onScreenshotBegin: (cb: (data: unknown) => void) => {
+    const listener = (_: unknown, data: unknown) => cb(data)
+    ipcRenderer.on('screenshot:begin', listener)
+    return () => ipcRenderer.removeListener('screenshot:begin', listener)
+  },
+  onScreenshotEnd: (cb: (data: unknown) => void) => {
+    const listener = (_: unknown, data: unknown) => cb(data)
+    ipcRenderer.on('screenshot:end', listener)
+    return () => ipcRenderer.removeListener('screenshot:end', listener)
+  },
+  commitScreenshot: (payload: { rect: { x: number; y: number; width: number; height: number } }) =>
+    ipcRenderer.invoke('screenshot:commit', payload),
+  cancelScreenshot: () => ipcRenderer.send('screenshot:cancel'),
 })

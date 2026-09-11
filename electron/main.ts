@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
+import { app, BrowserWindow, clipboard, desktopCapturer, dialog, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
 import { existsSync, promises as fs, readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -212,6 +212,197 @@ let lastWeatherData: any = null
 let gatewayConnectionManager: GatewayConnectionManager | null = null
 let lastAppliedDisplayId: number | null = null
 let lastAppliedScaleFactor: number | null = null
+
+// --- SCREENSHOT SNIPPER ---
+// The shortcut freezes the display before any UI changes, hands the frame to
+// the renderer for a snipping UI, and keeps the full-resolution capture here so
+// the final crop happens once, at native pixels. Everything is cleared on
+// commit, cancel, quit, or after the buffer TTL.
+const SCREENSHOT_SHORTCUT = 'CommandOrControl+Shift+S'
+const SCREENSHOT_BUFFER_TTL_MS = 120_000
+
+interface PendingScreenshot {
+  /** 1x bitmap decoded from `pngBytes`, so crop() and getSize() share one space. */
+  image: Electron.NativeImage
+  /** Original PNG bytes, handed to the renderer for the frozen frame. */
+  pngBytes: Buffer
+  display: Electron.Display
+  capturedAt: number
+}
+
+let screenshotActive = false
+let screenshotCaptureInFlight = false
+let screenshotGeneration = 0
+let lastScreenshotToggleAt = 0
+let pendingScreenshot: PendingScreenshot | null = null
+let screenshotDiscardTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Held global shortcuts repeat on Windows; without a debounce the repeat
+ *  would toggle the snipper straight back off after it opened. */
+const SCREENSHOT_TOGGLE_DEBOUNCE_MS = 400
+
+function sendScreenshotEvent(channel: string, payload?: unknown): void {
+  if (!win || win.isDestroyed()) return
+  win.webContents.send(channel, payload)
+}
+
+/** The display the overlay window is actually on — capturing any other display
+ *  would freeze a screen the snipping UI is not covering. */
+function getScreenshotDisplay(): Electron.Display {
+  const displays = screen.getAllDisplays()
+  if (lastAppliedDisplayId !== null) {
+    const onWindowDisplay = displays.find((display) => display.id === lastAppliedDisplayId)
+    if (onWindowDisplay) return onWindowDisplay
+  }
+  return getTargetDisplay()
+}
+
+/** Return the window to the click-through state the main surface had before
+ *  the snip; the renderer's own hit test takes over again on the next move. */
+function restorePointerInteractivity(): void {
+  if (!win || win.isDestroyed()) return
+  if (searchVisible) {
+    win.setIgnoreMouseEvents(false)
+  } else {
+    win.setIgnoreMouseEvents(true, { forward: true })
+  }
+}
+
+function clearPendingScreenshot(): void {
+  if (screenshotDiscardTimer) {
+    clearTimeout(screenshotDiscardTimer)
+    screenshotDiscardTimer = null
+  }
+  pendingScreenshot = null
+}
+
+function cancelScreenshot(reason: string): void {
+  if (!screenshotActive && !pendingScreenshot && !screenshotCaptureInFlight) return
+  screenshotActive = false
+  screenshotGeneration += 1
+  clearPendingScreenshot()
+  restorePointerInteractivity()
+  sendScreenshotEvent('screenshot:end', { reason })
+}
+
+async function captureTargetDisplayFrame(): Promise<PendingScreenshot | null> {
+  const display = getScreenshotDisplay()
+  const physicalWidth = Math.max(1, Math.round(display.bounds.width * display.scaleFactor))
+  const physicalHeight = Math.max(1, Math.round(display.bounds.height * display.scaleFactor))
+  let sources: Electron.DesktopCapturerSource[]
+  try {
+    sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: physicalWidth, height: physicalHeight },
+    })
+  } catch (error) {
+    console.error('[screenshot] display capture failed', error)
+    return null
+  }
+  const source =
+    sources.find((candidate) => candidate.display_id === String(display.id)) ?? sources[0]
+  if (!source || source.thumbnail.isEmpty()) {
+    console.warn('[screenshot] no usable screen source for display', display.id)
+    return null
+  }
+  // Re-decode the thumbnail from PNG so the working image is a plain 1x bitmap:
+  // getSize() is then true pixels, crop() operates in the same pixels, and the
+  // exact bytes we send to the renderer are the bytes we crop.
+  const pngBytes = source.thumbnail.toPNG()
+  const image = nativeImage.createFromBuffer(pngBytes)
+  if (image.isEmpty()) {
+    console.warn('[screenshot] captured frame decoded empty for display', display.id)
+    return null
+  }
+  return {
+    image,
+    pngBytes,
+    display,
+    capturedAt: Date.now(),
+  }
+}
+
+async function beginScreenshot(): Promise<void> {
+  if (!win || win.isDestroyed() || screenshotActive || screenshotCaptureInFlight) return
+  // Nothing to freeze into if the renderer is still loading.
+  if (win.webContents.isLoading()) return
+  screenshotCaptureInFlight = true
+  const generation = ++screenshotGeneration
+  try {
+    const captured = await captureTargetDisplayFrame()
+    if (!captured) return
+    // A cancel/navigation/display change while capturing supersedes this run.
+    if (generation !== screenshotGeneration) return
+    if (!win || win.isDestroyed()) return
+    pendingScreenshot = captured
+    screenshotActive = true
+    screenshotDiscardTimer = setTimeout(() => {
+      cancelScreenshot('timeout')
+    }, SCREENSHOT_BUFFER_TTL_MS)
+    // The whole window is the snip canvas while active, even when the main
+    // search surface is hidden.
+    if (win.isMinimized()) win.restore()
+    win.setIgnoreMouseEvents(false)
+    win.moveTop()
+    win.focus()
+    const frameSize = captured.image.getSize()
+    sendScreenshotEvent('screenshot:begin', {
+      frame: captured.pngBytes,
+      geometry: {
+        bounds: captured.display.bounds,
+        workArea: captured.display.workArea,
+      },
+      frameSize: { width: frameSize.width, height: frameSize.height },
+    })
+  } finally {
+    screenshotCaptureInFlight = false
+  }
+}
+
+function sanitizeScreenshotRect(raw: unknown): { x: number; y: number; width: number; height: number } | null {
+  if (!raw || typeof raw !== 'object') return null
+  const candidate = raw as Record<string, unknown>
+  const x = Number(candidate.x)
+  const y = Number(candidate.y)
+  const width = Number(candidate.width)
+  const height = Number(candidate.height)
+  if (![x, y, width, height].every(Number.isFinite)) return null
+  if (width < 1 || height < 1) return null
+  return { x, y, width, height }
+}
+
+function commitScreenshot(rect: { x: number; y: number; width: number; height: number }) {
+  if (!pendingScreenshot) {
+    cancelScreenshot('commit-without-capture')
+    return { ok: false as const, error: 'No screenshot is in progress.' }
+  }
+  const { image, display } = pendingScreenshot
+  const imageSize = image.getSize()
+  // Same mapping as `mapWindowRectToFramePhysical` in src/screenshotBounds.ts:
+  // window CSS px -> display DIP -> frame physical px. Scale comes from the
+  // frame's real size, never the display's nominal scale factor.
+  const scale = display.bounds.width > 0 ? imageSize.width / display.bounds.width : 1
+  const rawX = Math.round((display.workArea.x - display.bounds.x + rect.x) * scale)
+  const rawY = Math.round((display.workArea.y - display.bounds.y + rect.y) * scale)
+  const x = Math.min(Math.max(0, rawX), Math.max(0, imageSize.width - 1))
+  const y = Math.min(Math.max(0, rawY), Math.max(0, imageSize.height - 1))
+  const width = Math.max(1, Math.min(Math.round(rect.width * scale), imageSize.width - x))
+  const height = Math.max(1, Math.min(Math.round(rect.height * scale), imageSize.height - y))
+  try {
+    const cropped = image.crop({ x, y, width, height })
+    clipboard.writeImage(cropped)
+  } catch (error) {
+    console.error('[screenshot] crop or clipboard write failed', error)
+    cancelScreenshot('commit-failed')
+    return { ok: false as const, error: 'Screenshot could not be copied.' }
+  }
+  screenshotActive = false
+  screenshotGeneration += 1
+  clearPendingScreenshot()
+  restorePointerInteractivity()
+  sendScreenshotEvent('screenshot:end', { reason: 'committed' })
+  return { ok: true as const, width, height }
+}
 
 interface GatewayConnectionConfig {
   baseUrl: string
@@ -1862,6 +2053,12 @@ function loadMainWindow() {
 
 function toggleSearch() {
   if (!win) return
+  // While snipping, the shortcut peels the snipper off instead of toggling the
+  // main surface: same contract as Escape.
+  if (screenshotActive) {
+    cancelScreenshot('toggle-search')
+    return
+  }
   if (searchVisible) {
     searchVisible = false
     escapeCaptured = false
@@ -1883,6 +2080,8 @@ function toggleSearch() {
 
 function invokeMeetingMode() {
   if (!win) return
+  // Meeting mode must not surface behind the frozen snipping frame.
+  if (screenshotActive) return
 
   if (!searchVisible) {
     searchVisible = true
@@ -1931,6 +2130,13 @@ function createWindow() {
     if (input.type !== 'keyDown' || input.key !== 'Escape') {
       return
     }
+    // The snipper owns Escape wherever it is (even with the main surface
+    // hidden), so one key always cancels the snip.
+    if (screenshotActive) {
+      event.preventDefault()
+      cancelScreenshot('escape')
+      return
+    }
     if (!searchVisible) {
       return
     }
@@ -1948,9 +2154,16 @@ function createWindow() {
 
   // A claim belongs to one live surface in one loaded page. Anything that ends
   // that page ends the claim, so Escape can never be left pointing at a
-  // listener that no longer exists.
-  win.webContents.on('did-start-navigation', () => { escapeCaptured = false })
-  win.webContents.on('render-process-gone', () => { escapeCaptured = false })
+  // listener that no longer exists. A reload also discards an in-flight snip —
+  // the overlay that owned it is gone.
+  win.webContents.on('did-start-navigation', () => {
+    escapeCaptured = false
+    if (screenshotActive) cancelScreenshot('navigation')
+  })
+  win.webContents.on('render-process-gone', () => {
+    escapeCaptured = false
+    if (screenshotActive) cancelScreenshot('render-process-gone')
+  })
 
   win.setIgnoreMouseEvents(true, { forward: true })
 }
@@ -1979,6 +2192,8 @@ function cleanupProcesses() {
   kill(settingsProcess); settingsProcess = null
   kill(voiceProcess); voiceProcess = null
   kill(meetingProcess); meetingProcess = null
+  clearPendingScreenshot()
+  screenshotActive = false
   gatewayConnectionManager?.stop()
   gatewayConnectionManager = null
 }
@@ -1986,6 +2201,9 @@ function cleanupProcesses() {
 // Monitor change detection
 function handleDisplayAdded(_event: any, display: Electron.Display) {
   console.log('📺 Display added:', display.id)
+  // A frozen frame no longer matches the desktop once displays move; cancel
+  // rather than crop against stale geometry.
+  if (screenshotActive) cancelScreenshot('display-added')
   if (!store.get('autoRepositionOnChange') || searchVisible) {
     return
   }
@@ -1997,6 +2215,7 @@ function handleDisplayAdded(_event: any, display: Electron.Display) {
 
 function handleDisplayRemoved(_event: any, display: Electron.Display) {
   console.log('📺 Display removed:', display.id)
+  if (screenshotActive) cancelScreenshot('display-removed')
   if (!store.get('autoRepositionOnChange')) {
     return
   }
@@ -2024,6 +2243,7 @@ function handleDisplayMetricsChanged(
     m === 'scaleFactor' || m === 'bounds' || m === 'workArea' || m === 'rotation',
   )
   if (!relevant) return
+  if (screenshotActive) cancelScreenshot('display-metrics-changed')
   console.log(`📺 Display metrics changed on active display ${display.id}: ${changedMetrics.join(', ')}`)
   applyDisplayBounds(display, 'display-metrics-changed')
 }
@@ -2097,6 +2317,17 @@ app.whenReady().then(() => {
     const w = BrowserWindow.fromWebContents(event.sender)
     if (w) w.setIgnoreMouseEvents(ignore, options)
   })
+
+  // --- SCREENSHOT SNIPPER ---
+  ipcMain.handle('screenshot:commit', (_event, payload) => {
+    const rect = sanitizeScreenshotRect(payload?.rect)
+    if (!rect) {
+      return { ok: false, error: 'Invalid screenshot selection.' }
+    }
+    return commitScreenshot(rect)
+  })
+
+  ipcMain.on('screenshot:cancel', () => { cancelScreenshot('renderer-cancel') })
 
   ipcMain.on('app:quit', () => { app.quit() })
   ipcMain.on('app:minimize', (event) => {
@@ -4578,6 +4809,23 @@ app.whenReady().then(() => {
   })
 
   globalShortcut.register('CommandOrControl+Shift+Space', toggleSearch)
+
+  // Screenshot shortcut: freezes the target display, opens the in-app snipper,
+  // and toggles off (cancels) when pressed again. Registration is best-effort —
+  // the key may be claimed by another app on some machines.
+  const screenshotShortcutRegistered = globalShortcut.register(SCREENSHOT_SHORTCUT, () => {
+    const now = Date.now()
+    if (now - lastScreenshotToggleAt < SCREENSHOT_TOGGLE_DEBOUNCE_MS) return
+    lastScreenshotToggleAt = now
+    if (screenshotActive) {
+      cancelScreenshot('toggle-shortcut')
+      return
+    }
+    void beginScreenshot()
+  })
+  if (!screenshotShortcutRegistered) {
+    console.warn(`Failed to register screenshot shortcut: ${SCREENSHOT_SHORTCUT}`)
+  }
 
   // Meeting mode shortcut - CommandOrControl+Left: affect only meeting UI
   const meetingShortcutRegistered = globalShortcut.register('CommandOrControl+Left', () => {

@@ -12,6 +12,7 @@ import CosmicLoginModal from './CosmicLoginModal'
 import LiquidGlassLoader from './LiquidGlassLoader'
 import MeetingMode from './MeetingMode'
 import SpacesControlCenter from './SpacesControlCenter'
+import ScreenshotOverlay from './ScreenshotOverlay'
 import InlineMap from './components/InlineMap'
 import cosmicBallLogo from './assets/cosmic-ball-logo-v1.1.png'
 import moveToBackgroundIcon from './assets/move-to-background.png'
@@ -34,6 +35,13 @@ import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
+import {
+  pickAutoBoundRect,
+  type ScreenshotDisplayGeometry,
+  type ScreenshotFrameSize,
+  type ScreenshotRect,
+  type ScreenshotSurfaceRects,
+} from './screenshotBounds'
 import {
   coalesceInputEvents,
   keyInputEvent,
@@ -140,6 +148,14 @@ interface ProducedArtifactNotification {
   channel?: string | null
   createdAt?: string | null
   artifacts: ProducedArtifact[]
+}
+
+interface ScreenshotSession {
+  /** Object URL for the frozen frame captured by the main process. */
+  frameUrl: string
+  geometry: ScreenshotDisplayGeometry
+  frameSize: ScreenshotFrameSize
+  initialRect: ScreenshotRect
 }
 
 interface GatewayStatus {
@@ -5344,6 +5360,19 @@ function ExpandableQueryPill({
   )
 }
 
+/** Bounding rect of a surface that is actually painted, or null when it is
+ *  unmounted, collapsed, or faded out. Used to auto-bound the snipper. */
+function readVisibleRect(element: Element | null | undefined): ScreenshotRect | null {
+  if (!element) return null
+  const rect = element.getBoundingClientRect()
+  if (rect.width < 4 || rect.height < 4) return null
+  const style = window.getComputedStyle(element)
+  if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+    return null
+  }
+  return { x: rect.left, y: rect.top, width: rect.width, height: rect.height }
+}
+
 export default function App() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const modelDialRef = useRef<HTMLDivElement>(null)
@@ -5377,6 +5406,7 @@ export default function App() {
   const isStreamingRef = useRef(false)
   const searchStateRef = useRef<'hidden' | 'visible' | 'hiding'>('hidden')
   const showLauncherTrayRef = useRef(false)
+  const screenshotActiveRef = useRef(false)
   const lastGatewayResumeRequestAtRef = useRef(0)
   const shouldAutoScrollRef = useRef(true)
   const pendingResponseStartScrollRef = useRef(false)
@@ -5413,6 +5443,8 @@ export default function App() {
   const modeRef = useRef<QueryMode>('chat')
   const [isInputFocused, setIsInputFocused] = useState(false)
   const [showLauncherTray, setShowLauncherTray] = useState(false)
+  const [screenshotSession, setScreenshotSession] = useState<ScreenshotSession | null>(null)
+  const [screenshotToast, setScreenshotToast] = useState<string | null>(null)
   /** Bumped with mailbox id so Spaces can open Agent Email → Inbox (e.g. Dynamic Island mail notify). */
   const [agentEmailInboxNavigateSignal, setAgentEmailInboxNavigateSignal] = useState(0)
   const [agentEmailInboxNavigateMailboxId, setAgentEmailInboxNavigateMailboxId] = useState<string | null>(null)
@@ -7067,6 +7099,132 @@ export default function App() {
     setAgentEmailApprovalsNavigateSignal((n) => n + 1)
   }
 
+  // --- SCREENSHOT SNIPPER ---
+  // Reads the live surface rects exactly when the freeze frame arrives, so the
+  // pre-selection matches the pixels in the capture. Priority lives in
+  // `pickAutoBoundRect` and is unit tested there.
+  const resolveScreenshotAutoBound = useCallback((): ScreenshotRect | null => {
+    const composerRect = readVisibleRect(composerSurfaceRef.current)
+    const rects: ScreenshotSurfaceRects = {
+      settings: readVisibleRect(document.querySelector('.settings-overlay')),
+      launcher: showLauncherTrayRef.current ? composerRect : null,
+      meeting: readVisibleRect(meetingSurfaceRef.current),
+      spaces: readVisibleRect(spacesSurfaceRef.current),
+      task: readVisibleRect(taskInterruptStackRef.current),
+      composer: composerRect,
+      response: readVisibleRect(chatResponseSurfaceRef.current),
+      island: readVisibleRect(document.querySelector('.island')),
+    }
+    const picked = pickAutoBoundRect(rects, {
+      visible: searchStateRef.current !== 'hidden',
+      mode: modeRef.current,
+      launcherTrayOpen: showLauncherTrayRef.current,
+      composerFocused: Boolean(inputRef.current) && document.activeElement === inputRef.current,
+    })
+    return picked?.rect ?? null
+  }, [])
+
+  const tearDownScreenshot = useCallback(() => {
+    screenshotActiveRef.current = false
+    setScreenshotSession((previous) => {
+      if (previous) URL.revokeObjectURL(previous.frameUrl)
+      return null
+    })
+  }, [])
+
+  useEffect(() => {
+    const offBegin = window.cosmic?.onScreenshotBegin?.((payload) => {
+      if (!payload?.frame || !payload?.geometry || !payload?.frameSize) return
+      let frameUrl = ''
+      try {
+        const raw = payload.frame as unknown
+        const source = raw instanceof Uint8Array
+          ? raw
+          : raw instanceof ArrayBuffer
+            ? new Uint8Array(raw)
+            : null
+        if (!source) throw new Error('Unsupported screenshot frame payload')
+        // Copy out of the IPC buffer so the object URL owns plain memory.
+        const bytes = new Uint8Array(source)
+        frameUrl = URL.createObjectURL(new Blob([bytes.buffer], { type: 'image/png' }))
+      } catch (error) {
+        console.error('Screenshot frame could not be decoded', error)
+        window.cosmic?.cancelScreenshot?.()
+        return
+      }
+      const autoBound = resolveScreenshotAutoBound()
+      const fallbackRect: ScreenshotRect = {
+        x: 0,
+        y: 0,
+        width: Math.max(1, Math.round(payload.geometry.workArea.width)),
+        height: Math.max(1, Math.round(payload.geometry.workArea.height)),
+      }
+      screenshotActiveRef.current = true
+      setScreenshotToast(null)
+      setScreenshotSession((previous) => {
+        if (previous) URL.revokeObjectURL(previous.frameUrl)
+        return {
+          frameUrl,
+          geometry: payload.geometry,
+          frameSize: payload.frameSize,
+          initialRect: autoBound ?? fallbackRect,
+        }
+      })
+    })
+    const offEnd = window.cosmic?.onScreenshotEnd?.(() => {
+      tearDownScreenshot()
+    })
+    return () => {
+      offBegin?.()
+      offEnd?.()
+    }
+  }, [resolveScreenshotAutoBound, tearDownScreenshot])
+
+  // Hiding the app by any other route (tray, login flow, etc.) discards the
+  // snip; main can only hear about it through this listener.
+  useEffect(() => {
+    const offHiding = window.cosmic?.onHiding?.(() => {
+      if (!screenshotActiveRef.current) return
+      window.cosmic?.cancelScreenshot?.()
+      tearDownScreenshot()
+    })
+    return () => offHiding?.()
+  }, [tearDownScreenshot])
+
+  useEffect(() => {
+    if (!screenshotToast) return undefined
+    const timer = window.setTimeout(() => setScreenshotToast(null), 2200)
+    return () => window.clearTimeout(timer)
+  }, [screenshotToast])
+
+  const handleScreenshotConfirm = useCallback((rect: ScreenshotRect) => {
+    const request = window.cosmic?.commitScreenshot?.({ rect })
+    if (!request) {
+      setScreenshotToast('Screenshot is unavailable')
+      tearDownScreenshot()
+      return
+    }
+    request
+      .then((response) => {
+        if (response?.ok) {
+          const size = response.width && response.height ? ` · ${response.width}×${response.height}` : ''
+          setScreenshotToast(`Screenshot copied to clipboard${size}`)
+        } else {
+          setScreenshotToast(response?.error || 'Screenshot failed')
+        }
+      })
+      .catch(() => setScreenshotToast('Screenshot failed'))
+      .finally(() => {
+        // Main emits `screenshot:end` too; teardown is idempotent.
+        tearDownScreenshot()
+      })
+  }, [tearDownScreenshot])
+
+  const handleScreenshotCancel = useCallback(() => {
+    tearDownScreenshot()
+    window.cosmic?.cancelScreenshot?.()
+  }, [tearDownScreenshot])
+
   // --- INIT & MOUSE EVENTS ---
   useEffect(() => {
     const unsubKeys = window.cosmic?.onKeyStatus((status) => {
@@ -7147,6 +7305,7 @@ export default function App() {
       // or closed.
       const { islandHovered: islandHover, interactive: isInteractive } = hitTestPointerTarget(el, {
         searchVisible: searchState !== 'hidden',
+        screenshotActive: screenshotActiveRef.current,
       })
 
       if (lastIsland !== islandHover) {
@@ -9009,6 +9168,9 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        // The snipper owns Escape while it is up; main also routes it there,
+        // this is the no-bridge fallback.
+        if (screenshotActiveRef.current) return
         if (searchState === 'visible') {
           window.cosmic?.hide()
         }
@@ -9427,7 +9589,7 @@ export default function App() {
       <div
         className={`overlay ${overlayClass}`}
         onDoubleClick={(e) => {
-          if (e.target === e.currentTarget) window.cosmic?.hide()
+          if (e.target === e.currentTarget && !screenshotActiveRef.current) window.cosmic?.hide()
         }}
         style={overlayStyle}
       >
@@ -10663,6 +10825,24 @@ export default function App() {
           </LiquidGlass>
         </div>}
       </div>
+
+      {screenshotSession && (
+        <ScreenshotOverlay
+          frameUrl={screenshotSession.frameUrl}
+          geometry={screenshotSession.geometry}
+          frameSize={screenshotSession.frameSize}
+          initialRect={screenshotSession.initialRect}
+          onConfirm={handleScreenshotConfirm}
+          onCancel={handleScreenshotCancel}
+        />
+      )}
+
+      {screenshotToast && (
+        <div className="screenshot-toast" role="status">
+          {screenshotToast}
+        </div>
+      )}
+
       {hoverTooltip && createPortal(
         <div
           className="cosmic-hover-tooltip"
