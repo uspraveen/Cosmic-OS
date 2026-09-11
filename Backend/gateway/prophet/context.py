@@ -12,11 +12,23 @@ PROPHET_CRON_IDS = frozenset({PROPHET_MORNING_CRON_ID, PROPHET_EVENING_CRON_ID})
 
 PROPHET_MORNING_PROMPT = """Compose today's morning edition of The Daily Prophet for the user.
 
-Curate up to {max_stories} stories total using whatever sources you judge best (web search, research tools, X, or specialist agents). Personalize against the briefing below, avoid repeating stories from recent editions, and publish the finished edition with publish_prophet_edition. Then reply with one short line confirming the edition is ready."""
+Work rules:
+- Do not ask the user anything and do not narrate your process.
+- Keep research bounded and prioritize quality over quantity; do not chase every thread or start long delegations late.
+- You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections, at most {max_stories} stories total).
+- If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
+- After the publish succeeds, reply with one short line confirming the edition is ready."""
 
 PROPHET_EVENING_PROMPT = """Compose today's evening edition of The Daily Prophet for the user.
 
-This is the evening wrap: prioritize what developed during the day, what the user will want to know before tomorrow, and any late-breaking items. Curate up to {max_stories} stories total using whatever sources you judge best, personalize against the briefing below, avoid repeating stories from recent editions, and publish the finished edition with publish_prophet_edition. Then reply with one short line confirming the edition is ready."""
+This is the evening wrap: prioritize what developed during the day, what the user will want to know before tomorrow, and any late-breaking items.
+
+Work rules:
+- Do not ask the user anything and do not narrate your process.
+- Keep research bounded and prioritize quality over quantity; do not chase every thread or start long delegations late.
+- You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections, at most {max_stories} stories total).
+- If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
+- After the publish succeeds, reply with one short line confirming the edition is ready."""
 
 
 def prophet_prompt(slot: str, *, max_stories: int) -> str:
