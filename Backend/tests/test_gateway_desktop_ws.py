@@ -23,6 +23,7 @@ from gateway.channels.mobile import MobileAdapter
 from gateway.channels.routes import router as channel_router
 from gateway.config import GatewayConfig
 from gateway.memory_client import MemoryClientHTTPError, MemoryPromptContext
+from gateway.prophet import PROPHET_EVENING_CRON_ID, PROPHET_MORNING_CRON_ID
 from gateway.scheduler import CronExpressionError, compute_next_fire_at
 from gateway.runtime import (
     ActiveRequest,
@@ -1116,6 +1117,8 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             artifacts_db_path=tmp_path / "artifacts.db",
             delivery_queue_db_path=tmp_path / "delivery_queue.db",
             scheduler_db_path=tmp_path / "scheduler.db",
+            prophet_db_path=tmp_path / "prophet.db",
+            agent_email_integrations_db_path=tmp_path / "agent_email_integrations.db",
             heartbeat_notes_path=tmp_path / "heartbeat_notes.md",
             memory_write_audit_db_path=tmp_path / "memory_write_audit.db",
         )
@@ -4615,6 +4618,55 @@ def test_internal_scheduler_create_rejects_bad_cron_or_timezone(test_client: Tes
         },
     )
     assert bad_timezone.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_prophet_crons_seeded_and_rescheduled_from_settings(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        crons = {item["cron_id"]: item for item in runtime.scheduler_overview()["crons"]}
+        assert PROPHET_MORNING_CRON_ID in crons
+        assert PROPHET_EVENING_CRON_ID in crons
+        assert crons[PROPHET_MORNING_CRON_ID]["cron_expression"] == "0 5 * * *"
+        assert crons[PROPHET_EVENING_CRON_ID]["cron_expression"] == "0 19 * * *"
+        assert "publish_prophet_edition" in crons[PROPHET_MORNING_CRON_ID]["prompt"]
+        assert crons[PROPHET_MORNING_CRON_ID]["paused"] is False
+
+        runtime.update_prophet_settings({"morning_time": "06:15", "evening_enabled": False})
+        crons = {item["cron_id"]: item for item in runtime.scheduler_overview()["crons"]}
+        assert crons[PROPHET_MORNING_CRON_ID]["cron_expression"] == "15 6 * * *"
+        assert crons[PROPHET_MORNING_CRON_ID]["paused"] is False
+        assert crons[PROPHET_EVENING_CRON_ID]["paused"] is True
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_prophet_publish_stores_edition_for_request(tmp_path) -> None:
+    runtime = build_runtime(tmp_path, route="opus")
+    await runtime.start()
+    try:
+        result = await runtime.publish_prophet_edition(
+            {
+                "slot": "morning",
+                "lead": {"headline": "Lead story", "importance": 90},
+                "sections": [
+                    {
+                        "id": "tech",
+                        "label": "Technology",
+                        "stories": [{"headline": "Tech story"}],
+                    }
+                ],
+            },
+            request_id="req_prophet_test",
+        )
+        assert result["story_count"] == 2
+        stored = runtime.prophet_store.find_edition_by_request_id("req_prophet_test")
+        assert stored is not None
+        assert stored["payload"]["lead"]["headline"] == "Lead story"
+    finally:
+        await runtime.stop()
 
 
 def test_internal_channel_resolve_defaults_to_current_and_can_pick_linked_whatsapp(tmp_path) -> None:

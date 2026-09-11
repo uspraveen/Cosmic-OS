@@ -2616,6 +2616,160 @@ class ToolExecutor:
 
         return {"deleted": True, "cron_id": cron_id, "message": "Reminder deleted."}
 
+    # ── Daily Prophet ───────────────────────────────────────────
+
+    async def _publish_prophet_edition(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        if not self.gateway_url:
+            return {"error": True, "message": "Gateway Daily Prophet store is not configured."}
+        edition: dict[str, Any] = {}
+        for key in ("edition_date", "slot", "editor_note", "lead", "sections", "footer"):
+            value = tool_input.get(key)
+            if value is not None:
+                edition[key] = value
+        sections = edition.get("sections")
+        if not isinstance(sections, list) or not sections:
+            return {"error": True, "message": "sections are required and must be a non-empty array"}
+        body: dict[str, Any] = {"edition": edition}
+        slot = str(tool_input.get("slot") or "").strip()
+        if slot:
+            body["slot"] = slot
+        if context and context.request_id:
+            body["request_id"] = context.request_id
+        response = await self._request_gateway_json(
+            "POST",
+            "/internal/prophet/editions",
+            json_body=body,
+            timeout=60.0,
+        )
+        if not isinstance(response, dict):
+            return {"error": True, "message": "Daily Prophet store returned an unexpected response."}
+        warnings = response.get("warnings")
+        return {
+            "published": True,
+            "edition_id": response.get("edition_id"),
+            "edition_date": response.get("edition_date"),
+            "slot": response.get("slot"),
+            "story_count": response.get("story_count"),
+            "revision": response.get("revision"),
+            "warnings": warnings if isinstance(warnings, list) else [],
+            "message": "Daily Prophet edition published.",
+        }
+
+    async def _read_prophet_edition(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        if not self.gateway_url:
+            return {"error": True, "message": "Gateway Daily Prophet store is not configured."}
+        params: dict[str, Any] = {}
+        edition_date = str(tool_input.get("edition_date") or "").strip()
+        if edition_date:
+            params["date"] = edition_date
+        slot = str(tool_input.get("slot") or "").strip()
+        if slot:
+            params["slot"] = slot
+        payload = await self._request_gateway_json(
+            "GET",
+            "/internal/prophet/edition",
+            params=params or None,
+        )
+        edition = payload.get("edition") if isinstance(payload, dict) else None
+        if not isinstance(edition, dict):
+            return {"found": False, "message": "No Daily Prophet edition found for that request."}
+        return {
+            "found": True,
+            "edition_date": edition.get("edition_date"),
+            "slot": edition.get("slot"),
+            "revision": edition.get("revision"),
+            "editor_note": edition.get("editor_note"),
+            "payload": edition.get("payload"),
+        }
+
+    async def _list_prophet_editions(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        if not self.gateway_url:
+            return {"error": True, "message": "Gateway Daily Prophet store is not configured."}
+        tries = tool_input.get("days")
+        try:
+            days = int(tries) if tries is not None else 7
+        except (TypeError, ValueError):
+            days = 7
+        payload = await self._request_gateway_json(
+            "GET",
+            "/internal/prophet/editions",
+            params={"days": max(1, min(60, days)), "limit": 30},
+        )
+        editions = payload.get("editions") if isinstance(payload, dict) else None
+        return {"editions": editions if isinstance(editions, list) else []}
+
+    async def _update_prophet_preferences(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        if not self.gateway_url:
+            return {"error": True, "message": "Gateway Daily Prophet store is not configured."}
+
+        def _text_list(key: str) -> list[str]:
+            raw = tool_input.get(key)
+            if not isinstance(raw, list):
+                return []
+            return [str(item).strip() for item in raw if str(item).strip()][:40]
+
+        sources: list[dict[str, Any]] = []
+        raw_sources = tool_input.get("add_sources")
+        if isinstance(raw_sources, list):
+            for item in raw_sources[:40]:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("kind") or "site").strip().lower()
+                value = str(item.get("value") or "").strip()
+                if not value:
+                    continue
+                source: dict[str, Any] = {
+                    "kind": kind if kind in {"rss", "x", "site"} else "site",
+                    "value": value,
+                }
+                label = str(item.get("label") or "").strip()
+                if label:
+                    source["label"] = label
+                sources.append(source)
+        body = {
+            "add_interests": _text_list("add_interests"),
+            "remove_interests": _text_list("remove_interests"),
+            "mute_interests": _text_list("mute_interests"),
+            "add_sources": sources,
+            "remove_source_ids": _text_list("remove_source_ids"),
+            "origin": "inferred",
+            "allow_user_removal": False,
+        }
+        payload = await self._request_gateway_json(
+            "POST",
+            "/internal/prophet/preferences",
+            json_body=body,
+        )
+        return {
+            "updated": True,
+            "interests": payload.get("interests") if isinstance(payload, dict) else [],
+            "sources": payload.get("sources") if isinstance(payload, dict) else [],
+            "message": "Daily Prophet preferences updated.",
+        }
+
     # ── Reasoning Budget (meta-tool) ────────────────────────────
 
     async def _think_deeper(

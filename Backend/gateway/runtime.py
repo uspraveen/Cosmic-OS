@@ -79,6 +79,13 @@ from .session_store import SessionStore
 from .usage_store import UsageStore
 from .wishlist import CapabilityWishlistService, CapabilityWishlistStore
 from .tool_opportunities import ToolOpportunityService, ToolOpportunityStore
+from .prophet import (
+    PROPHET_CRON_IDS,
+    ProphetStore,
+    cron_expression_for_time,
+    prophet_cron_specs,
+    render_prophet_context_block,
+)
 from orchestrator.local_code_sandbox import LocalCodeSandboxSettings, run_local_code_sandbox
 from orchestrator.sandbox_permissions import session_grant_covers, union_session_grant
 from orchestrator.store.ledger import TaskLedger
@@ -504,6 +511,7 @@ class GatewayRuntime:
             config.capability_wishlist_db_path
         )
         self.tool_opportunity_store = ToolOpportunityStore(config.tool_opportunities_db_path)
+        self.prophet_store = ProphetStore(config.prophet_db_path)
         self.artifact_store = ArtifactStore(config.artifacts_db_path)
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.gmail_context_store = GmailContextStore(config.gmail_context_db_path)
@@ -669,6 +677,7 @@ class GatewayRuntime:
             default_timezone=self.config.user_timezone_fallback,
             default_heartbeat_interval_sec=self.config.heartbeat_interval_sec,
         )
+        self.prophet_store.initialize()
         self._migrate_heartbeat_notes_file()
         self.agent_email_integration_store.initialize()
         self.agent_auth_store.initialize()
@@ -963,6 +972,61 @@ class GatewayRuntime:
                 "context_packet": {},
             },
         )
+        self._sync_prophet_crons()
+
+    def _sync_prophet_crons(self) -> None:
+        try:
+            settings = self.prophet_store.get_settings()
+        except Exception:
+            logger.exception("gateway.prophet_settings_load_failed")
+            return
+        timezone_name = self.current_user_timezone()
+        now = datetime.now(timezone.utc)
+        for spec in prophet_cron_specs(settings):
+            cron_id = str(spec["cron_id"])
+            cron_expr = cron_expression_for_time(str(spec["time_value"]))
+            existing = self.scheduler_store.get_cron(cron_id)
+            next_fire_at = compute_next_fire_at(cron_expr, timezone_name, after=now)
+            if (
+                existing is not None
+                and self._safe_text(existing.get("timezone")) == timezone_name
+                and self._safe_text(existing.get("cron_expr")) == cron_expr
+                and self._safe_text(existing.get("next_fire_at"))
+            ):
+                next_fire_at = self._safe_text(existing.get("next_fire_at")) or next_fire_at
+            self.scheduler_store.upsert_cron(
+                cron_id=cron_id,
+                name=str(spec["name"]),
+                kind="system",
+                description=str(spec["description"]),
+                cron_expr=cron_expr,
+                timezone_name=timezone_name,
+                next_fire_at=next_fire_at,
+                metadata={
+                    "purpose": "daily_prophet",
+                    "managed_by": "gateway",
+                    "prophet_slot": str(spec["slot"]),
+                    "prompt": str(spec["prompt"]),
+                    "one_shot": False,
+                    "delivery_target": "desktop",
+                    "delivery_channel": "desktop",
+                    "created_by": "gateway",
+                    "context_summary": (
+                        "Compose and publish the user's Daily Prophet edition."
+                    ),
+                    "context_packet": {},
+                },
+            )
+            refreshed = self.scheduler_store.get_cron(cron_id)
+            if refreshed is None:
+                continue
+            if spec["active"]:
+                if refreshed.get("paused"):
+                    self.scheduler_store.resume_cron(cron_id, next_fire_at=next_fire_at)
+            elif not refreshed.get("paused"):
+                self.scheduler_store.pause_cron(
+                    cron_id, reason="Daily Prophet is disabled."
+                )
 
     def _scheduler_effective_timezone(self, timezone_name: str | None = None) -> str:
         if self._safe_text(timezone_name):
@@ -9021,7 +9085,18 @@ class GatewayRuntime:
             if isinstance(metadata.get("context_packet"), dict)
             else None
         )
-        cron_context_block = self._render_scheduler_context_block(context_packet)
+        if self._safe_text(metadata.get("purpose")) == "daily_prophet":
+            try:
+                prophet_settings = self.prophet_store.get_settings()
+            except Exception:
+                prophet_settings = {}
+            cron_context_block = render_prophet_context_block(
+                self.prophet_store,
+                slot=self._safe_text(metadata.get("prophet_slot")) or "morning",
+                max_stories=int(prophet_settings.get("max_stories") or 15),
+            )
+        else:
+            cron_context_block = self._render_scheduler_context_block(context_packet)
         memory_prompt_context = await self._assemble_memory_prompt_context(query=prompt)
         combined_memory_context = self._join_context_blocks(
             cron_context_block,
@@ -9530,6 +9605,57 @@ class GatewayRuntime:
             resulting_state=self._scheduler_record(record, include_history=False),
         )
         return self._scheduler_record(record, include_history=False)
+
+    def update_prophet_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
+        settings = self.prophet_store.update_settings(changes)
+        self._sync_prophet_crons()
+        self._scheduler_wakeup.set()
+        return settings
+
+    async def publish_prophet_edition(
+        self,
+        edition: dict[str, Any],
+        *,
+        request_id: str | None = None,
+        slot: str | None = None,
+    ) -> dict[str, Any]:
+        result = self.prophet_store.publish_edition(
+            edition,
+            request_id=request_id,
+            slot=slot,
+        )
+        await self._broadcast_prophet_edition(result)
+        return result
+
+    async def _broadcast_prophet_edition(self, result: dict[str, Any]) -> None:
+        try:
+            settings = self.prophet_store.get_settings()
+        except Exception:
+            settings = {}
+        if not bool(settings.get("notifications_enabled", True)):
+            return
+        edition = result.get("edition") if isinstance(result.get("edition"), dict) else {}
+        lead = edition.get("lead") if isinstance(edition.get("lead"), dict) else {}
+        event = {
+            "type": "prophet.edition.published",
+            "edition_id": result.get("edition_id"),
+            "edition_date": result.get("edition_date"),
+            "slot": result.get("slot"),
+            "story_count": result.get("story_count"),
+            "revision": result.get("revision"),
+            "headline": lead.get("headline"),
+            "timestamp": utcnow_iso(),
+        }
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            try:
+                await adapter.broadcast_all(event)
+            except Exception:
+                logger.exception(
+                    "gateway.prophet_edition_broadcast_failed platform=%s",
+                    adapter.platform,
+                )
 
     def get_scheduler_heartbeat(self) -> dict[str, Any]:
         return self.scheduler_store.get_heartbeat()
@@ -20663,6 +20789,31 @@ class GatewayRuntime:
                 event["weekly_my_tools_review_decision"] = (
                     weekly_tools_review_decision
                 )
+            if self._is_prophet_event(event):
+                published_edition = None
+                if request_id:
+                    published_edition = self.prophet_store.find_edition_by_request_id(
+                        request_id
+                    )
+                if published_edition is not None:
+                    self._trace_request_event(
+                        request_id=request_id,
+                        session_id=session_id,
+                        channel=event_channel,
+                        route=self._safe_text(event.get("route")) or "opus",
+                        event_type="response.complete",
+                        stage="response",
+                        status="suppressed",
+                        title="Daily Prophet edition published",
+                        detail=(
+                            f"{published_edition.get('slot')} edition "
+                            f"{published_edition.get('edition_date')} published."
+                        ),
+                        task_id=task_id,
+                        completed=False,
+                        execution_event=event,
+                    )
+                    return
             is_heartbeat_response = self._is_heartbeat_event(event)
             heartbeat_decision = (
                 self._parse_heartbeat_decision(event)
@@ -21281,6 +21432,21 @@ class GatewayRuntime:
             and self._safe_text(request_record.get("source")) == "cron"
             and self._safe_text(request_record.get("source_id"))
             == SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW
+        )
+
+    def _is_prophet_event(self, event: dict[str, Any]) -> bool:
+        if self._safe_text(event.get("source")) == "cron" and self._safe_text(
+            event.get("source_id")
+        ) in PROPHET_CRON_IDS:
+            return True
+        request_id = self._safe_text(event.get("request_id"))
+        if not request_id:
+            return False
+        request_record = self.request_records.get(request_id)
+        return (
+            isinstance(request_record, dict)
+            and self._safe_text(request_record.get("source")) == "cron"
+            and self._safe_text(request_record.get("source_id")) in PROPHET_CRON_IDS
         )
 
     def _is_heartbeat_noop_response(self, event: dict[str, Any]) -> bool:

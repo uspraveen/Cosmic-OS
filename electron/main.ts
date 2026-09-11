@@ -3053,6 +3053,68 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:get-prophet-edition', async (_, opts?: { date?: string; slot?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const query: string[] = []
+    const date = String(opts?.date || '').trim()
+    if (date) query.push(`date=${encodeURIComponent(date)}`)
+    const slot = String(opts?.slot || '').trim()
+    if (slot) query.push(`slot=${encodeURIComponent(slot)}`)
+    const suffix = query.length ? `?${query.join('&')}` : ''
+    return callGatewayJson(config, `/desktop/prophet/edition${suffix}`, { timeoutMs: 20000 })
+  })
+
+  ipcMain.handle('gateway:list-prophet-editions', async (_, opts?: { limit?: number; days?: number }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const query: string[] = []
+    if (typeof opts?.limit === 'number' && Number.isFinite(opts.limit)) {
+      query.push(`limit=${Math.max(1, Math.min(60, Math.trunc(opts.limit)))}`)
+    }
+    if (typeof opts?.days === 'number' && Number.isFinite(opts.days)) {
+      query.push(`days=${Math.max(1, Math.min(60, Math.trunc(opts.days)))}`)
+    }
+    const suffix = query.length ? `?${query.join('&')}` : ''
+    return callGatewayJson(config, `/desktop/prophet/editions${suffix}`, { timeoutMs: 20000 })
+  })
+
+  ipcMain.handle('gateway:get-prophet-settings', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/prophet/settings', { timeoutMs: 15000 })
+  })
+
+  ipcMain.handle('gateway:save-prophet-settings', async (_, payload: Record<string, unknown>) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/prophet/settings', {
+      method: 'PUT',
+      body: payload && typeof payload === 'object' ? payload : {},
+      timeoutMs: 20000,
+    })
+  })
+
+  ipcMain.handle('gateway:update-prophet-preferences', async (_, payload: Record<string, unknown>) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/prophet/preferences', {
+      method: 'POST',
+      body: payload && typeof payload === 'object' ? payload : {},
+      timeoutMs: 20000,
+    })
+  })
+
   ipcMain.handle('gateway:get-codex-status', async () => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

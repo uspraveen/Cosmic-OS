@@ -137,6 +137,7 @@ class GatewayConfig:
         BACKEND_ROOT / "gateway" / "cosmics_capability_wishlist.db"
     )
     tool_opportunities_db_path: Path = BACKEND_ROOT / "gateway" / "tool_opportunities.db"
+    prophet_db_path: Path = BACKEND_ROOT / "gateway" / "prophet.db"
     artifacts_db_path: Path = BACKEND_ROOT / "gateway" / "artifacts.db"
     artifacts_root: Path = BACKEND_ROOT / "runs" / "artifacts"
     delivery_queue_db_path: Path = BACKEND_ROOT / "gateway" / "delivery_queue.db"
@@ -462,6 +463,12 @@ class GatewayConfig:
                 os.getenv(
                     "GATEWAY_TOOL_OPPORTUNITIES_DB_PATH",
                     str(BACKEND_ROOT / "gateway" / "tool_opportunities.db"),
+                )
+            ).expanduser(),
+            prophet_db_path=Path(
+                os.getenv(
+                    "GATEWAY_PROPHET_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "prophet.db"),
                 )
             ).expanduser(),
             artifacts_db_path=Path(

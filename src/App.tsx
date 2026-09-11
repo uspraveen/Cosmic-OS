@@ -129,7 +129,7 @@ interface BackgroundTask {
 
 interface CronResultNotification {
   id: string
-  kind?: 'cron' | 'heartbeat'
+  kind?: 'cron' | 'heartbeat' | 'prophet'
   messageId?: string | null
   requestId?: string | null
   sourceId?: string | null
@@ -5450,6 +5450,8 @@ export default function App() {
   const [agentEmailInboxNavigateMailboxId, setAgentEmailInboxNavigateMailboxId] = useState<string | null>(null)
   const [agentEmailApprovalsNavigateSignal, setAgentEmailApprovalsNavigateSignal] = useState(0)
   const [agentEmailApprovalsNavigateId, setAgentEmailApprovalsNavigateId] = useState<string | null>(null)
+  /** Bumped when a Daily Prophet edition is ready so Spaces opens My Prophet. */
+  const [prophetNavigateSignal, setProphetNavigateSignal] = useState(0)
   const [selectedModel, setSelectedModel] = useState<GatewayModelSelection>('cosmic')
   const [modelPulseModel, setModelPulseModel] = useState<GatewayModelSelection | null>(null)
   const [hoverTooltip, setHoverTooltip] = useState<HoverTooltipState | null>(null)
@@ -6086,6 +6088,12 @@ export default function App() {
       delete next[normalizedRequestId]
       return next
     })
+  }
+
+  const openProphetFromCronNotification = (notificationId: string) => {
+    dismissCronResultNotification(notificationId)
+    showSpacesSurface()
+    setProphetNavigateSignal((value) => value + 1)
   }
 
   const openChatFromCronNotification = () => {
@@ -8144,6 +8152,31 @@ export default function App() {
         return
       }
 
+      if (eventType === 'prophet.edition.published') {
+        if (!isCronResultChatInactive()) {
+          return
+        }
+        const slot = String((event as any).slot || '').trim().toLowerCase()
+        const editionId = String((event as any).edition_id || '').trim() || crypto.randomUUID()
+        const storyCount = Number((event as any).story_count) || 0
+        const headline = String((event as any).headline || '').trim()
+        const storyLabel = `${storyCount} ${storyCount === 1 ? 'story' : 'stories'}`
+        const content = [
+          slot === 'evening' ? 'Evening edition ready' : 'Morning edition ready',
+          storyLabel,
+          headline,
+        ]
+          .filter(Boolean)
+          .join(' · ')
+        enqueueCronResultNotification({
+          id: `prophet_edition_${editionId}`,
+          kind: 'prophet',
+          content,
+          createdAt: new Date().toISOString(),
+        })
+        return
+      }
+
       if (eventType === 'agent_email.notification') {
         void window.cosmic?.recordCosmicMailGatewayNotification?.(event)
         window.dispatchEvent(new CustomEvent('cosmic-mail:gateway-notification', {
@@ -9413,6 +9446,7 @@ export default function App() {
             {orderedCronResultNotifications.map((notification, index) => (
               (() => {
                 const isHeartbeatNotification = notification.kind === 'heartbeat'
+                const isProphetNotification = notification.kind === 'prophet'
                 return (
               <LiquidGlass
                 key={notification.id}
@@ -9434,14 +9468,20 @@ export default function App() {
                       </div>
                       <div className="task-interrupt-copy">
                         <div className="task-interrupt-kicker">
-                          {isHeartbeatNotification ? 'Cosmic heartbeat' : 'Scheduled result ready'}
+                          {isProphetNotification
+                            ? 'Daily Prophet ready'
+                            : isHeartbeatNotification
+                              ? 'Cosmic heartbeat'
+                              : 'Scheduled result ready'}
                         </div>
                         <div className="task-interrupt-meta">
                           {orderedCronResultNotifications.length > 1
                             ? `${index + 1} of ${orderedCronResultNotifications.length} waiting`
-                            : isHeartbeatNotification
-                              ? 'Open chat to review the proactive note'
-                              : 'Open chat to review the latest reminder result'}
+                            : isProphetNotification
+                              ? 'Open My Prophet to read the edition'
+                              : isHeartbeatNotification
+                                ? 'Open chat to review the proactive note'
+                                : 'Open chat to review the latest reminder result'}
                         </div>
                       </div>
                     </div>
@@ -9450,7 +9490,7 @@ export default function App() {
                         <div className="task-interrupt-chip count">{orderedCronResultNotifications.length} waiting</div>
                       )}
                       <div className="task-interrupt-chip cron-result-chip">
-                        {isHeartbeatNotification ? 'Heartbeat' : 'Reminder'}
+                        {isProphetNotification ? 'Newspaper' : isHeartbeatNotification ? 'Heartbeat' : 'Reminder'}
                       </div>
                     </div>
                   </div>
@@ -9466,9 +9506,13 @@ export default function App() {
                     <button
                       type="button"
                       className="task-interrupt-btn primary"
-                      onClick={openChatFromCronNotification}
+                      onClick={() => (
+                        isProphetNotification
+                          ? openProphetFromCronNotification(notification.id)
+                          : openChatFromCronNotification()
+                      )}
                     >
-                      Open chat
+                      {isProphetNotification ? 'Read edition' : 'Open chat'}
                     </button>
                   </div>
                 </div>
@@ -9623,6 +9667,7 @@ export default function App() {
           agentEmailNavigateInboxMailboxId={agentEmailInboxNavigateMailboxId}
           agentEmailNavigateApprovalsSignal={agentEmailApprovalsNavigateSignal}
           agentEmailNavigateApprovalsId={agentEmailApprovalsNavigateId}
+          prophetNavigateSignal={prophetNavigateSignal}
         />
 
         {shouldShowTaskInterrupt && visibleTaskInterrupts.length > 0 && (

@@ -18,6 +18,21 @@ import {
   isSameCalendarDay,
   normalizeCalendarAgendaSnapshot,
 } from './calendar'
+import {
+  EMPTY_PROPHET_SETTINGS,
+  editionStoryCount,
+  formatProphetDateline,
+  formatProphetRelativeTime,
+  normalizeProphetEdition,
+  normalizeProphetSettings,
+  resolveProphetLayout,
+  type ProphetEdition,
+  type ProphetInterest,
+  type ProphetSection,
+  type ProphetSettings,
+  type ProphetSource,
+  type ProphetStory,
+} from './prophetFeed'
 
 type SpacesPageId = 'command' | 'tools' | 'calendar' | 'prophet' | 'autopilot' | 'pulse' | 'manage' | 'agents' | 'sessions' | 'agent-email' | 'gmail'
 type AgentEmailViewId = 'overview' | 'agents' | 'inboxes' | 'approvals' | 'settings'
@@ -47,6 +62,8 @@ interface SpacesControlCenterProps {
   /** Increment to open Agent Email on Approvals; optional approval id to select when the list loads. */
   agentEmailNavigateApprovalsSignal?: number
   agentEmailNavigateApprovalsId?: string | null
+  /** Increment to open My Prophet, e.g. from the "Daily Prophet ready" notification. */
+  prophetNavigateSignal?: number
 }
 
 interface SpacePageDef {
@@ -199,19 +216,6 @@ interface WeekEvent {
   startMinute: number
   durationMinutes: number
   accent: AccentTone
-}
-
-type ProphetSection = 'breaking' | 'tech' | 'markets' | 'social' | 'science'
-
-interface ProphetArticle {
-  id: string
-  section: ProphetSection
-  headline: string
-  summary: string
-  source: string
-  timeAgo: string
-  accent: AccentTone
-  featured?: boolean
 }
 
 interface ManageProviderDatum {
@@ -1950,117 +1954,6 @@ function buildManageSnapshot(metrics: GatewaySystemMetrics | null) {
   }
 }
 
-const PROPHET_SECTION_LABELS: Record<ProphetSection, string> = {
-  breaking: 'Breaking Dispatch',
-  tech: 'Technology & Innovation',
-  markets: 'Markets & Industry',
-  social: 'Social Feed',
-  science: 'Science & Discovery',
-}
-
-const PROPHET_ARTICLES: ProphetArticle[] = [
-  {
-    id: 'p1',
-    section: 'breaking',
-    headline: 'Anthropic Unveils Claude 4.5 Opus With Autonomous Agent Capabilities',
-    summary: 'The latest model demonstrates sustained reasoning over multi-hour tasks, marking a significant leap in AI-assisted software engineering and research workflows.',
-    source: 'The Verge',
-    timeAgo: '23m ago',
-    accent: 'rose',
-    featured: true,
-  },
-  {
-    id: 'p2',
-    section: 'breaking',
-    headline: 'EU Parliament Passes Landmark AI Governance Framework',
-    summary: 'New regulations establish tiered oversight for foundation models, with stricter requirements for systems capable of autonomous action.',
-    source: 'Reuters',
-    timeAgo: '1h ago',
-    accent: 'azure',
-  },
-  {
-    id: 'p3',
-    section: 'tech',
-    headline: 'Apple Previews On-Device LLM Integration Across iOS 20',
-    summary: 'Siri gains persistent memory and tool-use capabilities, running a distilled model entirely on the Neural Engine.',
-    source: 'Bloomberg',
-    timeAgo: '2h ago',
-    accent: 'slate',
-  },
-  {
-    id: 'p4',
-    section: 'tech',
-    headline: 'WebGPU Adoption Crosses 80% of Desktop Browsers',
-    summary: 'The milestone enables a new class of in-browser ML inference and real-time 3D applications without plugins.',
-    source: 'Chrome Blog',
-    timeAgo: '3h ago',
-    accent: 'mint',
-  },
-  {
-    id: 'p5',
-    section: 'tech',
-    headline: 'GitHub Copilot Workspace Enters General Availability',
-    summary: 'Full-repository reasoning and multi-file editing are now accessible to all Teams and Enterprise subscribers.',
-    source: 'GitHub',
-    timeAgo: '4h ago',
-    accent: 'azure',
-  },
-  {
-    id: 'p6',
-    section: 'markets',
-    headline: 'NVIDIA Surpasses $5T Market Cap on Data Centre Demand',
-    summary: 'The chipmaker\u2019s Blackwell Ultra architecture drives another record quarter as sovereign AI spending accelerates globally.',
-    source: 'Financial Times',
-    timeAgo: '2h ago',
-    accent: 'gold',
-  },
-  {
-    id: 'p7',
-    section: 'markets',
-    headline: 'YC W26 Batch Shows Record AI-Native Startup Density',
-    summary: 'Over 70% of the cohort is building on top of foundation model APIs, with developer tools and vertical agents dominating.',
-    source: 'TechCrunch',
-    timeAgo: '5h ago',
-    accent: 'mint',
-  },
-  {
-    id: 'p8',
-    section: 'social',
-    headline: 'Your X Timeline: AI Discourse Peaks After Claude 4.5 Launch',
-    summary: 'Trending threads debate autonomous coding assistants, with engineers sharing benchmark comparisons and workflow integrations.',
-    source: 'X / Twitter',
-    timeAgo: '45m ago',
-    accent: 'azure',
-  },
-  {
-    id: 'p9',
-    section: 'social',
-    headline: 'Hacker News Front Page: Show HN \u2014 Open-Source Agent Framework',
-    summary: 'A community-built orchestration layer for multi-model agent pipelines gains 400+ points overnight.',
-    source: 'Hacker News',
-    timeAgo: '3h ago',
-    accent: 'gold',
-  },
-  {
-    id: 'p10',
-    section: 'science',
-    headline: 'DeepMind Solves New Class of Partial Differential Equations',
-    summary: 'AlphaFold\u2019s successor architecture generalises to fluid dynamics and climate modelling, accelerating simulation by three orders of magnitude.',
-    source: 'Nature',
-    timeAgo: '6h ago',
-    accent: 'mint',
-  },
-  {
-    id: 'p11',
-    section: 'science',
-    headline: 'JWST Confirms New Biosignature in Trappist-1e Atmosphere',
-    summary: 'Spectral analysis reveals phosphine alongside methane, reigniting debate about potential biological sources on rocky exoplanets.',
-    source: 'NASA',
-    timeAgo: '8h ago',
-    accent: 'rose',
-  },
-]
-
 const SPACE_PAGES: SpacePageDef[] = [
   { id: 'command', label: 'Command', kicker: 'Live operating picture', countLabel: '03 zones', accent: 'azure' },
   { id: 'tools', label: 'My Tools', kicker: 'Sites, dashboards & utilities', countLabel: 'Build', accent: 'azure' },
@@ -2398,6 +2291,7 @@ export default function SpacesControlCenter({
   agentEmailNavigateInboxMailboxId = null,
   agentEmailNavigateApprovalsSignal = 0,
   agentEmailNavigateApprovalsId = null,
+  prophetNavigateSignal = 0,
 }: SpacesControlCenterProps) {
   const [page, setPage] = useState<SpacesPageId>('command')
   const [railCollapsed, setRailCollapsed] = useState(false)
@@ -2471,6 +2365,19 @@ export default function SpacesControlCenter({
   const [toolOpportunitiesRefreshing, setToolOpportunitiesRefreshing] = useState(false)
   const [toolOpportunitiesError, setToolOpportunitiesError] = useState<string | null>(null)
   const [toolOpportunityActionId, setToolOpportunityActionId] = useState<string | null>(null)
+  const [prophetEdition, setProphetEdition] = useState<ProphetEdition | null>(null)
+  const [prophetRefreshing, setProphetRefreshing] = useState(false)
+  const [prophetError, setProphetError] = useState<string | null>(null)
+  const [prophetSettings, setProphetSettings] = useState<ProphetSettings>(EMPTY_PROPHET_SETTINGS)
+  const [prophetDraft, setProphetDraft] = useState<ProphetSettings>(EMPTY_PROPHET_SETTINGS)
+  const [prophetInterests, setProphetInterests] = useState<ProphetInterest[]>([])
+  const [prophetSources, setProphetSources] = useState<ProphetSource[]>([])
+  const [prophetSettingsOpen, setProphetSettingsOpen] = useState(false)
+  const [prophetSettingsSaving, setProphetSettingsSaving] = useState(false)
+  const [prophetSettingsNotice, setProphetSettingsNotice] = useState<string | null>(null)
+  const [prophetInterestDraft, setProphetInterestDraft] = useState('')
+  const [prophetSourceDraft, setProphetSourceDraft] = useState({ kind: 'site', value: '', label: '' })
+  const prophetRequestRef = useRef(0)
 
   const refreshToolOpportunities = useCallback(async () => {
     if (!window.cosmic?.listGatewayToolOpportunities) {
@@ -2520,6 +2427,120 @@ export default function SpacesControlCenter({
       setToolOpportunityActionId(null)
     }
   }, [refreshToolOpportunities])
+
+  const refreshProphetEdition = useCallback(async (showSpinner = false) => {
+    if (!window.cosmic?.getGatewayProphetEdition) {
+      setProphetError('My Prophet is unavailable in this desktop build.')
+      return
+    }
+    const requestId = prophetRequestRef.current + 1
+    prophetRequestRef.current = requestId
+    if (showSpinner) setProphetRefreshing(true)
+    try {
+      const result = await window.cosmic.getGatewayProphetEdition()
+      if (prophetRequestRef.current !== requestId) return
+      setProphetEdition(normalizeProphetEdition(result?.edition))
+      setProphetSettings(normalizeProphetSettings(result?.settings))
+      setProphetError(null)
+    } catch (error) {
+      if (prophetRequestRef.current === requestId) {
+        setProphetError(toErrorMessage(error, 'Unable to load the Daily Prophet edition.'))
+      }
+    } finally {
+      if (prophetRequestRef.current === requestId) setProphetRefreshing(false)
+    }
+  }, [])
+
+  const refreshProphetSettings = useCallback(async () => {
+    if (!window.cosmic?.getGatewayProphetSettings) return
+    try {
+      const result = await window.cosmic.getGatewayProphetSettings()
+      const settings = normalizeProphetSettings(result?.settings)
+      setProphetSettings(settings)
+      setProphetDraft(settings)
+      setProphetInterests(Array.isArray(result?.interests) ? (result.interests as ProphetInterest[]) : [])
+      setProphetSources(Array.isArray(result?.sources) ? (result.sources as ProphetSource[]) : [])
+    } catch (error) {
+      setProphetSettingsNotice(toErrorMessage(error, 'Unable to load Daily Prophet settings.'))
+    }
+  }, [])
+
+  const openProphetSettings = useCallback(() => {
+    setProphetDraft(prophetSettings)
+    setProphetSettingsNotice(null)
+    setProphetSettingsOpen(true)
+    void refreshProphetSettings()
+  }, [prophetSettings, refreshProphetSettings])
+
+  const saveProphetSettings = useCallback(async () => {
+    if (!window.cosmic?.saveGatewayProphetSettings) return
+    setProphetSettingsSaving(true)
+    try {
+      const result = await window.cosmic.saveGatewayProphetSettings({
+        enabled: prophetDraft.enabled,
+        morning_time: prophetDraft.morningTime,
+        evening_enabled: prophetDraft.eveningEnabled,
+        evening_time: prophetDraft.eveningTime,
+        max_stories: prophetDraft.maxStories,
+        notifications_enabled: prophetDraft.notificationsEnabled,
+        sections: prophetDraft.sections,
+      })
+      const settings = normalizeProphetSettings(result?.settings)
+      setProphetSettings(settings)
+      setProphetDraft(settings)
+      setProphetSettingsNotice('Saved.')
+      void refreshProphetEdition(false)
+    } catch (error) {
+      setProphetSettingsNotice(toErrorMessage(error, 'Unable to save Daily Prophet settings.'))
+    } finally {
+      setProphetSettingsSaving(false)
+    }
+  }, [prophetDraft, refreshProphetEdition])
+
+  const updateProphetPreferences = useCallback(async (payload: Record<string, unknown>) => {
+    if (!window.cosmic?.updateGatewayProphetPreferences) return
+    try {
+      const result = await window.cosmic.updateGatewayProphetPreferences(payload)
+      setProphetSettings(normalizeProphetSettings(result?.settings))
+      setProphetInterests(Array.isArray(result?.interests) ? (result.interests as ProphetInterest[]) : [])
+      setProphetSources(Array.isArray(result?.sources) ? (result.sources as ProphetSource[]) : [])
+      setProphetSettingsNotice('Updated.')
+    } catch (error) {
+      setProphetSettingsNotice(toErrorMessage(error, 'Unable to update Daily Prophet preferences.'))
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!active || page !== 'prophet') return
+    void refreshProphetEdition(true)
+    void refreshProphetSettings()
+    const intervalId = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      void refreshProphetEdition(false)
+    }, 120000)
+    const offShown = window.cosmic?.onShown?.(() => {
+      void refreshProphetEdition(true)
+    })
+    const offGateway = window.cosmic?.onGatewayEvent?.((event: unknown) => {
+      const type = String((event as { type?: string } | null)?.type || '')
+      if (type === 'prophet.edition.published') {
+        void refreshProphetEdition(true)
+      }
+    })
+    return () => {
+      offShown?.()
+      offGateway?.()
+      window.clearInterval(intervalId)
+    }
+  }, [active, page, refreshProphetEdition, refreshProphetSettings])
+
+  const lastProphetNavigateSignalRef = useRef(0)
+  useEffect(() => {
+    const signal = prophetNavigateSignal ?? 0
+    if (!signal || signal === lastProphetNavigateSignalRef.current) return
+    lastProphetNavigateSignalRef.current = signal
+    setPage('prophet')
+  }, [prophetNavigateSignal])
 
   useEffect(() => {
     manageMetricsValueRef.current = manageMetrics
@@ -5638,31 +5659,412 @@ export default function SpacesControlCenter({
     )
   }
 
-  const prophetEditionDate = useMemo(
-    () => today.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }),
-    [today],
+  const prophetEditionDate = prophetEdition
+    ? formatProphetDateline(prophetEdition.editionDate)
+    : today.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+
+  const prophetStoryTime = (story: ProphetStory) => formatProphetRelativeTime(story.publishedAt, now.getTime())
+
+  const renderProphetByline = (story: ProphetStory) => {
+    const timeLabel = prophetStoryTime(story)
+    return (
+      <div className="prophet-story-byline">
+        {story.source?.name ? (
+          <button
+            type="button"
+            className="prophet-source-link"
+            onClick={() => openExternalUrl(story.source?.url)}
+            disabled={!story.source?.url}
+          >
+            {story.source.name}
+          </button>
+        ) : null}
+        {story.source?.name && timeLabel ? <span className="prophet-byline-dot" /> : null}
+        {timeLabel ? <span>{timeLabel}</span> : null}
+        {story.whySelected ? (
+          <span className="prophet-why" title={story.whySelected}>
+            why this matters
+          </span>
+        ) : null}
+      </div>
+    )
+  }
+
+  const renderProphetStory = (story: ProphetStory, options?: { feature?: boolean }) => {
+    const isBrief = story.role === 'brief'
+    const image = story.image
+    return (
+      <article
+        key={story.id}
+        className={[
+          'prophet-story',
+          `prophet-story--accent-${story.accent}`,
+          options?.feature ? 'prophet-story--feature' : '',
+          isBrief ? 'prophet-story--brief' : '',
+          story.role === 'pull_quote' ? 'prophet-story--quote' : '',
+          image?.url ? 'prophet-story--illustrated' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+      >
+        {image?.url ? (
+          <figure className="prophet-story-figure">
+            <img src={image.url} alt={image.caption || story.headline} loading="lazy" />
+            {image.caption || image.credit ? (
+              <figcaption>
+                {image.caption}
+                {image.credit ? <span className="prophet-credit">{image.credit}</span> : null}
+              </figcaption>
+            ) : null}
+          </figure>
+        ) : null}
+        <h3 className="prophet-story-headline">{story.headline}</h3>
+        {story.dek ? <p className="prophet-story-dek">{story.dek}</p> : null}
+        {!isBrief && story.body.length > 0 ? (
+          <div className="prophet-story-body">
+            {story.body.map((paragraph, index) => (
+              <p key={`${story.id}_p${index}`}>{paragraph}</p>
+            ))}
+          </div>
+        ) : null}
+        {renderProphetByline(story)}
+      </article>
+    )
+  }
+
+  const renderProphetSettingsPanel = () => (
+    <div className="prophet-settings-panel">
+      <div className="prophet-settings-head">
+        <div className="prophet-settings-title">
+          <div className="spaces-card-kicker">Press room</div>
+          <strong>Daily Prophet settings</strong>
+        </div>
+        <div className="prophet-settings-head-actions">
+          {prophetSettingsNotice ? <span className="prophet-settings-notice">{prophetSettingsNotice}</span> : null}
+          <button
+            type="button"
+            className="prophet-settings-save"
+            onClick={() => void saveProphetSettings()}
+            disabled={prophetSettingsSaving}
+          >
+            {prophetSettingsSaving ? 'Saving…' : 'Save changes'}
+          </button>
+        </div>
+      </div>
+      <div className="prophet-settings-grid">
+        <div className="prophet-settings-field">
+          <span className="prophet-settings-label">Daily editions</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={prophetDraft.enabled}
+            className={`prophet-toggle ${prophetDraft.enabled ? 'on' : ''}`}
+            onClick={() => setProphetDraft((prev) => ({ ...prev, enabled: !prev.enabled }))}
+          >
+            <span className="prophet-toggle-knob" />
+            <span className="prophet-toggle-text">{prophetDraft.enabled ? 'On' : 'Off'}</span>
+          </button>
+        </div>
+        <div className="prophet-settings-field">
+          <span className="prophet-settings-label">Morning edition</span>
+          <input
+            type="time"
+            className="prophet-time-input"
+            value={prophetDraft.morningTime}
+            onChange={(event) => setProphetDraft((prev) => ({ ...prev, morningTime: event.target.value }))}
+          />
+        </div>
+        <div className="prophet-settings-field">
+          <span className="prophet-settings-label">Evening edition</span>
+          <div className="prophet-settings-inline">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={prophetDraft.eveningEnabled}
+              className={`prophet-toggle small ${prophetDraft.eveningEnabled ? 'on' : ''}`}
+              onClick={() => setProphetDraft((prev) => ({ ...prev, eveningEnabled: !prev.eveningEnabled }))}
+            >
+              <span className="prophet-toggle-knob" />
+            </button>
+            <input
+              type="time"
+              className="prophet-time-input"
+              value={prophetDraft.eveningTime}
+              disabled={!prophetDraft.eveningEnabled}
+              onChange={(event) => setProphetDraft((prev) => ({ ...prev, eveningTime: event.target.value }))}
+            />
+          </div>
+        </div>
+        <div className="prophet-settings-field">
+          <span className="prophet-settings-label">Story cap</span>
+          <div className="prophet-settings-inline">
+            <input
+              type="range"
+              min={5}
+              max={30}
+              value={prophetDraft.maxStories}
+              onChange={(event) =>
+                setProphetDraft((prev) => ({ ...prev, maxStories: Number(event.target.value) || prev.maxStories }))
+              }
+            />
+            <span className="prophet-settings-value">{prophetDraft.maxStories} stories</span>
+          </div>
+        </div>
+        <div className="prophet-settings-field">
+          <span className="prophet-settings-label">Notifications</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={prophetDraft.notificationsEnabled}
+            className={`prophet-toggle ${prophetDraft.notificationsEnabled ? 'on' : ''}`}
+            onClick={() =>
+              setProphetDraft((prev) => ({ ...prev, notificationsEnabled: !prev.notificationsEnabled }))
+            }
+          >
+            <span className="prophet-toggle-knob" />
+            <span className="prophet-toggle-text">{prophetDraft.notificationsEnabled ? 'On' : 'Off'}</span>
+          </button>
+        </div>
+      </div>
+      <div className="prophet-settings-block">
+        <span className="prophet-settings-label">Sections</span>
+        <div className="prophet-chip-row">
+          {prophetDraft.sections.map((section) => (
+            <button
+              key={section.id}
+              type="button"
+              className={`prophet-chip ${section.enabled ? 'active' : ''}`}
+              onClick={() =>
+                setProphetDraft((prev) => ({
+                  ...prev,
+                  sections: prev.sections.map((item) =>
+                    item.id === section.id ? { ...item, enabled: !item.enabled } : item,
+                  ),
+                }))
+              }
+            >
+              {section.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="prophet-settings-block">
+        <span className="prophet-settings-label">Interests</span>
+        <div className="prophet-chip-row">
+          {prophetInterests.length === 0 ? (
+            <span className="prophet-settings-hint">
+              Cosmic learns your interests over time. Add topics to steer the edition.
+            </span>
+          ) : null}
+          {prophetInterests.map((interest) => (
+            <span
+              key={interest.topic}
+              className={`prophet-chip interest ${interest.muted ? 'muted' : ''} ${interest.origin === 'user' ? 'user' : ''}`}
+            >
+              <button
+                type="button"
+                className="prophet-chip-label"
+                title={interest.muted ? 'Unmute topic' : 'Mute topic'}
+                onClick={() =>
+                  void updateProphetPreferences(
+                    interest.muted ? { unmute_interests: [interest.topic] } : { mute_interests: [interest.topic] },
+                  )
+                }
+              >
+                {interest.topic}
+              </button>
+              <button
+                type="button"
+                className="prophet-chip-remove"
+                aria-label={`Remove ${interest.topic}`}
+                onClick={() => void updateProphetPreferences({ remove_interests: [interest.topic] })}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+        <div className="prophet-settings-inline">
+          <input
+            type="text"
+            className="prophet-text-input"
+            placeholder="Add a topic (e.g. AI infrastructure)"
+            value={prophetInterestDraft}
+            onChange={(event) => setProphetInterestDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && prophetInterestDraft.trim()) {
+                event.preventDefault()
+                void updateProphetPreferences({ add_interests: [prophetInterestDraft.trim()] })
+                setProphetInterestDraft('')
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="prophet-settings-secondary"
+            disabled={!prophetInterestDraft.trim()}
+            onClick={() => {
+              void updateProphetPreferences({ add_interests: [prophetInterestDraft.trim()] })
+              setProphetInterestDraft('')
+            }}
+          >
+            Add
+          </button>
+        </div>
+      </div>
+      <div className="prophet-settings-block">
+        <span className="prophet-settings-label">Sources</span>
+        <div className="prophet-source-list">
+          {prophetSources.length === 0 ? (
+            <span className="prophet-settings-hint">Add X handles, sites, or RSS feeds you trust.</span>
+          ) : null}
+          {prophetSources.map((source) => (
+            <span key={source.sourceId} className="prophet-source-row">
+              <span className="prophet-source-kind">{source.kind}</span>
+              <span className="prophet-source-value">{source.label || source.value}</span>
+              <button
+                type="button"
+                className="prophet-chip-remove"
+                aria-label="Remove source"
+                onClick={() => void updateProphetPreferences({ remove_source_ids: [source.sourceId] })}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+        <div className="prophet-settings-inline">
+          <select
+            className="prophet-select"
+            value={prophetSourceDraft.kind}
+            onChange={(event) => setProphetSourceDraft((prev) => ({ ...prev, kind: event.target.value }))}
+          >
+            <option value="site">Site</option>
+            <option value="x">X</option>
+            <option value="rss">RSS</option>
+          </select>
+          <input
+            type="text"
+            className="prophet-text-input"
+            placeholder="URL or @handle"
+            value={prophetSourceDraft.value}
+            onChange={(event) => setProphetSourceDraft((prev) => ({ ...prev, value: event.target.value }))}
+          />
+          <button
+            type="button"
+            className="prophet-settings-secondary"
+            disabled={!prophetSourceDraft.value.trim()}
+            onClick={() => {
+              void updateProphetPreferences({
+                add_sources: [
+                  {
+                    kind: prophetSourceDraft.kind,
+                    value: prophetSourceDraft.value.trim(),
+                    label: prophetSourceDraft.label.trim() || undefined,
+                  },
+                ],
+              })
+              setProphetSourceDraft({ kind: 'site', value: '', label: '' })
+            }}
+          >
+            Add
+          </button>
+        </div>
+      </div>
+    </div>
   )
 
-  const prophetSections = useMemo(() => {
-    const order: ProphetSection[] = ['breaking', 'tech', 'markets', 'social', 'science']
-    return order
-      .map((s) => ({ key: s, label: PROPHET_SECTION_LABELS[s], articles: PROPHET_ARTICLES.filter((a) => a.section === s && !a.featured) }))
-      .filter((s) => s.articles.length > 0)
-  }, [])
+  const prophetLeadStory: ProphetStory | null =
+    prophetEdition?.lead ||
+    prophetEdition?.sections.flatMap((section) => section.stories)[0] ||
+    null
+
+  const renderProphetLead = (story: ProphetStory) => {
+    const image = story.image
+    return (
+      <section className={`prophet-lead prophet-lead--${story.accent}`}>
+        <div className="prophet-lead-label">
+          {prophetEdition?.slot === 'evening' ? 'Evening Dispatch' : 'Breaking Dispatch'}
+        </div>
+        <div className={`prophet-lead-grid ${image?.url ? 'has-image' : ''}`}>
+          <div className="prophet-lead-copy">
+            <h2 className="prophet-lead-headline">{story.headline}</h2>
+            <div className="prophet-lead-byline">
+              <em>By special correspondent</em>
+              <span className="prophet-byline-dot" />
+              {story.source?.name ? (
+                <button
+                  type="button"
+                  className="prophet-source-link"
+                  onClick={() => openExternalUrl(story.source?.url)}
+                  disabled={!story.source?.url}
+                >
+                  {story.source.name}
+                </button>
+              ) : null}
+              {prophetStoryTime(story) ? <span className="prophet-byline-dot" /> : null}
+              {prophetStoryTime(story) ? <span>{prophetStoryTime(story)}</span> : null}
+            </div>
+            {story.dek ? <p className="prophet-lead-dek">{story.dek}</p> : null}
+            {story.body.length > 0 ? (
+              <div className="prophet-lead-body">
+                {story.body.map((paragraph, index) => (
+                  <p key={`${story.id}_lead_${index}`}>{paragraph}</p>
+                ))}
+              </div>
+            ) : null}
+            {story.whySelected ? <p className="prophet-lead-why">Why this leads: {story.whySelected}</p> : null}
+          </div>
+          {image?.url ? (
+            <figure className="prophet-lead-figure">
+              <img src={image.url} alt={image.caption || story.headline} loading="lazy" />
+              {image.caption || image.credit ? (
+                <figcaption>
+                  {image.caption}
+                  {image.credit ? <span className="prophet-credit">{image.credit}</span> : null}
+                </figcaption>
+              ) : null}
+            </figure>
+          ) : null}
+        </div>
+      </section>
+    )
+  }
 
   const renderProphetPage = () => {
-    const leadArticle = PROPHET_ARTICLES.find((a) => a.featured)!
-
+    const edition = prophetEdition
     return (
       <div className="spaces-page prophet-page">
-        {/* Masthead */}
+        <div className="prophet-toolbar">
+          <div className="prophet-toolbar-meta">
+            {edition
+              ? `${edition.slot === 'evening' ? 'Evening' : 'Morning'} edition · ${editionStoryCount(edition)} stories · revision ${edition.revision}`
+              : 'Awaiting first edition'}
+            {prophetRefreshing ? ' · refreshing…' : ''}
+          </div>
+          <div className="prophet-toolbar-actions">
+            <button type="button" className="prophet-toolbar-btn" onClick={() => void refreshProphetEdition(true)}>
+              Refresh
+            </button>
+            <button
+              type="button"
+              className={`prophet-toolbar-btn ${prophetSettingsOpen ? 'active' : ''}`}
+              onClick={() => (prophetSettingsOpen ? setProphetSettingsOpen(false) : openProphetSettings())}
+            >
+              {prophetSettingsOpen ? 'Close settings' : 'Settings'}
+            </button>
+          </div>
+        </div>
+
+        {prophetSettingsOpen ? renderProphetSettingsPanel() : null}
+
         <header className="prophet-masthead">
           <div className="prophet-rule prophet-rule-thick" />
           <div className="prophet-masthead-inner">
             <div className="prophet-edition">
               <span className="prophet-edition-vol">Vol. MMXXVI</span>
               <span className="prophet-edition-dot" />
-              <span>No. {today.getDate()}</span>
+              <span>No. {edition ? Number(edition.editionDate.slice(-2)) || today.getDate() : today.getDate()}</span>
               <span className="prophet-edition-dot" />
               <span className="prophet-price">Price: Five Knuts</span>
             </div>
@@ -5671,7 +6073,7 @@ export default function SpacesControlCenter({
             <div className="prophet-dateline">
               <span>{prophetEditionDate}</span>
               <span className="prophet-edition-dot" />
-              <span>COSMIC Edition</span>
+              <span>{edition?.slot === 'evening' ? 'Evening Edition' : 'COSMIC Edition'}</span>
               <span className="prophet-edition-dot" />
               <span>Proprietor: COSMIC Systems</span>
             </div>
@@ -5679,72 +6081,94 @@ export default function SpacesControlCenter({
           <div className="prophet-rule prophet-rule-thick" />
         </header>
 
-        {/* Lead Story — full width above the fold */}
-        <section className="prophet-lead">
-          <div className="prophet-lead-label">Breaking Dispatch</div>
-          <h2 className="prophet-lead-headline">{leadArticle.headline}</h2>
-          <div className="prophet-lead-byline">
-            <em>By special correspondent</em>
-            <span className="prophet-byline-dot" />
-            <span>{leadArticle.source}</span>
-            <span className="prophet-byline-dot" />
-            <span>{leadArticle.timeAgo}</span>
+        {prophetError ? (
+          <div className="prophet-empty prophet-empty--error">
+            <strong>The presses stalled.</strong>
+            <p>{prophetError}</p>
+            <div className="prophet-empty-actions">
+              <button type="button" className="prophet-toolbar-btn" onClick={() => void refreshProphetEdition(true)}>
+                Retry
+              </button>
+            </div>
           </div>
-          <p className="prophet-lead-body">{leadArticle.summary}</p>
-          <p className="prophet-lead-cont">Continued on Page 3, Column IV</p>
-        </section>
+        ) : null}
 
-        <div className="prophet-double-rule" />
-
-        {/* Magazine well — editorial grids; cosmic page BG unchanged */}
-        <div className="prophet-body">
-          <div className="prophet-magazine">
-            {prophetSections.map((section) => {
-              const n = section.articles.length
-              const storiesClass =
-                n <= 1 ? 'prophet-section-stories prophet-section-stories--n1' :
-                n === 2 ? 'prophet-section-stories prophet-section-stories--n2' :
-                'prophet-section-stories prophet-section-stories--n3'
-              return (
-                <section key={section.key} className={`prophet-section prophet-section--${section.key}`}>
-                  <div className="prophet-section-head">
-                    <span className="prophet-section-ornament" aria-hidden>
-                      ◆
-                    </span>
-                    <h2 className="prophet-section-title">{section.label}</h2>
-                    <div className="prophet-section-rule" />
-                    <span className="prophet-section-ornament" aria-hidden>
-                      ◆
-                    </span>
-                  </div>
-                  <div className={storiesClass}>
-                    {section.articles.map((article, index) => {
-                      const isFeature = n >= 3 && index === 0
-                      return (
-                        <article
-                          key={article.id}
-                          className={`prophet-story prophet-story--accent-${article.accent} ${isFeature ? 'prophet-story--feature' : ''}`}
-                        >
-                          <h3 className="prophet-story-headline">{article.headline}</h3>
-                          <p className="prophet-story-body">{article.summary}</p>
-                          <div className="prophet-story-byline">
-                            <span>{article.source}</span>
-                            <span className="prophet-byline-dot" />
-                            <span>{article.timeAgo}</span>
-                          </div>
-                        </article>
-                      )
-                    })}
-                  </div>
-                </section>
-              )
-            })}
+        {!prophetError && !edition ? (
+          <div className="prophet-empty">
+            <strong>The presses are warming up.</strong>
+            <p>
+              Your first edition will appear here at the next scheduled run
+              {prophetSettings.enabled
+                ? ` (mornings at ${prophetSettings.morningTime}${prophetSettings.eveningEnabled ? `, evenings at ${prophetSettings.eveningTime}` : ''})`
+                : ' once editions are enabled in settings'}
+              .
+            </p>
+            <div className="prophet-empty-actions">
+              <button type="button" className="prophet-toolbar-btn" onClick={openProphetSettings}>
+                Open settings
+              </button>
+              <button
+                type="button"
+                className="prophet-toolbar-btn primary"
+                onClick={() =>
+                  onPromptChat(
+                    "Compose today's Daily Prophet edition now and publish it with publish_prophet_edition.",
+                  )
+                }
+              >
+                Compose now
+              </button>
+            </div>
           </div>
-        </div>
+        ) : null}
+
+        {edition && prophetLeadStory ? renderProphetLead(prophetLeadStory) : null}
+
+        {edition ? <div className="prophet-double-rule" /> : null}
+
+        {edition ? (
+          <div className="prophet-body">
+            <div className="prophet-magazine">
+              {edition.sections.length === 0 ? (
+                <div className="prophet-empty">
+                  <strong>A quiet day.</strong>
+                  <p>No sections cleared the desk for this edition.</p>
+                </div>
+              ) : null}
+              {edition.sections.map((section: ProphetSection) => {
+                const mode = resolveProphetLayout(section)
+                return (
+                  <section key={section.id} className={`prophet-section prophet-section--${section.id}`}>
+                    <div className="prophet-section-head">
+                      <span className="prophet-section-ornament" aria-hidden>
+                        ◆
+                      </span>
+                      <h2 className="prophet-section-title">{section.label}</h2>
+                      <div className="prophet-section-rule" />
+                      <span className="prophet-section-ornament" aria-hidden>
+                        ◆
+                      </span>
+                    </div>
+                    <div className={`prophet-section-stories prophet-section-stories--${mode}`}>
+                      {section.stories.map((story, index) =>
+                        renderProphetStory(story, {
+                          feature: (mode === 'm3' || mode === 'm5') && index === 0,
+                        }),
+                      )}
+                    </div>
+                  </section>
+                )
+              })}
+            </div>
+          </div>
+        ) : null}
 
         <footer className="prophet-footer">
           <div className="prophet-rule prophet-rule-thick" />
-          <p>Assembled by COSMIC &middot; Sources verified against your trusted feeds &middot; All times local</p>
+          <p>
+            {edition?.footer ||
+              'Assembled by COSMIC · Curated from your interests and trusted sources · All times local'}
+          </p>
         </footer>
       </div>
     )

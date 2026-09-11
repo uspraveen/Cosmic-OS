@@ -236,6 +236,22 @@ interface Window {
       metadata?: Record<string, unknown>
     }) => Promise<any>
     listGatewayHeartbeatConsumptions: (sessionId?: string | null) => Promise<any>
+    getGatewayProphetEdition: (opts?: { date?: string; slot?: string }) => Promise<{
+      edition: any | null
+      settings: any
+    }>
+    listGatewayProphetEditions: (opts?: { limit?: number; days?: number }) => Promise<{ editions: any[] }>
+    getGatewayProphetSettings: () => Promise<{
+      settings: any
+      interests: any[]
+      sources: any[]
+    }>
+    saveGatewayProphetSettings: (payload: Record<string, unknown>) => Promise<{ settings: any }>
+    updateGatewayProphetPreferences: (payload: Record<string, unknown>) => Promise<{
+      settings: any
+      interests: any[]
+      sources: any[]
+    }>
     getGatewayCodexStatus: () => Promise<any>
     saveGatewayCodexConfig: (payload: {
       authMode?: string

@@ -409,6 +409,71 @@ def _delete_reminder_progress(tool_input: dict[str, Any]) -> str:
     return f"Removing reminder {cron_id}..." if cron_id else "Removing reminder..."
 
 
+_PROPHET_STORY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "headline": {"type": "string", "description": "Headline, max 300 characters."},
+        "dek": {"type": "string", "description": "Optional standfirst, max 400 characters."},
+        "body": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "1-3 short paragraphs in your own words. Never paste full articles.",
+        },
+        "role": {
+            "type": "string",
+            "enum": ["lead", "feature", "standard", "brief", "pull_quote", "image_led"],
+            "description": "Editorial treatment. brief = one-liner without body; image_led requires an image.",
+        },
+        "importance": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Ranking score; drives lead promotion and story-cap trimming.",
+        },
+        "source": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "url": {"type": "string"}},
+            "description": "Source attribution and link.",
+        },
+        "published_at": {"type": "string", "description": "ISO timestamp when known."},
+        "image": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "caption": {"type": "string"},
+                "credit": {"type": "string"},
+            },
+            "required": ["url"],
+        },
+        "why_selected": {
+            "type": "string",
+            "description": "One short line on why this story matters to this user.",
+        },
+        "tags": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["headline"],
+}
+
+_PROPHET_SECTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "description": "Stable section id, e.g. breaking, tech, markets, social, science."},
+        "label": {"type": "string", "description": "Display label for the section."},
+        "layout": {
+            "type": "string",
+            "enum": ["feature", "columns", "briefs", "gallery", "essay"],
+            "description": "Semantic layout intent; the renderer maps it to the correct template.",
+        },
+        "quiet_day_text": {
+            "type": "string",
+            "description": "Optional line shown when the section has no qualifying news.",
+        },
+        "stories": {"type": "array", "items": _PROPHET_STORY_SCHEMA},
+    },
+    "required": ["stories"],
+}
+
+
 _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="web_search",
@@ -2753,6 +2818,126 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         handler_method="_delete_reminder",
     ),
     ToolSpec(
+        name="publish_prophet_edition",
+        api_definition={
+            "name": "publish_prophet_edition",
+            "description": (
+                "Publish a finished Daily Prophet edition for the user. Call this during the scheduled "
+                "edition run (or when the user explicitly asks for an edition). Provide the lead plus "
+                "themed sections with semantic layout intents; the renderer handles final layout. "
+                "Rejected editions come back with an actionable error, and the response lists any "
+                "soft layout downgrades."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "edition_date": {"type": "string", "description": "YYYY-MM-DD; defaults to today."},
+                    "slot": {"type": "string", "enum": ["morning", "evening"]},
+                    "editor_note": {
+                        "type": "string",
+                        "description": "Short note recording this edition's editorial choices and reasoning.",
+                    },
+                    "lead": {
+                        **_PROPHET_STORY_SCHEMA,
+                        "description": "Front-page lead. Omit to auto-promote the highest-importance story.",
+                    },
+                    "sections": {"type": "array", "items": _PROPHET_SECTION_SCHEMA},
+                    "footer": {"type": "string"},
+                },
+                "required": ["sections"],
+            },
+        },
+        group="prophet",
+        prompt_summary="Publish the curated Daily Prophet edition the user reads each morning and evening.",
+        progress_builder=lambda _tool_input: "Setting today's Daily Prophet...",
+        handler_method="_publish_prophet_edition",
+    ),
+    ToolSpec(
+        name="read_prophet_edition",
+        api_definition={
+            "name": "read_prophet_edition",
+            "description": (
+                "Read a published Daily Prophet edition, defaulting to the most recent one, including "
+                "stories, sources, and why_selected notes."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "edition_date": {"type": "string", "description": "YYYY-MM-DD; omit for the latest edition."},
+                    "slot": {"type": "string", "enum": ["morning", "evening"]},
+                },
+            },
+        },
+        group="prophet",
+        prompt_summary="Look up a published Daily Prophet edition, its stories, and the reasoning behind them.",
+        progress_builder=lambda _tool_input: "Opening the Daily Prophet archive...",
+        handler_method="_read_prophet_edition",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="list_prophet_editions",
+        api_definition={
+            "name": "list_prophet_editions",
+            "description": "List recent Daily Prophet editions with their dates, story counts, and headlines.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 60,
+                        "description": "How many days back to include. Defaults to 7.",
+                    },
+                },
+            },
+        },
+        group="prophet",
+        prompt_summary="Review what recent Daily Prophet editions covered so you can avoid repeating stories.",
+        progress_builder=lambda _tool_input: "Checking recent Daily Prophet editions...",
+        handler_method="_list_prophet_editions",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="update_prophet_preferences",
+        api_definition={
+            "name": "update_prophet_preferences",
+            "description": (
+                "Maintain the user's Daily Prophet interests and preferred sources. Add inferred "
+                "interests or sources you discover from the user's work; remove or mute only entries "
+                "you previously inferred. User-added entries are protected from removal."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "add_interests": {"type": "array", "items": {"type": "string"}},
+                    "remove_interests": {"type": "array", "items": {"type": "string"}},
+                    "mute_interests": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Topics the newspaper must never surface.",
+                    },
+                    "add_sources": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {"type": "string", "enum": ["rss", "x", "site"]},
+                                "value": {"type": "string", "description": "URL, feed URL, or X handle."},
+                                "label": {"type": "string"},
+                            },
+                            "required": ["kind", "value"],
+                        },
+                    },
+                    "remove_source_ids": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        group="prophet",
+        prompt_summary="Keep the Daily Prophet's interest profile and source list accurate as the user's work evolves.",
+        progress_builder=lambda _tool_input: "Updating Daily Prophet preferences...",
+        handler_method="_update_prophet_preferences",
+    ),
+    ToolSpec(
         name="think_deeper",
         api_definition={
             "name": "think_deeper",
@@ -2821,6 +3006,7 @@ _GROUP_ORDER = (
     "history",
     "automations",
     "scheduling",
+    "prophet",
     "thinking",
 )
 _GROUP_TITLES = {
@@ -2837,6 +3023,7 @@ _GROUP_TITLES = {
     "history": "History",
     "automations": "Event Automations",
     "scheduling": "Scheduling",
+    "prophet": "Daily Prophet",
     "thinking": "Thinking",
 }
 

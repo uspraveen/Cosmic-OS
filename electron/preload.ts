@@ -120,6 +120,13 @@ contextBridge.exposeInMainWorld('cosmic', {
   resumeGatewaySchedulerHeartbeat: () => ipcRenderer.invoke('gateway:resume-scheduler-heartbeat'),
   recordGatewayHeartbeatConsumption: (payload: any) => ipcRenderer.invoke('gateway:record-heartbeat-consumption', payload),
   listGatewayHeartbeatConsumptions: (sessionId?: string) => ipcRenderer.invoke('gateway:list-heartbeat-consumptions', sessionId),
+  getGatewayProphetEdition: (opts?: { date?: string; slot?: string }) =>
+    ipcRenderer.invoke('gateway:get-prophet-edition', opts || {}),
+  listGatewayProphetEditions: (opts?: { limit?: number; days?: number }) =>
+    ipcRenderer.invoke('gateway:list-prophet-editions', opts || {}),
+  getGatewayProphetSettings: () => ipcRenderer.invoke('gateway:get-prophet-settings'),
+  saveGatewayProphetSettings: (payload: any) => ipcRenderer.invoke('gateway:save-prophet-settings', payload),
+  updateGatewayProphetPreferences: (payload: any) => ipcRenderer.invoke('gateway:update-prophet-preferences', payload),
   getGatewayCodexStatus: () => ipcRenderer.invoke('gateway:get-codex-status'),
   saveGatewayCodexConfig: (payload: any) => ipcRenderer.invoke('gateway:save-codex-config', payload),
   startGatewayCodexLogin: () => ipcRenderer.invoke('gateway:start-codex-login'),

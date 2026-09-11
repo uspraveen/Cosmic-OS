@@ -20,6 +20,7 @@ from .usage.routes import router as usage_router
 from .vault.routes import router as vault_router
 from .wishlist.routes import router as wishlist_router
 from .tool_opportunities.routes import router as tool_opportunities_router
+from .prophet.routes import router as prophet_router
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,7 @@ app.include_router(usage_router)
 app.include_router(vault_router)
 app.include_router(wishlist_router)
 app.include_router(tool_opportunities_router)
+app.include_router(prophet_router)
 
 
 @app.get("/health")
