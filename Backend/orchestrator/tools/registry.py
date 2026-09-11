@@ -445,8 +445,8 @@ _PROPHET_STORY_SCHEMA: dict[str, Any] = {
             },
             "required": ["url"],
             "description": (
-                "Optional visual. Use sparingly — the lead and at most a couple of stories — and only "
-                "with direct article images you trust. Logos, icons, avatars, and SVGs are discarded."
+                "Optional visual. Aim for the lead and at most two other stories, using the article's "
+                "own main image. Logos, icons, avatars, and SVGs are discarded."
             ),
         },
         "why_selected": {
