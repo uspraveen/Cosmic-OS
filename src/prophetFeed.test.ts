@@ -6,6 +6,7 @@ import {
   normalizeProphetEdition,
   normalizeProphetSettings,
   prophetAccent,
+  prophetDomain,
   resolveProphetLayout,
   type ProphetSection,
   type ProphetStory,
@@ -156,18 +157,29 @@ describe('normalizeProphetSettings', () => {
       evening_time: '20:00',
       max_stories: 22,
       notifications_enabled: false,
+      paper_style: 'newsprint',
       sections: [{ id: 'tech', label: 'Tech', enabled: false }],
     })
     expect(settings.enabled).toBe(false)
     expect(settings.morningTime).toBe('06:15')
     expect(settings.eveningEnabled).toBe(false)
     expect(settings.maxStories).toBe(22)
+    expect(settings.paperStyle).toBe('newsprint')
     expect(settings.sections).toEqual([{ id: 'tech', label: 'Tech', enabled: false }])
   })
 
   it('falls back to defaults on junk', () => {
-    const settings = normalizeProphetSettings({ max_stories: 999 })
+    const settings = normalizeProphetSettings({ max_stories: 999, paper_style: 'cardboard' })
     expect(settings.maxStories).toBe(15)
+    expect(settings.paperStyle).toBe('parchment')
     expect(settings.sections.length).toBe(5)
+  })
+})
+
+describe('prophetDomain', () => {
+  it('extracts a clean display domain', () => {
+    expect(prophetDomain('https://www.reuters.com/technology/x')).toBe('reuters.com')
+    expect(prophetDomain('not a url')).toBe('')
+    expect(prophetDomain(undefined)).toBe('')
   })
 })

@@ -10,22 +10,26 @@ PROPHET_MORNING_CRON_ID = "prophet.morning"
 PROPHET_EVENING_CRON_ID = "prophet.evening"
 PROPHET_CRON_IDS = frozenset({PROPHET_MORNING_CRON_ID, PROPHET_EVENING_CRON_ID})
 
-PROPHET_MORNING_PROMPT = """Compose today's morning edition of The Daily Prophet for the user.
+PROPHET_MORNING_PROMPT = """Compose today's morning edition of The Daily Prophet — COSMIC's personalized newspaper for this user.
+
+This is not a headline dump. Write the user's own edition: choose the stories that matter to them, rewrite headlines and body copy in COSMIC's editorial voice, add framing that connects each story to their world (their projects, interests, and goals), and order everything front-page-first.
 
 Work rules:
 - Do not ask the user anything and do not narrate your process.
 - Keep research bounded and prioritize quality over quantity; do not chase every thread or start long delegations late.
+- Include visuals: give the lead and most stories a relevant direct image URL (from the source page or a clearly relevant image), with captions and credits when known. Never invent image URLs.
 - You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections, at most {max_stories} stories total).
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
 - After the publish succeeds, reply with one short line confirming the edition is ready."""
 
-PROPHET_EVENING_PROMPT = """Compose today's evening edition of The Daily Prophet for the user.
+PROPHET_EVENING_PROMPT = """Compose today's evening edition of The Daily Prophet — COSMIC's personalized newspaper for this user.
 
-This is the evening wrap: prioritize what developed during the day, what the user will want to know before tomorrow, and any late-breaking items.
+This is the evening wrap: what developed during the day, what the user will want to know before tomorrow, and any late-breaking items — written as their own edition, not a raw feed. Choose the stories that matter to them, rewrite headlines and body copy in COSMIC's editorial voice, and connect each story to their world.
 
 Work rules:
 - Do not ask the user anything and do not narrate your process.
 - Keep research bounded and prioritize quality over quantity; do not chase every thread or start long delegations late.
+- Include visuals: give the lead and most stories a relevant direct image URL (from the source page or a clearly relevant image), with captions and credits when known. Never invent image URLs.
 - You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections, at most {max_stories} stories total).
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
 - After the publish succeeds, reply with one short line confirming the edition is ready."""

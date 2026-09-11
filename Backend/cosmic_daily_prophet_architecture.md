@@ -73,9 +73,10 @@ Curator (orchestrator tool) may only add/remove/mute `inferred` entries; user-ad
 
 ## Generation pipeline
 
-- The cron prompt is 3–4 lines: slot, story cap, "curate from any sources you judge best, personalize
-  against the briefing, publish with publish_prophet_edition". Sources are unrestricted (web search,
-  Perplexity, X, Firecrawl, browser, specialist delegation).
+- The cron prompt is compact but strict: write the user's own edition (rewrite headlines and body copy in
+  COSMIC's voice, connect stories to the user's world), keep research bounded, include image URLs for the
+  lead and most stories, and always end with `publish_prophet_edition`. Sources are unrestricted
+  (web search, Perplexity, X, Firecrawl, browser, specialist delegation).
 - Fresh context packet per run (`prophet/context.py`): settings summary, enabled sections, active
   interests, muted topics, preferred sources, and the last three days of shown headlines for dedup.
 - The run response is suppressed from chat when `prophet_store.find_edition_by_request_id()` finds a
@@ -102,13 +103,18 @@ Tool group: `prophet` ("Daily Prophet") in the orchestrator prompt catalog.
 
 ## Frontend
 
-- `src/prophetFeed.ts`: pure normalizer, accent mapping, relative time, dateline, and the
-  deterministic `resolveProphetLayout()` used by the renderer. Covered by `src/prophetFeed.test.ts`.
-- `SpacesControlCenter.tsx`: feed-driven `renderProphetPage()` with masthead, lead, sections,
-  empty/error states, refresh + polling, `onGatewayEvent` live refresh, and the settings panel
-  (schedule, cap, sections, interests, sources).
-- `spaces-control.css`: scoped paper edition tokens under `.prophet-page` (warm parchment, ink rules,
-  Source Serif 4 body type bundled in `src/assets/fonts/`), layout modes `m1..m5`, responsive rules.
+- `src/prophetFeed.ts`: pure normalizer, accent mapping, relative time, dateline, paper-style metadata,
+  domain extraction, and the deterministic `resolveProphetLayout()` used by the renderer. Covered by
+  `src/prophetFeed.test.ts`.
+- `SpacesControlCenter.tsx`: feed-driven `renderProphetPage()` with masthead, lead, sections, image
+  figures with captions/credits, empty/error states, refresh + polling, `onGatewayEvent` live refresh,
+  and a glass settings panel (schedule, cap, sections, interests, sources, paper style).
+- Story source links open a glass hover preview (headline, image, domain, open-in-browser) instead of a
+  bare link.
+- `spaces-control.css`: the paper canvas is scoped to `.prophet-page` with selectable styles
+  (`parchment`, `newsprint`, `ivory`, `midnight`), layered grain/stain textures, ink rules, Newsreader
+  body type bundled in `src/assets/fonts/`, layout modes `m1..m5`, and responsive rules. Toolbar and
+  settings chrome use the app's glass design tokens.
 - `App.tsx`: `prophet.edition.published` enqueues a "Daily Prophet ready" card; "Read edition" opens
   Spaces → My Prophet through `prophetNavigateSignal`.
 - IPC: `electron/preload.ts` + `electron/main.ts` handlers for the desktop routes above.

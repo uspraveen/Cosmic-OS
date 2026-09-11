@@ -27,6 +27,7 @@ class ProphetSettingsUpdateRequest(BaseModel):
     evening_time: str | None = Field(default=None, max_length=5)
     max_stories: int | None = Field(default=None, ge=5, le=30)
     notifications_enabled: bool | None = None
+    paper_style: str | None = Field(default=None, max_length=20)
     sections: list[ProphetSectionSetting] | None = Field(default=None, max_length=24)
 
 

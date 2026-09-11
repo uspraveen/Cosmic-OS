@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ComponentPropsWithoutRef, CSSProperties, RefObject } from 'react'
+import type { ComponentPropsWithoutRef, CSSProperties, MouseEvent as ReactMouseEvent, RefObject } from 'react'
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -20,11 +20,13 @@ import {
 } from './calendar'
 import {
   EMPTY_PROPHET_SETTINGS,
+  PROPHET_PAPER_STYLES,
   editionStoryCount,
   formatProphetDateline,
   formatProphetRelativeTime,
   normalizeProphetEdition,
   normalizeProphetSettings,
+  prophetDomain,
   resolveProphetLayout,
   type ProphetEdition,
   type ProphetInterest,
@@ -2377,6 +2379,15 @@ export default function SpacesControlCenter({
   const [prophetSettingsNotice, setProphetSettingsNotice] = useState<string | null>(null)
   const [prophetInterestDraft, setProphetInterestDraft] = useState('')
   const [prophetSourceDraft, setProphetSourceDraft] = useState({ kind: 'site', value: '', label: '' })
+  const [prophetLinkPreview, setProphetLinkPreview] = useState<{
+    url: string
+    name: string
+    headline: string
+    domain: string
+    imageUrl?: string
+    x: number
+    y: number
+  } | null>(null)
   const prophetRequestRef = useRef(0)
 
   const refreshToolOpportunities = useCallback(async () => {
@@ -2483,6 +2494,7 @@ export default function SpacesControlCenter({
         evening_time: prophetDraft.eveningTime,
         max_stories: prophetDraft.maxStories,
         notifications_enabled: prophetDraft.notificationsEnabled,
+        paper_style: prophetDraft.paperStyle,
         sections: prophetDraft.sections,
       })
       const settings = normalizeProphetSettings(result?.settings)
@@ -5665,6 +5677,52 @@ export default function SpacesControlCenter({
 
   const prophetStoryTime = (story: ProphetStory) => formatProphetRelativeTime(story.publishedAt, now.getTime())
 
+  const prophetLinkPreviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const scheduleProphetLinkPreviewClose = () => {
+    if (prophetLinkPreviewTimerRef.current) clearTimeout(prophetLinkPreviewTimerRef.current)
+    prophetLinkPreviewTimerRef.current = setTimeout(() => {
+      prophetLinkPreviewTimerRef.current = null
+      setProphetLinkPreview(null)
+    }, 220)
+  }
+
+  const keepProphetLinkPreview = () => {
+    if (prophetLinkPreviewTimerRef.current) {
+      clearTimeout(prophetLinkPreviewTimerRef.current)
+      prophetLinkPreviewTimerRef.current = null
+    }
+  }
+
+  const showProphetLinkPreview = (
+    event: ReactMouseEvent<HTMLElement>,
+    story: ProphetStory,
+  ) => {
+    keepProphetLinkPreview()
+    const url = story.source?.url
+    if (!url) return
+    const rect = event.currentTarget.getBoundingClientRect()
+    const main = event.currentTarget.closest('.spaces-main') as HTMLElement | null
+    const mainRect = main ? main.getBoundingClientRect() : { left: 0, top: 0 }
+    const cardWidth = 304
+    const cardHeight = 188
+    const left = Math.max(12, Math.min(
+      rect.left - mainRect.left + (main?.scrollLeft || 0) - cardWidth + Math.max(rect.width, 120),
+      (main?.clientWidth || window.innerWidth) - cardWidth - 12,
+    ))
+    const below = rect.bottom - mainRect.top + (main?.scrollTop || 0) + 10
+    const above = rect.top - mainRect.top + (main?.scrollTop || 0) - cardHeight - 10
+    setProphetLinkPreview({
+      url,
+      name: story.source?.name || '',
+      headline: story.headline,
+      domain: prophetDomain(url),
+      imageUrl: story.image?.url,
+      x: left,
+      y: below > (main?.clientHeight || window.innerHeight) - 40 ? Math.max(12, above) : below,
+    })
+  }
+
   const renderProphetByline = (story: ProphetStory) => {
     const timeLabel = prophetStoryTime(story)
     return (
@@ -5674,6 +5732,8 @@ export default function SpacesControlCenter({
             type="button"
             className="prophet-source-link"
             onClick={() => openExternalUrl(story.source?.url)}
+            onMouseEnter={(event) => showProphetLinkPreview(event, story)}
+            onMouseLeave={scheduleProphetLinkPreviewClose}
             disabled={!story.source?.url}
           >
             {story.source.name}
@@ -5709,7 +5769,16 @@ export default function SpacesControlCenter({
       >
         {image?.url ? (
           <figure className="prophet-story-figure">
-            <img src={image.url} alt={image.caption || story.headline} loading="lazy" />
+            <img
+              src={image.url}
+              alt={image.caption || story.headline}
+              loading="lazy"
+              referrerPolicy="no-referrer"
+              onError={(event) => {
+                const figure = event.currentTarget.closest('figure')
+                if (figure instanceof HTMLElement) figure.style.display = 'none'
+              }}
+            />
             {image.caption || image.credit ? (
               <figcaption>
                 {image.caption}
@@ -5824,6 +5893,25 @@ export default function SpacesControlCenter({
             <span className="prophet-toggle-knob" />
             <span className="prophet-toggle-text">{prophetDraft.notificationsEnabled ? 'On' : 'Off'}</span>
           </button>
+        </div>
+      </div>
+      <div className="prophet-settings-block">
+        <span className="prophet-settings-label">Paper style</span>
+        <div className="prophet-paper-picker">
+          {PROPHET_PAPER_STYLES.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={`prophet-paper-option ${prophetDraft.paperStyle === option.id ? 'active' : ''}`}
+              onClick={() => setProphetDraft((prev) => ({ ...prev, paperStyle: option.id }))}
+            >
+              <span className="prophet-paper-swatch" style={{ background: option.swatch }} />
+              <span className="prophet-paper-copy">
+                <strong>{option.label}</strong>
+                <em>{option.hint}</em>
+              </span>
+            </button>
+          ))}
         </div>
       </div>
       <div className="prophet-settings-block">
@@ -5997,6 +6085,8 @@ export default function SpacesControlCenter({
                   type="button"
                   className="prophet-source-link"
                   onClick={() => openExternalUrl(story.source?.url)}
+                  onMouseEnter={(event) => showProphetLinkPreview(event, story)}
+                  onMouseLeave={scheduleProphetLinkPreviewClose}
                   disabled={!story.source?.url}
                 >
                   {story.source.name}
@@ -6017,7 +6107,16 @@ export default function SpacesControlCenter({
           </div>
           {image?.url ? (
             <figure className="prophet-lead-figure">
-              <img src={image.url} alt={image.caption || story.headline} loading="lazy" />
+              <img
+                src={image.url}
+                alt={image.caption || story.headline}
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                onError={(event) => {
+                  const figure = event.currentTarget.closest('figure')
+                  if (figure instanceof HTMLElement) figure.style.display = 'none'
+                }}
+              />
               {image.caption || image.credit ? (
                 <figcaption>
                   {image.caption}
@@ -6034,7 +6133,7 @@ export default function SpacesControlCenter({
   const renderProphetPage = () => {
     const edition = prophetEdition
     return (
-      <div className="spaces-page prophet-page">
+      <div className="spaces-page prophet-screen">
         <div className="prophet-toolbar">
           <div className="prophet-toolbar-meta">
             {edition
@@ -6058,6 +6157,7 @@ export default function SpacesControlCenter({
 
         {prophetSettingsOpen ? renderProphetSettingsPanel() : null}
 
+        <div className={`prophet-page prophet-paper--${prophetSettingsOpen ? prophetDraft.paperStyle : prophetSettings.paperStyle}`}>
         <header className="prophet-masthead">
           <div className="prophet-rule prophet-rule-thick" />
           <div className="prophet-masthead-inner">
@@ -6167,9 +6267,48 @@ export default function SpacesControlCenter({
           <div className="prophet-rule prophet-rule-thick" />
           <p>
             {edition?.footer ||
-              'Assembled by COSMIC · Curated from your interests and trusted sources · All times local'}
+              'Assembled by COSMIC · Personalized for you and rewritten in the COSMIC voice · All times local'}
           </p>
         </footer>
+        </div>
+
+        {prophetLinkPreview ? (
+          <div
+            className="prophet-link-preview"
+            style={{ left: prophetLinkPreview.x, top: prophetLinkPreview.y }}
+            onMouseEnter={keepProphetLinkPreview}
+            onMouseLeave={scheduleProphetLinkPreviewClose}
+          >
+            {prophetLinkPreview.imageUrl ? (
+              <div className="prophet-link-preview-media">
+                <img
+                  src={prophetLinkPreview.imageUrl}
+                  alt=""
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                  onError={(event) => {
+                    const media = event.currentTarget.closest('.prophet-link-preview-media')
+                    if (media instanceof HTMLElement) media.style.display = 'none'
+                  }}
+                />
+              </div>
+            ) : null}
+            <div className="prophet-link-preview-body">
+              <span className="prophet-link-preview-domain">{prophetLinkPreview.domain || 'source'}</span>
+              <strong className="prophet-link-preview-headline">{prophetLinkPreview.headline}</strong>
+              {prophetLinkPreview.name ? (
+                <span className="prophet-link-preview-source">{prophetLinkPreview.name}</span>
+              ) : null}
+              <button
+                type="button"
+                className="prophet-link-preview-open"
+                onClick={() => openExternalUrl(prophetLinkPreview.url)}
+              >
+                Open in browser
+              </button>
+            </div>
+          </div>
+        ) : null}
       </div>
     )
   }

@@ -439,11 +439,12 @@ _PROPHET_STORY_SCHEMA: dict[str, Any] = {
         "image": {
             "type": "object",
             "properties": {
-                "url": {"type": "string"},
+                "url": {"type": "string", "description": "Direct image URL. Never invent URLs."},
                 "caption": {"type": "string"},
                 "credit": {"type": "string"},
             },
             "required": ["url"],
+            "description": "Relevant visual for the story. The lead and most stories should have one.",
         },
         "why_selected": {
             "type": "string",
@@ -2823,7 +2824,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "publish_prophet_edition",
             "description": (
                 "Publish a finished Daily Prophet edition for the user. Call this during the scheduled "
-                "edition run (or when the user explicitly asks for an edition). Provide the lead plus "
+                "edition run (or when the user explicitly asks for an edition). Write it as the user's "
+                "personalized newspaper: rewritten headlines and body copy in COSMIC's voice, with "
+                "image URLs (and captions/credits) for the lead and most stories. Provide the lead plus "
                 "themed sections with semantic layout intents; the renderer handles final layout. "
                 "Rejected editions come back with an actionable error, and the response lists any "
                 "soft layout downgrades."

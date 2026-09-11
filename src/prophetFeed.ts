@@ -3,6 +3,21 @@ export type ProphetLayoutIntent = 'feature' | 'columns' | 'briefs' | 'gallery' |
 export type ProphetStoryRole = 'lead' | 'feature' | 'standard' | 'brief' | 'pull_quote' | 'image_led'
 export type ProphetLayoutMode = 'm1' | 'm2' | 'm3' | 'm4' | 'm5'
 export type ProphetAccent = 'rose' | 'azure' | 'slate' | 'mint' | 'gold'
+export type ProphetPaperStyle = 'parchment' | 'newsprint' | 'ivory' | 'midnight'
+
+export interface ProphetPaperOption {
+  id: ProphetPaperStyle
+  label: string
+  hint: string
+  swatch: string
+}
+
+export const PROPHET_PAPER_STYLES: ProphetPaperOption[] = [
+  { id: 'parchment', label: 'Parchment', hint: 'Warm aged newsprint', swatch: '#efe3c4' },
+  { id: 'newsprint', label: 'Newsprint', hint: 'Cool grey stock', swatch: '#e2e7ea' },
+  { id: 'ivory', label: 'Ivory', hint: 'Clean cream paper', swatch: '#f4efe2' },
+  { id: 'midnight', label: 'Midnight', hint: 'Dark cosmic edition', swatch: '#191b22' },
+]
 
 export interface ProphetStoryImage {
   url: string
@@ -65,6 +80,7 @@ export interface ProphetSettings {
   eveningTime: string
   maxStories: number
   notificationsEnabled: boolean
+  paperStyle: ProphetPaperStyle
   sections: ProphetSectionSetting[]
 }
 
@@ -91,6 +107,7 @@ export const EMPTY_PROPHET_SETTINGS: ProphetSettings = {
   eveningTime: '19:00',
   maxStories: 15,
   notificationsEnabled: true,
+  paperStyle: 'parchment',
   sections: [
     { id: 'breaking', label: 'Breaking Dispatch', enabled: true },
     { id: 'tech', label: 'Technology & Innovation', enabled: true },
@@ -99,6 +116,8 @@ export const EMPTY_PROPHET_SETTINGS: ProphetSettings = {
     { id: 'science', label: 'Science & Discovery', enabled: true },
   ],
 }
+
+const VALID_PAPER_STYLES: ProphetPaperStyle[] = ['parchment', 'newsprint', 'ivory', 'midnight']
 
 const VALID_SLOTS: ProphetSlot[] = ['morning', 'evening']
 const VALID_ROLES: ProphetStoryRole[] = ['lead', 'feature', 'standard', 'brief', 'pull_quote', 'image_led']
@@ -283,6 +302,7 @@ export const normalizeProphetSettings = (raw: unknown): ProphetSettings => {
         .filter((section): section is ProphetSectionSetting => section !== null)
     : []
   const maxStoriesRaw = Number(record.max_stories)
+  const paperStyleRaw = asText(record.paper_style).toLowerCase() as ProphetPaperStyle
   return {
     enabled: record.enabled !== false,
     morningTime: asText(record.morning_time) || EMPTY_PROPHET_SETTINGS.morningTime,
@@ -293,6 +313,19 @@ export const normalizeProphetSettings = (raw: unknown): ProphetSettings => {
         ? Math.round(maxStoriesRaw)
         : EMPTY_PROPHET_SETTINGS.maxStories,
     notificationsEnabled: record.notifications_enabled !== false,
+    paperStyle: VALID_PAPER_STYLES.includes(paperStyleRaw)
+      ? paperStyleRaw
+      : EMPTY_PROPHET_SETTINGS.paperStyle,
     sections: sections.length > 0 ? sections : EMPTY_PROPHET_SETTINGS.sections,
+  }
+}
+
+export const prophetDomain = (url: string | undefined): string => {
+  const value = asText(url)
+  if (!value) return ''
+  try {
+    return new URL(value).hostname.replace(/^www\./, '')
+  } catch {
+    return ''
   }
 }

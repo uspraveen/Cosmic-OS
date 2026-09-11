@@ -25,6 +25,8 @@ PROPHET_DEDUP_WINDOW_DAYS = 3
 VALID_LAYOUTS = ("feature", "columns", "briefs", "gallery", "essay")
 VALID_ROLES = ("lead", "feature", "standard", "brief", "pull_quote", "image_led")
 VALID_SLOTS = ("morning", "evening")
+VALID_PAPER_STYLES = ("parchment", "newsprint", "ivory", "midnight")
+DEFAULT_PAPER_STYLE = "parchment"
 
 DEFAULT_SECTIONS: tuple[dict[str, Any], ...] = (
     {"id": "breaking", "label": "Breaking Dispatch", "enabled": True},
@@ -370,6 +372,14 @@ def normalize_settings_changes(changes: dict[str, Any]) -> dict[str, Any]:
                 code="invalid_max_stories",
             )
         clean["max_stories"] = count
+    if "paper_style" in changes:
+        paper_style = (_clean_text(changes.get("paper_style")) or "").lower()
+        if paper_style not in VALID_PAPER_STYLES:
+            raise ProphetValidationError(
+                "paper_style must be one of: " + ", ".join(VALID_PAPER_STYLES) + ".",
+                code="invalid_paper_style",
+            )
+        clean["paper_style"] = paper_style
     if "sections" in changes and isinstance(changes.get("sections"), list):
         sections: list[dict[str, Any]] = []
         for raw in changes["sections"]:
@@ -413,6 +423,7 @@ class ProphetStore:
                     evening_time TEXT NOT NULL DEFAULT '19:00',
                     max_stories INTEGER NOT NULL DEFAULT 15,
                     notifications_enabled INTEGER NOT NULL DEFAULT 1,
+                    paper_style TEXT NOT NULL DEFAULT 'parchment',
                     sections_json TEXT NOT NULL DEFAULT '[]',
                     updated_at TEXT NOT NULL
                 );
@@ -481,6 +492,7 @@ class ProphetStore:
                 """
             )
             now = utcnow_iso()
+            self._ensure_settings_columns(connection)
             connection.execute(
                 """
                 INSERT INTO prophet_settings (
@@ -491,14 +503,16 @@ class ProphetStore:
                     evening_time,
                     max_stories,
                     notifications_enabled,
+                    paper_style,
                     sections_json,
                     updated_at
                 )
-                VALUES ('default', 1, '05:00', 1, '19:00', ?, 1, ?, ?)
+                VALUES ('default', 1, '05:00', 1, '19:00', ?, 1, ?, ?, ?)
                 ON CONFLICT(config_id) DO NOTHING
                 """,
                 (
                     PROPHET_DEFAULT_MAX_STORIES,
+                    DEFAULT_PAPER_STYLE,
                     _json_dumps(list(DEFAULT_SECTIONS)),
                     now,
                 ),
@@ -521,6 +535,10 @@ class ProphetStore:
         record["max_stories"] = max(
             PROPHET_MIN_STORIES,
             min(PROPHET_MAX_STORIES_HARD_CAP, _as_int(record.get("max_stories"), PROPHET_DEFAULT_MAX_STORIES)),
+        )
+        paper_style = (_clean_text(record.get("paper_style")) or "").lower()
+        record["paper_style"] = (
+            paper_style if paper_style in VALID_PAPER_STYLES else DEFAULT_PAPER_STYLE
         )
         return record
 
@@ -999,6 +1017,7 @@ class ProphetStore:
             "evening_enabled": settings["evening_enabled"],
             "evening_time": settings["evening_time"],
             "max_stories": settings["max_stories"],
+            "paper_style": settings["paper_style"],
             "edition_count": edition_count,
             "interest_count": interest_count,
             "source_count": source_count,
@@ -1056,6 +1075,16 @@ class ProphetStore:
         record = dict(row)
         record["payload"] = _json_load(record.pop("payload_json", None), {})
         return record
+
+    @staticmethod
+    def _ensure_settings_columns(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(prophet_settings)")
+        }
+        if "paper_style" not in columns:
+            connection.execute(
+                "ALTER TABLE prophet_settings ADD COLUMN paper_style TEXT NOT NULL DEFAULT 'parchment'"
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=30)

@@ -60,6 +60,7 @@ def test_settings_defaults(tmp_path: Path) -> None:
     assert settings["evening_enabled"] is True
     assert settings["evening_time"] == "19:00"
     assert settings["max_stories"] == 15
+    assert settings["paper_style"] == "parchment"
     assert len(settings["sections"]) == 5
 
 
@@ -68,10 +69,46 @@ def test_update_settings_validates(tmp_path: Path) -> None:
     updated = store.update_settings({"morning_time": "06:30", "max_stories": 20})
     assert updated["morning_time"] == "06:30"
     assert updated["max_stories"] == 20
+    styled = store.update_settings({"paper_style": "newsprint"})
+    assert styled["paper_style"] == "newsprint"
     with pytest.raises(ProphetValidationError):
         store.update_settings({"morning_time": "6:30"})
     with pytest.raises(ProphetValidationError):
         store.update_settings({"max_stories": 31})
+    with pytest.raises(ProphetValidationError):
+        store.update_settings({"paper_style": "cardboard"})
+
+
+def test_initialize_migrates_paper_style_column(tmp_path: Path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE prophet_settings (
+            config_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            morning_time TEXT NOT NULL DEFAULT '05:00',
+            evening_enabled INTEGER NOT NULL DEFAULT 1,
+            evening_time TEXT NOT NULL DEFAULT '19:00',
+            max_stories INTEGER NOT NULL DEFAULT 15,
+            notifications_enabled INTEGER NOT NULL DEFAULT 1,
+            sections_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO prophet_settings (config_id, updated_at) VALUES ('default', '2026-01-01T00:00:00Z')"
+    )
+    connection.commit()
+    connection.close()
+
+    store = ProphetStore(db_path)
+    store.initialize()
+    settings = store.get_settings()
+    assert settings["paper_style"] == "parchment"
 
 
 def test_publish_and_fetch_edition(tmp_path: Path) -> None:
