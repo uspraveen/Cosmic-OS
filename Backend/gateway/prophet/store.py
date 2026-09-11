@@ -52,6 +52,8 @@ _WEAK_IMAGE_HINTS = (
     "logo",
     "avatar",
     "gravatar",
+    "profile_images",
+    "profile_image",
     "1x1",
     "pixel.gif",
     "blank.gif",
@@ -322,11 +324,6 @@ def validate_edition_payload(
                 if story.get("role") == "lead":
                     story["role"] = "feature"
             sections = [section for section in sections if section["stories"]]
-            if not sections:
-                raise ProphetValidationError(
-                    "An edition needs at least one section with stories.",
-                    code="empty_edition",
-                )
             warnings.append("Promoted the highest-importance lead-role story to the front page.")
         else:
             ranked = sorted(all_stories, key=lambda item: item.get("importance", 0), reverse=True)
@@ -337,11 +334,6 @@ def validate_edition_payload(
                         story for story in section["stories"] if story["id"] != lead["id"]
                     ]
                 sections = [section for section in sections if section["stories"]]
-                if not sections:
-                    raise ProphetValidationError(
-                        "An edition needs at least one section besides the lead.",
-                        code="empty_edition",
-                    )
                 warnings.append("No lead was provided; promoted the highest-importance story to the front page.")
 
     total_stories = (1 if lead else 0) + sum(len(section["stories"]) for section in sections)

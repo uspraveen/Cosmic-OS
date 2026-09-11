@@ -18,7 +18,7 @@ Work rules:
 - Do not ask the user anything and do not narrate your process.
 - Keep research bounded and prioritize quality over quantity; do not chase every thread or start long delegations late.
 - Images: a couple of visuals carry a paper — aim for the lead and up to two more, using each article's own main image when you have a URL you trust. Skip icons, logos, avatars, and anything you cannot verify.
-- You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections, at most {max_stories} stories total).
+- You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections). Aim for a full paper — roughly eight to {max_stories} stories — and go smaller only on a genuinely quiet day.
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
 - If publish_prophet_edition is rejected, correct the specific problem and republish the real edition. Never publish placeholder, sample, or test stories.
 - After the publish succeeds, reply with one short line confirming the edition is ready."""
@@ -31,7 +31,7 @@ Work rules:
 - Do not ask the user anything and do not narrate your process.
 - Keep research bounded and prioritize quality over quantity; do not chase every thread or start long delegations late.
 - Images: a couple of visuals carry a paper — aim for the lead and up to two more, using each article's own main image when you have a URL you trust. Skip icons, logos, avatars, and anything you cannot verify.
-- You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections, at most {max_stories} stories total).
+- You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections). Aim for a full paper — roughly eight to {max_stories} stories — and go smaller only on a genuinely quiet day.
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
 - If publish_prophet_edition is rejected, correct the specific problem and republish the real edition. Never publish placeholder, sample, or test stories.
 - After the publish succeeds, reply with one short line confirming the edition is ready."""

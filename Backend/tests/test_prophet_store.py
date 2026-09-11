@@ -214,6 +214,25 @@ def test_sources_upsert_and_remove(tmp_path: Path) -> None:
     assert store.list_sources() == []
 
 
+def test_lead_only_edition_is_published(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    payload = {
+        "slot": "morning",
+        "sections": [
+            {
+                "id": "breaking",
+                "label": "Breaking",
+                "stories": [{"headline": "Only story of the day", "role": "lead", "importance": 90}],
+            }
+        ],
+    }
+    result = store.publish_edition(payload)
+    edition = result["edition"]
+    assert result["story_count"] == 1
+    assert edition["lead"]["headline"] == "Only story of the day"
+    assert edition["sections"] == []
+
+
 def test_list_editions_summary(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.publish_edition(_edition())
