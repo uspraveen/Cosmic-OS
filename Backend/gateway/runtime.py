@@ -83,6 +83,7 @@ from .prophet import (
     PROPHET_CRON_IDS,
     ProphetStore,
     cron_expression_for_time,
+    is_weak_image_url,
     prophet_cron_specs,
     render_prophet_context_block,
 )
@@ -292,6 +293,47 @@ _HEARTBEAT_OFFLINE_SUPPRESS_RE = re.compile(
     r"chat (?:is |are )?silent|user still offline|nothing time-ripe for a mobile push)",
     re.IGNORECASE,
 )
+PROPHET_IMAGE_ENRICH_LIMIT = 3
+PROPHET_IMAGE_ENRICH_TIMEOUT_SEC = 8.0
+_PROPHET_OG_IMAGE_PATTERNS = (
+    re.compile(
+        r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)["\']',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\']',
+        re.IGNORECASE,
+    ),
+)
+_PROPHET_OG_IMAGE_ALT_RE = re.compile(
+    r'<meta[^>]+(?:property|name)=["\'](?:og:image:alt|twitter:image:alt)["\'][^>]+content=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+
+
+def _parse_prophet_og_image(html_text: str) -> dict[str, str] | None:
+    text = str(html_text or "")
+    if not text:
+        return None
+    image_url = ""
+    for pattern in _PROPHET_OG_IMAGE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            image_url = match.group(1).strip()
+            break
+    if not image_url:
+        return None
+    image_url = image_url.replace("&amp;", "&").strip()
+    if not image_url.startswith(("http://", "https://")) or is_weak_image_url(image_url):
+        return None
+    image: dict[str, str] = {"url": image_url}
+    alt_match = _PROPHET_OG_IMAGE_ALT_RE.search(text)
+    if alt_match:
+        alt = alt_match.group(1).replace("&amp;", "&").strip()
+        if alt:
+            image["caption"] = alt[:400]
+    return image
+
 GMAIL_SURFACE_DECISION_SOURCE = "gmail_surface"
 # Fixed point in time the stale-active backfill sweep went live. The
 # pre-existing backlog of items stuck in status=active (created before this
@@ -9619,13 +9661,115 @@ class GatewayRuntime:
         request_id: str | None = None,
         slot: str | None = None,
     ) -> dict[str, Any]:
+        enriched = await self._enrich_prophet_edition_images(edition)
         result = self.prophet_store.publish_edition(
-            edition,
+            enriched,
             request_id=request_id,
             slot=slot,
         )
         await self._broadcast_prophet_edition(result)
         return result
+
+    async def _enrich_prophet_edition_images(
+        self, edition: dict[str, Any]
+    ) -> dict[str, Any]:
+        if not isinstance(edition, dict):
+            return edition
+        work = json.loads(json.dumps(edition, default=str))
+
+        def _image_url(story: dict[str, Any]) -> str:
+            image = story.get("image")
+            if isinstance(image, dict):
+                return self._safe_text(image.get("url")) or ""
+            return ""
+
+        def _source_url(story: dict[str, Any]) -> str:
+            source = story.get("source")
+            if isinstance(source, dict):
+                return self._safe_text(source.get("url")) or ""
+            return ""
+
+        targets: list[tuple[dict[str, Any], str]] = []
+        lead = work.get("lead")
+        if isinstance(lead, dict) and not _image_url(lead):
+            url = _source_url(lead)
+            if url:
+                targets.append((lead, url))
+        ranked: list[tuple[dict[str, Any], str]] = []
+        for section in work.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            for story in section.get("stories") or []:
+                if not isinstance(story, dict) or _image_url(story):
+                    continue
+                url = _source_url(story)
+                if url:
+                    ranked.append((story, url))
+        ranked.sort(key=lambda item: item[0].get("importance", 0) or 0, reverse=True)
+        for item in ranked:
+            if len(targets) >= PROPHET_IMAGE_ENRICH_LIMIT:
+                break
+            targets.append(item)
+        if not targets:
+            return edition
+        try:
+            async with httpx.AsyncClient(
+                timeout=PROPHET_IMAGE_ENRICH_TIMEOUT_SEC,
+                follow_redirects=True,
+            ) as client:
+                fetched = await asyncio.gather(
+                    *(self._fetch_prophet_image(client, url) for _, url in targets),
+                    return_exceptions=True,
+                )
+        except Exception:
+            logger.exception("gateway.prophet_image_enrichment_failed")
+            return work
+        for (story, _url), image in zip(targets, fetched):
+            if isinstance(image, dict) and image.get("url"):
+                story["image"] = image
+        return work
+
+    async def _fetch_prophet_image(
+        self, client: httpx.AsyncClient, page_url: str
+    ) -> dict[str, str] | None:
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+        )
+        try:
+            response = await client.get(
+                page_url,
+                headers={
+                    "User-Agent": user_agent,
+                    "Accept": "text/html,application/xhtml+xml",
+                },
+            )
+            if response.status_code >= 400:
+                return None
+            content_type = (response.headers.get("content-type") or "").lower()
+            if "html" not in content_type and "xml" not in content_type:
+                return None
+            image = _parse_prophet_og_image(response.text[:400_000])
+            if image is None:
+                return None
+            async with client.stream(
+                "GET", image["url"], headers={"User-Agent": user_agent}
+            ) as probe:
+                if probe.status_code >= 400:
+                    return None
+                probe_type = (probe.headers.get("content-type") or "").lower()
+                if not probe_type.startswith("image/"):
+                    return None
+                length = probe.headers.get("content-length")
+                if length is not None:
+                    try:
+                        if int(length) < 4096:
+                            return None
+                    except ValueError:
+                        pass
+            return image
+        except Exception:
+            return None
 
     async def _broadcast_prophet_edition(self, result: dict[str, Any]) -> None:
         try:

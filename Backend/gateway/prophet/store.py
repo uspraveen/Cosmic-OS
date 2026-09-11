@@ -133,16 +133,21 @@ def _normalize_source(raw: Any) -> dict[str, str]:
     return {key: value for key, value in {"name": name, "url": url}.items() if value}
 
 
+def is_weak_image_url(url: str | None) -> bool:
+    text = _clean_text(url, limit=2000)
+    if not text:
+        return True
+    lowered = text.casefold()
+    if lowered.startswith(("data:", "javascript:")) or lowered.endswith(".svg"):
+        return True
+    return any(hint in lowered for hint in _WEAK_IMAGE_HINTS)
+
+
 def _normalize_image(raw: Any) -> dict[str, str] | None:
     if not isinstance(raw, dict):
         return None
     url = _clean_text(raw.get("url"), limit=2000)
-    if not url:
-        return None
-    lowered = url.casefold()
-    if lowered.startswith(("data:", "javascript:")) or lowered.endswith(".svg"):
-        return None
-    if any(hint in lowered for hint in _WEAK_IMAGE_HINTS):
+    if not url or is_weak_image_url(url):
         return None
     image: dict[str, str] = {"url": url}
     for key, limit in (("caption", 400), ("credit", 200)):

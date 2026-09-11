@@ -76,9 +76,10 @@ Curator (orchestrator tool) may only add/remove/mute `inferred` entries; user-ad
 - The cron prompt is compact but strict: write the user's own edition (rewrite headlines and body copy in
   COSMIC's voice, connect stories to the user's world), keep research bounded, suggest a few trustworthy
   images (lead plus a couple of stories), and always end with `publish_prophet_edition`. Sources are
-  unrestricted (web search, Perplexity, X, Firecrawl, browser, specialist delegation). The store drops
-  weak image sources (logos, icons, avatars, SVGs, duplicates) and caps the edition at four images,
-  keeping the lead and the highest-importance stories.
+  unrestricted (web search, Perplexity, X, Firecrawl, browser, specialist delegation).
+- At publish time the gateway enriches missing visuals by fetching each article's `og:image`/`twitter:image`
+  for the lead and top stories, verifies the image content type, drops weak sources (logos, icons,
+  avatars, SVGs, duplicates), and caps the edition at four images.
 - Fresh context packet per run (`prophet/context.py`): settings summary, enabled sections, active
   interests, muted topics, preferred sources, and the last three days of shown headlines for dedup.
 - The run response is suppressed from chat when `prophet_store.find_edition_by_request_id()` finds a

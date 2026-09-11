@@ -31,6 +31,7 @@ from gateway.runtime import (
     SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW,
     WEEKLY_MY_TOOLS_REVIEW_CRON,
     GatewayRuntime,
+    _parse_prophet_og_image,
 )
 from gateway.session_store import utcnow_iso
 from shared import AgentEmailIntegrationStore
@@ -4640,6 +4641,25 @@ async def test_prophet_crons_seeded_and_rescheduled_from_settings(tmp_path) -> N
         assert crons[PROPHET_EVENING_CRON_ID]["paused"] is True
     finally:
         await runtime.stop()
+
+
+def test_prophet_og_image_parser_reads_meta_tags() -> None:
+    html = (
+        "<html><head>"
+        '<meta property="og:image" content="https://cdn.example.com/photo.jpg">'
+        '<meta property="og:image:alt" content="A test photo">'
+        "</head></html>"
+    )
+    assert _parse_prophet_og_image(html) == {
+        "url": "https://cdn.example.com/photo.jpg",
+        "caption": "A test photo",
+    }
+    reversed_attrs = '<meta content="https://cdn.example.com/two.jpg" name="twitter:image">'
+    assert _parse_prophet_og_image(reversed_attrs) == {
+        "url": "https://cdn.example.com/two.jpg"
+    }
+    assert _parse_prophet_og_image('<meta property="og:image" content="https://x.com/logo.png">') is None
+    assert _parse_prophet_og_image("") is None
 
 
 @pytest.mark.asyncio
