@@ -37,6 +37,8 @@ DEFAULT_SECTIONS: tuple[dict[str, Any], ...] = (
     {"id": "science", "label": "Science & Discovery", "enabled": True},
 )
 
+_SETTINGS_COLUMN_NAMES = {"sections": "sections_json"}
+
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _HEADLINE_KEY_RE = re.compile(r"[^a-z0-9]+")
@@ -648,8 +650,9 @@ class ProphetStore:
         assignments: list[str] = []
         values: list[Any] = []
         for key, value in clean.items():
-            assignments.append(f"{key} = ?")
-            values.append(_json_dumps(value) if key == "sections" else value)
+            column = _SETTINGS_COLUMN_NAMES.get(key, key)
+            assignments.append(f"{column} = ?")
+            values.append(_json_dumps(value) if column == "sections_json" else value)
         assignments.append("updated_at = ?")
         values.append(now)
         with self._lock, closing(self._connect()) as connection:

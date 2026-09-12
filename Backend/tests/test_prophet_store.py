@@ -79,6 +79,35 @@ def test_update_settings_validates(tmp_path: Path) -> None:
         store.update_settings({"paper_style": "cardboard"})
 
 
+def test_update_settings_persists_full_desktop_payload(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    saved = store.update_settings(
+        {
+            "enabled": True,
+            "morning_time": "06:45",
+            "evening_enabled": False,
+            "evening_time": "20:30",
+            "max_stories": 18,
+            "notifications_enabled": False,
+            "paper_style": "midnight",
+            "sections": [
+                {"id": "tech", "label": "Technology", "enabled": True},
+                {"id": "markets", "label": "Markets", "enabled": False},
+            ],
+        }
+    )
+    assert saved["paper_style"] == "midnight"
+    assert saved["notifications_enabled"] is False
+    assert saved["sections"] == [
+        {"id": "tech", "label": "Technology", "enabled": True},
+        {"id": "markets", "label": "Markets", "enabled": False},
+    ]
+    reloaded = store.get_settings()
+    assert reloaded["morning_time"] == "06:45"
+    assert reloaded["evening_enabled"] is False
+    assert reloaded["sections"][1]["enabled"] is False
+
+
 def test_initialize_migrates_paper_style_column(tmp_path: Path) -> None:
     import sqlite3
 
