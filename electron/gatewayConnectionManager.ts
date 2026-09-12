@@ -1243,6 +1243,10 @@ export class GatewayConnectionManager {
     }
 
     if (eventType === 'task.progress') {
+      const existing = this.getForegroundStreamSnapshot(payload)
+      if (!existing || existing.completed === true || existing.failed === true) {
+        return
+      }
       const eventStatus = typeof payload.status === 'string' ? payload.status.trim() : ''
       const statusMessage = typeof payload.message === 'string' ? payload.message.trim() : ''
       const progressState = payload.tabular_progress ?? payload.docs_progress
@@ -1270,7 +1274,7 @@ export class GatewayConnectionManager {
         progressStage,
         progressKind,
       )
-      const existing = this.upsertForegroundStream(payload, {
+      const current = this.upsertForegroundStream(payload, {
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
         route: typeof payload.route === 'string' ? payload.route : undefined,
       })
@@ -1281,11 +1285,11 @@ export class GatewayConnectionManager {
         route: typeof payload.route === 'string' ? payload.route : undefined,
         activity: activityText,
         activity_log: mergeCachedActivityLogs(
-          existing?.activity_log,
+          current?.activity_log,
           snapshotActivityLog && snapshotActivityLog.length > 0 ? snapshotActivityLog : activityEntries,
         ),
         alpha_terminal_log: mergeCachedAlphaTerminalLogs(
-          appendCachedAlphaTerminalLog(existing?.alpha_terminal_log, payload.codex_terminal),
+          appendCachedAlphaTerminalLog(current?.alpha_terminal_log, payload.codex_terminal),
           snapshotAlphaTerminalLog,
         ),
         docs_progress: payload.docs_progress,
@@ -1300,36 +1304,40 @@ export class GatewayConnectionManager {
     }
 
     if (eventType === 'response.chunk') {
-      const existing = this.upsertForegroundStream(payload, {
+      const existing = this.getForegroundStreamSnapshot(payload)
+      if (!existing || existing.completed === true || existing.failed === true) {
+        return
+      }
+      this.upsertForegroundStream(payload, {
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
         route: typeof payload.route === 'string' ? payload.route : undefined,
         completed: false,
         failed: false,
+        content: appendCachedStreamText(existing.content, payload.content),
       })
-      if (existing) {
-        this.upsertForegroundStream(payload, {
-          content: appendCachedStreamText(existing.content, payload.content),
-        })
-      }
       return
     }
 
     if (eventType === 'response.thinking.chunk') {
-      const existing = this.upsertForegroundStream(payload, {
+      const existing = this.getForegroundStreamSnapshot(payload)
+      if (!existing || existing.completed === true || existing.failed === true) {
+        return
+      }
+      this.upsertForegroundStream(payload, {
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
         route: typeof payload.route === 'string' ? payload.route : undefined,
         completed: false,
         failed: false,
+        thinking_text: appendCachedStreamText(existing.thinking_text, payload.content),
       })
-      if (existing) {
-        this.upsertForegroundStream(payload, {
-          thinking_text: appendCachedStreamText(existing.thinking_text, payload.content),
-        })
-      }
       return
     }
 
     if (eventType === 'response.blocks.snapshot') {
+      const existingForSnapshot = this.getForegroundStreamSnapshot(payload)
+      if (!existingForSnapshot || existingForSnapshot.completed === true || existingForSnapshot.failed === true) {
+        return
+      }
       const snapshotSeq =
         Number.isFinite(Number(payload.snapshot_seq)) && Number(payload.snapshot_seq) > 0
           ? Number(payload.snapshot_seq)
@@ -1560,7 +1568,7 @@ export class GatewayConnectionManager {
     }
     this.applyEventToHistory(payload, eventType)
     this.pruneForegroundStreamsFromHistory()
-    if (eventType === 'response.complete') {
+    if (eventType === 'response.complete' || eventType === 'task.completed' || eventType === 'task.cancelled') {
       this.removeForegroundStream(payload)
     }
     if (eventType === 'resume.ok') {

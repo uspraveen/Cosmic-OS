@@ -439,6 +439,21 @@ EPHEMERAL_CHANNEL_EVENT_TYPES = {
     "task.foregrounded",
 }
 
+# Live stream noise for an autonomous run that was bumped off the composer
+# so a user turn could proceed. The final response.complete still lands in
+# chat as unread; only user-backgrounded work belongs in the task inbox.
+AUTONOMOUS_LIVE_HOLD_EVENT_TYPES = {
+    "route_result",
+    "task.created",
+    "task.progress",
+    "response.chunk",
+    "response.thinking.chunk",
+    "response.blocks.snapshot",
+    "response.segment",
+    "tool.call",
+    "tool.result",
+}
+
 
 @dataclass(slots=True)
 class ActiveRequest:
@@ -10306,7 +10321,7 @@ class GatewayRuntime:
                     "visual_response_enhancement_enabled",
                     bool(request_record.get("visual_response_enhancement_enabled")),
                 )
-            if active_request is not None and not active_request.foreground:
+            if self._should_park_in_background_inbox(active_request):
                 assistant_metadata["background"] = True
             return self._append_session_message(
                 session_id,
@@ -10665,6 +10680,41 @@ class GatewayRuntime:
     def _is_autonomous_active_request(self, state: ActiveRequest) -> bool:
         return self._is_autonomous_source(state.source, state.source_id)
 
+    def _is_silent_live_progress_event(self, event: dict[str, Any]) -> bool:
+        """Heartbeat / Gmail-surface / weekly-review turns must not stream live."""
+        return (
+            self._is_heartbeat_event(event)
+            or self._is_gmail_surface_decision_event(event)
+            or self._is_weekly_my_tools_review_event(event)
+        )
+
+    def _is_silent_live_progress_request(self, request_id: str | None) -> bool:
+        normalized = self._safe_text(request_id)
+        if not normalized:
+            return False
+        state = self.active_requests.get(normalized)
+        if state is not None:
+            return self._is_silent_live_progress_event(
+                {
+                    "request_id": normalized,
+                    "source": state.source,
+                    "source_id": state.source_id,
+                }
+            )
+        return self._is_silent_live_progress_event({"request_id": normalized})
+
+    def _should_park_in_background_inbox(
+        self, state: ActiveRequest | None
+    ) -> bool:
+        """True only for user-backgrounded work.
+
+        Autonomous jobs may run off the composer so they do not steal a user
+        turn, but their finished note belongs in chat (unread), not the inbox.
+        """
+        if state is None or state.foreground:
+            return False
+        return not self._is_autonomous_active_request(state)
+
     def _background_autonomous_foreground_requests_for_channel(
         self, channel: str
     ) -> None:
@@ -10679,36 +10729,12 @@ class GatewayRuntime:
                 or not self._is_autonomous_active_request(state)
             ):
                 continue
+            # Free the composer for the user. Do not emit task.backgrounded —
+            # that parks the result in the task inbox until Move to chat.
             state.foreground = False
             state.backgrounded_at = state.backgrounded_at or utcnow_iso()
             if not state.activity:
                 state.activity = "Running in background until the current response finishes."
-            self._track_background_task(
-                self._deliver_or_queue_channel_event(
-                    {
-                        "type": "task.backgrounded",
-                        "request_id": state.request_id,
-                        "session_id": state.session_id,
-                        "task_id": state.task_id,
-                        "channel": state.channel,
-                        "route": state.route,
-                        "user_query_excerpt": state.user_query_excerpt,
-                        "partial_content": state.partial_content[:500]
-                        if state.partial_content
-                        else "",
-                        "partial_thinking": state.partial_thinking,
-                        "activity": state.activity,
-                        "activity_log": state.activity_log,
-                        "alpha_terminal_log": state.alpha_terminal_log,
-                        "slide_progress": state.slide_progress,
-                        "browser_progress": state.browser_progress,
-                        "sheets_progress": state.sheets_progress,
-                        "response_blocks": state.response_blocks_snapshot,
-                        "snapshot_seq": state.snapshot_seq or None,
-                    },
-                    channel=state.channel,
-                )
-            )
 
     def _active_foreground_collision_for_request(
         self, request_record: dict[str, Any]
@@ -10806,29 +10832,6 @@ class GatewayRuntime:
                 ),
             },
         )
-        if backgrounded:
-            await self._deliver_or_queue_channel_event(
-                {
-                    "type": "task.backgrounded",
-                    "request_id": request_id,
-                    "session_id": session_id,
-                    "task_id": state.task_id,
-                    "channel": channel,
-                    "route": route,
-                    "user_query_excerpt": state.user_query_excerpt,
-                    "partial_content": "",
-                    "partial_thinking": "",
-                    "activity": state.activity,
-                    "activity_log": state.activity_log,
-                    "alpha_terminal_log": state.alpha_terminal_log,
-                    "slide_progress": state.slide_progress,
-                    "browser_progress": state.browser_progress,
-                    "sheets_progress": state.sheets_progress,
-                    "response_blocks": state.response_blocks_snapshot,
-                    "snapshot_seq": None,
-                },
-                channel=channel,
-            )
         state.worker = asyncio.create_task(
             self._run_request_fulfillment(state, request_record)
         )
@@ -15456,7 +15459,8 @@ class GatewayRuntime:
                 "completed": False,
             }
             for state in self.active_requests.values()
-            if not state.foreground and state.channel == channel
+            if self._should_park_in_background_inbox(state)
+            and state.channel == channel
         ]
         foreground_streams = [
             {
@@ -15485,6 +15489,13 @@ class GatewayRuntime:
             and state.channel == channel
             and state.session_id == session_id
             and (not state.completed or state.failed)
+            and not self._is_silent_live_progress_event(
+                {
+                    "request_id": state.request_id,
+                    "source": state.source,
+                    "source_id": state.source_id,
+                }
+            )
         ]
         assistant_request_ids_in_history = {
             self._safe_text(item.get("request_id"))
@@ -16369,10 +16380,14 @@ class GatewayRuntime:
                 self._refresh_active_working_set(session_id)
             self._persist_specialist_completion_artifacts(event=event, forwarded=forwarded)
             self._track_forwarded_foreground_event(forwarded)
-            await self._deliver_or_queue_channel_event(
-                forwarded,
-                channel=self._safe_text(forwarded.get("channel")),
-            )
+            if self._is_silent_live_progress_request(request_id):
+                if self._is_heartbeat_event({"request_id": request_id}):
+                    self._collect_heartbeat_activity_event(forwarded)
+            else:
+                await self._deliver_or_queue_channel_event(
+                    forwarded,
+                    channel=self._safe_text(forwarded.get("channel")),
+                )
             await self._redis.xack(
                 self.config.agent_events_stream,
                 self.config.agent_events_gateway_group,
@@ -17240,18 +17255,24 @@ class GatewayRuntime:
         if not resolved_channel:
             raise ValueError("Outbound event is missing channel")
 
-        # Re-namespace events for backgrounded requests so the desktop
-        # routes them to the task panel instead of the main response stream.
+        # User-backgrounded work is re-namespaced into the task inbox.
+        # Autonomous work that was only bumped off the composer stays silent
+        # until the final note, then lands in chat as unread.
         request_id = self._safe_text(event.get("request_id"))
         bg_state = self.active_requests.get(request_id) if request_id else None
+        event_type_raw = self._safe_text(event.get("type"))
         if (
             bg_state is not None
             and not bg_state.foreground
-            and not self._safe_text(event.get("type", "")).startswith(
-                "task.background."
-            )
-            and self._safe_text(event.get("type"))
-            not in {"task.backgrounded", "task.foregrounded"}
+            and self._is_autonomous_active_request(bg_state)
+            and event_type_raw in AUTONOMOUS_LIVE_HOLD_EVENT_TYPES
+        ):
+            return "dropped"
+        if (
+            bg_state is not None
+            and self._should_park_in_background_inbox(bg_state)
+            and not event_type_raw.startswith("task.background.")
+            and event_type_raw not in {"task.backgrounded", "task.foregrounded"}
         ):
             event = {**event, "type": f"task.background.{event.get('type', 'unknown')}"}
 
@@ -20792,6 +20813,10 @@ class GatewayRuntime:
                     completed=True,
                     execution_event=event,
                 )
+                # Release any leaked desktop stream (specialist progress used
+                # to paint the composer even when this beat is suppressed).
+                if event_type in {"task.completed", "task.cancelled"}:
+                    await send(event)
                 return
         if self._is_weekly_my_tools_review_event(event):
             if event_type in {
@@ -25031,7 +25056,7 @@ class GatewayRuntime:
                     interrupted_metadata["response_blocks"] = list(
                         state.response_blocks_snapshot
                     )
-                if not state.foreground:
+                if self._should_park_in_background_inbox(state):
                     interrupted_metadata["background"] = True
                 self._append_session_message(
                     state.session_id,

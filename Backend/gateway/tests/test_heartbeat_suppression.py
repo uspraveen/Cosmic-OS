@@ -418,8 +418,86 @@ def test_user_request_can_background_autonomous_foreground_on_same_channel() -> 
     assert not runtime.active_requests["req_heartbeat"].foreground
     assert runtime.active_requests["req_heartbeat"].backgrounded_at
     assert runtime.active_requests["req_user"].foreground
-    assert events[0]["type"] == "task.backgrounded"
-    assert events[0]["request_id"] == "req_heartbeat"
+    assert events == []
+
+
+def test_user_backgrounded_work_is_parked_in_inbox_autonomous_is_not() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    user_bg = ActiveRequest(
+        request_id="req_user_bg",
+        session_id="sess_1",
+        channel="desktop",
+        route="opus",
+        source="user",
+        foreground=False,
+    )
+    heartbeat_bg = ActiveRequest(
+        request_id="req_heartbeat_bg",
+        session_id="sess_1",
+        channel="desktop",
+        route="opus",
+        source="heartbeat",
+        foreground=False,
+    )
+    gmail_bg = ActiveRequest(
+        request_id="req_gmail_bg",
+        session_id="sess_1",
+        channel="desktop",
+        route="opus",
+        source=GMAIL_SURFACE_DECISION_SOURCE,
+        source_id="gmail_surface:abc",
+        foreground=False,
+    )
+    user_fg = ActiveRequest(
+        request_id="req_user_fg",
+        session_id="sess_1",
+        channel="desktop",
+        route="opus",
+        source="user",
+        foreground=True,
+    )
+
+    assert runtime._should_park_in_background_inbox(user_bg) is True
+    assert runtime._should_park_in_background_inbox(heartbeat_bg) is False
+    assert runtime._should_park_in_background_inbox(gmail_bg) is False
+    assert runtime._should_park_in_background_inbox(user_fg) is False
+    assert runtime._should_park_in_background_inbox(None) is False
+
+
+def test_silent_live_progress_covers_heartbeat_gmail_and_weekly_review() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.active_requests = {}
+    runtime.request_records = {}
+
+    assert runtime._is_silent_live_progress_event(
+        {"source": "heartbeat", "request_id": "req_heartbeat_abc"}
+    )
+    assert runtime._is_silent_live_progress_event(
+        {
+            "source": GMAIL_SURFACE_DECISION_SOURCE,
+            "request_id": "req_gmail_abc",
+        }
+    )
+    assert runtime._is_silent_live_progress_event(
+        {
+            "source": "cron",
+            "source_id": SYSTEM_CRON_WEEKLY_MY_TOOLS_REVIEW,
+            "request_id": "req_cron_weekly",
+        }
+    )
+    assert not runtime._is_silent_live_progress_event(
+        {"source": "user", "request_id": "req_user_abc"}
+    )
+    runtime.active_requests["req_heartbeat_live"] = ActiveRequest(
+        request_id="req_heartbeat_live",
+        session_id="sess_1",
+        channel="desktop",
+        route="opus",
+        source="heartbeat",
+        foreground=True,
+    )
+    assert runtime._is_silent_live_progress_request("req_heartbeat_live")
+    assert not runtime._is_silent_live_progress_request("req_user_abc")
 
 
 def test_heartbeat_recent_delivery_facts_include_completed_mobile_cron_across_rollover(tmp_path) -> None:
