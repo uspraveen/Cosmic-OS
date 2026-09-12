@@ -2383,7 +2383,9 @@ export default function SpacesControlCenter({
     url: string
     name: string
     headline: string
+    dek?: string
     domain: string
+    accent: string
     imageUrl?: string
     x: number
     y: number
@@ -5704,8 +5706,8 @@ export default function SpacesControlCenter({
     const rect = event.currentTarget.getBoundingClientRect()
     const main = event.currentTarget.closest('.spaces-main') as HTMLElement | null
     const mainRect = main ? main.getBoundingClientRect() : { left: 0, top: 0 }
-    const cardWidth = 304
-    const cardHeight = 188
+    const cardWidth = 328
+    const cardHeight = 236
     const left = Math.max(12, Math.min(
       rect.left - mainRect.left + (main?.scrollLeft || 0) - cardWidth + Math.max(rect.width, 120),
       (main?.clientWidth || window.innerWidth) - cardWidth - 12,
@@ -5716,7 +5718,9 @@ export default function SpacesControlCenter({
       url,
       name: story.source?.name || '',
       headline: story.headline,
+      dek: story.dek,
       domain: prophetDomain(url),
+      accent: story.accent,
       imageUrl: story.image?.url,
       x: left,
       y: below > (main?.clientHeight || window.innerHeight) - 40 ? Math.max(12, above) : below,
@@ -6305,11 +6309,12 @@ export default function SpacesControlCenter({
 
         {prophetLinkPreview ? (
           <div
-            className="prophet-link-preview"
+            className={`prophet-link-preview prophet-link-preview--${prophetLinkPreview.accent}`}
             style={{ left: prophetLinkPreview.x, top: prophetLinkPreview.y }}
             onMouseEnter={keepProphetLinkPreview}
             onMouseLeave={scheduleProphetLinkPreviewClose}
           >
+            <span className="prophet-link-preview-accent" aria-hidden />
             {prophetLinkPreview.imageUrl ? (
               <div className="prophet-link-preview-media">
                 <img
@@ -6322,21 +6327,33 @@ export default function SpacesControlCenter({
                     if (media instanceof HTMLElement) media.style.display = 'none'
                   }}
                 />
+                <span className="prophet-link-preview-domain">{prophetLinkPreview.domain || 'source'}</span>
               </div>
-            ) : null}
+            ) : (
+              <div className="prophet-link-preview-head">
+                <span className="prophet-link-preview-domain">{prophetLinkPreview.domain || 'source'}</span>
+              </div>
+            )}
             <div className="prophet-link-preview-body">
-              <span className="prophet-link-preview-domain">{prophetLinkPreview.domain || 'source'}</span>
               <strong className="prophet-link-preview-headline">{prophetLinkPreview.headline}</strong>
-              {prophetLinkPreview.name ? (
-                <span className="prophet-link-preview-source">{prophetLinkPreview.name}</span>
+              {prophetLinkPreview.dek ? (
+                <p className="prophet-link-preview-dek">{prophetLinkPreview.dek}</p>
               ) : null}
-              <button
-                type="button"
-                className="prophet-link-preview-open"
-                onClick={() => openExternalUrl(prophetLinkPreview.url)}
-              >
-                Open in browser
-              </button>
+              <div className="prophet-link-preview-foot">
+                {prophetLinkPreview.name ? (
+                  <span className="prophet-link-preview-source">{prophetLinkPreview.name}</span>
+                ) : (
+                  <span className="prophet-link-preview-source">via {prophetLinkPreview.domain || 'source'}</span>
+                )}
+                <button
+                  type="button"
+                  className="prophet-link-preview-open"
+                  onClick={() => openExternalUrl(prophetLinkPreview.url)}
+                >
+                  Open article
+                  <span aria-hidden>↗</span>
+                </button>
+              </div>
             </div>
           </div>
         ) : null}
