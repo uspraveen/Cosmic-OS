@@ -3415,6 +3415,7 @@
   --pp-ink: #1b1510;
   --pp-ink-strong: #0e0a07;
   --pp-ink-soft: rgba(20, 15, 11, 0.88);
+  --pp-ink-body: rgba(14, 10, 7, 0.95);
   --pp-ink-muted: rgba(20, 15, 11, 0.66);
   --pp-ink-faint: rgba(20, 15, 11, 0.47);
   --pp-rule: rgba(27, 21, 16, 0.34);
@@ -3452,6 +3453,7 @@
   --pp-ink: #1b1510;
   --pp-ink-strong: #0e0a07;
   --pp-ink-soft: rgba(20, 15, 11, 0.88);
+  --pp-ink-body: rgba(14, 10, 7, 0.95);
   --pp-ink-muted: rgba(20, 15, 11, 0.66);
   --pp-ink-faint: rgba(20, 15, 11, 0.47);
   --pp-rule: rgba(27, 21, 16, 0.34);
@@ -3468,6 +3470,7 @@
   --pp-ink: #171a1e;
   --pp-ink-strong: #0b0d10;
   --pp-ink-soft: rgba(15, 18, 22, 0.88);
+  --pp-ink-body: rgba(9, 12, 16, 0.95);
   --pp-ink-muted: rgba(15, 18, 22, 0.68);
   --pp-ink-faint: rgba(15, 18, 22, 0.5);
   --pp-rule: rgba(23, 26, 30, 0.32);
@@ -3484,6 +3487,7 @@
   --pp-ink: #241d14;
   --pp-ink-strong: #120d08;
   --pp-ink-soft: rgba(28, 22, 14, 0.88);
+  --pp-ink-body: rgba(20, 15, 9, 0.95);
   --pp-ink-muted: rgba(28, 22, 14, 0.66);
   --pp-ink-faint: rgba(28, 22, 14, 0.47);
   --pp-rule: rgba(36, 29, 20, 0.3);
@@ -3500,6 +3504,7 @@
   --pp-ink: #ece3cf;
   --pp-ink-strong: #fdf6e6;
   --pp-ink-soft: rgba(244, 237, 222, 0.92);
+  --pp-ink-body: rgba(253, 249, 239, 0.97);
   --pp-ink-muted: rgba(244, 237, 222, 0.72);
   --pp-ink-faint: rgba(244, 237, 222, 0.52);
   --pp-rule: rgba(236, 227, 207, 0.3);
@@ -3660,9 +3665,9 @@
   gap: 6px;
   flex-wrap: wrap;
   font-family: var(--pp-display-font);
-  font-size: 11.5px;
+  font-size: 12.5px;
   font-style: italic;
-  color: var(--pp-ink-muted);
+  color: var(--pp-ink-soft);
   margin-bottom: 12px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--pp-rule-soft);
@@ -3687,9 +3692,9 @@
 
 .prophet-lead-body {
   font-size: 14.5px;
-  font-weight: 500;
+  font-weight: 520;
   line-height: 1.74;
-  color: var(--pp-ink-soft);
+  color: var(--pp-ink-body);
   text-align: justify;
   hyphens: auto;
   -webkit-hyphens: auto;
@@ -3743,17 +3748,17 @@
 
 .prophet-lead-figure figcaption,
 .prophet-story-figure figcaption {
-  font-size: 10.5px;
+  font-size: 11.5px;
   font-style: italic;
   line-height: 1.45;
-  color: var(--pp-ink-faint);
+  color: var(--pp-ink-muted);
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
 .prophet-credit {
-  font-size: 9.5px;
+  font-size: 10px;
   font-style: normal;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3809,9 +3814,9 @@
 
 .prophet-section-title {
   font-family: var(--pp-display-font);
-  font-size: 11px;
+  font-size: 12.5px;
   font-weight: 800;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.15em;
   text-transform: uppercase;
   color: var(--pp-ink-soft);
   white-space: nowrap;
@@ -3891,7 +3896,7 @@
 .prophet-section-stories--m1 .prophet-story-headline {
   grid-column: 1;
   grid-row: 1;
-  font-size: 21px;
+  font-size: 22px;
   line-height: 1.18;
   letter-spacing: -0.02em;
 }
@@ -3907,7 +3912,7 @@
 .prophet-section-stories--m1 .prophet-story-body {
   grid-column: 2;
   grid-row: 1 / 3;
-  font-size: 13.5px;
+  font-size: 14.5px;
   line-height: 1.72;
   text-align: justify;
   hyphens: auto;
@@ -3949,12 +3954,12 @@
 }
 
 .prophet-section-stories--m2 .prophet-story-headline {
-  font-size: 18px;
+  font-size: 19.5px;
   line-height: 1.2;
 }
 
 .prophet-section-stories--m2 .prophet-story-body {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.7;
   text-align: justify;
   hyphens: auto;
@@ -3982,11 +3987,11 @@
 }
 
 .prophet-section-stories--m3 .prophet-story--feature .prophet-story-dek {
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .prophet-section-stories--m3 .prophet-story--feature .prophet-story-body {
-  font-size: 13.5px;
+  font-size: 14.5px;
   line-height: 1.7;
   text-align: justify;
   hyphens: auto;
@@ -4014,12 +4019,12 @@
 }
 
 .prophet-section-stories--m3 .prophet-story:not(.prophet-story--feature) .prophet-story-headline {
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .prophet-section-stories--m3 .prophet-story:not(.prophet-story--feature) .prophet-story-body {
-  font-size: 12.5px;
-  line-height: 1.62;
+  font-size: 13.5px;
+  line-height: 1.65;
 }
 
 /* m4 — briefs grid */
@@ -4034,13 +4039,13 @@
 }
 
 .prophet-section-stories--m4 .prophet-story .prophet-story-headline {
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.26;
 }
 
 .prophet-section-stories--m4 .prophet-story .prophet-story-body {
-  font-size: 12.5px;
-  line-height: 1.62;
+  font-size: 13.5px;
+  line-height: 1.64;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
@@ -4071,12 +4076,12 @@
 }
 
 .prophet-section-stories--m5 .prophet-story-headline {
-  font-size: 16px;
+  font-size: 17px;
   line-height: 1.24;
 }
 
 .prophet-section-stories--m5 .prophet-story--feature .prophet-story-headline {
-  font-size: 21px;
+  font-size: 22px;
 }
 
 /* ── Story base ── */
@@ -4096,21 +4101,21 @@
 }
 
 .prophet-story--brief .prophet-story-headline {
-  font-size: 14px;
-  line-height: 1.28;
+  font-size: 15px;
+  line-height: 1.3;
 }
 
 .prophet-story--quote .prophet-story-body {
   font-style: italic;
-  font-size: 15px;
-  line-height: 1.62;
+  font-size: 15.5px;
+  line-height: 1.64;
   padding-left: 14px;
   border-left: 2px solid var(--pp-accent-soft);
 }
 
 .prophet-story-headline {
   font-family: var(--pp-display-font);
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 700;
   line-height: 1.28;
   color: var(--pp-ink-strong);
@@ -4119,19 +4124,19 @@
 }
 
 .prophet-story-dek {
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-style: italic;
-  font-weight: 480;
-  line-height: 1.5;
+  font-weight: 490;
+  line-height: 1.52;
   color: var(--pp-ink-muted);
   margin: 0;
 }
 
 .prophet-story-body {
-  font-size: 12.5px;
-  font-weight: 500;
-  line-height: 1.66;
-  color: var(--pp-ink-soft);
+  font-size: 13.5px;
+  font-weight: 520;
+  line-height: 1.7;
+  color: var(--pp-ink-body);
   margin: 0;
 }
 
@@ -4150,7 +4155,7 @@
   flex-wrap: wrap;
   font-family: var(--pp-display-font);
   font-style: italic;
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--pp-ink-muted);
   margin-top: auto;
   padding-top: 4px;
@@ -4180,7 +4185,7 @@
 
 .prophet-why {
   margin-left: auto;
-  font-size: 9.5px;
+  font-size: 10.5px;
   font-style: normal;
   letter-spacing: 0.08em;
   text-transform: uppercase;
