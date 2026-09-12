@@ -48,6 +48,7 @@ interface ForegroundStreamSnapshot {
   tabular_progress?: unknown
   slide_progress?: unknown
   browser_progress?: unknown
+  sheets_progress?: unknown
   produced_artifacts?: any[]
   supporting_artifacts?: any[]
   response_blocks?: any[]
@@ -1164,6 +1165,7 @@ export class GatewayConnectionManager {
         tabular_progress: payload.tabular_progress,
         slide_progress: payload.slide_progress,
         browser_progress: payload.browser_progress,
+        sheets_progress: payload.sheets_progress,
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
         supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : undefined,
         response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
@@ -1216,6 +1218,7 @@ export class GatewayConnectionManager {
         tabular_progress: payload.tabular_progress,
         slide_progress: payload.slide_progress,
         browser_progress: payload.browser_progress,
+        sheets_progress: payload.sheets_progress,
         produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
         supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : undefined,
         response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
@@ -1289,6 +1292,7 @@ export class GatewayConnectionManager {
         tabular_progress: payload.tabular_progress,
         slide_progress: payload.slide_progress,
         browser_progress: payload.browser_progress,
+        sheets_progress: payload.sheets_progress,
         completed: false,
         failed: false,
       })

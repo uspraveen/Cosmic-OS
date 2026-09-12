@@ -194,3 +194,127 @@ def test_format_range_builds_google_repeat_cell_request() -> None:
     assert repeat_cell["cell"]["userEnteredFormat"]["backgroundColor"] == {"red": 1.0, "green": 102 / 255, "blue": 0.0}
     assert repeat_cell["cell"]["userEnteredFormat"]["textFormat"]["bold"] is True
     assert repeat_cell["fields"] == "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.foregroundColor,userEnteredFormat.textFormat.bold"
+
+
+class _CapturingRedis:
+    """Records what emit_event publishes so tests can read live-card payloads."""
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    async def incr(self, key: str) -> int:
+        return len(self.events) + 1
+
+    async def xadd(self, stream: str, fields: dict, **kwargs):
+        self.events.append(json.loads(fields["event"]))
+        return "0-1"
+
+    async def rpush(self, key: str, value: str) -> None:
+        return None
+
+    async def expire(self, key: str, ttl: int) -> None:
+        return None
+
+
+def _build_agent(tmp_path: Path) -> GoogleSheetsAgent:
+    from agents.google_sheets_agent.config import GoogleSheetsAgentConfig
+
+    return GoogleSheetsAgent(
+        redis_client=_CapturingRedis(),
+        config=GoogleSheetsAgentConfig(enable_internal_llm=False),
+        registry_db_path=tmp_path / "registry.db",
+        store_root=tmp_path / "store",
+        artifacts_root=tmp_path / "artifacts",
+    )
+
+
+def _card_task(intent: str = "sheets.create"):
+    from shared.contracts import TaskEnvelope
+
+    return TaskEnvelope(
+        task_id="tsk_card_001",
+        task_list_id="tl_test",
+        parent_task_id=None,
+        session_id="sess_test",
+        sender="cosmic/orchestrator:1.0.0",
+        recipient="cosmic/google-sheets-agent:1.0.0",
+        intent=intent,
+        input={"title": "Target Jobs"},
+        idempotency_key="idem_card_001",
+        deadline_ts=None,
+        priority="normal",
+        signature="test_sig",
+    )
+
+
+def _sheet_payloads(agent: GoogleSheetsAgent) -> list[dict]:
+    payloads = []
+    for event in agent.redis.events:
+        progress = event.get("payload") or {}
+        if isinstance(progress.get("sheets_progress"), dict):
+            payloads.append(progress["sheets_progress"])
+    return payloads
+
+
+def test_emit_sheet_progress_clamps_and_positions_values(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    task = _card_task()
+    values = [[f"cell-{row}-{col}" for col in range(50)] for row in range(300)]
+
+    asyncio.run(
+        agent._emit_sheet_progress(
+            task,
+            op="append_rows",
+            phase="writing",
+            message="Appended 300 row(s).",
+            spreadsheet_id="sheet_123",
+            title="Target Jobs",
+            url="https://docs.google.com/spreadsheets/d/sheet_123/edit",
+            tab="Pipeline",
+            range_name="'Pipeline'!A3:AX302",
+            values=values,
+        )
+    )
+
+    payloads = _sheet_payloads(agent)
+    assert len(payloads) == 1
+    payload = payloads[0]
+    assert payload["kind"] == "sheet_run"
+    assert payload["op"] == "append_rows"
+    assert payload["phase"] == "writing"
+    assert payload["spreadsheet_id"] == "sheet_123"
+    assert payload["range"] == "'Pipeline'!A3:AX302"
+    assert len(payload["values"]) == 250
+    assert all(len(row) == 40 for row in payload["values"])
+    assert payload["values"][0][0] == "cell-0-0"
+
+
+def test_execute_reports_failed_phase_only_after_card_started(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    task = _card_task()
+
+    async def failing_handler(t):
+        await agent._emit_sheet_progress(t, op="create", phase="creating", message="Creating 'Target Jobs'.")
+        return agent._err("GOOGLE_API_ERROR", "quota blown", False, "escalate")
+
+    agent.handle_sheets_create = failing_handler  # type: ignore[method-assign]
+    result = asyncio.run(agent.execute(task))
+
+    assert result.status == "failed"
+    phases = [payload["phase"] for payload in _sheet_payloads(agent)]
+    assert phases == ["creating", "failed"]
+    assert "quota blown" in _sheet_payloads(agent)[-1]["error"]
+
+
+def test_execute_without_card_events_stays_silent_on_failure(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    task = _card_task("sheets.read")
+
+    async def failing_handler(t):
+        return agent._err("INVALID_INPUT", "no sheet id", False, "escalate")
+
+    agent.handle_sheets_read = failing_handler  # type: ignore[method-assign]
+    result = asyncio.run(agent.execute(task))
+
+    assert result.status == "failed"
+    assert _sheet_payloads(agent) == []

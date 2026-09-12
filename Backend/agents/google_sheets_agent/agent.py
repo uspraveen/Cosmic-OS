@@ -64,6 +64,28 @@ class ApprovalRequiredError(RuntimeError):
     pass
 
 
+# The live sheet card is fed by mirrors of the writes this agent already makes,
+# so the mirror adds no Google reads of its own. Caps here bound one event;
+# the gateway re-clamps before forwarding.
+SHEET_PROGRESS_MAX_ROWS = 250
+SHEET_PROGRESS_MAX_COLS = 40
+SHEET_PROGRESS_CELL_CHARS = 160
+
+
+def _clamp_sheet_values(values: list[list[Any]]) -> list[list[str]]:
+    clamped: list[list[str]] = []
+    for row in values[:SHEET_PROGRESS_MAX_ROWS]:
+        if not isinstance(row, list):
+            continue
+        clamped.append(
+            [
+                ("" if cell is None else str(cell))[:SHEET_PROGRESS_CELL_CHARS]
+                for cell in row[:SHEET_PROGRESS_MAX_COLS]
+            ]
+        )
+    return clamped
+
+
 class GoogleSheetsAgent(AgentRuntime):
     RESOLVE_RESOURCE = "sheets.resolve_resource"
     CREATE = "sheets.create"
@@ -105,6 +127,12 @@ class GoogleSheetsAgent(AgentRuntime):
             gateway_internal_token=self.config.gateway_internal_token,
             http_client=http_client,
         )
+        # Live sheet card state: per-task sequence, whether any card-facing
+        # event went out (so failures can close the card), and the last phase
+        # (so a failure is never reported twice).
+        self._sheet_progress_seq = 0
+        self._sheet_progress_active = False
+        self._sheet_progress_last_phase: str | None = None
 
     async def on_startup(self) -> None:
         self.store_root.mkdir(parents=True, exist_ok=True)
@@ -119,6 +147,26 @@ class GoogleSheetsAgent(AgentRuntime):
             conn.commit()
 
     async def execute(self, task: TaskEnvelope) -> AgentResult:
+        self._sheet_progress_seq = 0
+        self._sheet_progress_active = False
+        self._sheet_progress_last_phase = None
+        result = await self._execute_inner(task)
+        if (
+            self._sheet_progress_active
+            and result.status != "completed"
+            and self._sheet_progress_last_phase != "failed"
+        ):
+            error = result.error.message if result.error else "Sheets operation failed."
+            await self._emit_sheet_progress(
+                task,
+                op="verify",
+                phase="failed",
+                message=f"Sheets operation stopped: {error}",
+                error=error,
+            )
+        return result
+
+    async def _execute_inner(self, task: TaskEnvelope) -> AgentResult:
         started = time.perf_counter()
         metered = begin_metered_call(prefix="google_sheets_api")
         handler = getattr(self, f"handle_{task.intent.replace('.', '_')}", None)
@@ -174,6 +222,72 @@ class GoogleSheetsAgent(AgentRuntime):
             await self._post_specialist_usage(task, metered, result, started)
             return result
 
+    async def _emit_sheet_progress(
+        self,
+        task: TaskEnvelope,
+        *,
+        op: str,
+        phase: str,
+        message: str,
+        spreadsheet_id: str = "",
+        title: str = "",
+        url: str = "",
+        tab: str = "",
+        range_name: str = "",
+        values: list[list[Any]] | None = None,
+        header: dict[str, Any] | None = None,
+        error: str = "",
+    ) -> None:
+        """Mirror one write onto the live sheet card channel.
+
+        Same shape of side channel as the browser agent's browser_progress:
+        a task.progress event whose payload lands on the desktop verbatim and
+        is rendered as a read-only grid. Values are the delta just written,
+        positioned absolutely by `range`, so replayed or merged events stay
+        idempotent client-side.
+        """
+        self._sheet_progress_seq += 1
+        self._sheet_progress_last_phase = phase
+        if phase != "failed":
+            self._sheet_progress_active = True
+        payload: dict[str, Any] = {
+            "kind": "sheet_run",
+            "seq": self._sheet_progress_seq,
+            "op": str(op or ""),
+            "phase": str(phase or ""),
+            "spreadsheet_id": str(spreadsheet_id or ""),
+            "title": str(title or ""),
+            "url": str(url or ""),
+            "tab": str(tab or ""),
+            "range": str(range_name or ""),
+        }
+        if values:
+            payload["values"] = _clamp_sheet_values(values)
+        if header:
+            payload["header"] = header
+        if error:
+            payload["error"] = str(error)[:300]
+        account = self._account_info()
+        payload["account_email"] = str(
+            account.get("account_email") or account.get("account_label") or ""
+        )
+        try:
+            await self.emit_event(
+                task.task_id,
+                "task.progress",
+                {
+                    "type": "sheets_progress",
+                    "message": str(message or "")[:400],
+                    "sheets_progress": payload,
+                },
+            )
+        except Exception:
+            logger.debug(
+                "google_sheets_agent.progress_emit_failed task_id=%s",
+                task.task_id,
+                exc_info=True,
+            )
+
     async def handle_sheets_resolve_resource(self, task: TaskEnvelope) -> AgentResult:
         task = await self._apply_internal_plan_if_needed(task, purpose="resolve")
         await self._create_plan(["Resolve Google account", "Search Drive", "Return spreadsheet candidates"])
@@ -204,9 +318,27 @@ class GoogleSheetsAgent(AgentRuntime):
         title = str(task.input.get("title") or "Untitled spreadsheet").strip() or "Untitled spreadsheet"
         sheet_specs = self._sheet_specs_from_input(task.input)
         sheet_titles = [spec["title"] for spec in sheet_specs] or [str(task.input.get("sheet_name") or "Sheet1").strip() or "Sheet1"]
+        await self._emit_sheet_progress(
+            task,
+            op="create",
+            phase="creating",
+            title=title,
+            message=f"Creating spreadsheet '{title}'.",
+        )
         await self._step(1, "completed", "Google account resolved.")
         spreadsheet = await client.create_spreadsheet(title=title, sheet_titles=sheet_titles)
         spreadsheet_id = spreadsheet["spreadsheet_id"]
+        sheet_url = spreadsheet_url(spreadsheet_id)
+        await self._emit_sheet_progress(
+            task,
+            op="create",
+            phase="writing",
+            message=f"Created '{spreadsheet['title']}'.",
+            spreadsheet_id=spreadsheet_id,
+            title=str(spreadsheet.get("title") or title),
+            url=sheet_url,
+            tab=str(sheet_titles[0] or ""),
+        )
         await self._step(2, "completed", f"Created '{spreadsheet['title']}'.")
 
         verified_ranges: list[dict[str, Any]] = []
@@ -218,15 +350,48 @@ class GoogleSheetsAgent(AgentRuntime):
                 continue
             self._assert_write_budget(rows)
             range_name = navigator.ensure_range(str(spec.get("range") or "A1"), default_sheet=spec["title"])
-            await client.update_values(spreadsheet_id, range_name, rows)
+            response = await client.update_values(spreadsheet_id, range_name, rows)
+            updated_range = str((response or {}).get("updatedRange") or range_name)
+            await self._emit_sheet_progress(
+                task,
+                op="update_cells",
+                phase="writing",
+                message=f"Wrote {len(rows)} row(s) to {updated_range}.",
+                spreadsheet_id=spreadsheet_id,
+                title=str(spreadsheet.get("title") or title),
+                url=sheet_url,
+                tab=str(spec["title"]),
+                range_name=updated_range,
+                values=rows,
+            )
             if self._bool(spec.get("has_header"), True):
                 await self._format_header_row(client, spreadsheet_id, navigator, sheet_name=spec["title"])
+                await self._emit_sheet_progress(
+                    task,
+                    op="format_header_row",
+                    phase="writing",
+                    message=f"Formatted the header row on '{spec['title']}'.",
+                    spreadsheet_id=spreadsheet_id,
+                    title=str(spreadsheet.get("title") or title),
+                    url=sheet_url,
+                    tab=str(spec["title"]),
+                    header={"formatted": True, "color": "#E8F0FE", "frozen_rows": 1},
+                )
             after = await client.get_values(spreadsheet_id, range_name)
             verified_ranges.append({"range": range_name, "after": after})
         await self._step(3, "completed", f"Wrote {len(verified_ranges)} populated range(s).")
 
         final_structure = await client.get_spreadsheet(spreadsheet_id)
         await self._step(4, "completed", "Verified workbook structure.")
+        await self._emit_sheet_progress(
+            task,
+            op="verify",
+            phase="done",
+            message="Spreadsheet ready.",
+            spreadsheet_id=spreadsheet_id,
+            title=str(final_structure.get("title") or spreadsheet.get("title") or title),
+            url=sheet_url,
+        )
         output = {
             "status": "completed",
             "operation": "create",
@@ -301,6 +466,11 @@ class GoogleSheetsAgent(AgentRuntime):
         await self._create_plan(["Resolve Google account", "Read workbook state", "Apply operation", "Verify result"])
         client = self._client()
         spreadsheet_id = self._require_spreadsheet_id(task)
+        # Live sheet card mirrors (see _emit_sheet_progress): the branches below
+        # fill these in for the operations that change what the card shows.
+        sheet_card_tab = ""
+        sheet_card_values: list[list[Any]] | None = None
+        sheet_card_header: dict[str, Any] | None = None
         await self._step(1, "completed", "Google account resolved.")
         structure = await client.get_spreadsheet(spreadsheet_id)
         navigator = SheetNavigator(structure)
@@ -314,6 +484,7 @@ class GoogleSheetsAgent(AgentRuntime):
             response = await client.update_values(spreadsheet_id, range_name, rows)
             after = await client.get_values(spreadsheet_id, range_name)
             result_payload = {"range": range_name, "response": response, "before": before, "after": after}
+            sheet_card_values = rows
         elif operation == "append_rows":
             range_name = navigator.ensure_range(str(task.input.get("range") or "A1"), default_sheet=task.input.get("sheet_name"))
             rows = normalize_rows(task.input.get("values")) or rows_from_input(task.input)
@@ -322,6 +493,7 @@ class GoogleSheetsAgent(AgentRuntime):
             response = await client.append_values(spreadsheet_id, range_name, rows)
             after = await client.get_values(spreadsheet_id, range_name)
             result_payload = {"range": range_name, "response": response, "before": before, "after": after}
+            sheet_card_values = rows
         elif operation == "clear_range":
             range_name = navigator.ensure_range(str(task.input.get("range") or ""), default_sheet=task.input.get("sheet_name"))
             before = await client.get_values(spreadsheet_id, range_name)
@@ -348,17 +520,20 @@ class GoogleSheetsAgent(AgentRuntime):
             response = await client.batch_update(spreadsheet_id, requests)
             after_structure = await client.get_spreadsheet(spreadsheet_id)
             result_payload = {"range": "", "response": response, "before": structure, "after": after_structure}
+            sheet_card_tab = title
         elif operation == "format_header_row":
             sheet_name = str(task.input.get("sheet_name") or navigator.active_sheet).strip()
+            header_background = str(task.input.get("background_color") or "#E8F0FE")
             response = await self._format_header_row(
                 client,
                 spreadsheet_id,
                 navigator,
                 sheet_name=sheet_name,
-                background_color=str(task.input.get("background_color") or "#E8F0FE"),
+                background_color=header_background,
             )
             after_structure = await client.get_spreadsheet(spreadsheet_id)
             result_payload = {"range": f"{sheet_name}!1:1", "response": response, "before": structure, "after": after_structure}
+            sheet_card_header = {"formatted": True, "color": header_background, "frozen_rows": 1}
         elif operation == "format_range":
             range_name = navigator.ensure_range(str(task.input.get("range") or "").strip())
             response = await self._format_range(
@@ -413,16 +588,20 @@ class GoogleSheetsAgent(AgentRuntime):
             result_payload = {"range": range_name, "response": response, "before": structure, "after": after_structure}
         elif operation == "freeze_panes":
             sheet_name = str(task.input.get("sheet_name") or navigator.active_sheet).strip()
+            frozen_rows = self._bounded_int(task.input.get("frozen_row_count") or task.input.get("rows"), 1, 0, 1000)
+            frozen_cols = self._bounded_int(task.input.get("frozen_column_count") or task.input.get("columns"), 0, 0, 1000)
             response = await self._freeze_panes(
                 client,
                 spreadsheet_id,
                 navigator,
                 sheet_name=sheet_name,
-                frozen_row_count=self._bounded_int(task.input.get("frozen_row_count") or task.input.get("rows"), 1, 0, 1000),
-                frozen_column_count=self._bounded_int(task.input.get("frozen_column_count") or task.input.get("columns"), 0, 0, 1000),
+                frozen_row_count=frozen_rows,
+                frozen_column_count=frozen_cols,
             )
             after_structure = await client.get_spreadsheet(spreadsheet_id)
             result_payload = {"range": sheet_name, "response": response, "before": structure, "after": after_structure}
+            sheet_card_tab = sheet_name
+            sheet_card_header = {"frozen_rows": frozen_rows, "frozen_cols": frozen_cols}
         elif operation in {"merge_cells", "unmerge_cells"}:
             range_name = navigator.ensure_range(str(task.input.get("range") or "").strip())
             response = await self._merge_cells(
@@ -449,6 +628,39 @@ class GoogleSheetsAgent(AgentRuntime):
         else:
             raise ValueError(f"Unsupported Sheets edit operation: {operation}")
 
+        card_title = str(structure.get("title") or "")
+        card_url = spreadsheet_url(spreadsheet_id)
+        card_range = str(result_payload.get("range") or "")
+        card_response = result_payload.get("response") if isinstance(result_payload.get("response"), dict) else {}
+        if operation == "update_cells":
+            card_range = str(card_response.get("updatedRange") or card_range)
+        elif operation == "append_rows":
+            card_updates = card_response.get("updates") if isinstance(card_response.get("updates"), dict) else {}
+            card_range = str(card_updates.get("updatedRange") or card_range)
+        elif operation == "clear_range":
+            card_range = str(card_response.get("clearedRange") or card_range)
+        card_rows = len(sheet_card_values) if sheet_card_values else 0
+        if operation == "append_rows":
+            card_message = f"Appended {card_rows} row(s) to {card_range or 'the sheet'}."
+        elif operation == "update_cells":
+            card_message = f"Wrote {card_rows} row(s) to {card_range or 'the sheet'}."
+        elif operation == "clear_range":
+            card_message = f"Cleared {card_range or 'cells'}."
+        else:
+            card_message = f"Applied {operation.replace('_', ' ')}."
+        await self._emit_sheet_progress(
+            task,
+            op=operation,
+            phase="writing",
+            message=card_message,
+            spreadsheet_id=spreadsheet_id,
+            title=card_title,
+            url=card_url,
+            tab=sheet_card_tab,
+            range_name=card_range,
+            values=sheet_card_values,
+            header=sheet_card_header,
+        )
         await self._step(3, "completed", f"Applied {operation}.")
         await self._step(4, "completed", "Verified resulting workbook state.")
         title = str((result_payload.get("after") or {}).get("title") or structure.get("title") or "").strip()
@@ -463,6 +675,15 @@ class GoogleSheetsAgent(AgentRuntime):
                 "before": result_payload.get("before") or {},
                 "after": result_payload.get("after") or {},
             },
+        )
+        await self._emit_sheet_progress(
+            task,
+            op="verify",
+            phase="done",
+            message="Sheet updated.",
+            spreadsheet_id=spreadsheet_id,
+            title=title or card_title,
+            url=card_url,
         )
         output = {
             "status": "completed",

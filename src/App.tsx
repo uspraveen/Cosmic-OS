@@ -1,4 +1,4 @@
-import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, Mail, Maximize2, Mic, Minimize2, MousePointerClick, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
+import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, Mail, Maximize2, Mic, Minimize2, MousePointerClick, Pencil, Presentation, Save, Shield, Square, Table, X } from 'lucide-react'
 import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
@@ -34,6 +34,7 @@ import { findPendingApprovals } from './pendingApprovals'
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
+import { mergeSheetRunProgress, normalizeSheetProgress, type SheetProgressState } from './sheetRunPreview'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
 import {
   pickAutoBoundRect,
@@ -69,6 +70,7 @@ interface Message {
   alphaTerminalLog?: AlphaTerminalEntry[]
   alphaConsoleAnchors?: AlphaConsoleAnchor[]
   browserConsoleAnchors?: AlphaConsoleAnchor[]
+  sheetRunAnchors?: AlphaConsoleAnchor[]
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
   stopped?: boolean
   channel?: string | null
@@ -87,6 +89,7 @@ interface Message {
   progress?: DocsProgressState | TabularProgressState
   slideProgress?: SlideProgressState
   browserProgress?: BrowserProgressState
+  sheetsProgress?: SheetProgressState
   backgroundState?: 'working' | 'ready' | 'failed'
 }
 
@@ -119,9 +122,11 @@ interface BackgroundTask {
   alphaTerminalLog?: AlphaTerminalEntry[]
   alphaConsoleAnchors?: AlphaConsoleAnchor[]
   browserConsoleAnchors?: AlphaConsoleAnchor[]
+  sheetRunAnchors?: AlphaConsoleAnchor[]
   progress?: DocsProgressState | TabularProgressState
   slideProgress?: SlideProgressState
   browserProgress?: BrowserProgressState
+  sheetsProgress?: SheetProgressState
   producedArtifacts?: ProducedArtifact[]
   supportingArtifacts?: ProducedArtifact[]
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
@@ -178,9 +183,11 @@ interface GatewayForegroundStreamSnapshot {
   alphaTerminalLog?: AlphaTerminalEntry[]
   alphaConsoleAnchors?: AlphaConsoleAnchor[]
   browserConsoleAnchors?: AlphaConsoleAnchor[]
+  sheetRunAnchors?: AlphaConsoleAnchor[]
   progress?: DocsProgressState | TabularProgressState
   slideProgress?: SlideProgressState
   browserProgress?: BrowserProgressState
+  sheetsProgress?: SheetProgressState
   producedArtifacts?: ProducedArtifact[]
   supportingArtifacts?: ProducedArtifact[]
   responseBlocks?: ResponseBlock[]
@@ -1248,6 +1255,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       alphaTerminalLog: normalizeAlphaTerminalLog(item?.metadata?.alpha_terminal_log),
       alphaConsoleAnchors: normalizeAlphaConsoleAnchors(item?.metadata?.alpha_console_anchors),
       browserConsoleAnchors: normalizeAlphaConsoleAnchors(item?.metadata?.browser_console_anchors),
+      sheetRunAnchors: normalizeAlphaConsoleAnchors(item?.metadata?.sheet_run_anchors),
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
       stopped: Boolean(item?.metadata?.interrupted),
       channel: typeof item?.channel === 'string' ? item.channel : null,
@@ -1269,6 +1277,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       progress: normalizeTabularProgress(item?.metadata?.tabular_progress) ?? normalizeDocsProgress(item?.metadata?.docs_progress),
       slideProgress: normalizeSlideProgress(item?.metadata?.slide_progress),
       browserProgress: normalizeBrowserProgress(item?.metadata?.browser_progress),
+      sheetsProgress: normalizeSheetProgress(item?.metadata?.sheets_progress),
     })))
 }
 
@@ -1372,9 +1381,11 @@ const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStr
     alphaTerminalLog: normalizeAlphaTerminalLog((value as any).alpha_terminal_log ?? (value as any).alphaTerminalLog),
     alphaConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).alpha_console_anchors ?? (value as any).alphaConsoleAnchors),
     browserConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).browser_console_anchors ?? (value as any).browserConsoleAnchors),
+    sheetRunAnchors: normalizeAlphaConsoleAnchors((value as any).sheet_run_anchors ?? (value as any).sheetRunAnchors),
     progress,
     slideProgress,
     browserProgress,
+    sheetsProgress: normalizeSheetProgress((value as any).sheets_progress ?? (value as any).sheetsProgress),
     producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
     supportingArtifacts: normalizeSupportingArtifacts((value as any).supporting_artifacts ?? (value as any).supportingArtifacts),
     responseBlocks: normalizeResponseBlocks((value as any).response_blocks ?? (value as any).responseBlocks ?? (value as any).blocks),
@@ -1469,6 +1480,7 @@ const mergeHydratedMessages = (
       activityLog: message.activityLog ?? existing.activityLog,
       alphaTerminalLog: message.alphaTerminalLog ?? existing.alphaTerminalLog,
       alphaConsoleAnchors: message.alphaConsoleAnchors ?? existing.alphaConsoleAnchors,
+      sheetRunAnchors: message.sheetRunAnchors ?? existing.sheetRunAnchors,
       sources: message.sources ?? existing.sources,
       requestId: message.requestId ?? existing.requestId,
       source: message.source ?? existing.source,
@@ -1484,6 +1496,7 @@ const mergeHydratedMessages = (
       progress: message.progress ?? existing.progress,
       slideProgress: message.slideProgress ?? existing.slideProgress,
       browserProgress: mergeBrowserProgress(existing.browserProgress, message.browserProgress),
+      sheetsProgress: mergeSheetsProgress(existing.sheetsProgress, message.sheetsProgress),
       backgroundState: message.backgroundState ?? existing.backgroundState,
     }
   })
@@ -1906,6 +1919,11 @@ const mergeBrowserProgress = (
   incoming: BrowserProgressState | undefined,
 ): BrowserProgressState | undefined => mergeBrowserRunProgress(previous, incoming)
 
+const mergeSheetsProgress = (
+  previous: SheetProgressState | undefined,
+  incoming: SheetProgressState | undefined,
+): SheetProgressState | undefined => mergeSheetRunProgress(previous, incoming)
+
 const currentSlidePreview = (progress?: SlideProgressState | null): SlidePreviewItem | null => {
   if (!progress?.slides?.length) {
     return null
@@ -1973,6 +1991,7 @@ const normalizeBackgroundTask = (value: unknown): BackgroundTask | null => {
     progress: normalizeTabularProgress((value as any).tabular_progress) ?? normalizeDocsProgress((value as any).docs_progress),
     slideProgress: normalizeSlideProgress((value as any).slide_progress ?? (value as any).slideProgress),
     browserProgress: normalizeBrowserProgress((value as any).browser_progress ?? (value as any).browserProgress),
+    sheetsProgress: normalizeSheetProgress((value as any).sheets_progress ?? (value as any).sheetsProgress),
     producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
     supportingArtifacts: normalizeSupportingArtifacts((value as any).supporting_artifacts ?? (value as any).supportingArtifacts),
     sources: Array.isArray((value as any).sources) ? (value as any).sources : undefined,
@@ -2945,6 +2964,226 @@ const BrowserRunCard = ({
         </div>,
         document.body,
       )}
+    </div>
+  )
+}
+
+/** 1-based column index → spreadsheet letters (1 → A, 27 → AA). */
+const sheetColumnLabel = (index: number): string => {
+  let label = ''
+  let n = index
+  while (n >= 0) {
+    label = String.fromCharCode(65 + (n % 26)) + label
+    n = Math.floor(n / 26) - 1
+  }
+  return label
+}
+
+/** The agent's header tint is a Google pastel (light hex) — on this dark card
+ * only a whisper of it should show, so the tint reads as formatting, not as
+ * a broken color. */
+const sheetTintForCard = (hex?: string): string | null => {
+  const raw = String(hex || '').trim().replace('#', '')
+  if (!/^[0-9a-fA-F]{6}$/.test(raw)) {
+    return null
+  }
+  const r = parseInt(raw.slice(0, 2), 16)
+  const g = parseInt(raw.slice(2, 4), 16)
+  const b = parseInt(raw.slice(4, 6), 16)
+  return `rgba(${r}, ${g}, ${b}, 0.16)`
+}
+
+const SHEET_RUN_OP_LABEL: Record<string, string> = {
+  create: 'Created sheet',
+  update_cells: 'Wrote',
+  append_rows: 'Appended',
+  clear_range: 'Cleared',
+  format_header_row: 'Formatted header',
+  format_range: 'Formatted range',
+  clear_formatting: 'Cleared formatting',
+  set_borders: 'Set borders',
+  add_banding: 'Added banding',
+  add_sheet: 'Added tab',
+  freeze_panes: 'Froze header',
+  merge_cells: 'Merged cells',
+  unmerge_cells: 'Unmerged cells',
+  auto_resize_columns: 'Auto-sized columns',
+  auto_resize_rows: 'Auto-sized rows',
+  resize_columns: 'Resized columns',
+  resize_rows: 'Resized rows',
+}
+
+const SHEET_RUN_VISIBLE_ROWS = 8
+const SHEET_RUN_VISIBLE_COLS = 8
+
+const resolveSheetOutcome = (progress: SheetProgressState): { label: string; stage: string } | null => {
+  if (progress.phase === 'failed') return { label: 'Failed', stage: 'failed' }
+  if (progress.phase === 'done') return { label: 'Done', stage: 'ready' }
+  return null
+}
+
+/**
+ * Live, read-only view of the Google Sheet the specialist is building — the
+ * write-mirror twin of BrowserRunCard. The agent's `sheets_progress` deltas
+ * are folded into a grid by mergeSheetRunProgress; this card just renders it:
+ * a miniature sheet with the just-written cells still lit, the row count in
+ * the same dot-matrix instrument the browser run uses, and the trail of
+ * operations that got the sheet where it is. No takeover controls on purpose:
+ * the sheet stays the agent's work product until it says otherwise.
+ */
+const SheetRunCard = ({
+  progress,
+  streaming = false,
+}: {
+  progress: SheetProgressState
+  streaming?: boolean
+}) => {
+  // `streaming` is the whole assistant response's state; `phase` is the
+  // sheet job's own — the specialist usually finishes first.
+  const runEnded = Boolean(progress.phase && (progress.phase === 'done' || progress.phase === 'failed'))
+  const live = streaming && !runEnded
+  const outcome = resolveSheetOutcome(progress)
+  const hasGrid = Boolean(progress.grid && progress.grid.length > 0)
+  const statusLabel = outcome
+    ? outcome.label
+    : progress.phase === 'creating'
+      ? 'Creating'
+      : live
+        ? 'Writing'
+        : 'Done'
+  // Reuses the docs-progress stage tokens (amber prepare / blue working /
+  // green done) so all the live cards speak the same status language.
+  const statusKey = progress.phase === 'failed'
+    ? 'failed'
+    : progress.phase === 'creating'
+      ? 'prepare'
+      : outcome
+        ? outcome.stage
+        : live
+          ? 'parse'
+          : 'ready'
+  const tone = live ? 'is-live' : 'is-done'
+  const title = String(progress.title || '').trim()
+  const url = String(progress.url || '').trim()
+  const headerTint = progress.header?.formatted ? sheetTintForCard(progress.header?.color || '#E8F0FE') : null
+  const frozenRows = progress.header?.frozenRows ?? 0
+  const grid = progress.grid || []
+  const totalRows = grid.length
+  const totalCols = grid.reduce((max, row) => Math.max(max, row.length), 0)
+  const visibleRowCount = Math.min(totalRows, SHEET_RUN_VISIBLE_ROWS)
+  const visibleColCount = Math.min(Math.max(totalCols, 1), SHEET_RUN_VISIBLE_COLS)
+  const hiddenRows = Math.max(0, totalRows - visibleRowCount)
+  const span = progress.lastSpan
+  const freshRow = (rowIndex: number) =>
+    Boolean(live && span && rowIndex + 1 >= (span.startRow ?? 1) && rowIndex + 1 <= (span.endRow ?? span.startRow ?? 1))
+  const freshCol = (colIndex: number) =>
+    Boolean(live && span && colIndex + 1 >= (span.startCol ?? 1) && colIndex + 1 <= (span.endCol ?? span.startCol ?? 1))
+  const trail = (progress.trail || []).slice(-3)
+  const rowCountLabel = String(totalRows)
+
+  return (
+    <div
+      className={`slide-build-card sheet-run-card ${tone}${live ? ' streaming' : ''}`}
+      role="status"
+      aria-live="polite"
+    >
+      <div className="sheet-run-head">
+        <span className="docs-progress-kicker">
+          <Table size={12} aria-hidden />
+          Google Sheets
+        </span>
+        <span className={`docs-progress-stage ${statusKey}`}>{statusLabel}</span>
+      </div>
+      {(title || progress.accountEmail) && (
+        <div className="sheet-run-titleline">
+          {title ? (
+            <span className="sheet-run-title" title={title}>
+              {url ? (
+                <a href={url} target="_blank" rel="noreferrer">{title}</a>
+              ) : title}
+            </span>
+          ) : <span className="sheet-run-title">Untitled spreadsheet</span>}
+          {progress.accountEmail && (
+            <span className="sheet-run-account" title={progress.accountEmail}>{progress.accountEmail}</span>
+          )}
+        </div>
+      )}
+      <div className="sheet-run-sheet">
+        {hasGrid ? (
+          <table className="sheet-run-grid">
+            <thead>
+              <tr>
+                <th className="sheet-run-corner" aria-hidden="true" />
+                {Array.from({ length: visibleColCount }, (_, col) => (
+                  <th key={col}>{sheetColumnLabel(col)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({ length: visibleRowCount }, (_, rowIndex) => {
+                const row = grid[rowIndex] || []
+                const isHeaderRow = rowIndex === 0 && Boolean(progress.header?.formatted)
+                const cellStyle = isHeaderRow && headerTint ? { background: headerTint } : undefined
+                return (
+                  <tr key={rowIndex} className={isHeaderRow ? 'is-header' : undefined}>
+                    <td className="sheet-run-gutter" style={cellStyle || undefined}>{rowIndex + 1}</td>
+                    {Array.from({ length: visibleColCount }, (_, colIndex) => {
+                      const fresh = freshRow(rowIndex) && freshCol(colIndex)
+                      return (
+                        <td
+                          key={colIndex}
+                          className={fresh ? 'is-fresh' : undefined}
+                          style={cellStyle || undefined}
+                          title={row[colIndex] || undefined}
+                        >
+                          {row[colIndex] || ''}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <div className="sheet-run-skeleton" aria-hidden="true">
+            {Array.from({ length: 4 }, (_, index) => (
+              <div key={index} className="sheet-run-skeleton-row" style={{ animationDelay: `${index * 0.18}s` }}>
+                <span /><span /><span /><span />
+              </div>
+            ))}
+          </div>
+        )}
+        {hiddenRows > 0 && (
+          <div className="sheet-run-more">+{hiddenRows} more row{hiddenRows === 1 ? '' : 's'} in the sheet</div>
+        )}
+      </div>
+      <div className="sheet-run-foot">
+        <div className="browser-run-readout">
+          <BrowserMatrixReadout text={rowCountLabel} />
+          <span className="browser-run-readout-label">
+            <b>Rows</b>
+            <span>{progress.tab ? `tab ${progress.tab}` : 'live view'}</span>
+          </span>
+        </div>
+        {frozenRows > 0 && (
+          <span className="sheet-run-freeze" title={`${frozenRows} frozen row(s)`}>Frozen {frozenRows}</span>
+        )}
+      </div>
+      {trail.length > 0 && (
+        <ol className="sheet-run-trail">
+          {trail.map((entry, index) => (
+            <li key={`${entry.op}-${index}`} className={index === trail.length - 1 ? 'is-latest' : undefined}>
+              <span className="sheet-run-trail-op">{SHEET_RUN_OP_LABEL[entry.op] || entry.op}</span>
+              {entry.rows > 0 && (
+                <span className="sheet-run-trail-rows">{entry.rows} row{entry.rows === 1 ? '' : 's'}</span>
+              )}
+              {entry.range && <span className="sheet-run-trail-range" title={entry.range}>{entry.range}</span>}
+            </li>
+          ))}
+        </ol>
+      )}
+      {progress.error && <div className="sheet-run-error">{progress.error}</div>}
     </div>
   )
 }
@@ -5097,13 +5336,17 @@ const AssistantAlphaStreamBody = ({
   message,
   onStopAlpha,
   browserStreaming = false,
+  sheetStreaming = false,
   browserLiveFrame,
 }: {
-  message: Pick<Message, 'content' | 'responseBlocks' | 'alphaTerminalLog' | 'alphaConsoleAnchors' | 'activityLog' | 'requestId' | 'stopped' | 'browserProgress' | 'browserConsoleAnchors'>
+  message: Pick<Message, 'content' | 'responseBlocks' | 'alphaTerminalLog' | 'alphaConsoleAnchors' | 'activityLog' | 'requestId' | 'stopped' | 'browserProgress' | 'browserConsoleAnchors' | 'sheetsProgress' | 'sheetRunAnchors'>
   onStopAlpha: (payload: { requestId?: string; taskId?: string }) => void
   /** Whether this message is the currently-streaming one — passed through to
    * BrowserRunCard for its status pill / live pulse indicator. */
   browserStreaming?: boolean
+  /** Same, threaded to the SheetRunCard. Kept a separate prop so the two
+   * cards' liveness can drift independently if one surface ever needs it. */
+  sheetStreaming?: boolean
   /** Live CDP screencast frame for this message's browser run, if any — kept
    * out of Message state (see browserLiveFrames), so it's threaded in here. */
   browserLiveFrame?: string
@@ -5114,11 +5357,13 @@ const AssistantAlphaStreamBody = ({
     alphaConsoleAnchors: message.alphaConsoleAnchors,
     alphaTerminalLog: message.alphaTerminalLog,
     browserConsoleAnchors: message.browserConsoleAnchors,
+    sheetRunAnchors: message.sheetRunAnchors,
   })
   const fallbackConsole = buildAlphaConsoleView(message.activityLog, message.alphaTerminalLog, {
     stopped: message.stopped,
   })
   const hasBrowserAnchor = Boolean(message.browserConsoleAnchors && message.browserConsoleAnchors.length > 0)
+  const hasSheetAnchor = Boolean(message.sheetRunAnchors && message.sheetRunAnchors.length > 0)
 
   if (!hasAnchors) {
     return (
@@ -5134,6 +5379,9 @@ const AssistantAlphaStreamBody = ({
         )}
         {message.browserProgress && (
           <BrowserRunCard progress={message.browserProgress} streaming={browserStreaming} liveFrame={browserLiveFrame} />
+        )}
+        {message.sheetsProgress && (
+          <SheetRunCard progress={message.sheetsProgress} streaming={sheetStreaming} />
         )}
         {message.responseBlocks && message.responseBlocks.length > 0 ? (
           <AssistantResponseBlocks blocks={message.responseBlocks} />
@@ -5170,6 +5418,15 @@ const AssistantAlphaStreamBody = ({
             />
           ) : null
         }
+        if (segment.kind === 'sheet_run') {
+          return message.sheetsProgress ? (
+            <SheetRunCard
+              key={`sheet-run-${segment.taskId || 'default'}`}
+              progress={message.sheetsProgress}
+              streaming={sheetStreaming}
+            />
+          ) : null
+        }
         if (segment.blocks && segment.blocks.length > 0) {
           return (
             <AssistantResponseBlocks
@@ -5192,6 +5449,9 @@ const AssistantAlphaStreamBody = ({
           (segments came only from alpha anchors) — never lose the card. */}
       {message.browserProgress && !hasBrowserAnchor && (
         <BrowserRunCard progress={message.browserProgress} streaming={browserStreaming} liveFrame={browserLiveFrame} />
+      )}
+      {message.sheetsProgress && !hasSheetAnchor && (
+        <SheetRunCard progress={message.sheetsProgress} streaming={sheetStreaming} />
       )}
     </>
   )
@@ -6056,6 +6316,7 @@ export default function App() {
           sources: nextTask.sources ?? item.sources,
           slideProgress: nextTask.slideProgress ?? item.slideProgress,
           browserProgress: mergeBrowserProgress(item.browserProgress, nextTask.browserProgress),
+          sheetsProgress: mergeSheetsProgress(item.sheetsProgress, nextTask.sheetsProgress),
         }
       })
     })
@@ -6533,6 +6794,7 @@ export default function App() {
         progress: stream.progress ?? existingMessage?.progress,
         slideProgress: stream.slideProgress ?? existingMessage?.slideProgress,
         browserProgress: mergeBrowserProgress(existingMessage?.browserProgress, stream.browserProgress),
+        sheetsProgress: mergeSheetsProgress(existingMessage?.sheetsProgress, stream.sheetsProgress),
         producedArtifacts: stream.producedArtifacts ?? existingMessage?.producedArtifacts,
         supportingArtifacts: stream.supportingArtifacts ?? existingMessage?.supportingArtifacts,
         responseBlocks: stream.responseBlocks ?? existingMessage?.responseBlocks,
@@ -7514,6 +7776,7 @@ export default function App() {
           tabular_progress: tabularProgress ?? (existingTask?.progress?.kind === 'tabular_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'tabular_parse' ? existingAssistantMessage.progress : undefined),
           slide_progress: (event as any)?.slide_progress ?? existingTask?.slideProgress ?? existingAssistantMessage?.slideProgress,
           browser_progress: (event as any)?.browser_progress ?? existingTask?.browserProgress ?? existingAssistantMessage?.browserProgress,
+          sheets_progress: (event as any)?.sheets_progress ?? existingTask?.sheetsProgress ?? existingAssistantMessage?.sheetsProgress,
           produced_artifacts: (event as any)?.produced_artifacts ?? existingTask?.producedArtifacts ?? existingAssistantMessage?.producedArtifacts,
           sources: Array.isArray((event as any)?.sources) ? (event as any).sources : existingTask?.sources ?? existingAssistantMessage?.sources,
           completed: false,
@@ -7579,6 +7842,7 @@ export default function App() {
           tabular_progress: (event as any)?.tabular_progress ?? (preservedTask?.progress?.kind === 'tabular_parse' ? preservedTask.progress : undefined),
           slide_progress: (event as any)?.slide_progress ?? preservedTask?.slideProgress,
           browser_progress: (event as any)?.browser_progress ?? preservedTask?.browserProgress,
+          sheets_progress: (event as any)?.sheets_progress ?? preservedTask?.sheetsProgress,
           produced_artifacts: (event as any)?.produced_artifacts ?? preservedTask?.producedArtifacts,
           sources: Array.isArray((event as any)?.sources) ? (event as any).sources : preservedTask?.sources,
           completed: Boolean((event as any).completed ?? preservedTask?.completed),
@@ -7608,6 +7872,7 @@ export default function App() {
           progress: foregroundTask?.progress,
           slideProgress: foregroundTask?.slideProgress,
           browserProgress: foregroundTask?.browserProgress,
+          sheetsProgress: foregroundTask?.sheetsProgress,
           producedArtifacts: foregroundTask?.producedArtifacts,
           sources: foregroundTask?.sources,
         })
@@ -7674,6 +7939,7 @@ export default function App() {
           const progressState = tabularProgress ?? docsProgress
           const incomingSlideProgress = normalizeSlideProgress(event.slide_progress ?? event.slideProgress)
           const incomingBrowserProgress = normalizeBrowserProgress(event.browser_progress ?? event.browserProgress)
+          const incomingSheetsProgress = normalizeSheetProgress((event as any).sheets_progress ?? (event as any).sheetsProgress)
           const alphaTerminalEntry = normalizeAlphaTerminalEntry((event as any).codex_terminal)
           const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working in the background...'
           const activityText = incomingSlideProgress?.label || progressState?.label || statusMessage || fallbackMessage
@@ -7700,6 +7966,7 @@ export default function App() {
             progress: alphaTerminalEntry ? undefined : progressState,
             slideProgress: alphaTerminalEntry ? undefined : incomingSlideProgress,
             browserProgress: alphaTerminalEntry ? undefined : incomingBrowserProgress,
+            sheetsProgress: alphaTerminalEntry ? undefined : incomingSheetsProgress,
           })
           patchBackgroundTask(requestId, (current) => ({
             ...current,
@@ -7715,6 +7982,7 @@ export default function App() {
             progress: alphaTerminalEntry ? current.progress : (progressState ?? current.progress),
             slideProgress: alphaTerminalEntry ? current.slideProgress : (incomingSlideProgress ?? current.slideProgress),
             browserProgress: alphaTerminalEntry ? current.browserProgress : mergeBrowserProgress(current.browserProgress, incomingBrowserProgress),
+            sheetsProgress: alphaTerminalEntry ? current.sheetsProgress : mergeSheetsProgress(current.sheetsProgress, incomingSheetsProgress),
             completed: false,
           }))
           return
@@ -7919,6 +8187,7 @@ export default function App() {
         const progressState = tabularProgress ?? docsProgress
         const incomingSlideProgress = normalizeSlideProgress(event.slide_progress ?? event.slideProgress)
         const incomingBrowserProgress = normalizeBrowserProgress(event.browser_progress ?? event.browserProgress)
+        const incomingSheetsProgress = normalizeSheetProgress((event as any).sheets_progress ?? (event as any).sheetsProgress)
         const alphaTerminalEntry = normalizeAlphaTerminalEntry((event as any).codex_terminal)
         const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working on your request...'
         const activityText = incomingSlideProgress?.label || progressState?.label || statusMessage || fallbackMessage
@@ -7963,9 +8232,20 @@ export default function App() {
                   measureAssistantStreamLength(message.content, message.responseBlocks),
                 )
                 : message.browserConsoleAnchors,
+              // Same one-card-per-message story as the browser card: stamped
+              // once, the first time a sheets reading arrives, so the live
+              // SheetRunCard renders inline where the sheet was created.
+              sheetRunAnchors: incomingSheetsProgress
+                ? ensureAlphaConsoleAnchor(
+                  message.sheetRunAnchors,
+                  null,
+                  measureAssistantStreamLength(message.content, message.responseBlocks),
+                )
+                : message.sheetRunAnchors,
               progress: alphaTerminalEntry ? message.progress : (progressState ?? message.progress),
               slideProgress: alphaTerminalEntry ? message.slideProgress : (incomingSlideProgress ?? message.slideProgress),
               browserProgress: alphaTerminalEntry ? message.browserProgress : mergeBrowserProgress(message.browserProgress, incomingBrowserProgress),
+              sheetsProgress: alphaTerminalEntry ? message.sheetsProgress : mergeSheetsProgress(message.sheetsProgress, incomingSheetsProgress),
               stopped: false,
             }
           })
@@ -10442,6 +10722,7 @@ export default function App() {
                             message={msg}
                             onStopAlpha={handleStopAlphaAgent}
                             browserStreaming={messageIsStreaming}
+                            sheetStreaming={messageIsStreaming}
                             browserLiveFrame={browserLiveFrames[msg.requestId || ''] || browserLiveFrames[msg.sourceId || '']}
                           />
                           <AssistantMessageArtifacts

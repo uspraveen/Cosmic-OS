@@ -467,6 +467,7 @@ class ActiveRequest:
     alpha_console_anchors: dict[str, int] = field(default_factory=dict)
     slide_progress: dict[str, Any] | None = None
     browser_progress: dict[str, Any] | None = None
+    sheets_progress: dict[str, Any] | None = None
     error_message: str = ""
 
 
@@ -10701,6 +10702,7 @@ class GatewayRuntime:
                         "alpha_terminal_log": state.alpha_terminal_log,
                         "slide_progress": state.slide_progress,
                         "browser_progress": state.browser_progress,
+                        "sheets_progress": state.sheets_progress,
                         "response_blocks": state.response_blocks_snapshot,
                         "snapshot_seq": state.snapshot_seq or None,
                     },
@@ -10821,6 +10823,7 @@ class GatewayRuntime:
                     "alpha_terminal_log": state.alpha_terminal_log,
                     "slide_progress": state.slide_progress,
                     "browser_progress": state.browser_progress,
+                    "sheets_progress": state.sheets_progress,
                     "response_blocks": state.response_blocks_snapshot,
                     "snapshot_seq": None,
                 },
@@ -10930,6 +10933,7 @@ class GatewayRuntime:
                 "alpha_terminal_log": state.alpha_terminal_log,
                 "slide_progress": state.slide_progress,
                 "browser_progress": state.browser_progress,
+                "sheets_progress": state.sheets_progress,
                 "response_blocks": state.response_blocks_snapshot,
                 "snapshot_seq": state.snapshot_seq or None,
             },
@@ -10975,6 +10979,7 @@ class GatewayRuntime:
                     "alpha_terminal_log": state.alpha_terminal_log,
                     "slide_progress": state.slide_progress,
                     "browser_progress": state.browser_progress,
+                    "sheets_progress": state.sheets_progress,
                     "response_blocks": state.response_blocks_snapshot,
                     "snapshot_seq": state.snapshot_seq or None,
                     "completed": state.completed,
@@ -15444,6 +15449,7 @@ class GatewayRuntime:
                 "alpha_terminal_log": state.alpha_terminal_log,
                 "slide_progress": state.slide_progress,
                 "browser_progress": state.browser_progress,
+                "sheets_progress": state.sheets_progress,
                 "response_blocks": state.response_blocks_snapshot,
                 "snapshot_seq": state.snapshot_seq or None,
                 "backgrounded_at": state.backgrounded_at,
@@ -15468,6 +15474,7 @@ class GatewayRuntime:
                 "alpha_terminal_log": state.alpha_terminal_log,
                 "slide_progress": state.slide_progress,
                 "browser_progress": state.browser_progress,
+                "sheets_progress": state.sheets_progress,
                 "completed": state.completed,
                 "failed": state.failed,
                 "error": state.error_message or None,
@@ -16478,6 +16485,9 @@ class GatewayRuntime:
                 session_id=context["session_id"],
                 channel=context["channel"],
             )
+        sheets_progress = payload.get("sheets_progress")
+        if isinstance(sheets_progress, dict):
+            forwarded["sheets_progress"] = self._hydrate_sheets_progress(sheets_progress)
         return forwarded
 
     def _hydrate_slide_progress(
@@ -16590,6 +16600,25 @@ class GatewayRuntime:
                 if preview_url:
                     shot["preview_url"] = preview_url
             hydrated["screenshot"] = shot
+        return hydrated
+
+    def _hydrate_sheets_progress(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Clamp the sheets agent's write mirror before it reaches the desktop.
+
+        The payload carries the cell values the agent just wrote so the client
+        can render a live, read-only grid without ever calling Google. The
+        agent already caps the payload; clamp again here so a runaway value
+        can't flood the WebSocket channel.
+        """
+        hydrated = dict(payload)
+        values = hydrated.get("values")
+        if isinstance(values, list):
+            cleaned: list[list[str]] = []
+            for row in values[:250]:
+                if not isinstance(row, list):
+                    continue
+                cleaned.append([self._safe_text(cell)[:160] for cell in row[:40]])
+            hydrated["values"] = cleaned
         return hydrated
 
     async def publish_browser_live_frame(self, *, task_id: str, frame: str) -> None:
@@ -21240,6 +21269,16 @@ class GatewayRuntime:
                 and isinstance(task_notebook.get("browser_progress"), dict)
                 else None
             )
+            # Same story as browser_progress above: the live sheet card is
+            # driven by sheets_progress, which only exists on the in-flight
+            # stream — persist it so reopening the response keeps the card.
+            sheets_progress = (
+                event.get("sheets_progress")
+                if isinstance(event.get("sheets_progress"), dict)
+                else request_state.sheets_progress
+                if request_state is not None and isinstance(request_state.sheets_progress, dict)
+                else None
+            )
             assistant_message_id = store_assistant_message(
                 str(event.get("content") or ""),
                 awaiting_reply=bool(event.get("awaiting_reply")),
@@ -21274,6 +21313,7 @@ class GatewayRuntime:
                     "alpha_terminal_log": alpha_terminal_log,
                     "alpha_console_anchors": alpha_console_anchors,
                     "browser_progress": browser_progress,
+                    "sheets_progress": sheets_progress,
                 },
                 channel=event_channel,
                 route="opus",
@@ -25078,6 +25118,8 @@ class GatewayRuntime:
                 state.slide_progress = event["slide_progress"]
             if isinstance(event.get("browser_progress"), dict):
                 state.browser_progress = event["browser_progress"]
+            if isinstance(event.get("sheets_progress"), dict):
+                state.sheets_progress = event["sheets_progress"]
             state.activity = progress_label or self._safe_text(event.get("message")) or state.activity
             activity_entry = self._build_task_activity_entry(event)
             if activity_entry:

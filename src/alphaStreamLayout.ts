@@ -19,6 +19,7 @@ export type AlphaStreamSegment =
   | { kind: 'content'; content?: string; blocks?: ResponseBlockLike[] }
   | { kind: 'alpha_console'; taskId: string | null }
   | { kind: 'browser_run'; taskId: string | null }
+  | { kind: 'sheet_run'; taskId: string | null }
 
 const DEFAULT_ALPHA_TASK_KEY = '_default'
 
@@ -116,7 +117,7 @@ export const ensureAlphaConsoleAnchor = (
 }
 
 interface KindedAnchor extends AlphaConsoleAnchor {
-  segmentKind: 'alpha_console' | 'browser_run'
+  segmentKind: 'alpha_console' | 'browser_run' | 'sheet_run'
 }
 
 export const buildAlphaStreamSegments = (options: {
@@ -129,12 +130,16 @@ export const buildAlphaStreamSegments = (options: {
   // fallback source the way Alpha has, since there's one live card per
   // message, not a per-task log to derive an offset from).
   browserConsoleAnchors?: AlphaConsoleAnchor[]
+  // Sheets specialist equivalent, same one-card-per-message story.
+  sheetRunAnchors?: AlphaConsoleAnchor[]
 }): { segments: AlphaStreamSegment[]; hasAnchors: boolean } => {
   const alphaAnchors: KindedAnchor[] = resolveAlphaConsoleAnchors(options.alphaConsoleAnchors, options.alphaTerminalLog)
     .map((anchor) => ({ ...anchor, segmentKind: 'alpha_console' as const }))
   const browserAnchors: KindedAnchor[] = (options.browserConsoleAnchors || [])
     .map((anchor) => ({ ...anchor, segmentKind: 'browser_run' as const }))
-  const anchors: KindedAnchor[] = [...alphaAnchors, ...browserAnchors].sort((a, b) => a.offset - b.offset)
+  const sheetAnchors: KindedAnchor[] = (options.sheetRunAnchors || [])
+    .map((anchor) => ({ ...anchor, segmentKind: 'sheet_run' as const }))
+  const anchors: KindedAnchor[] = [...alphaAnchors, ...browserAnchors, ...sheetAnchors].sort((a, b) => a.offset - b.offset)
 
   if (anchors.length <= 0) {
     return {
