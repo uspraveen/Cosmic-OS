@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -19,6 +19,9 @@ class SheetInfo:
     column_count: int
     frozen_row_count: int = 0
     frozen_column_count: int = 0
+    # Native Sheets tables on this tab: {"table_id", "name", "range",
+    # "range_a1", "row_count", "column_count"}. Empty for tabs without one.
+    tables: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SheetNavigator:
@@ -36,6 +39,7 @@ class SheetNavigator:
                 column_count=int(item.get("column_count") or 0),
                 frozen_row_count=int(item.get("frozen_row_count") or 0),
                 frozen_column_count=int(item.get("frozen_column_count") or 0),
+                tables=_normalize_tables(item.get("tables")),
             )
             for item in raw_sheets
             if str(item.get("title") or "").strip()
@@ -102,6 +106,14 @@ class SheetNavigator:
             "endColumnIndex": right,
         }
 
+    def table_names(self) -> list[str]:
+        """Every native table name in the workbook, for unique naming."""
+        return [table.get("name") for sheet in self.sheets for table in sheet.tables if table.get("name")]
+
+    def tables_for(self, sheet_name: str | None = None) -> list[dict[str, Any]]:
+        sheet = self.sheet_for(sheet_name)
+        return list(sheet.tables) if sheet else []
+
     def summary(self) -> dict[str, Any]:
         return {
             "spreadsheet_id": self.spreadsheet_id,
@@ -115,6 +127,7 @@ class SheetNavigator:
                     "column_count": item.column_count,
                     "frozen_row_count": item.frozen_row_count,
                     "frozen_column_count": item.frozen_column_count,
+                    "tables": [dict(table) for table in item.tables],
                 }
                 for item in self.sheets
             ],
@@ -124,6 +137,57 @@ class SheetNavigator:
 def quote_sheet_name(sheet_name: str) -> str:
     cleaned = str(sheet_name or "Sheet1").replace("'", "''").strip() or "Sheet1"
     return f"'{cleaned}'"
+
+
+def column_letters(index: int) -> str:
+    """0-based column index → spreadsheet letters (0 → A, 26 → AA)."""
+    label = ""
+    n = int(index)
+    while n >= 0:
+        label = chr(65 + (n % 26)) + label
+        n = n // 26 - 1
+    return label
+
+
+def grid_range_to_a1(sheet_title: str, grid_range: dict[str, Any]) -> str:
+    """A bounded GridRange (exclusive ends) → `'Title'!A1:D5`.
+
+    Tables always carry a bounded range; if an end index is missing the
+    start cell stands in so the result stays a valid single-cell range
+    rather than lying about the extent.
+    """
+    if not isinstance(grid_range, dict):
+        return ""
+    start_row = int(grid_range.get("startRowIndex") or 0) + 1
+    start_col = int(grid_range.get("startColumnIndex") or 0)
+    end_row_raw = grid_range.get("endRowIndex")
+    end_col_raw = grid_range.get("endColumnIndex")
+    end_row = int(end_row_raw) if isinstance(end_row_raw, (int, float)) else start_row
+    end_col = int(end_col_raw) if isinstance(end_col_raw, (int, float)) else start_col + 1
+    start_ref = f"{column_letters(start_col)}{start_row}"
+    end_ref = f"{column_letters(max(start_col, end_col - 1))}{max(start_row, end_row)}"
+    cells = start_ref if (start_ref == end_ref) else f"{start_ref}:{end_ref}"
+    return f"{quote_sheet_name(str(sheet_title or 'Sheet1'))}!{cells}"
+
+
+def _normalize_tables(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    tables: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        tables.append(
+            {
+                "table_id": str(item.get("table_id") or "").strip(),
+                "name": str(item.get("name") or "").strip(),
+                "range": item.get("range") if isinstance(item.get("range"), dict) else {},
+                "range_a1": str(item.get("range_a1") or "").strip(),
+                "row_count": int(item.get("row_count") or 0),
+                "column_count": int(item.get("column_count") or 0),
+            }
+        )
+    return tables
 
 
 def _parse_a1_cell(cell_ref: str) -> tuple[int, int]:

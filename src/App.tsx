@@ -3003,6 +3003,7 @@ const SHEET_RUN_OP_LABEL: Record<string, string> = {
   clear_formatting: 'Cleared formatting',
   set_borders: 'Set borders',
   add_banding: 'Added banding',
+  create_table: 'Made table',
   add_sheet: 'Added tab',
   freeze_panes: 'Froze header',
   merge_cells: 'Merged cells',
@@ -3166,6 +3167,14 @@ const SheetRunCard = ({
             <span>{progress.tab ? `tab ${progress.tab}` : 'live view'}</span>
           </span>
         </div>
+        {progress.header?.table && (
+          <span
+            className="sheet-run-freeze"
+            title={progress.header.tableName ? `Native table '${progress.header.tableName}'` : 'Native table'}
+          >
+            Table
+          </span>
+        )}
         {frozenRows > 0 && (
           <span className="sheet-run-freeze" title={`${frozenRows} frozen row(s)`}>Frozen {frozenRows}</span>
         )}

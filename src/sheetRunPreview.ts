@@ -31,6 +31,9 @@ export interface SheetProgressHeader {
   color?: string
   frozenRows?: number
   frozenCols?: number
+  /** The header row belongs to a native Sheets table (filters + banding). */
+  table?: boolean
+  tableName?: string
 }
 
 export interface SheetProgressState {
@@ -178,6 +181,13 @@ const normalizeHeader = (value: unknown): SheetProgressHeader | null => {
       header[key] = num
     }
   }
+  if (raw.table !== undefined) {
+    header.table = Boolean(raw.table)
+  }
+  const tableName = cleanText(raw.tableName ?? raw.table_name)
+  if (tableName) {
+    header.tableName = tableName
+  }
   return Object.keys(header).length > 0 ? header : null
 }
 
@@ -276,6 +286,8 @@ export const mergeSheetRunProgress = <T extends SheetRunProgressLike>(
     }
     if (values && (lastSpan || incomingState.range)) {
       trail = pushTrail(trail, { op: cleanText(incomingState.op) || 'write', range: cleanText(incomingState.range), rows: values.length })
+    } else if (!values && cleanText(incomingState.op) === 'create_table' && incomingState.range) {
+      trail = pushTrail(trail, { op: 'create_table', range: cleanText(incomingState.range), rows: 0 })
     }
     // `values` has been folded into the grid — drop it so the merged state
     // doesn't carry the delta twice.
@@ -313,6 +325,10 @@ export const mergeSheetRunProgress = <T extends SheetRunProgressLike>(
     trail = pushTrail(trail, { op: op || 'write', range: cleanText(incomingState.range), rows: values.length })
   } else if (op === 'clear_range' && span) {
     applyValues(grid, span, [], true)
+    trail = pushTrail(trail, { op, range: cleanText(incomingState.range), rows: 0 })
+  } else if (op === 'create_table' && cleanText(incomingState.range)) {
+    // A table wrap changes no cell values, but it's the run's headline —
+    // narrate it like any other step.
     trail = pushTrail(trail, { op, range: cleanText(incomingState.range), rows: 0 })
   }
 

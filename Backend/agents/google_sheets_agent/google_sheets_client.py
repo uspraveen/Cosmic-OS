@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from .sheet_structure import grid_range_to_a1
+
 
 _SHEETS_BASE = "https://sheets.googleapis.com/v4"
 _DRIVE_BASE = "https://www.googleapis.com/drive/v3"
@@ -314,15 +316,17 @@ def normalize_spreadsheet(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         props = sheet.get("properties") if isinstance(sheet.get("properties"), dict) else {}
         grid = props.get("gridProperties") if isinstance(props.get("gridProperties"), dict) else {}
+        title = str(props.get("title") or "").strip()
         sheets.append(
             {
                 "sheet_id": props.get("sheetId"),
-                "title": str(props.get("title") or "").strip(),
+                "title": title,
                 "index": props.get("index"),
                 "row_count": int(grid.get("rowCount") or 0),
                 "column_count": int(grid.get("columnCount") or 0),
                 "frozen_row_count": int(grid.get("frozenRowCount") or 0),
                 "frozen_column_count": int(grid.get("frozenColumnCount") or 0),
+                "tables": _normalize_raw_tables(title, sheet.get("tables")),
             }
         )
     return {
@@ -335,6 +339,38 @@ def normalize_spreadsheet(payload: dict[str, Any]) -> dict[str, Any]:
         "sheets": sheets,
         "raw": payload,
     }
+
+
+def _normalize_raw_tables(sheet_title: str, value: Any) -> list[dict[str, Any]]:
+    """Native tables live at sheets[].tables[] in the raw Spreadsheet payload."""
+    if not isinstance(value, list):
+        return []
+    tables: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        grid_range = item.get("range") if isinstance(item.get("range"), dict) else {}
+        row_count = 0
+        column_count = 0
+        end_row = grid_range.get("endRowIndex")
+        end_col = grid_range.get("endColumnIndex")
+        start_row = grid_range.get("startRowIndex")
+        start_col = grid_range.get("startColumnIndex")
+        if isinstance(end_row, (int, float)) and isinstance(start_row, (int, float)):
+            row_count = max(0, int(end_row) - int(start_row))
+        if isinstance(end_col, (int, float)) and isinstance(start_col, (int, float)):
+            column_count = max(0, int(end_col) - int(start_col))
+        tables.append(
+            {
+                "table_id": str(item.get("tableId") or "").strip(),
+                "name": str(item.get("name") or "").strip(),
+                "range": grid_range,
+                "range_a1": grid_range_to_a1(sheet_title, grid_range),
+                "row_count": row_count,
+                "column_count": column_count,
+            }
+        )
+    return tables
 
 
 def normalize_values_response(payload: dict[str, Any]) -> dict[str, Any]:

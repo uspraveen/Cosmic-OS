@@ -42,6 +42,10 @@ Core behavior:
 - Use append_rows for adding new records under existing headers.
 - Use add_sheet before writing to a new tab.
 - Use format_header_row when the first row should be frozen/bold/colored.
+- Prefer native tables. Writing a fresh grid with a header row wraps it in a
+  native table automatically; to convert an existing grid, use create_table
+  (it falls back to header formatting + banding if a table already covers
+  the range, e.g. one the user made by hand in the Sheets UI).
 - Use format_range, set_borders, add_banding, resize_columns/rows,
   auto_resize_columns/rows, freeze_panes, merge_cells, and clear_formatting
   when the user asks for visual polish, colored cells, alignment, wrapping,
@@ -54,7 +58,7 @@ Core behavior:
 Return strict JSON only with this shape:
 {
   "intent": "sheets.resolve_resource|sheets.create|sheets.read|sheets.edit",
-  "operation": "resolve_resource|create|read_structure|read_range|update_cells|append_rows|add_sheet|format_header_row|format_range|clear_formatting|set_borders|auto_resize|auto_resize_columns|auto_resize_rows|resize_dimension|resize_columns|resize_rows|freeze_panes|merge_cells|unmerge_cells|add_banding|clear_range|share_file|list_permissions|get_link",
+  "operation": "resolve_resource|create|read_structure|read_range|update_cells|append_rows|add_sheet|format_header_row|format_range|clear_formatting|set_borders|auto_resize|auto_resize_columns|auto_resize_rows|resize_dimension|resize_columns|resize_rows|freeze_panes|merge_cells|unmerge_cells|add_banding|create_table|clear_range|share_file|list_permissions|get_link",
   "params": {},
   "confidence": 0.0,
   "needs_clarification": false,
@@ -83,6 +87,7 @@ Supported params include:
 - merge_cells/unmerge_cells: spreadsheet_id, range, merge_type
 - add_banding: spreadsheet_id, range, header_color, first_band_color,
   second_band_color
+- create_table: spreadsheet_id, range, table_name, sheet_name
 - clear_formatting: spreadsheet_id, range
 - clear_range: spreadsheet_id, range
 - sharing: spreadsheet_id, role, type, email_address, domain, send_notification_email, approval_confirmed

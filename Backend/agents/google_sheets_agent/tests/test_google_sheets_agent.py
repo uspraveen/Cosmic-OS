@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -17,7 +18,10 @@ from agents.google_sheets_agent.agent import GoogleSheetsAgent
 from agents.google_sheets_agent.google_sheets_client import GoogleSheetsClient, normalize_spreadsheet
 from agents.google_sheets_agent.sheet_structure import (
     SheetNavigator,
+    _parse_a1_cell,
+    column_letters,
     count_cells,
+    grid_range_to_a1,
     parse_markdown_tables,
     rows_from_input,
 )
@@ -318,3 +322,294 @@ def test_execute_without_card_events_stays_silent_on_failure(tmp_path: Path) -> 
 
     assert result.status == "failed"
     assert _sheet_payloads(agent) == []
+
+
+# --- Native Sheets tables -------------------------------------------------
+
+
+def test_column_letters_and_grid_range_to_a1() -> None:
+    assert column_letters(0) == "A"
+    assert column_letters(8) == "I"
+    assert column_letters(26) == "AA"
+    assert (
+        grid_range_to_a1("Jobs", {"sheetId": 111, "startRowIndex": 0, "endRowIndex": 10, "startColumnIndex": 0, "endColumnIndex": 9})
+        == "'Jobs'!A1:I10"
+    )
+
+
+def test_normalize_spreadsheet_extracts_native_tables() -> None:
+    structure = normalize_spreadsheet(
+        {
+            "spreadsheetId": "sheet_123",
+            "properties": {"title": "Copper Tracker"},
+            "sheets": [
+                {
+                    "properties": {
+                        "sheetId": 111,
+                        "title": "Pipeline",
+                        "gridProperties": {"rowCount": 100, "columnCount": 26},
+                    },
+                    "tables": [
+                        {
+                            "tableId": "tbl_1",
+                            "name": "Pipeline",
+                            "range": {"sheetId": 111, "startRowIndex": 0, "endRowIndex": 10, "startColumnIndex": 0, "endColumnIndex": 3},
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    navigator = SheetNavigator(structure)
+    tables = navigator.tables_for("Pipeline")
+    assert tables[0]["table_id"] == "tbl_1"
+    assert tables[0]["name"] == "Pipeline"
+    assert tables[0]["range_a1"] == "'Pipeline'!A1:C10"
+    assert tables[0]["row_count"] == 10
+    assert navigator.table_names() == ["Pipeline"]
+    assert navigator.summary()["sheets"][0]["tables"][0]["table_id"] == "tbl_1"
+
+
+def test_unique_table_name_avoids_collisions_and_unsafe_characters() -> None:
+    assert GoogleSheetsAgent._unique_table_name("Jobs", set()) == "Jobs"
+    assert GoogleSheetsAgent._unique_table_name("Jobs", {"jobs"}) == "Jobs 2"
+    assert GoogleSheetsAgent._unique_table_name("Jobs", {"jobs", "jobs 2"}) == "Jobs 3"
+    assert GoogleSheetsAgent._unique_table_name("My [Jobs]!", set()) == "My Jobs"
+    assert GoogleSheetsAgent._unique_table_name("", set()) == "Table"
+
+
+def test_add_table_builds_add_table_and_freeze_requests() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.batches: list[tuple[str, list[dict]]] = []
+
+        async def batch_update(self, spreadsheet_id: str, requests: list[dict]) -> dict:
+            self.batches.append((spreadsheet_id, requests))
+            name = requests[0]["addTable"]["table"]["name"]
+            return {"spreadsheetId": spreadsheet_id, "replies": [{"addTable": {"table": {"name": name, "tableId": "tbl_1"}}}, {}]}
+
+    client = FakeClient()
+    agent = object.__new__(GoogleSheetsAgent)
+    navigator = SheetNavigator(_sample_spreadsheet())
+    table = asyncio.run(
+        agent._add_table(client, "sheet_123", navigator, range_name="'Pipeline'!A1:C3", table_name="Pipeline")
+    )
+
+    spreadsheet_id, requests = client.batches[0]
+    assert spreadsheet_id == "sheet_123"
+    assert requests[0]["addTable"]["table"]["name"] == "Pipeline"
+    assert requests[0]["addTable"]["table"]["range"] == {
+        "sheetId": 111,
+        "startRowIndex": 0,
+        "endRowIndex": 3,
+        "startColumnIndex": 0,
+        "endColumnIndex": 3,
+    }
+    assert requests[1]["updateSheetProperties"]["properties"]["gridProperties"]["frozenRowCount"] == 1
+    assert table["tableId"] == "tbl_1"
+    assert table["name"] == "Pipeline"
+
+
+class _FakeSheetsClient:
+    """In-memory client double for handler-level tests.
+
+    update_values echoes the *written extent* (like the real values.update),
+    so a 3x3 write anchored at A1 reports 'Jobs'!A1:C3 — the range the
+    addTable request must end up covering.
+    """
+
+    def __init__(self, *, fail_table_requests: bool = False) -> None:
+        self.fail_table_requests = fail_table_requests
+        self.batch_requests: list[list[dict]] = []
+        self._structure = normalize_spreadsheet(
+            {
+                "spreadsheetId": "sheet_123",
+                "properties": {"title": "Target Jobs"},
+                "sheets": [
+                    {
+                        "properties": {
+                            "sheetId": 111,
+                            "title": "Jobs",
+                            "index": 0,
+                            "gridProperties": {"rowCount": 1000, "columnCount": 26},
+                        }
+                    }
+                ],
+            }
+        )
+
+    async def create_spreadsheet(self, *, title: str, sheet_titles=None) -> dict:
+        payload = {
+            "spreadsheetId": "sheet_123",
+            "properties": {"title": title},
+            "sheets": [
+                {
+                    "properties": {
+                        "sheetId": 111 + index,
+                        "title": name,
+                        "index": index,
+                        "gridProperties": {"rowCount": 1000, "columnCount": 26},
+                    }
+                }
+                for index, name in enumerate(sheet_titles or ["Sheet1"])
+            ],
+        }
+        return normalize_spreadsheet(payload)
+
+    async def get_spreadsheet(self, spreadsheet_id: str, **kwargs) -> dict:
+        return self._structure
+
+    async def update_values(self, spreadsheet_id: str, range_name: str, values, **kwargs) -> dict:
+        cols = max(len(row) for row in values)
+        match = re.fullmatch(r"([^!]+!)([A-Za-z]+)(\d+)", range_name)
+        if not match:
+            return {"updatedRange": range_name, "updatedRows": len(values)}
+        row_number, col_index = _parse_a1_cell(f"{match.group(2)}{match.group(3)}")
+        end = f"{column_letters(col_index + cols - 1)}{row_number + len(values) - 1}"
+        return {
+            "updatedRange": f"{match.group(1)}{match.group(2)}{row_number}:{end}",
+            "updatedRows": len(values),
+        }
+
+    async def get_values(self, spreadsheet_id: str, range_name: str, **kwargs) -> dict:
+        return {"range": range_name, "values": [], "row_count": 0, "column_count": 0}
+
+    async def batch_update(self, spreadsheet_id: str, requests: list[dict]) -> dict:
+        if self.fail_table_requests and any("addTable" in request for request in requests):
+            request = httpx.Request("POST", f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate")
+            response = httpx.Response(
+                400,
+                json={"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "Table overlaps an existing table"}},
+                request=request,
+            )
+            response.raise_for_status()
+        self.batch_requests.append(requests)
+        replies = []
+        for request in requests:
+            if "addTable" in request:
+                table = dict(request["addTable"]["table"])
+                table["tableId"] = "tbl_1"
+                replies.append({"addTable": {"table": table}})
+            else:
+                replies.append({})
+        return {"spreadsheetId": spreadsheet_id, "replies": replies}
+
+
+def _headered_create_task():
+    task = _card_task("sheets.create")
+    values = [
+        ["Role", "Company", "Status"],
+        ["LLM Infra", "Fireworks", "To apply"],
+        ["Evals", "OpenAI", "Backup"],
+    ]
+    return task.model_copy(
+        update={"input": {"title": "Target Jobs", "sheets": [{"title": "Jobs", "values": values, "has_header": True}]}}
+    )
+
+
+def _with_client(agent: GoogleSheetsAgent, client: _FakeSheetsClient) -> None:
+    agent.auth = {"access_token": "tok", "account_email": "tester@example.com"}
+    agent._client = lambda: client  # type: ignore[method-assign]
+
+
+def test_create_wraps_headered_grid_in_native_table(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    asyncio.run(agent.on_startup())
+    client = _FakeSheetsClient()
+    _with_client(agent, client)
+    task = _headered_create_task()
+
+    result = asyncio.run(agent.handle_sheets_create(task))
+
+    assert result.status == "completed"
+    table_requests = [request for batch in client.batch_requests for request in batch if "addTable" in request]
+    assert len(table_requests) == 1
+    table = table_requests[0]["addTable"]["table"]
+    assert table["name"] == "Jobs"
+    assert table["range"] == {
+        "sheetId": 111,
+        "startRowIndex": 0,
+        "endRowIndex": 3,
+        "startColumnIndex": 0,
+        "endColumnIndex": 3,
+    }
+    # The header freeze rides in the same batch, and no plain header
+    # formatting happened — the table owns the header now.
+    table_batch = next(batch for batch in client.batch_requests if any("addTable" in request for request in batch))
+    assert any("updateSheetProperties" in request for request in table_batch)
+    assert not any("repeatCell" in request for batch in client.batch_requests for request in batch)
+    payloads = _sheet_payloads(agent)
+    table_payload = next(payload for payload in payloads if payload["op"] == "create_table")
+    assert table_payload["range"] == "'Jobs'!A1:C3"
+    assert table_payload["header"]["table"] is True
+    assert table_payload["header"]["table_name"] == "Jobs"
+    assert payloads[-1]["phase"] == "done"
+
+
+def test_create_falls_back_to_header_format_when_table_rejected(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    asyncio.run(agent.on_startup())
+    client = _FakeSheetsClient(fail_table_requests=True)
+    _with_client(agent, client)
+    task = _headered_create_task()
+
+    result = asyncio.run(agent.handle_sheets_create(task))
+
+    assert result.status == "completed"
+    assert not any("addTable" in request for batch in client.batch_requests for request in batch)
+    assert any("repeatCell" in request for batch in client.batch_requests for request in batch)
+    ops = [payload["op"] for payload in _sheet_payloads(agent)]
+    assert "create_table" not in ops
+    assert "format_header_row" in ops
+    assert _sheet_payloads(agent)[-1]["phase"] == "done"
+
+
+def test_edit_create_table_operation_succeeds(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    asyncio.run(agent.on_startup())
+    client = _FakeSheetsClient()
+    _with_client(agent, client)
+    task = _card_task("sheets.edit").model_copy(
+        update={
+            "input": {
+                "spreadsheet_id": "sheet_123",
+                "operation": "create_table",
+                "range": "Jobs!A1:C3",
+                "table_name": "Roles",
+            }
+        }
+    )
+
+    result = asyncio.run(agent.handle_sheets_edit(task))
+
+    assert result.status == "completed"
+    assert result.output["operation"] == "create_table"
+    assert result.output["result"]["response"]["table"]["name"] == "Roles"
+    payloads = _sheet_payloads(agent)
+    table_payload = next(payload for payload in payloads if payload["op"] == "create_table")
+    assert table_payload["phase"] == "writing"
+    assert table_payload["header"]["table_name"] == "Roles"
+
+
+def test_edit_create_table_falls_back_to_header_format_and_banding(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    asyncio.run(agent.on_startup())
+    client = _FakeSheetsClient(fail_table_requests=True)
+    _with_client(agent, client)
+    task = _card_task("sheets.edit").model_copy(
+        update={
+            "input": {
+                "spreadsheet_id": "sheet_123",
+                "operation": "create_table",
+                "range": "Jobs!A1:C3",
+            }
+        }
+    )
+
+    result = asyncio.run(agent.handle_sheets_edit(task))
+
+    assert result.status == "completed"
+    assert result.output["result"]["response"]["table_fallback"] is True
+    assert "overlaps an existing table" in result.output["result"]["response"]["table_error"]
+    assert any("repeatCell" in request for batch in client.batch_requests for request in batch)
+    assert any("addBanding" in request for batch in client.batch_requests for request in batch)

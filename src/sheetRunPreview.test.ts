@@ -112,6 +112,42 @@ describe('mergeSheetRunProgress', () => {
     expect(done.header).toEqual({ formatted: true, color: '#E8F0FE', frozenRows: 1 })
   })
 
+  it('narrates a native table wrap without touching the grid', () => {
+    const first = mergeSheetRunProgress(
+      undefined,
+      reading({
+        op: 'update_cells',
+        range: 'Jobs!A1:C2',
+        values: [['Role', 'Comp', 'Status'], ['MTS', '$210K', 'To apply']],
+      }),
+    )
+    const tabled = mergeSheetRunProgress(
+      first,
+      reading({
+        op: 'create_table',
+        range: 'Jobs!A1:C2',
+        header: { formatted: true, table: true, table_name: 'Jobs', frozen_rows: 1 },
+      }),
+    ) as SheetProgressState
+    expect(tabled.grid).toEqual([
+      ['Role', 'Comp', 'Status'],
+      ['MTS', '$210K', 'To apply'],
+    ])
+    expect(tabled.header).toEqual({ formatted: true, table: true, tableName: 'Jobs', frozenRows: 1 })
+    expect(tabled.trail?.map((entry) => entry.op)).toEqual(['update_cells', 'create_table'])
+    expect(tabled.trail?.[1].rows).toBe(0)
+  })
+
+  it('keeps a create_table trail entry even with no prior grid', () => {
+    const tabled = mergeSheetRunProgress(
+      undefined,
+      reading({ op: 'create_table', range: 'Jobs!A1:C2', header: { formatted: true, table: true, table_name: 'Jobs' } }),
+    ) as SheetProgressState
+    expect(tabled.grid).toBeUndefined()
+    expect(tabled.trail?.map((entry) => entry.op)).toEqual(['create_table'])
+    expect(tabled.header?.table).toBe(true)
+  })
+
   it('caps the grid and the trail', () => {
     let merged: SheetProgressState | undefined
     for (let batch = 0; batch < 10; batch += 1) {

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -342,6 +343,7 @@ class GoogleSheetsAgent(AgentRuntime):
         await self._step(2, "completed", f"Created '{spreadsheet['title']}'.")
 
         verified_ranges: list[dict[str, Any]] = []
+        created_tables: list[str] = []
         latest_structure = await client.get_spreadsheet(spreadsheet_id)
         navigator = SheetNavigator(latest_structure)
         for spec in sheet_specs:
@@ -365,18 +367,58 @@ class GoogleSheetsAgent(AgentRuntime):
                 values=rows,
             )
             if self._bool(spec.get("has_header"), True):
-                await self._format_header_row(client, spreadsheet_id, navigator, sheet_name=spec["title"])
-                await self._emit_sheet_progress(
-                    task,
-                    op="format_header_row",
-                    phase="writing",
-                    message=f"Formatted the header row on '{spec['title']}'.",
-                    spreadsheet_id=spreadsheet_id,
-                    title=str(spreadsheet.get("title") or title),
-                    url=sheet_url,
-                    tab=str(spec["title"]),
-                    header={"formatted": True, "color": "#E8F0FE", "frozen_rows": 1},
-                )
+                # Prefer a native table: header + banding + filter buttons in
+                # one object. Needs a header row plus at least one body row;
+                # anything else (or any addTable failure — tables can't
+                # overlap an existing table) keeps the plain header format.
+                table_name = ""
+                if len(rows) >= 2:
+                    try:
+                        table = await self._add_table(
+                            client,
+                            spreadsheet_id,
+                            navigator,
+                            range_name=updated_range,
+                            table_name=str(spec["title"]),
+                            taken_names=created_tables,
+                        )
+                        table_name = str((table or {}).get("name") or "")
+                        if table_name:
+                            created_tables.append(table_name)
+                    except Exception as exc:
+                        detail = self._http_status_error_detail(exc) if isinstance(exc, httpx.HTTPStatusError) else str(exc)
+                        logger.info(
+                            "google_sheets_agent.add_table_fallback task_id=%s range=%s error=%s",
+                            task.task_id,
+                            updated_range,
+                            detail[:300],
+                        )
+                if table_name:
+                    await self._emit_sheet_progress(
+                        task,
+                        op="create_table",
+                        phase="writing",
+                        message=f"Wrapped {updated_range} in a native table '{table_name}'.",
+                        spreadsheet_id=spreadsheet_id,
+                        title=str(spreadsheet.get("title") or title),
+                        url=sheet_url,
+                        tab=str(spec["title"]),
+                        range_name=updated_range,
+                        header={"formatted": True, "table": True, "table_name": table_name, "frozen_rows": 1},
+                    )
+                else:
+                    await self._format_header_row(client, spreadsheet_id, navigator, sheet_name=spec["title"])
+                    await self._emit_sheet_progress(
+                        task,
+                        op="format_header_row",
+                        phase="writing",
+                        message=f"Formatted the header row on '{spec['title']}'.",
+                        spreadsheet_id=spreadsheet_id,
+                        title=str(spreadsheet.get("title") or title),
+                        url=sheet_url,
+                        tab=str(spec["title"]),
+                        header={"formatted": True, "color": "#E8F0FE", "frozen_rows": 1},
+                    )
             after = await client.get_values(spreadsheet_id, range_name)
             verified_ranges.append({"range": range_name, "after": after})
         await self._step(3, "completed", f"Wrote {len(verified_ranges)} populated range(s).")
@@ -409,7 +451,11 @@ class GoogleSheetsAgent(AgentRuntime):
             {
                 "operation": "create",
                 "range": "",
-                "requests": {"sheet_titles": sheet_titles, "populated_ranges": [item["range"] for item in verified_ranges]},
+                "requests": {
+                    "sheet_titles": sheet_titles,
+                    "populated_ranges": [item["range"] for item in verified_ranges],
+                    "tables": created_tables,
+                },
                 "before": {},
                 "after": {"structure": final_structure, "ranges": verified_ranges},
             },
@@ -471,6 +517,7 @@ class GoogleSheetsAgent(AgentRuntime):
         sheet_card_tab = ""
         sheet_card_values: list[list[Any]] | None = None
         sheet_card_header: dict[str, Any] | None = None
+        sheet_card_message = ""
         await self._step(1, "completed", "Google account resolved.")
         structure = await client.get_spreadsheet(spreadsheet_id)
         navigator = SheetNavigator(structure)
@@ -625,6 +672,81 @@ class GoogleSheetsAgent(AgentRuntime):
             )
             after_structure = await client.get_spreadsheet(spreadsheet_id)
             result_payload = {"range": range_name, "response": response, "before": structure, "after": after_structure}
+        elif operation == "create_table":
+            range_name = navigator.ensure_range(
+                str(task.input.get("range") or "").strip(),
+                default_sheet=str(task.input.get("sheet_name") or "").strip() or None,
+            )
+            requested_name = str(task.input.get("table_name") or task.input.get("name") or "").strip()
+            table_error = ""
+            table: dict[str, Any] = {}
+            header_response: dict[str, Any] = {}
+            banding_response: dict[str, Any] = {}
+            try:
+                table = await self._add_table(
+                    client,
+                    spreadsheet_id,
+                    navigator,
+                    range_name=range_name,
+                    table_name=requested_name,
+                )
+            except Exception as exc:
+                # Tables can't overlap an existing table (often one the user
+                # made by hand in the UI), so convert the range the
+                # old-fashioned way rather than failing the task on polish.
+                detail = self._http_status_error_detail(exc) if isinstance(exc, httpx.HTTPStatusError) else str(exc)
+                table_error = detail[:300]
+                logger.info(
+                    "google_sheets_agent.add_table_fallback task_id=%s range=%s error=%s",
+                    task.task_id,
+                    range_name,
+                    table_error,
+                )
+                header_response = await self._format_header_row(
+                    client,
+                    spreadsheet_id,
+                    navigator,
+                    sheet_name=self._sheet_name_from_range(range_name) or str(navigator.active_sheet),
+                )
+                banding_response = await self._add_banding(
+                    client,
+                    spreadsheet_id,
+                    navigator,
+                    range_name=range_name,
+                    input_data=task.input,
+                )
+            after_structure = await client.get_spreadsheet(spreadsheet_id)
+            sheet_card_tab = self._sheet_name_from_range(range_name)
+            if table:
+                result_payload = {
+                    "range": range_name,
+                    "response": {"table": table},
+                    "before": structure,
+                    "after": after_structure,
+                }
+                sheet_card_header = {
+                    "formatted": True,
+                    "table": True,
+                    "table_name": str(table.get("name") or ""),
+                    "frozen_rows": 1,
+                }
+                sheet_card_message = f"Converted {range_name} to a native table '{table.get('name') or ''}'."
+            else:
+                result_payload = {
+                    "range": range_name,
+                    "response": {
+                        "table_fallback": True,
+                        "table_error": table_error,
+                        "header": header_response,
+                        "banding": banding_response,
+                    },
+                    "before": structure,
+                    "after": after_structure,
+                }
+                sheet_card_header = {"formatted": True, "color": "#E8F0FE", "frozen_rows": 1}
+                sheet_card_message = (
+                    f"Native table unavailable for {range_name}; applied header format and banding instead."
+                )
         else:
             raise ValueError(f"Unsupported Sheets edit operation: {operation}")
 
@@ -646,6 +768,8 @@ class GoogleSheetsAgent(AgentRuntime):
             card_message = f"Wrote {card_rows} row(s) to {card_range or 'the sheet'}."
         elif operation == "clear_range":
             card_message = f"Cleared {card_range or 'cells'}."
+        elif operation == "create_table":
+            card_message = sheet_card_message or f"Applied {operation.replace('_', ' ')}."
         else:
             card_message = f"Applied {operation.replace('_', ' ')}."
         await self._emit_sheet_progress(
@@ -824,6 +948,73 @@ class GoogleSheetsAgent(AgentRuntime):
             },
         ]
         return await client.batch_update(spreadsheet_id, requests)
+
+    async def _add_table(
+        self,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        navigator: SheetNavigator,
+        *,
+        range_name: str,
+        table_name: str = "",
+        taken_names: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Wrap a bounded range in a native Google Sheets table.
+
+        The addTable request and the header-row freeze travel in one
+        batchUpdate so the table lands complete or not at all. Failure is the
+        caller's cue to fall back to plain header formatting — tables can't
+        overlap a table that already exists on the tab.
+        """
+        grid_range = navigator.grid_range(range_name)
+        taken = set(navigator.table_names())
+        taken.update(str(name or "").strip() for name in taken_names or [])
+        name = self._unique_table_name(table_name or navigator.title or "Table", taken)
+        requests = [
+            {
+                "addTable": {
+                    "table": {
+                        "name": name,
+                        "range": grid_range,
+                    }
+                }
+            },
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": int(grid_range["sheetId"]),
+                        "gridProperties": {"frozenRowCount": 1},
+                    },
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            },
+        ]
+        response = await client.batch_update(spreadsheet_id, requests)
+        replies = response.get("replies") if isinstance(response.get("replies"), list) else []
+        first = replies[0] if replies and isinstance(replies[0], dict) else {}
+        added = first.get("addTable") if isinstance(first.get("addTable"), dict) else {}
+        table = added.get("table") if isinstance(added.get("table"), dict) else {}
+        return table or {"name": name}
+
+    @staticmethod
+    def _unique_table_name(base: str, taken: set[str]) -> str:
+        # Table names are unique per spreadsheet and structured references
+        # choke on brackets/quotes/commas, so keep the name to safe words.
+        sanitized = re.sub(r"[^\w \-]", " ", str(base or "")).strip()
+        sanitized = re.sub(r"\s+", " ", sanitized)[:80] or "Table"
+        name = sanitized
+        suffix = 2
+        while name.lower() in taken:
+            name = f"{sanitized} {suffix}"
+            suffix += 1
+        return name
+
+    @staticmethod
+    def _sheet_name_from_range(range_name: str) -> str:
+        raw = str(range_name or "").strip()
+        if "!" not in raw:
+            return ""
+        return raw.rsplit("!", 1)[0].strip().strip("'")
 
     async def _format_range(
         self,
