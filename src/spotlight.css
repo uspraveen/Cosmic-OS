@@ -5810,7 +5810,7 @@ kbd {
    window: title bar, then the page. The strip sits above the frame rather
    than over it, so nothing the user needs to click is ever competing with
    the page they are driving. */
-.browser-run-stage {
+.browser-run-lightbox .browser-run-stage {
   position: relative;
   display: flex;
   flex-direction: column;
@@ -5826,7 +5826,7 @@ kbd {
    below the chrome bar. The bar's height (34px controls + 12px padding +
    2px border) comes off the image budget, so the whole panel still fits the
    82vh the lightbox always used. */
-.browser-run-stage .deck-preview-full {
+.browser-run-lightbox .browser-run-stage .deck-preview-full {
   max-width: 100%;
   max-height: calc(82vh - 48px);
   border: none;
