@@ -3240,6 +3240,11 @@ class OrchestratorRuntime:
             vault_auth = dict(child_input["auth"]) if isinstance(child_input.get("auth"), dict) else {}
             vault_auth["vault"] = vault_credential
             child_input["auth"] = vault_auth
+            usage_notes = str(vault_credential.get("notes") or "").strip()
+            if usage_notes:
+                # Usage constraints belong in the specialist's task input so they
+                # can obey them. The password stays only in auth.vault.
+                child_input["vault_usage_notes"] = usage_notes
 
         child_priority = str(priority or parent_task.priority or SOURCE_PRIORITY_MAP.get(parent_task.source, "normal")).strip()
         normalized_idempotency_key = str(idempotency_key or "").strip() or self._build_child_idempotency_key(

@@ -2711,13 +2711,15 @@ app.whenReady().then(() => {
     return callGatewayJson(config, '/channels/vault/pending')
   })
 
-  ipcMain.handle('vault:approve-pending', async (_, requestId: string) => {
+  ipcMain.handle('vault:approve-pending', async (_, requestId: string, payload?: { grant?: string; window_seconds?: number }) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {
       throw new Error('Gateway connection is not configured.')
     }
+    const body = payload && typeof payload === 'object' ? payload : { grant: 'once' }
     return callGatewayJson(config, `/channels/vault/pending/${encodeURIComponent(String(requestId || '').trim())}/approve`, {
       method: 'POST',
+      body,
     })
   })
 

@@ -14,6 +14,7 @@ import {
   vaultKindLabel,
   type VaultCredentialKind,
 } from './vaultKinds'
+import { VAULT_ALLOW_WINDOW_SECONDS, vaultIslandAllowWindowLabel } from './vaultIsland'
 import './vault-settings.css'
 
 interface VaultPolicy {
@@ -362,21 +363,28 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
 
   const openEditor = useCallback((entry?: VaultEntry) => {
     setConfirmDeleteId(null)
-    setEditor(
-      entry
-        ? {
-            entryId: entry.entry_id,
-            title: entry.title || '',
-            siteUrl: entry.site_url || '',
-            username: entry.username || '',
-            password: '',
-            totpSeed: '',
-            notes: '',
-            credentialKind: normalizeVaultCredentialKind(entry.credential_kind),
-            expiresAt: String(entry.expires_at || '').slice(0, 10),
-          }
-        : { ...EMPTY_EDITOR },
-    )
+    if (!entry) {
+      setEditor({ ...EMPTY_EDITOR })
+      return
+    }
+    setEditor({
+      entryId: entry.entry_id,
+      title: entry.title || '',
+      siteUrl: entry.site_url || '',
+      username: entry.username || '',
+      password: '',
+      totpSeed: '',
+      notes: '',
+      credentialKind: normalizeVaultCredentialKind(entry.credential_kind),
+      expiresAt: String(entry.expires_at || '').slice(0, 10),
+    })
+    void window.cosmic?.vaultGetEntry?.(entry.entry_id).then((payload) => {
+      const notes = String(payload?.entry?.notes || '')
+      const current = getVaultEditorDraft()
+      if (current && current.entryId === entry.entry_id) {
+        setEditor({ ...current, notes })
+      }
+    }).catch(() => undefined)
   }, [setEditor])
 
   const handleSave = useCallback(async () => {
@@ -489,13 +497,26 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
     }
   }, [refresh])
 
-  const handlePendingAction = useCallback(async (requestId: string, kind: 'approve' | 'reject') => {
-    const bridge = kind === 'approve' ? window.cosmic?.vaultApprovePending : window.cosmic?.vaultRejectPending
-    if (!bridge) return
+  const handlePendingAction = useCallback(async (
+    requestId: string,
+    kind: 'approve' | 'window' | 'reject',
+  ) => {
+    if (kind === 'reject') {
+      if (!window.cosmic?.vaultRejectPending) return
+    } else if (!window.cosmic?.vaultApprovePending) {
+      return
+    }
     setBusyEntryId(requestId)
     setError(null)
     try {
-      await bridge(requestId)
+      if (kind === 'reject') {
+        await window.cosmic.vaultRejectPending!(requestId)
+      } else {
+        await window.cosmic.vaultApprovePending!(requestId, {
+          grant: kind === 'window' ? 'window' : 'once',
+          window_seconds: kind === 'window' ? VAULT_ALLOW_WINDOW_SECONDS : undefined,
+        })
+      }
       await refresh()
     } catch (err: unknown) {
       setError(getErrorMessage(err, 'Failed to respond to the vault request.'))
@@ -609,6 +630,16 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                   >
                     Deny
                   </button>
+                  {!isAdd ? (
+                    <button
+                      type="button"
+                      className="vault-btn vault-btn--ghost"
+                      disabled={busyEntryId === item.request_id}
+                      onClick={() => void handlePendingAction(item.request_id, 'window')}
+                    >
+                      {vaultIslandAllowWindowLabel()}
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="vault-btn vault-btn--primary"
@@ -775,16 +806,19 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
             ) : null}
 
             <div className="vault-editor-group-label">
-              Notes <em>optional</em>
+              Notes for Cosmic <em>optional</em>
             </div>
             <label className="vault-field">
               <textarea
                 value={editor.notes}
                 rows={3}
-                placeholder="Recovery codes, security questions…"
+                placeholder="e.g. Hugging Face key — use only to read"
                 onChange={(event) => setEditor({ ...editor, notes: event.target.value })}
               />
             </label>
+            <div className="vault-field-hint">
+              Cosmic sees this when it uses the credential. Don&apos;t put the secret or recovery codes here.
+            </div>
           </div>
 
           <footer className="vault-editor-actions">

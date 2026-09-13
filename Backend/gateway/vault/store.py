@@ -1,10 +1,11 @@
 """SQLite persistence for the Cosmic password vault.
 
 All secret fields are stored Fernet-encrypted (see gateway.credentials.encryption)
-using the shared CREDENTIAL_ENCRYPTION_KEY. Secrets are only ever decrypted for
-three callers: the user's explicit reveal endpoint, the TOTP code generator, and
-the internal /internal/vault/resolve endpoint used by the orchestrator at task
-dispatch time. Lookups return a credential_ref, never the password.
+using the shared CREDENTIAL_ENCRYPTION_KEY. Passwords and TOTP seeds are only
+ever decrypted for the user's explicit reveal endpoint, the TOTP code generator,
+and the internal /internal/vault/resolve endpoint used by the orchestrator at
+task dispatch time. Lookups return a credential_ref and any user-authored usage
+notes — never the password.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -105,6 +106,27 @@ def entry_is_expired(expires_at: Any) -> bool:
     if not day:
         return False
     return day < datetime.now(timezone.utc).date().isoformat()
+
+
+def agent_lookup_metadata(entry: dict[str, Any]) -> dict[str, Any]:
+    """Fields the orchestrator model may see after an approved vault lookup.
+
+    Includes user-authored usage notes (e.g. "read-only Hugging Face access").
+    Never includes the password or TOTP seed.
+    """
+    expires_at = normalize_expires_at(entry.get("expires_at"))
+    return {
+        "entry_id": entry["entry_id"],
+        "title": entry["title"],
+        "site_url": entry["site_url"],
+        "site_domain": entry["site_domain"],
+        "username": entry["username"],
+        "credential_kind": normalize_credential_kind(entry.get("credential_kind")),
+        "expires_at": expires_at,
+        "expired": entry_is_expired(expires_at),
+        "notes": decrypt_token(entry.get("notes_encrypted") or ""),
+        "has_totp": bool(entry.get("has_totp")),
+    }
 
 
 class VaultStore:
@@ -496,27 +518,107 @@ class VaultStore:
                 return None
         return self.get_pending(request_id)
 
-    def take_approved_use(self, entry_id: str, task_id: str | None) -> dict[str, Any] | None:
-        """Consume one approved use_entry request for this entry+task, if any."""
+    def take_approved_use(
+        self,
+        entry_id: str,
+        task_id: str | None,
+        session_id: str | None = None,
+        *,
+        max_age_seconds: float = 30 * 60,
+    ) -> dict[str, Any] | None:
+        """Consume one approved use_entry grant for this credential.
+
+        Continuation turns mint a new task_id after the user clicks Allow, so
+        the grant must survive that hop. Prefer the same task, then the same
+        session, then the newest approved use for this entry. Stale grants
+        (older than max_age_seconds) are ignored so a leftover Allow once
+        cannot skip a later, unrelated lookup.
+        """
+        with self._lock, self._connection() as connection:
+            connection.row_factory = sqlite3.Row
+            candidates: list[sqlite3.Row] = []
+            if task_id:
+                row = connection.execute(
+                    """
+                    SELECT * FROM vault_pending
+                    WHERE action = 'use_entry' AND entry_id = ?
+                      AND status = 'approved' AND task_id = ?
+                    ORDER BY updated_at DESC LIMIT 1
+                    """,
+                    (entry_id, task_id),
+                ).fetchone()
+                if row is not None:
+                    candidates.append(row)
+            if session_id:
+                row = connection.execute(
+                    """
+                    SELECT * FROM vault_pending
+                    WHERE action = 'use_entry' AND entry_id = ?
+                      AND status = 'approved' AND session_id = ?
+                    ORDER BY updated_at DESC LIMIT 1
+                    """,
+                    (entry_id, session_id),
+                ).fetchone()
+                if row is not None:
+                    candidates.append(row)
+            row = connection.execute(
+                """
+                SELECT * FROM vault_pending
+                WHERE action = 'use_entry' AND entry_id = ? AND status = 'approved'
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (entry_id,),
+            ).fetchone()
+            if row is not None:
+                candidates.append(row)
+            chosen = None
+            seen: set[str] = set()
+            for candidate in candidates:
+                request_id = str(candidate["request_id"])
+                if request_id in seen:
+                    continue
+                seen.add(request_id)
+                if not self._pending_is_fresh(candidate, max_age_seconds):
+                    continue
+                chosen = candidate
+                break
+            if chosen is None:
+                return None
+            connection.execute(
+                "UPDATE vault_pending SET status = 'consumed', updated_at = ? WHERE request_id = ?",
+                (utcnow_iso(), chosen["request_id"]),
+            )
+            connection.commit()
+        return self._row_to_pending(chosen)
+
+    @staticmethod
+    def _pending_is_fresh(row: sqlite3.Row, max_age_seconds: float) -> bool:
+        if max_age_seconds <= 0:
+            return True
+        stamp_text = str(row["updated_at"] or row["created_at"] or "").strip()
+        if not stamp_text:
+            return True
+        try:
+            stamp = datetime.fromisoformat(stamp_text.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - stamp <= timedelta(seconds=max_age_seconds)
+
+    def get_open_pending_use(self, entry_id: str) -> dict[str, Any] | None:
+        """Return the live use_entry approval card for this credential, if any."""
         with self._lock, self._connection() as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute(
                 """
                 SELECT * FROM vault_pending
-                WHERE action = 'use_entry' AND entry_id = ?
-                  AND status = 'approved' AND (task_id IS NULL OR task_id = ?)
-                ORDER BY updated_at DESC LIMIT 1
+                WHERE action = 'use_entry' AND entry_id = ? AND status = 'pending'
+                ORDER BY created_at DESC LIMIT 1
                 """,
-                (entry_id, task_id or ""),
+                (entry_id,),
             ).fetchone()
-            if not row:
-                return None
-            connection.execute(
-                "UPDATE vault_pending SET status = 'consumed', updated_at = ? WHERE request_id = ?",
-                (utcnow_iso(), row["request_id"]),
-            )
-            connection.commit()
-        return self._row_to_pending(row)
+        return self._row_to_pending(row) if row else None
 
     # ── audit ────────────────────────────────────────────────────────────────
 

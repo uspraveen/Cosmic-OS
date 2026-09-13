@@ -194,8 +194,11 @@
 
 .vault-pending-actions {
   display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
   flex-shrink: 0;
+  max-width: 320px;
 }
 
 .vault-list {

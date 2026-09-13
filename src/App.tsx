@@ -50,6 +50,7 @@ import {
   mouseInputEvent,
   type TakeoverInputEvent,
 } from './browserTakeoverInput'
+import { VAULT_ALLOW_WINDOW_SECONDS, vaultIslandAllowWindowLabel } from './vaultIsland'
 
 export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'task' | 'meeting' | 'spaces'
@@ -4750,7 +4751,7 @@ const SandboxPermissionActionBlock = ({ block }: { block: ResponseActionBlock })
 
 const VaultPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) => {
   const [status, setStatus] = useState(block.status || 'pending')
-  const [busy, setBusy] = useState<'approve' | 'reject' | null>(null)
+  const [busy, setBusy] = useState<'approve' | 'window' | 'reject' | null>(null)
   const [error, setError] = useState('')
   const isPending = status.toLowerCase() === 'pending' && block.canRespond !== false
   const action = block.action === 'add_entry' ? 'add_entry' : 'use_entry'
@@ -4763,22 +4764,24 @@ const VaultPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) =
     setStatus(block.status || 'pending')
   }, [block.status])
 
-  const act = async (kind: 'approve' | 'reject') => {
+  const act = async (kind: 'approve' | 'window' | 'reject') => {
     if (!block.requestId || busy || !isPending) return
     setBusy(kind)
     setError('')
     try {
-      const bridge = kind === 'approve'
-        ? window.cosmic?.vaultApprovePending
-        : window.cosmic?.vaultRejectPending
-      if (!bridge) {
+      if (kind === 'reject' ? !window.cosmic?.vaultRejectPending : !window.cosmic?.vaultApprovePending) {
         throw new Error('Vault approval action is unavailable.')
       }
-      const result = await bridge(block.requestId)
+      const result = kind === 'reject'
+        ? await window.cosmic.vaultRejectPending!(block.requestId)
+        : await window.cosmic.vaultApprovePending!(block.requestId, {
+            grant: kind === 'window' ? 'window' : 'once',
+            window_seconds: kind === 'window' ? VAULT_ALLOW_WINDOW_SECONDS : undefined,
+          })
       if (String(result?.status || '').trim() === 'ignored') {
         throw new Error('This vault request was already handled on another device.')
       }
-      setStatus(kind === 'approve' ? 'approved' : 'rejected')
+      setStatus(kind === 'reject' ? 'rejected' : 'approved')
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : 'Action failed.')
     } finally {
@@ -4823,6 +4826,16 @@ const VaultPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) =
             >
               {busy === 'reject' ? 'Denying…' : 'Deny'}
             </button>
+            {action === 'use_entry' ? (
+              <button
+                type="button"
+                className="assistant-action-button"
+                disabled={Boolean(busy)}
+                onClick={() => void act('window')}
+              >
+                {busy === 'window' ? 'Working…' : vaultIslandAllowWindowLabel()}
+              </button>
+            ) : null}
             <button
               type="button"
               className="assistant-action-button is-primary"

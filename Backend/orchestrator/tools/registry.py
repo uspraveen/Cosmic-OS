@@ -888,13 +888,16 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "description": (
                 "Look up a saved credential (login, API key, or token) from the user's "
                 "password vault so a specialist agent can use it on their behalf. Returns "
-                "the username, credential_kind, expiry metadata, and a credential_ref to pass "
-                "in delegate_to_agent input — NEVER a password or API key. If expired is true, "
-                "tell the user the credential is past its expiry before using it. Depending on "
-                "the user's per-site policy this either succeeds immediately, or pauses for an "
-                "inline user approval card: if the result says permission_required, briefly tell "
-                "the user why vault access is needed, end your turn, and wait — the turn "
-                "resumes automatically after they approve, then call vault_lookup again."
+                "the username, credential_kind, expiry metadata, any usage notes the user "
+                "left for Cosmic, and a credential_ref to pass in delegate_to_agent input — "
+                "NEVER a password or API key. Obey notes (for example 'use this Hugging Face "
+                "key only to read'). If expired is true, tell the user the credential is past "
+                "its expiry before using it. Depending on the user's per-site policy this either "
+                "succeeds immediately, or pauses for an inline user approval card: if the result "
+                "says permission_required, briefly tell the user why vault access is needed, end "
+                "your turn, and wait. After they approve, the turn resumes with credential_ref "
+                "already granted — do not call vault_lookup again unless a later message says "
+                "the approval did not carry."
             ),
             "input_schema": {
                 "type": "object",
@@ -914,7 +917,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         group="integrations",
         prompt_summary=(
             "Fetch a saved login, API key, or token from the user's password vault. "
-            "Returns a credential_ref for delegation — never the secret. May pause for user approval."
+            "Returns a credential_ref plus usage notes — never the secret. May pause for user approval."
         ),
         progress_builder=lambda tool_input: (
             f"Looking up vault credentials for {str((tool_input or {}).get('site') or '')[:60]}..."
@@ -962,7 +965,13 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "type": "string",
                         "description": "Optional base32 TOTP/2FA seed so Cosmic can generate login codes.",
                     },
-                    "notes": {"type": "string", "description": "Optional private notes."},
+                    "notes": {
+                        "type": "string",
+                        "description": (
+                            "Optional usage instructions Cosmic should follow when later using this "
+                            "credential, e.g. 'Hugging Face key — read-only only'. Do not put the secret itself here."
+                        ),
+                    },
                     "purpose": {
                         "type": "string",
                         "description": "Short human-readable reason shown on the approval card.",

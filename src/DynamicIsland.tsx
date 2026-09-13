@@ -9,6 +9,17 @@ import {
   noteVaultEditorDismissed,
   noteVaultEditorHide,
 } from './vaultEditorSession'
+import {
+  isVaultIslandResolved,
+  parseVaultIslandOpen,
+  VAULT_ALLOW_WINDOW_SECONDS,
+  vaultIslandAllowLabel,
+  vaultIslandAllowWindowLabel,
+  vaultIslandFromPending,
+  vaultIslandHeadline,
+  vaultIslandKindLabel,
+  type VaultIslandRequest,
+} from './vaultIsland'
 import WeatherAnimation from './WeatherAnimation'
 import DotBurstCheckmark from './DotBurstCheckmark'
 import AgentWorkSlide, { type AgentWorkPayload } from './AgentWorkSlide'
@@ -102,6 +113,45 @@ const ISLAND_NOTIFICATION_DIMENSIONS: CSSProperties = {
   width: '540px',
   height: '160px',
   borderRadius: '0 0 40px 40px',
+}
+
+function VaultIslandShield() {
+  return (
+    <svg viewBox="0 0 88 110" width="88" height="110" fill="none" aria-hidden>
+      <defs>
+        <pattern id="diVaultDotGrid" width="3" height="3" patternUnits="userSpaceOnUse">
+          <circle cx="1.5" cy="1.5" r="0.95" fill="#fff" />
+        </pattern>
+        <linearGradient id="diVaultFieldFade" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0.12" stopColor="#fff" />
+          <stop offset="0.86" stopColor="#000" />
+        </linearGradient>
+        <mask id="diVaultFieldMask" maskUnits="userSpaceOnUse" x="0" y="0" width="88" height="110">
+          <rect width="88" height="110" fill="url(#diVaultFieldFade)" />
+        </mask>
+        <filter id="diVaultDotBlur" x="-40%" y="-40%" width="180%" height="180%">
+          <feGaussianBlur stdDeviation="0.7" />
+        </filter>
+        <mask id="diVaultGlyphMask" maskUnits="userSpaceOnUse" x="0" y="0" width="88" height="110">
+          <rect width="88" height="110" fill="#000" />
+          <g transform="translate(16 11) scale(4.15)" stroke="#fff" strokeLinecap="round" strokeLinejoin="round" fill="none">
+            <g strokeWidth="2.4" filter="url(#diVaultDotBlur)">
+              <path d="M12 3.25 5.25 6v5.4c0 4.3 2.85 8.05 6.75 9.35 3.9-1.3 6.75-5.05 6.75-9.35V6L12 3.25Z" />
+              <path d="M12 10.6v3" />
+              <circle cx="12" cy="8.7" r="0.9" />
+            </g>
+            <g strokeWidth="1.05">
+              <path d="M12 3.25 5.25 6v5.4c0 4.3 2.85 8.05 6.75 9.35 3.9-1.3 6.75-5.05 6.75-9.35V6L12 3.25Z" />
+              <path d="M12 10.6v3" />
+              <circle cx="12" cy="8.7" r="0.9" />
+            </g>
+          </g>
+        </mask>
+      </defs>
+      <rect width="88" height="110" fill="url(#diVaultDotGrid)" opacity="0.12" mask="url(#diVaultFieldMask)" />
+      <rect width="88" height="110" fill="url(#diVaultDotGrid)" mask="url(#diVaultGlyphMask)" />
+    </svg>
+  )
 }
 
 function formatIslandInboundRelativeTime(receivedAtMs: number): string {
@@ -488,6 +538,11 @@ export default function DynamicIsland({
   const [mailInboundNotification, setMailInboundNotification] = useState<CosmicMailIslandPayload | null>(null)
   const [approvalRequestNotification, setApprovalRequestNotification] =
     useState<CosmicMailApprovalIslandPayload | null>(null)
+  const [vaultIslandRequest, setVaultIslandRequest] = useState<VaultIslandRequest | null>(null)
+  const [vaultIslandBusy, setVaultIslandBusy] = useState<'approve' | 'window' | 'reject' | null>(null)
+  const [vaultIslandError, setVaultIslandError] = useState('')
+  const vaultIslandRequestRef = useRef<VaultIslandRequest | null>(null)
+  vaultIslandRequestRef.current = vaultIslandRequest
   // Track notified events to prevent double notification
   const notifiedEventsRef = useRef<Set<string>>(new Set())
   const hoverGateRef = useRef({ searchActive, hovered, internalHover })
@@ -655,6 +710,7 @@ export default function DynamicIsland({
       !!notificationEvent ||
       !!mailInboundNotification ||
       !!approvalRequestNotification ||
+      !!vaultIslandRequest ||
       !!integrationToast ||
       !!authAttentionReminder ||
       !!selectedCalendarEvent ||
@@ -666,6 +722,7 @@ export default function DynamicIsland({
       notificationEvent,
       mailInboundNotification,
       approvalRequestNotification,
+      vaultIslandRequest,
       integrationToast,
       authAttentionReminder,
       selectedCalendarEvent,
@@ -682,6 +739,7 @@ export default function DynamicIsland({
     !!notificationEvent ||
     !!mailInboundNotification ||
     !!approvalRequestNotification ||
+    !!vaultIslandRequest ||
     !!integrationToast ||
     !!authAttentionReminder ||
     !!selectedCalendarEvent ||
@@ -820,10 +878,10 @@ export default function DynamicIsland({
   }, [isMusicActive, activeSlide])
 
   const slideContentMap = useMemo(() => {
-    if (notificationEvent || mailInboundNotification || approvalRequestNotification) return ['notification'] as const
+    if (notificationEvent || mailInboundNotification || approvalRequestNotification || vaultIslandRequest) return ['notification'] as const
     if (isMusicActive) return ['music', 'home', 'weather', 'calendar', 'voice', 'utilities'] as const
     return ['home', 'music', 'weather', 'calendar', 'voice', 'utilities'] as const
-  }, [isMusicActive, notificationEvent, mailInboundNotification, approvalRequestNotification])
+  }, [isMusicActive, notificationEvent, mailInboundNotification, approvalRequestNotification, vaultIslandRequest])
 
   useEffect(() => {
     if (!window.cosmic?.onCosmicMailInbound) return
@@ -906,6 +964,82 @@ export default function DynamicIsland({
     }, 10_000)
     return () => clearTimeout(t)
   }, [approvalRequestNotification])
+
+  const loadVaultIslandFromPending = useCallback(async (exceptRequestId?: string) => {
+    if (!window.cosmic?.vaultListPending) return
+    try {
+      const payload = await window.cosmic.vaultListPending()
+      const pending = Array.isArray(payload?.pending) ? payload.pending : []
+      const next = pending
+        .map((item: unknown) => vaultIslandFromPending(item))
+        .find((item): item is VaultIslandRequest => Boolean(item) && item.requestId !== exceptRequestId) || null
+      setVaultIslandRequest(next)
+      if (next) {
+        setVaultIslandBusy(null)
+        setVaultIslandError('')
+        setExpanded(true)
+      }
+    } catch {
+      // Settings still holds the queue if this snapshot fails.
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!window.cosmic?.onGatewayEvent) return
+    const unsubscribe = window.cosmic.onGatewayEvent((event: unknown) => {
+      const opened = parseVaultIslandOpen(event)
+      if (opened) {
+        setVaultIslandRequest(opened)
+        setVaultIslandBusy(null)
+        setVaultIslandError('')
+        setExpanded(true)
+        return
+      }
+      const current = vaultIslandRequestRef.current
+      if (!current || !isVaultIslandResolved(event, current.requestId)) return
+      setVaultIslandRequest(null)
+      setVaultIslandBusy(null)
+      setVaultIslandError('')
+      void loadVaultIslandFromPending(current.requestId)
+    })
+    return unsubscribe
+  }, [loadVaultIslandFromPending])
+
+  useEffect(() => {
+    void loadVaultIslandFromPending()
+    const offShown = window.cosmic?.onShown(() => {
+      void loadVaultIslandFromPending()
+    })
+    return () => offShown?.()
+  }, [loadVaultIslandFromPending])
+
+  const actOnVaultIsland = useCallback(async (kind: 'approve' | 'window' | 'reject') => {
+    const request = vaultIslandRequest
+    if (!request || vaultIslandBusy) return
+    if (kind === 'reject' ? !window.cosmic?.vaultRejectPending : !window.cosmic?.vaultApprovePending) {
+      setVaultIslandError('Vault approval is unavailable.')
+      return
+    }
+    setVaultIslandBusy(kind)
+    setVaultIslandError('')
+    try {
+      const result = kind === 'reject'
+        ? await window.cosmic.vaultRejectPending!(request.requestId)
+        : await window.cosmic.vaultApprovePending!(request.requestId, {
+            grant: kind === 'window' ? 'window' : 'once',
+            window_seconds: kind === 'window' ? VAULT_ALLOW_WINDOW_SECONDS : undefined,
+          })
+      if (String(result?.status || '').trim() === 'ignored') {
+        throw new Error('This vault request was already handled.')
+      }
+      setVaultIslandRequest(null)
+      setVaultIslandBusy(null)
+      await loadVaultIslandFromPending(request.requestId)
+    } catch (error) {
+      setVaultIslandBusy(null)
+      setVaultIslandError(error instanceof Error ? error.message : 'Action failed.')
+    }
+  }, [loadVaultIslandFromPending, vaultIslandBusy, vaultIslandRequest])
 
   useEffect(() => {
     if (!window.cosmic?.onWindowUpdate) return
@@ -1153,6 +1287,7 @@ export default function DynamicIsland({
       notificationEvent ||
       mailInboundNotification ||
       approvalRequestNotification ||
+      vaultIslandRequest ||
       integrationToast ||
       selectedCalendarEvent ||
       showMonthView ||
@@ -1188,6 +1323,7 @@ export default function DynamicIsland({
   }, [
     agentWorkPayload,
     approvalRequestNotification,
+    vaultIslandRequest,
     authAttentionItems,
     authAttentionPrefs,
     authAttentionReminder,
@@ -1649,6 +1785,7 @@ export default function DynamicIsland({
       notificationEvent ||
       mailInboundNotification ||
       approvalRequestNotification ||
+      vaultIslandRequest ||
       integrationToast
     ) {
       return
@@ -2524,7 +2661,7 @@ export default function DynamicIsland({
   // Managed by App.tsx now
 
 
-  const notificationIslandActive = !!(notificationEvent || mailInboundNotification || approvalRequestNotification)
+  const notificationIslandActive = !!(notificationEvent || mailInboundNotification || approvalRequestNotification || vaultIslandRequest)
 
   // Override 'expanded' style if Month View or integration / auth attention toast is open
   const islandStyle = selectedCalendarEvent
@@ -2535,9 +2672,11 @@ export default function DynamicIsland({
         ? { width: '500px', height: '156px', borderRadius: '0 0 34px 34px' }
       : integrationToast
         ? { width: '456px', height: '136px', borderRadius: '0 0 30px 30px' }
-        : notificationIslandActive
-          ? ISLAND_NOTIFICATION_DIMENSIONS
-          : {}
+        : vaultIslandRequest
+          ? { ...ISLAND_NOTIFICATION_DIMENSIONS, height: '168px' }
+          : notificationIslandActive
+            ? ISLAND_NOTIFICATION_DIMENSIONS
+            : {}
 
   const dynamicBgStyle = { background: `rgba(0, 0, 0, ${islandOpacity})` }
 
@@ -2830,7 +2969,71 @@ export default function DynamicIsland({
     )
   }
 
+  const renderVaultIsland = () => {
+    if (!vaultIslandRequest) return null
+    const request = vaultIslandRequest
+    const kindLabel = vaultIslandKindLabel(request)
+    const reason = request.purpose || request.summary
+    const meta = [vaultIslandHeadline(request), request.username].filter(Boolean).join(' · ')
+    const busy = Boolean(vaultIslandBusy)
+    return (
+      <div className="slide slide-vault-island">
+        <div className="vault-island-mark" aria-hidden>
+          <VaultIslandShield />
+        </div>
+        <div className="vault-island-copy">
+          <div className="vault-island-kicker">
+            <span>Password Vault</span>
+            <span className="vault-island-kind">{kindLabel}</span>
+          </div>
+          <div className="vault-island-title">{request.title}</div>
+          {meta ? <div className="vault-island-meta">{meta}</div> : null}
+          {reason ? <div className="vault-island-reason">{reason}</div> : null}
+          {vaultIslandError ? <div className="vault-island-error">{vaultIslandError}</div> : null}
+        </div>
+        <div className="vault-island-actions">
+          <button
+            type="button"
+            className="vault-island-action vault-island-action--allow"
+            disabled={busy}
+            onClick={(event) => {
+              event.stopPropagation()
+              void actOnVaultIsland('approve')
+            }}
+          >
+            {vaultIslandBusy === 'approve' ? 'Working…' : vaultIslandAllowLabel(request)}
+          </button>
+          {request.action === 'use_entry' ? (
+            <button
+              type="button"
+              className="vault-island-action vault-island-action--window"
+              disabled={busy}
+              onClick={(event) => {
+                event.stopPropagation()
+                void actOnVaultIsland('window')
+              }}
+            >
+              {vaultIslandBusy === 'window' ? 'Working…' : vaultIslandAllowWindowLabel()}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="vault-island-action vault-island-action--deny"
+            disabled={busy}
+            onClick={(event) => {
+              event.stopPropagation()
+              void actOnVaultIsland('reject')
+            }}
+          >
+            {vaultIslandBusy === 'reject' ? 'Denying…' : 'Deny'}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   const renderContent = () => {
+    if (vaultIslandRequest) return renderVaultIsland()
     if (authAttentionReminder) return renderAuthAttentionReminder()
     if (integrationToast) return renderIntegrationToast()
     if (agentWorkPayload) return <AgentWorkSlide payload={agentWorkPayload} />
@@ -2861,7 +3064,7 @@ export default function DynamicIsland({
         onWheel={onWheel}
         style={{
           ...dynamicBgStyle, // Apply background opacity here
-          ...(expanded && (showMonthView || selectedCalendarEvent || notificationEvent || mailInboundNotification || approvalRequestNotification || integrationToast || authAttentionReminder)
+          ...(expanded && (showMonthView || selectedCalendarEvent || notificationEvent || mailInboundNotification || approvalRequestNotification || vaultIslandRequest || integrationToast || authAttentionReminder)
             ? islandStyle
             : {}),
           pointerEvents: 'auto'
@@ -2877,7 +3080,7 @@ export default function DynamicIsland({
 
         {expanded && !sessionIslandActive && (
           <>
-            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && !authAttentionReminder && !agentWorkPayload && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !vaultIslandRequest && !integrationToast && !authAttentionReminder && !agentWorkPayload && (
               <>
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', left: 0, width: '40px', zIndex: 50, cursor: activeSlide > 0 ? 'w-resize' : 'default' }} onMouseEnter={() => switchSlide('prev')} />
                 <div style={{ position: 'absolute', top: 0, bottom: '50px', right: 0, width: '40px', zIndex: 50, cursor: activeSlide < TOTAL_SLIDES - 1 ? 'e-resize' : 'default' }} onMouseEnter={() => switchSlide('next')} />
@@ -2897,7 +3100,7 @@ export default function DynamicIsland({
               </button>
             )}
 
-            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !integrationToast && !authAttentionReminder && !agentWorkPayload && (
+            {!showMonthView && !selectedCalendarEvent && !notificationEvent && !mailInboundNotification && !approvalRequestNotification && !vaultIslandRequest && !integrationToast && !authAttentionReminder && !agentWorkPayload && (
               <>
                 <div className="island-anchor-container">
                   <button className={`anchor-btn ${isAnchored ? 'active' : ''}`} onClick={(e) => { e.stopPropagation(); setIsAnchored(!isAnchored) }}>

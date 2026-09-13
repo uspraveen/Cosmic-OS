@@ -207,7 +207,8 @@ contextBridge.exposeInMainWorld('cosmic', {
   vaultGetEntry: (entryId: string) => ipcRenderer.invoke('vault:get-entry', entryId),
   vaultListAudit: () => ipcRenderer.invoke('vault:list-audit'),
   vaultListPending: () => ipcRenderer.invoke('vault:list-pending'),
-  vaultApprovePending: (requestId: string) => ipcRenderer.invoke('vault:approve-pending', requestId),
+  vaultApprovePending: (requestId: string, payload?: { grant?: 'once' | 'window'; window_seconds?: number }) =>
+    ipcRenderer.invoke('vault:approve-pending', requestId, payload || { grant: 'once' }),
   vaultRejectPending: (requestId: string) => ipcRenderer.invoke('vault:reject-pending', requestId),
   vaultProvidePending: (requestId: string, payload: any) => ipcRenderer.invoke('vault:provide-pending', requestId, payload),
   browserRespondInterrupt: (requestId: string, answer: string) => ipcRenderer.invoke('browser:respond-interrupt', requestId, answer),

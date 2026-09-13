@@ -2745,6 +2745,167 @@
   min-width: 10px;
 }
 
+/* Vault approval: same island type scale, vault-hero glyph + settings buttons */
+.slide.slide-vault-island {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.vault-island-mark {
+  flex-shrink: 0;
+  width: 72px;
+  margin: -6px 0 -8px -10px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.vault-island-mark svg {
+  display: block;
+  width: 88px;
+  height: 110px;
+  opacity: 0.78;
+}
+
+.vault-island-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 2px 14px 2px 2px;
+}
+
+.vault-island-kicker {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vault-island-kicker > span:first-child {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.vault-island-kind {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.42);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vault-island-title {
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  color: rgba(255, 255, 255, 0.94);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vault-island-meta,
+.vault-island-reason {
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.48);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vault-island-reason {
+  color: rgba(255, 255, 255, 0.34);
+}
+
+.vault-island-error {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 176, 176, 0.92);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vault-island-actions {
+  width: 128px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  gap: 6px;
+  padding-left: 14px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.vault-island-action {
+  appearance: none;
+  border: 1px solid transparent;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: center;
+  transition: opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.vault-island-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+
+.vault-island-action--allow {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #0b0f14;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.vault-island-action--allow:hover {
+  background: #fff;
+}
+
+.vault-island-action--window,
+.vault-island-action--deny {
+  height: 22px;
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.vault-island-action--window:hover,
+.vault-island-action--deny:hover {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.vault-island-action--deny {
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.34);
+}
+
 /* Inbox message card (.agent-email-inbox-msg-inner + inbound stripe) */
 .di-notify-card {
   border-radius: 12px;
@@ -2778,8 +2939,21 @@
     var(--di-inbox-surface-raised);
 }
 
-.di-notify-card--calendar {
-  background: var(--di-inbox-surface-raised);
+.di-notify-strip-action--allow {
+  background: rgba(255, 255, 255, 0.94);
+  border-color: transparent;
+  color: #0b0f14;
+}
+
+.di-notify-strip-action--allow:hover {
+  background: #fff;
+  border-color: transparent;
+}
+
+.di-notify-strip-action:disabled,
+.di-notify-strip-action--allow:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 /* Strip: .agent-email-inbox-mailbox-label + mono address + sync-style action */

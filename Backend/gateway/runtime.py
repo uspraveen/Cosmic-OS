@@ -47,7 +47,7 @@ from .event_automation_store import EventAutomationStore
 from .gmail_approval_store import GmailApprovalStore
 from .gmail_context_store import GmailContextStore
 from .sandbox_permission_store import SandboxPermissionStore
-from .vault.store import VaultStore, decrypt_entry_secrets
+from .vault.store import POLICY_WINDOW, VaultStore, decrypt_entry_secrets
 from .browser_interrupts import BrowserInterruptManager
 from .slide_workflow_choice_store import SlideWorkflowChoiceStore
 from .memory import MemoryWriteAuditStore
@@ -5297,6 +5297,7 @@ class GatewayRuntime:
             "username": self._safe_text(payload.get("username")),
             "site_domain": self._safe_text(payload.get("site_domain")),
             "purpose": self._safe_text(pending.get("purpose")),
+            "credential_kind": self._safe_text(payload.get("credential_kind")) or "login",
             "status": status,
             "can_respond": status == "pending",
             "created_at": self._safe_text(pending.get("created_at")),
@@ -5317,18 +5318,28 @@ class GatewayRuntime:
         payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
         request_id = self._safe_text(pending.get("request_id")) or ""
         action = self._safe_text(pending.get("action")) or "use_entry"
+        title = self._safe_text(payload.get("title")) or self._safe_text(payload.get("site_domain")) or "a site"
+        kind = self._safe_text(payload.get("credential_kind")) or "login"
+        kind_label = "API key" if kind == "api_key" else "token" if kind == "token" else "login"
         if action == "browser_credential_request":
-            summary = f"The browser agent needs credentials for {payload.get('title') or 'a site'} to finish its task"
+            summary = f"The browser agent needs credentials for {title} to finish its task"
         elif action == "add_entry":
-            summary = f"Cosmic wants to save credentials for {payload.get('title') or 'a site'} in your vault"
+            summary = f"Cosmic wants to save a {kind_label} for {title} in your vault"
         else:
-            summary = f"Cosmic wants to use your saved login for {payload.get('title') or 'a site'}"
+            summary = f"Cosmic wants to use your saved {kind_label} for {title}"
         event = {
             "type": "vault.notification",
             "kind": "approval",
             "event_type": "vault.approval",
             "notification_id": f"vault:request:{request_id}",
             "request_id": request_id,
+            "action": action,
+            "title": title,
+            "site_domain": self._safe_text(payload.get("site_domain")),
+            "username": self._safe_text(payload.get("username")),
+            "purpose": self._safe_text(pending.get("purpose")),
+            "credential_kind": kind,
+            "status": self._safe_text(pending.get("status")) or "pending",
             "summary": summary,
             "tab": "chat",
             "timestamp": utcnow_iso(),
@@ -5357,7 +5368,13 @@ class GatewayRuntime:
         await self._publish_vault_notification(pending)
         return pending
 
-    async def approve_vault_request(self, request_id: str) -> dict[str, Any]:
+    async def approve_vault_request(
+        self,
+        request_id: str,
+        *,
+        grant: str = "once",
+        window_seconds: float | None = None,
+    ) -> dict[str, Any]:
         pending = self.vault_store.get_pending(request_id)
         if not pending:
             raise ValueError("Vault request not found.")
@@ -5389,7 +5406,37 @@ class GatewayRuntime:
                 }
             )
             entry_id = entry.get("entry_id")
+        grant_kind = grant if grant in {"once", "window"} else "once"
+        if action == "use_entry" and entry_id and grant_kind == "window":
+            seconds = window_seconds if window_seconds and window_seconds > 0 else 15 * 60
+            seconds = min(float(seconds), 24 * 3600)
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=seconds)
+            ).isoformat().replace("+00:00", "Z")
+            self.vault_store.set_policy(entry_id, POLICY_WINDOW, expires_at)
+            self.vault_store.append_audit(
+                entry_id,
+                "user",
+                "policy_change",
+                task_id,
+                detail=f"mode=window seconds={int(seconds)}",
+            )
+            logger.info(
+                "vault.approve_window entry=%s request=%s seconds=%s expires_at=%s",
+                entry_id,
+                request_id,
+                int(seconds),
+                expires_at,
+            )
         approved = self.vault_store.mark_pending(request_id, "approved")
+        if action == "use_entry" and entry_id and grant_kind == "window":
+            # Policy now covers the window; consume the one-shot grant so it
+            # cannot skip an ask after the window expires.
+            self.vault_store.take_approved_use(
+                entry_id,
+                task_id,
+                self._safe_text(pending.get("session_id")) or None,
+            )
         if entry_id:
             self.vault_store.append_audit(
                 entry_id,
@@ -5400,7 +5447,7 @@ class GatewayRuntime:
         if approved:
             await self._publish_vault_request_block({**approved, "status": "approved"})
             self._schedule_background_task(
-                self._continue_turn_after_vault({**approved, "status": "approved"}),
+                self._continue_turn_after_vault({**approved, "status": "approved", "entry_id": entry_id}),
                 name=f"vault-continuation-{request_id}",
             )
         return {"status": "approved", "request": approved, "entry_id": entry_id}
@@ -5541,6 +5588,15 @@ class GatewayRuntime:
                 f"The user approved saving the credentials you created for {title} in the "
                 "password vault. They are stored now. Continue the user's original task — "
                 "do not call vault_save_entry again for these credentials."
+            )
+        entry_id = self._safe_text(pending.get("entry_id"))
+        credential_ref = f"vault:{entry_id}" if entry_id else ""
+        if credential_ref:
+            return (
+                "[VAULT CONTINUATION — system message, not from the user]\n"
+                f"The user approved vault access for {title}. Do not call vault_lookup again. "
+                f"Use credential_ref {credential_ref} for this task now — pass it to the specialist "
+                "that needs the secret. The password itself never enters your context."
             )
         return (
             "[VAULT CONTINUATION — system message, not from the user]\n"

@@ -11,6 +11,7 @@ Two trust surfaces:
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -23,6 +24,7 @@ from .store import (
     POLICY_MODES,
     POLICY_WINDOW,
     VaultStore,
+    agent_lookup_metadata,
     decrypt_entry_secrets,
     derive_site_domain,
     entry_is_expired,
@@ -30,6 +32,8 @@ from .store import (
     normalize_credential_kind,
     normalize_expires_at,
 )
+
+logger = logging.getLogger(__name__)
 from .totp import generate_totp_code
 
 logger = logging.getLogger(__name__)
@@ -339,7 +343,26 @@ async def list_pending(request: Request):
 async def approve_pending(request_id: str, request: Request):
     _check_local_token(request)
     runtime = request.app.state.gateway_runtime
-    return await runtime.approve_vault_request(request_id)
+    payload: dict[str, Any] = {}
+    try:
+        raw = await request.body()
+        if raw:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                payload = parsed
+    except (TypeError, ValueError):
+        payload = {}
+    grant = str(payload.get("grant") or "once").strip().lower() or "once"
+    window_seconds = payload.get("window_seconds")
+    try:
+        window_value = float(window_seconds) if window_seconds is not None else None
+    except (TypeError, ValueError):
+        window_value = None
+    return await runtime.approve_vault_request(
+        request_id,
+        grant=grant,
+        window_seconds=window_value,
+    )
 
 
 @router.post("/channels/vault/pending/{request_id}/reject")
@@ -381,8 +404,9 @@ async def internal_list_sites(request: Request):
 async def internal_lookup(body: LookupRequest, request: Request):
     """Resolve a site query to a credential the orchestrator may use.
 
-    Never returns the password: the caller receives a credential_ref and hands
-    it to delegate_to_agent; the runtime resolves the secret at dispatch time.
+    Never returns the password: the caller receives a credential_ref and any
+    usage notes the user left for Cosmic. The runtime resolves the secret at
+    dispatch time.
     """
     _check_internal_token(request)
     store = _get_store(request)
@@ -410,10 +434,40 @@ async def internal_lookup(body: LookupRequest, request: Request):
     entry = matches[0]
     entry_id = entry["entry_id"]
 
+    policy = store.get_policy(entry_id)
     allowed = store.policy_allows_use(entry_id)
     if not allowed:
-        allowed = store.take_approved_use(entry_id, body.task_id) is not None
+        allowed = store.take_approved_use(entry_id, body.task_id, body.session_id) is not None
+    logger.info(
+        "vault.lookup entry=%s policy_mode=%s window_expires_at=%s allowed=%s task=%s session=%s",
+        entry_id,
+        policy.get("mode"),
+        policy.get("window_expires_at"),
+        allowed,
+        body.task_id,
+        body.session_id,
+    )
     if not allowed:
+        existing = store.get_open_pending_use(entry_id)
+        if existing:
+            store.append_audit(
+                entry_id, "orchestrator", "lookup_denied", body.task_id, result="permission_required"
+            )
+            return {
+                "status": "permission_required",
+                "request_id": existing.get("request_id"),
+                "entry_id": entry_id,
+                "title": entry["title"],
+                "username": entry["username"],
+                "_cosmic_ui": {
+                    "render": "trusted_inline_block",
+                    "block_type": "vault_permission_request",
+                    "request_id": existing.get("request_id"),
+                    "summary": (
+                        f"Vault access needed for {entry['title']} — waiting for user approval."
+                    ),
+                },
+            }
         pending = await request.app.state.gateway_runtime.create_vault_pending_and_notify(
             {
                 "action": "use_entry",
@@ -460,15 +514,8 @@ async def internal_lookup(body: LookupRequest, request: Request):
     store.append_audit(entry_id, "orchestrator", "use", body.task_id)
     return {
         "status": "ok",
-        "entry_id": entry_id,
         "credential_ref": f"{CREDENTIAL_REF_PREFIX}{entry_id}",
-        "title": entry["title"],
-        "site_url": entry["site_url"],
-        "site_domain": entry["site_domain"],
-        "username": entry["username"],
-        "credential_kind": normalize_credential_kind(entry.get("credential_kind")),
-        "expires_at": normalize_expires_at(entry.get("expires_at")),
-        "expired": entry_is_expired(entry.get("expires_at")),
+        **agent_lookup_metadata(entry),
         "totp_code": totp_code,
         "totp_seconds_remaining": totp_remaining,
     }
@@ -490,6 +537,9 @@ async def internal_resolve(body: ResolveRequest, request: Request):
     if not entry:
         raise HTTPException(status_code=404, detail="Vault entry not found.")
     secrets = decrypt_entry_secrets(entry)
+    # Allow once is consumed when the secret is actually injected, so a leftover
+    # approval cannot skip the next unrelated lookup.
+    store.take_approved_use(entry["entry_id"], body.task_id)
     store.append_audit(entry["entry_id"], "orchestrator", "resolve", body.task_id)
     return {
         "credential_ref": ref,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import sys
 import time
@@ -20,6 +21,7 @@ from gateway.vault.store import (  # noqa: E402
     POLICY_ALWAYS_ASK,
     POLICY_WINDOW,
     VaultStore,
+    agent_lookup_metadata,
     decrypt_entry_secrets,
     derive_site_domain,
     entry_is_expired,
@@ -127,13 +129,52 @@ def test_pending_use_request_is_consumed_once(store):
     assert store.get_pending(pending["request_id"])["status"] == "consumed"
 
 
-def test_take_approved_use_is_scoped_to_task(store):
+def test_take_approved_use_survives_continuation_task_id(store):
+    entry = _entry(store)
+    pending = store.create_pending(
+        {
+            "action": "use_entry",
+            "entry_id": entry["entry_id"],
+            "task_id": "t1",
+            "session_id": "sess-1",
+        }
+    )
+    store.mark_pending(pending["request_id"], "approved")
+    taken = store.take_approved_use(entry["entry_id"], "req_vaultcont_new", "sess-1")
+    assert taken is not None and taken["request_id"] == pending["request_id"]
+    assert store.take_approved_use(entry["entry_id"], "req_vaultcont_new", "sess-1") is None
+
+
+def test_take_approved_use_survives_new_task_without_session(store):
     entry = _entry(store)
     pending = store.create_pending(
         {"action": "use_entry", "entry_id": entry["entry_id"], "task_id": "t1"}
     )
     store.mark_pending(pending["request_id"], "approved")
-    assert store.take_approved_use(entry["entry_id"], "other-task") is None
+    taken = store.take_approved_use(entry["entry_id"], "other-task")
+    assert taken is not None and taken["request_id"] == pending["request_id"]
+
+
+def test_take_approved_use_does_not_consume_another_entry(store):
+    first = _entry(store, title="GitHub", site_url="https://github.com")
+    second = _entry(store, title="HuggingFace", site_url="https://huggingface.co")
+    pending = store.create_pending(
+        {"action": "use_entry", "entry_id": first["entry_id"], "task_id": "t1"}
+    )
+    store.mark_pending(pending["request_id"], "approved")
+    assert store.take_approved_use(second["entry_id"], "t2") is None
+    assert store.take_approved_use(first["entry_id"], "t2") is not None
+
+
+def test_get_open_pending_use_reuses_live_card(store):
+    entry = _entry(store)
+    pending = store.create_pending(
+        {"action": "use_entry", "entry_id": entry["entry_id"], "task_id": "t1"}
+    )
+    found = store.get_open_pending_use(entry["entry_id"])
+    assert found is not None and found["request_id"] == pending["request_id"]
+    store.mark_pending(pending["request_id"], "approved")
+    assert store.get_open_pending_use(entry["entry_id"]) is None
 
 
 def test_agent_add_entry_flow_uses_preencrypted_payload(store):
@@ -207,6 +248,23 @@ def test_add_entry_defaults_kind_to_login(store):
     assert entry["credential_kind"] == "login"
     assert entry["expires_at"] is None
     assert entry["expired"] is False
+
+
+def test_agent_lookup_metadata_includes_notes_not_secrets(store):
+    entry = _entry(
+        store,
+        notes="Hugging Face key — use only to read.",
+        totp_seed="JBSWY3DPEHPK3PXP",
+    )
+    raw = store.get_entry(entry["entry_id"])
+    meta = agent_lookup_metadata(raw)
+    dumped = json.dumps(meta)
+    assert meta["notes"] == "Hugging Face key — use only to read."
+    assert "password" not in meta
+    assert "totp_seed" not in meta
+    assert "hunter2" not in dumped
+    assert "JBSWY3DPEHPK3PXP" not in dumped
+    assert decrypt_entry_secrets(raw)["notes"] == meta["notes"]
 
 
 def test_update_entry_can_set_and_clear_expiry(store):
