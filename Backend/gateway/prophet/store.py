@@ -624,6 +624,26 @@ class ProphetStore:
                     ON prophet_story_index(url_hash);
                 CREATE INDEX IF NOT EXISTS idx_prophet_story_index_headline
                     ON prophet_story_index(headline_key);
+
+                CREATE TABLE IF NOT EXISTS prophet_notifications (
+                    notification_id TEXT PRIMARY KEY,
+                    edition_id TEXT NOT NULL,
+                    edition_date TEXT NOT NULL,
+                    slot TEXT NOT NULL,
+                    headline TEXT,
+                    story_count INTEGER NOT NULL DEFAULT 0,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    snoozed_until TEXT,
+                    state_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    delivered_at TEXT,
+                    opened_at TEXT,
+                    UNIQUE(edition_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_prophet_notifications_state
+                    ON prophet_notifications(state, edition_date DESC);
                 """
             )
             now = utcnow_iso()
@@ -1379,3 +1399,150 @@ class ProphetStore:
         connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
         return connection
+
+    # ── Notification state machine ──────────────────────────────
+    # One durable row per edition. The WS ping is a hint; this row is the
+    # truth. State is per-notification, not per-device, so acting on one
+    # device settles it everywhere.
+
+    def create_notification_for_edition(
+        self,
+        *,
+        edition_id: str,
+        edition_date: str,
+        slot: str,
+        headline: str | None,
+        story_count: int,
+    ) -> dict[str, Any]:
+        now = utcnow_iso()
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO prophet_notifications (
+                    notification_id, edition_id, edition_date, slot, headline,
+                    story_count, state, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ON CONFLICT(edition_id) DO UPDATE SET
+                    headline = excluded.headline,
+                    story_count = excluded.story_count,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    f"pnote_{uuid4().hex[:12]}",
+                    _clean_text(edition_id, limit=80),
+                    _clean_text(edition_date, limit=20),
+                    (_clean_text(slot) or "").lower(),
+                    _clean_text(headline, limit=300),
+                    max(0, int(story_count or 0)),
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM prophet_notifications WHERE edition_id = ?",
+                (_clean_text(edition_id, limit=80),),
+            ).fetchone()
+        return dict(row) if row is not None else {}
+
+    def list_pending_notifications(
+        self,
+        *,
+        edition_date: str | None = None,
+        limit: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Notifications that should still surface: pending, delivered but not
+        acted on, or snoozed whose snooze has expired."""
+        now = utcnow_iso()
+        query = """
+            SELECT * FROM prophet_notifications
+            WHERE state IN ('pending', 'delivered')
+               OR (state = 'snoozed' AND snoozed_until IS NOT NULL AND snoozed_until <= ?)
+        """
+        params: list[Any] = [now]
+        if edition_date:
+            query += " AND edition_date = ?"
+            params.append(_clean_text(edition_date, limit=20))
+        query += " ORDER BY edition_date DESC, slot ASC LIMIT ?"
+        params.append(max(1, min(10, int(limit or 2))))
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_notification(self, notification_id: str | None) -> dict[str, Any] | None:
+        normalized = _clean_text(notification_id, limit=80)
+        if not normalized:
+            return None
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM prophet_notifications WHERE notification_id = ?",
+                (normalized,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_notification_for_edition(self, edition_id: str | None) -> dict[str, Any] | None:
+        normalized = _clean_text(edition_id, limit=80)
+        if not normalized:
+            return None
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM prophet_notifications WHERE edition_id = ?",
+                (normalized,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def mark_notification_state(
+        self,
+        notification_id: str,
+        *,
+        state: str,
+        snoozed_until: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_state = (_clean_text(state) or "").lower()
+        if normalized_state not in {"pending", "delivered", "opened", "snoozed", "ignored"}:
+            return None
+        now = utcnow_iso()
+        with self._lock, closing(self._connect()) as connection:
+            existing = connection.execute(
+                "SELECT * FROM prophet_notifications WHERE notification_id = ?",
+                (_clean_text(notification_id, limit=80),),
+            ).fetchone()
+            if existing is None:
+                return None
+            # Terminal states win: once opened or ignored anywhere, no other
+            # device may move it back.
+            if existing["state"] in {"opened", "ignored"}:
+                return dict(existing)
+            delivered_at = existing["delivered_at"]
+            opened_at = existing["opened_at"]
+            if normalized_state == "delivered" and not delivered_at:
+                delivered_at = now
+            if normalized_state == "opened":
+                opened_at = now
+                if not delivered_at:
+                    delivered_at = now
+            connection.execute(
+                """
+                UPDATE prophet_notifications
+                SET state = ?, snoozed_until = ?, state_reason = ?,
+                    updated_at = ?, delivered_at = ?, opened_at = ?
+                WHERE notification_id = ?
+                """,
+                (
+                    normalized_state,
+                    _clean_text(snoozed_until, limit=40) if normalized_state == "snoozed" else None,
+                    _clean_text(reason, limit=200),
+                    now,
+                    delivered_at,
+                    opened_at,
+                    _clean_text(notification_id, limit=80),
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM prophet_notifications WHERE notification_id = ?",
+                (_clean_text(notification_id, limit=80),),
+            ).fetchone()
+        return dict(row) if row is not None else None

@@ -715,6 +715,17 @@ async def _handle_realtime_websocket_message(
             logger.info("gateway.mobile_presence.invalid channel=%s payload=%s", channel, payload)
         return
 
+    if message_type == "prophet.notification.state":
+        notification_id = str(payload.get("notification_id") or "").strip()
+        if notification_id:
+            runtime.update_prophet_notification_state(
+                notification_id,
+                state=str(payload.get("state") or "").strip(),
+                snoozed_until=str(payload.get("snoozed_until") or "").strip() or None,
+                reason=str(payload.get("reason") or "").strip() or f"{platform}_ws",
+            )
+        return
+
     if message_type == "resume":
         known_task_ids = payload.get("known_task_ids")
         if not isinstance(known_task_ids, list):

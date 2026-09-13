@@ -67,6 +67,13 @@ class ProphetArchiveSearchRequest(BaseModel):
     request_id: str | None = Field(default=None, max_length=120)
 
 
+class ProphetNotificationStateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    state: str = Field(..., min_length=1, max_length=20)
+    snoozed_until: str | None = Field(default=None, max_length=40)
+    reason: str | None = Field(default=None, max_length=200)
+
+
 def _apply_preferences(
     runtime: GatewayRuntime,
     payload: ProphetPreferencesUpdateRequest,
@@ -159,6 +166,35 @@ async def update_desktop_prophet_preferences(
     runtime: GatewayRuntime = Depends(get_runtime),
 ) -> dict[str, Any]:
     return _apply_preferences(runtime, payload)
+
+
+@router.get("/desktop/prophet/notifications")
+async def list_desktop_prophet_notifications(
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return {"notifications": runtime.prophet_pending_notifications(limit=2)}
+
+
+@router.post("/desktop/prophet/notifications/{notification_id}/state")
+async def update_desktop_prophet_notification_state(
+    notification_id: str,
+    payload: ProphetNotificationStateRequest,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    updated = runtime.update_prophet_notification_state(
+        notification_id,
+        state=payload.state,
+        snoozed_until=payload.snoozed_until,
+        reason=payload.reason,
+    )
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Prophet notification not found or invalid state.",
+        )
+    return {"notification": updated}
 
 
 @router.get("/internal/prophet/edition")

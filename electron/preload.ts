@@ -188,6 +188,8 @@ contextBridge.exposeInMainWorld('cosmic', {
   cancelGatewayResponse: (payload: { requestId?: string; taskId?: string }) => ipcRenderer.invoke('gateway:cancel-response', payload),
   backgroundGatewayRequest: (payload: { requestId: string }) => ipcRenderer.invoke('gateway:background-request', payload),
   foregroundGatewayRequest: (payload: { requestId: string }) => ipcRenderer.invoke('gateway:foreground-request', payload),
+  setGatewayProphetNotificationState: (payload: { notificationId: string; state: string; snoozedUntil?: string; reason?: string }) =>
+    ipcRenderer.invoke('gateway:prophet-notification-state', payload),
   listGatewaySessions: () => ipcRenderer.invoke('gateway:list-sessions'),
   getGatewaySessionHistory: (sessionId: string) => ipcRenderer.invoke('gateway:get-session-history', sessionId),
   getGatewayRequestTraces: (sessionId: string) => ipcRenderer.invoke('gateway:get-request-traces', sessionId),

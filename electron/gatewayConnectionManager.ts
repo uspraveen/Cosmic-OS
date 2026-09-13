@@ -676,6 +676,26 @@ export class GatewayConnectionManager {
     return { ok: true, requestId: normalizedRequestId }
   }
 
+  setProphetNotificationState(
+    notificationId: string,
+    state: string,
+    opts?: { snoozedUntil?: string; reason?: string },
+  ) {
+    const normalizedId = String(notificationId || '').trim()
+    const normalizedState = String(state || '').trim()
+    if (!normalizedId || !normalizedState) {
+      throw new Error('notificationId and state are required.')
+    }
+    this.sendJson({
+      type: 'prophet.notification.state',
+      notification_id: normalizedId,
+      state: normalizedState,
+      snoozed_until: opts?.snoozedUntil || undefined,
+      reason: opts?.reason || 'desktop',
+    })
+    return { ok: true }
+  }
+
   foregroundRequest(requestId: string) {
     const normalizedRequestId = String(requestId || '').trim()
     if (!normalizedRequestId) {

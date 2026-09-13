@@ -431,3 +431,102 @@ def test_similar_stories_ranks_by_cosine_and_respects_window(tmp_path: Path) -> 
                or item["edition_id"] == first["edition_id"] for item in matches)
     assert matches[0]["semantic_similarity"] >= 0.99
 
+
+
+def test_notification_lifecycle(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    result = store.publish_edition(_edition())
+    edition_id = result['edition_id']
+
+    note = store.create_notification_for_edition(
+        edition_id=edition_id,
+        edition_date='2026-09-11',
+        slot='morning',
+        headline='Lead story about agents',
+        story_count=5,
+    )
+    assert note['state'] == 'pending'
+    assert note['edition_id'] == edition_id
+
+    pending = store.list_pending_notifications(edition_date='2026-09-11')
+    assert len(pending) == 1
+    assert pending[0]['notification_id'] == note['notification_id']
+
+    delivered = store.mark_notification_state(note['notification_id'], state='delivered', reason='test')
+    assert delivered is not None
+    assert delivered['state'] == 'delivered'
+    assert delivered['delivered_at'] is not None
+
+    # Still surfaces until opened or ignored
+    pending = store.list_pending_notifications(edition_date='2026-09-11')
+    assert len(pending) == 1
+
+    opened = store.mark_notification_state(note['notification_id'], state='opened', reason='test')
+    assert opened is not None
+    assert opened['state'] == 'opened'
+    assert opened['opened_at'] is not None
+
+    # Terminal: no longer pending
+    pending = store.list_pending_notifications(edition_date='2026-09-11')
+    assert pending == []
+
+    # Terminal states win - cannot move back
+    again = store.mark_notification_state(note['notification_id'], state='delivered', reason='test')
+    assert again is not None
+    assert again['state'] == 'opened'
+
+
+def test_notification_snooze_expires(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+    store = _store(tmp_path)
+    result = store.publish_edition(_edition())
+
+    note = store.create_notification_for_edition(
+        edition_id=result['edition_id'],
+        edition_date='2026-09-11',
+        slot='morning',
+        headline='Lead',
+        story_count=5,
+    )
+    past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat().replace('+00:00', 'Z')
+    future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat().replace('+00:00', 'Z')
+
+    snoozed = store.mark_notification_state(
+        note['notification_id'], state='snoozed', snoozed_until=future, reason='later',
+    )
+    assert snoozed is not None
+    assert snoozed['state'] == 'snoozed'
+    assert store.list_pending_notifications(edition_date='2026-09-11') == []
+
+    # Expired snooze resurfaces
+    snoozed = store.mark_notification_state(
+        note['notification_id'], state='snoozed', snoozed_until=past, reason='later',
+    )
+    assert snoozed is not None
+    pending = store.list_pending_notifications(edition_date='2026-09-11')
+    assert len(pending) == 1
+    assert pending[0]['state'] == 'snoozed'
+
+
+def test_notification_upsert_on_republish(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = store.publish_edition(_edition())
+    second = store.publish_edition(_edition())
+    assert first['edition_id'] == second['edition_id']
+
+    note = store.create_notification_for_edition(
+        edition_id=first['edition_id'],
+        edition_date='2026-09-11',
+        slot='morning',
+        headline='Original',
+        story_count=5,
+    )
+    note2 = store.create_notification_for_edition(
+        edition_id=first['edition_id'],
+        edition_date='2026-09-11',
+        slot='morning',
+        headline='Updated headline',
+        story_count=6,
+    )
+    assert note['notification_id'] == note2['notification_id']
+    assert note2['headline'] == 'Updated headline'

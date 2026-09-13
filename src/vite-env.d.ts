@@ -330,6 +330,7 @@ interface Window {
     cancelGatewayResponse: (payload: { requestId?: string; taskId?: string }) => Promise<{ ok: boolean }>
     backgroundGatewayRequest: (payload: { requestId: string }) => Promise<{ ok: boolean; requestId: string }>
     foregroundGatewayRequest: (payload: { requestId: string }) => Promise<{ ok: boolean; requestId: string }>
+    setGatewayProphetNotificationState: (payload: { notificationId: string; state: string; snoozedUntil?: string; reason?: string }) => Promise<{ ok: boolean }>
     listGatewaySessions: () => Promise<{ sessions: any[] }>
     getGatewaySessionHistory: (sessionId: string) => Promise<{ session_id: string; messages: any[]; heartbeat_consumptions?: any[] }>
     getGatewayRequestTraces: (sessionId: string) => Promise<{ session_id: string; request_traces: any[] }>

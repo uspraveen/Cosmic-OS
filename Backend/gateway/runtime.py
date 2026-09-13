@@ -9921,8 +9921,16 @@ class GatewayRuntime:
             return
         edition = result.get("edition") if isinstance(result.get("edition"), dict) else {}
         lead = edition.get("lead") if isinstance(edition.get("lead"), dict) else {}
+        notification = self.prophet_store.create_notification_for_edition(
+            edition_id=str(result.get("edition_id") or ""),
+            edition_date=str(result.get("edition_date") or ""),
+            slot=str(result.get("slot") or ""),
+            headline=lead.get("headline"),
+            story_count=int(result.get("story_count") or 0),
+        )
         event = {
             "type": "prophet.edition.published",
+            "notification_id": notification.get("notification_id"),
             "edition_id": result.get("edition_id"),
             "edition_date": result.get("edition_date"),
             "slot": result.get("slot"),
@@ -9931,16 +9939,58 @@ class GatewayRuntime:
             "headline": lead.get("headline"),
             "timestamp": utcnow_iso(),
         }
+        delivered_channels: list[str] = []
         for adapter in self.registry.adapters.values():
             if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
                 continue
             try:
-                await adapter.broadcast_all(event)
+                connections = await adapter.list_connections()
             except Exception:
-                logger.exception(
-                    "gateway.prophet_edition_broadcast_failed platform=%s",
-                    adapter.platform,
-                )
+                connections = []
+            for conn in connections:
+                channel = str(conn.get("channel") or "").strip()
+                if not channel:
+                    continue
+                try:
+                    await adapter.send(event, channel=channel)
+                    delivered_channels.append(channel)
+                except Exception:
+                    logger.exception(
+                        "gateway.prophet_edition_deliver_failed channel=%s",
+                        channel,
+                    )
+        if delivered_channels and notification.get("notification_id"):
+            self.prophet_store.mark_notification_state(
+                str(notification["notification_id"]),
+                state="delivered",
+                reason=f"live:{len(delivered_channels)} device(s)",
+            )
+
+    def prophet_pending_notifications(self, *, limit: int = 2) -> list[dict[str, Any]]:
+        """Today's notifications that still need to surface on a device."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        try:
+            return self.prophet_store.list_pending_notifications(
+                edition_date=today, limit=limit
+            )
+        except Exception:
+            logger.exception("gateway.prophet_pending_notifications_failed")
+            return []
+
+    def update_prophet_notification_state(
+        self,
+        notification_id: str,
+        *,
+        state: str,
+        snoozed_until: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        return self.prophet_store.mark_notification_state(
+            notification_id,
+            state=state,
+            snoozed_until=snoozed_until,
+            reason=reason,
+        )
 
     def get_scheduler_heartbeat(self) -> dict[str, Any]:
         return self.scheduler_store.get_heartbeat()
@@ -15766,6 +15816,7 @@ class GatewayRuntime:
             "pending_inputs": pending_inputs,
             "background_tasks": background_tasks,
             "foreground_streams": foreground_streams,
+            "prophet_notifications": self.prophet_pending_notifications(limit=2),
         }
 
     def notify_channel_active(self, channel: str | None) -> None:

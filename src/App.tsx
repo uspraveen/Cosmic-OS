@@ -143,6 +143,7 @@ interface CronResultNotification {
   content: string
   channel?: string | null
   createdAt?: string | null
+  prophetNotificationId?: string | null
 }
 
 interface ProducedArtifactNotification {
@@ -6315,7 +6316,22 @@ export default function App() {
   }
 
   const dismissCronResultNotification = (notificationId: string) => {
+    const notification = cronResultNotifications.find((item) => item.id === notificationId)
     setCronResultNotifications((prev) => prev.filter((item) => item.id !== notificationId))
+    if (notification?.kind === 'prophet' && notification.prophetNotificationId) {
+      // "Later" is a snooze: hide for now, resurface after the snooze window.
+      const snoozedUntil = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+      try {
+        void window.cosmic?.setGatewayProphetNotificationState?.({
+          notificationId: notification.prophetNotificationId,
+          state: 'snoozed',
+          snoozedUntil,
+          reason: 'desktop_later',
+        })
+      } catch {
+        // best-effort
+      }
+    }
   }
 
   const dismissArtifactReadyNotification = (notificationId: string) => {
@@ -6393,7 +6409,19 @@ export default function App() {
   }
 
   const openProphetFromCronNotification = (notificationId: string) => {
+    const notification = cronResultNotifications.find((item) => item.id === notificationId)
     dismissCronResultNotification(notificationId)
+    if (notification?.prophetNotificationId) {
+      try {
+        void window.cosmic?.setGatewayProphetNotificationState?.({
+          notificationId: notification.prophetNotificationId,
+          state: 'opened',
+          reason: 'desktop_open',
+        })
+      } catch {
+        // best-effort; state settles on next reconcile
+      }
+    }
     showSpacesSurface()
     setProphetNavigateSignal((value) => value + 1)
   }
@@ -7795,6 +7823,35 @@ export default function App() {
         if (searchStateRef.current === 'visible' && modeRef.current === 'chat') {
           scheduleOpenUnreadScan(120, 'instant')
         }
+        // Catch-up: surface any Prophet editions that published while this
+        // device was asleep or offline. The gateway keeps these pending until
+        // some device acts on them.
+        const pendingProphet = Array.isArray((event as any).prophet_notifications)
+          ? (event as any).prophet_notifications
+          : []
+        for (const item of pendingProphet) {
+          if (!item || typeof item !== 'object') continue
+          const notifId = String((item as any).notification_id || '').trim()
+          if (!notifId) continue
+          const slot = String((item as any).slot || '').trim().toLowerCase()
+          const storyCount = Number((item as any).story_count) || 0
+          const headline = String((item as any).headline || '').trim()
+          const storyLabel = `${storyCount} ${storyCount === 1 ? 'story' : 'stories'}`
+          const content = [
+            slot === 'evening' ? 'Evening edition ready' : 'Morning edition ready',
+            storyLabel,
+            headline,
+          ]
+            .filter(Boolean)
+            .join(' · ')
+          enqueueCronResultNotification({
+            id: `prophet_edition_${notifId}`,
+            kind: 'prophet',
+            content,
+            createdAt: String((item as any).created_at || new Date().toISOString()),
+            prophetNotificationId: notifId,
+          })
+        }
         return
       }
 
@@ -8500,9 +8557,7 @@ export default function App() {
       }
 
       if (eventType === 'prophet.edition.published') {
-        if (!isCronResultChatInactive()) {
-          return
-        }
+        const notificationId = String((event as any).notification_id || '').trim() || null
         const slot = String((event as any).slot || '').trim().toLowerCase()
         const editionId = String((event as any).edition_id || '').trim() || crypto.randomUUID()
         const storyCount = Number((event as any).story_count) || 0
@@ -8516,10 +8571,11 @@ export default function App() {
           .filter(Boolean)
           .join(' · ')
         enqueueCronResultNotification({
-          id: `prophet_edition_${editionId}`,
+          id: `prophet_edition_${notificationId || editionId}`,
           kind: 'prophet',
           content,
           createdAt: new Date().toISOString(),
+          prophetNotificationId: notificationId,
         })
         return
       }

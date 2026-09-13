@@ -2552,6 +2552,22 @@ app.whenReady().then(() => {
     )
   })
 
+  ipcMain.handle('gateway:prophet-notification-state', async (_, payload: {
+    notificationId?: string
+    state?: string
+    snoozedUntil?: string
+    reason?: string
+  }) => {
+    if (!gatewayConnectionManager) {
+      throw new Error('Gateway connection manager is unavailable.')
+    }
+    return gatewayConnectionManager.setProphetNotificationState(
+      String(payload?.notificationId || ''),
+      String(payload?.state || ''),
+      { snoozedUntil: payload?.snoozedUntil, reason: payload?.reason },
+    )
+  })
+
   ipcMain.handle('gateway:request-resume', () => {
     gatewayConnectionManager?.requestResume()
     return { ok: true }
