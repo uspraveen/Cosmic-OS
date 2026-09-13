@@ -4770,12 +4770,13 @@ const VaultPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) =
     setBusy(kind)
     setError('')
     try {
-      if (kind === 'reject' ? !window.cosmic?.vaultRejectPending : !window.cosmic?.vaultApprovePending) {
+      const cosmicApi = window.cosmic
+      if (!cosmicApi || (kind === 'reject' ? !cosmicApi.vaultRejectPending : !cosmicApi.vaultApprovePending)) {
         throw new Error('Vault approval action is unavailable.')
       }
       const result = kind === 'reject'
-        ? await window.cosmic.vaultRejectPending!(block.requestId)
-        : await window.cosmic.vaultApprovePending!(block.requestId, {
+        ? await cosmicApi.vaultRejectPending!(block.requestId)
+        : await cosmicApi.vaultApprovePending!(block.requestId, {
             grant: kind === 'window' ? 'window' : 'once',
             window_seconds: kind === 'window' ? VAULT_ALLOW_WINDOW_SECONDS : undefined,
           })

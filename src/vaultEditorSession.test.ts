@@ -18,6 +18,8 @@ const SAMPLE_DRAFT = {
   password: '',
   totpSeed: '',
   notes: '',
+  credentialKind: 'login',
+  expiresAt: '',
 }
 
 afterEach(() => {

@@ -972,7 +972,7 @@ export default function DynamicIsland({
       const pending = Array.isArray(payload?.pending) ? payload.pending : []
       const next = pending
         .map((item: unknown) => vaultIslandFromPending(item))
-        .find((item): item is VaultIslandRequest => Boolean(item) && item.requestId !== exceptRequestId) || null
+        .find((item): item is VaultIslandRequest => item !== null && item.requestId !== exceptRequestId) || null
       setVaultIslandRequest(next)
       if (next) {
         setVaultIslandBusy(null)
@@ -1016,7 +1016,8 @@ export default function DynamicIsland({
   const actOnVaultIsland = useCallback(async (kind: 'approve' | 'window' | 'reject') => {
     const request = vaultIslandRequest
     if (!request || vaultIslandBusy) return
-    if (kind === 'reject' ? !window.cosmic?.vaultRejectPending : !window.cosmic?.vaultApprovePending) {
+    const cosmicApi = window.cosmic
+    if (!cosmicApi || (kind === 'reject' ? !cosmicApi.vaultRejectPending : !cosmicApi.vaultApprovePending)) {
       setVaultIslandError('Vault approval is unavailable.')
       return
     }
@@ -1024,8 +1025,8 @@ export default function DynamicIsland({
     setVaultIslandError('')
     try {
       const result = kind === 'reject'
-        ? await window.cosmic.vaultRejectPending!(request.requestId)
-        : await window.cosmic.vaultApprovePending!(request.requestId, {
+        ? await cosmicApi.vaultRejectPending!(request.requestId)
+        : await cosmicApi.vaultApprovePending!(request.requestId, {
             grant: kind === 'window' ? 'window' : 'once',
             window_seconds: kind === 'window' ? VAULT_ALLOW_WINDOW_SECONDS : undefined,
           })
