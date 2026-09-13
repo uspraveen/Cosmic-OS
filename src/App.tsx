@@ -2999,6 +2999,7 @@ const sheetTintForCard = (hex?: string): string | null => {
 
 const SHEET_RUN_OP_LABEL: Record<string, string> = {
   create: 'Created sheet',
+  snapshot: 'Loaded sheet',
   update_cells: 'Wrote',
   append_rows: 'Appended',
   clear_range: 'Cleared',

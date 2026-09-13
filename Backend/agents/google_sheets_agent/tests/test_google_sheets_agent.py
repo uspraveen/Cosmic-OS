@@ -847,6 +847,77 @@ def test_edit_create_table_scans_values_and_reports_check(tmp_path: Path) -> Non
     assert response["table_check"].get("repaired", False) is False
 
 
+# --- Card snapshot: edits seed the card with the sheet's real content ------
+
+
+def _snapshot_edit_task():
+    return _card_task("sheets.edit").model_copy(
+        update={
+            "input": {
+                "spreadsheet_id": "sheet_123",
+                "operation": "update_cells",
+                "range": "Jobs!I11:I16",
+                "values": [["2026-09-13"], ["2026-09-13"]],
+            }
+        }
+    )
+
+
+def test_edit_seeds_card_with_tab_snapshot_before_write(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    asyncio.run(agent.on_startup())
+    client = _FakeSheetsClient()
+    seed_rows = [[f"cell-{r}-{c}" for c in range(10)] for r in range(16)]
+
+    async def seeded_get_values(spreadsheet_id: str, range_name: str, **kwargs) -> dict:
+        return {"range": range_name, "values": [row[:] for row in seed_rows], "row_count": 16, "column_count": 10}
+
+    client.get_values = seeded_get_values  # type: ignore[method-assign]
+    _with_client(agent, client)
+    task = _snapshot_edit_task()
+
+    result = asyncio.run(agent.handle_sheets_edit(task))
+
+    assert result.status == "completed"
+    payloads = _sheet_payloads(agent)
+    assert payloads[0]["op"] == "snapshot"
+    assert payloads[0]["tab"] == "Jobs"
+    assert payloads[0]["values"][0][0] == "cell-0-0"
+    # The write mirrors after the snapshot, so the delta lands on top.
+    assert payloads[1]["op"] == "update_cells"
+    assert payloads[1]["range"] == "'Jobs'!I11:I16"
+
+
+def test_snapshot_prefers_native_table_extent_over_bounded_window(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    asyncio.run(agent.on_startup())
+    client = _FakeSheetsClient()
+    seen_ranges: list[str] = []
+
+    async def recording_get_values(spreadsheet_id: str, range_name: str, **kwargs) -> dict:
+        seen_ranges.append(range_name)
+        return {"range": range_name, "values": [["a"]], "row_count": 1, "column_count": 1}
+
+    client.get_values = recording_get_values  # type: ignore[method-assign]
+    client._structure["sheets"][0]["tables"] = [
+        {
+            "table_id": "tbl_1",
+            "name": "Jobs",
+            "range": {"sheetId": 111, "startRowIndex": 0, "endRowIndex": 16, "startColumnIndex": 0, "endColumnIndex": 10},
+            "range_a1": "'Jobs'!A1:J16",
+            "row_count": 16,
+            "column_count": 10,
+            "column_properties": [],
+        }
+    ]
+    _with_client(agent, client)
+    task = _snapshot_edit_task()
+
+    asyncio.run(agent.handle_sheets_edit(task))
+
+    assert "'Jobs'!A1:J16" in seen_ranges
+
+
 # --- Live card persistence (replay on the closing event) ------------------
 
 

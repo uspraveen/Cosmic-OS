@@ -407,7 +407,9 @@ export const mergeSheetRunProgress = <T extends SheetRunProgressLike>(
   const op = cleanText(incomingState.op)
 
   // Replayed earlier writes (closing event) fold before the fresh delta.
-  // Absolute positions make the re-fold a no-op on a live grid.
+  // Absolute positions make the re-fold a no-op on a live grid, and the
+  // trail already narrated these steps when they first arrived — only the
+  // grid is topped up here, not the story.
   for (const entry of incomingState.replay ?? []) {
     const entryValues = normalizeSheetValues(entry.values)
     if (!entryValues) {
@@ -420,7 +422,6 @@ export const mergeSheetRunProgress = <T extends SheetRunProgressLike>(
       entryValues,
     )
     lastSpan = applied.span
-    trail = pushTrail(trail, { op: cleanText(entry.op) || 'write', range: cleanText(entry.range), rows: entryValues.length })
   }
 
   if (values && span) {

@@ -21,7 +21,7 @@ from shared.usage import begin_metered_call, build_usage_event, post_usage_event
 from .config import AGENT_ROOT, BACKEND_ROOT, GoogleSheetsAgentConfig
 from .google_sheets_client import GoogleSheetsClient, spreadsheet_url
 from .internal_llm import invoke_google_sheets_planner_llm
-from .sheet_structure import SheetNavigator, count_cells, normalize_rows, rows_from_input, values_preview
+from .sheet_structure import SheetNavigator, count_cells, normalize_rows, quote_sheet_name, rows_from_input, values_preview
 
 logger = logging.getLogger(__name__)
 
@@ -589,6 +589,10 @@ class GoogleSheetsAgent(AgentRuntime):
 
         if operation == "update_cells":
             range_name = navigator.ensure_range(str(task.input.get("range") or "A1"), default_sheet=task.input.get("sheet_name"))
+            await self._emit_sheet_snapshot(
+                task, client, spreadsheet_id, navigator,
+                range_name=range_name, title=str(structure.get("title") or ""), url=spreadsheet_url(spreadsheet_id),
+            )
             rows = normalize_rows(task.input.get("values")) or rows_from_input(task.input)
             self._assert_write_budget(rows)
             before = await client.get_values(spreadsheet_id, range_name)
@@ -598,6 +602,10 @@ class GoogleSheetsAgent(AgentRuntime):
             sheet_card_values = rows
         elif operation == "append_rows":
             range_name = navigator.ensure_range(str(task.input.get("range") or "A1"), default_sheet=task.input.get("sheet_name"))
+            await self._emit_sheet_snapshot(
+                task, client, spreadsheet_id, navigator,
+                range_name=range_name, title=str(structure.get("title") or ""), url=spreadsheet_url(spreadsheet_id),
+            )
             rows = normalize_rows(task.input.get("values")) or rows_from_input(task.input)
             self._assert_write_budget(rows)
             before = await client.get_values(spreadsheet_id, range_name)
@@ -607,6 +615,10 @@ class GoogleSheetsAgent(AgentRuntime):
             sheet_card_values = rows
         elif operation == "clear_range":
             range_name = navigator.ensure_range(str(task.input.get("range") or ""), default_sheet=task.input.get("sheet_name"))
+            await self._emit_sheet_snapshot(
+                task, client, spreadsheet_id, navigator,
+                range_name=range_name, title=str(structure.get("title") or ""), url=spreadsheet_url(spreadsheet_id),
+            )
             before = await client.get_values(spreadsheet_id, range_name)
             response = await client.clear_values(spreadsheet_id, range_name)
             after = await client.get_values(spreadsheet_id, range_name)
@@ -752,6 +764,10 @@ class GoogleSheetsAgent(AgentRuntime):
             try:
                 # Classify before wrapping so mixed-type columns can be pinned
                 # untyped instead of letting inference flag them invalid.
+                await self._emit_sheet_snapshot(
+                    task, client, spreadsheet_id, navigator,
+                    range_name=range_name, title=str(structure.get("title") or ""), url=spreadsheet_url(spreadsheet_id),
+                )
                 table_values = await self._read_values_for_table_scan(client, spreadsheet_id, range_name)
                 column_properties = self._mixed_table_columns(table_values)
                 table = await self._add_table(
@@ -1179,6 +1195,57 @@ class GoogleSheetsAgent(AgentRuntime):
             date_time_render_option="STRING",
         )
         return response.get("values") or []
+
+    async def _emit_sheet_snapshot(
+        self,
+        task: TaskEnvelope,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        navigator: SheetNavigator,
+        *,
+        range_name: str,
+        title: str,
+        url: str,
+    ) -> None:
+        """Seed the live card with the tab's current content before an edit.
+
+        The card mirrors this task's writes, but on an existing sheet most
+        cells were written by earlier tasks — a delta-only grid reads as an
+        empty sheet. One bounded read puts the real content under the edit:
+        the tab's native table extent when it has one, else a capped window.
+        Never raises: a failed snapshot just means the delta-only card.
+        """
+        try:
+            tab = self._sheet_name_from_range(range_name) or str(navigator.active_sheet)
+            extent = ""
+            for table in navigator.tables_for(tab):
+                if table.get("range_a1"):
+                    extent = str(table["range_a1"])
+                    break
+            if not extent:
+                extent = f"{quote_sheet_name(tab)}!A1:Z200"
+            response = await client.get_values(spreadsheet_id, extent)
+            values = response.get("values") or []
+            if not values:
+                return
+            await self._emit_sheet_progress(
+                task,
+                op="snapshot",
+                phase="writing",
+                message=f"Loaded {tab} ({len(values)} row(s)) for context.",
+                spreadsheet_id=spreadsheet_id,
+                title=title,
+                url=url,
+                tab=tab,
+                range_name=extent,
+                values=values,
+            )
+        except Exception:
+            logger.debug(
+                "google_sheets_agent.snapshot_failed task_id=%s",
+                task.task_id,
+                exc_info=True,
+            )
 
     async def _repair_typed_table_columns(
         self,
