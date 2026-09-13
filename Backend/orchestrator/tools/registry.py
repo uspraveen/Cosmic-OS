@@ -678,8 +678,10 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "description": (
                             "Upper bound on agent steps before it must ask to continue (default 40). "
                             "Size it to the task: ~15 for a single-page lookup, 60+ when several "
-                            "records or pages must be opened. Under-budgeting is the most common "
-                            "cause of a partial answer."
+                            "records or pages must be opened. Goals that say ALL/every — or repeat a "
+                            "search per location, filter, or category — spend steps on every listing "
+                            "plus a page load each: budget 80+ or split the goal into focused passes. "
+                            "Under-budgeting is the most common cause of a partial answer."
                         ),
                     },
                     "memory_mode": {
