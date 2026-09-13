@@ -34,7 +34,7 @@ import { findPendingApprovals } from './pendingApprovals'
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
-import { mergeSheetRunProgress, normalizeSheetProgress, type SheetProgressState } from './sheetRunPreview'
+import { mergeSheetRunProgress, normalizeSheetProgress, sheetRunVisibleWindow, type SheetProgressState } from './sheetRunPreview'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
 import {
   pickAutoBoundRect,
@@ -3030,9 +3030,6 @@ const GoogleSheetsLogo = ({ size = 12 }: { size?: number }) => (
   </svg>
 )
 
-const SHEET_RUN_VISIBLE_ROWS = 8
-const SHEET_RUN_VISIBLE_COLS = 8
-
 const resolveSheetOutcome = (progress: SheetProgressState): { label: string; stage: string } | null => {
   if (progress.phase === 'failed') return { label: 'Failed', stage: 'failed' }
   if (progress.phase === 'done') return { label: 'Done', stage: 'ready' }
@@ -3086,23 +3083,17 @@ const SheetRunCard = ({
   const frozenRows = progress.header?.frozenRows ?? 0
   const grid = progress.grid || []
   const totalRows = grid.length
-  const totalCols = grid.reduce((max, row) => Math.max(max, row.length), 0)
-  const visibleRowCount = Math.min(totalRows, SHEET_RUN_VISIBLE_ROWS)
-  const visibleColCount = Math.min(Math.max(totalCols, 1), SHEET_RUN_VISIBLE_COLS)
+  // The window follows the freshest write on both axes: a single-column
+  // write at I11:I16 must show column I, not just columns A-H — cells
+  // outside this task's deltas are genuinely empty on this card.
+  const { rowStart: windowStart, colStart: colWindowStart, rowCount: visibleRowCount, colCount: visibleColCount } =
+    sheetRunVisibleWindow(progress)
   const hiddenRows = Math.max(0, totalRows - visibleRowCount)
   const span = progress.lastSpan
-  // The window shows the freshest write, not just the top of the sheet: a
-  // task that appended at rows 11-16 must render rows 9-16, because rows
-  // 1-10 were an earlier task's write and this card mirrors only its own.
-  const freshEndRow = Math.min(span?.endRow ?? span?.startRow ?? 1, Math.max(totalRows, 1))
-  const windowStart =
-    span && (span.startRow ?? 1) > visibleRowCount
-      ? Math.max(1, freshEndRow - visibleRowCount + 1)
-      : 1
   const freshRow = (rowNumber: number) =>
     Boolean(live && span && rowNumber >= (span.startRow ?? 1) && rowNumber <= (span.endRow ?? span.startRow ?? 1))
-  const freshCol = (colIndex: number) =>
-    Boolean(live && span && colIndex + 1 >= (span.startCol ?? 1) && colIndex + 1 <= (span.endCol ?? span.startCol ?? 1))
+  const freshCol = (colNumber: number) =>
+    Boolean(live && span && colNumber >= (span.startCol ?? 1) && colNumber <= (span.endCol ?? span.startCol ?? 1))
   const trail = (progress.trail || []).slice(-3)
   const rowCountLabel = String(totalRows)
 
@@ -3140,7 +3131,7 @@ const SheetRunCard = ({
               <tr>
                 <th className="sheet-run-corner" aria-hidden="true" />
                 {Array.from({ length: visibleColCount }, (_, col) => (
-                  <th key={col}>{sheetColumnLabel(col)}</th>
+                  <th key={col}>{sheetColumnLabel(colWindowStart - 1 + col)}</th>
                 ))}
               </tr>
             </thead>
@@ -3154,15 +3145,17 @@ const SheetRunCard = ({
                   <tr key={rowNumber} className={isHeaderRow ? 'is-header' : undefined}>
                     <td className="sheet-run-gutter" style={cellStyle || undefined}>{rowNumber}</td>
                     {Array.from({ length: visibleColCount }, (_, colIndex) => {
-                      const fresh = freshRow(rowNumber) && freshCol(colIndex)
+                      const colNumber = colWindowStart + colIndex
+                      const fresh = freshRow(rowNumber) && freshCol(colNumber)
+                      const cell = row[colNumber - 1] || ''
                       return (
                         <td
                           key={colIndex}
                           className={fresh ? 'is-fresh' : undefined}
                           style={cellStyle || undefined}
-                          title={row[colIndex] || undefined}
+                          title={cell || undefined}
                         >
-                          {row[colIndex] || ''}
+                          {cell}
                         </td>
                       )
                     })}

@@ -108,6 +108,45 @@ const TRAIL_LIMIT = 5
 /** Mirror of the agent-side cap on writes carried by the closing event. */
 const SHEET_REPLAY_LIMIT = 10
 
+export const SHEET_RUN_VISIBLE_ROWS = 8
+export const SHEET_RUN_VISIBLE_COLS = 8
+
+export interface SheetRunWindow {
+  rowStart: number
+  colStart: number
+  rowCount: number
+  colCount: number
+}
+
+/**
+ * The visible window over the accumulated grid — the freshest write, not
+ * necessarily the top-left corner. A task that appended at rows 11-16 or
+ * wrote column I must have that write on screen: rows/columns outside this
+ * task's deltas are genuinely empty here, because this card mirrors only
+ * its own task while the wider sheet belongs to earlier ones.
+ */
+export const sheetRunVisibleWindow = (
+  progress: Pick<SheetProgressState, 'grid' | 'lastSpan'>,
+): SheetRunWindow => {
+  const grid = progress.grid || []
+  const totalRows = grid.length
+  const totalCols = grid.reduce((max, row) => Math.max(max, row.length), 0)
+  const rowCount = Math.min(totalRows, SHEET_RUN_VISIBLE_ROWS)
+  const colCount = Math.min(Math.max(totalCols, 1), SHEET_RUN_VISIBLE_COLS)
+  const span = progress.lastSpan
+  const spanEndRow = Math.min(span?.endRow ?? span?.startRow ?? 1, Math.max(totalRows, 1))
+  const rowStart =
+    span && (span.startRow ?? 1) > rowCount
+      ? Math.max(1, spanEndRow - rowCount + 1)
+      : 1
+  const spanEndCol = Math.min(span?.endCol ?? span?.startCol ?? 1, Math.max(totalCols, 1))
+  const colStart =
+    span && (span.startCol ?? 1) > colCount
+      ? Math.max(1, spanEndCol - colCount + 1)
+      : 1
+  return { rowStart, colStart, rowCount, colCount }
+}
+
 const cleanText = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
 
 const a1ColumnIndex = (letters: string): number => {

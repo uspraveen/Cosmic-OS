@@ -3,6 +3,7 @@ import {
   mergeSheetRunProgress,
   normalizeSheetProgress,
   parseSheetRange,
+  sheetRunVisibleWindow,
   type SheetProgressState,
 } from './sheetRunPreview'
 
@@ -34,6 +35,42 @@ describe('parseSheetRange', () => {
     expect(parseSheetRange('')).toBeNull()
     expect(parseSheetRange('Jobs!')).toBeNull()
     expect(parseSheetRange('hello world')).toBeNull()
+  })
+})
+
+describe('sheetRunVisibleWindow', () => {
+  it('anchors on the freshest write on both axes', () => {
+    // The real run: a single-column append at I11:I16 on a sheet whose other
+    // cells were written by an earlier task. Rows 9-16 x columns B-I must be
+    // visible — column I is the payload.
+    const write = mergeSheetRunProgress(
+      undefined,
+      reading({ op: 'update_cells', range: 'Jobs!I11:I16', values: [['2026-09-13'], ['2026-09-13'], ['2026-09-13'], ['2026-09-13'], ['2026-09-13'], ['2026-09-13']] }),
+    ) as SheetProgressState
+    const window = sheetRunVisibleWindow(write)
+    expect(window.rowStart).toBe(9)
+    expect(window.rowCount).toBe(8)
+    expect(window.colStart).toBe(2)
+    expect(window.colCount).toBe(8)
+    // the payload column is inside the window
+    expect(write.grid?.[10]?.[8]).toBe('2026-09-13')
+    expect(window.colStart + window.colCount - 1).toBeGreaterThanOrEqual(9)
+  })
+
+  it('keeps the top-left corner for a full create', () => {
+    const create = mergeSheetRunProgress(
+      undefined,
+      reading({ op: 'update_cells', range: 'A1:J10', values: Array.from({ length: 10 }, (_, r) => [`r${r}`, 'x', 'y', 'z', 'w', 'v', 'u', 't', 's', 'q']) }),
+    ) as SheetProgressState
+    const window = sheetRunVisibleWindow(create)
+    expect(window.rowStart).toBe(1)
+    expect(window.colStart).toBe(1)
+    expect(window.rowCount).toBe(8)
+    expect(window.colCount).toBe(8)
+  })
+
+  it('stays at the origin without a span or grid', () => {
+    expect(sheetRunVisibleWindow({})).toEqual({ rowStart: 1, colStart: 1, rowCount: 0, colCount: 1 })
   })
 })
 

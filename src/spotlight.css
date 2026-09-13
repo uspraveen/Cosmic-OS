@@ -2597,6 +2597,15 @@ kbd {
   width: 100%;
 }
 
+/* A specialist card that follows the blocks column is a sibling of that
+   column, not a child of it: the column's 18px gap never reaches the card,
+   and its last paragraph carries the p:last-child margin reset, so the card
+   landed flush against the text it follows. Give the card the paragraph
+   rhythm back at exactly that seam. */
+.message-row.assistant > .assistant-response-blocks + .slide-build-card {
+  margin-top: 16px;
+}
+
 .assistant-action-card {
   width: var(--response-block-width, min(100%, 760px));
   margin-inline: auto;
@@ -5592,7 +5601,8 @@ kbd {
 }
 
 .sheet-run-grid th.sheet-run-corner {
-  width: 26px;
+  width: 30px;
+  min-width: 30px;
   padding: 3.5px 2px;
 }
 
@@ -5620,8 +5630,9 @@ kbd {
 }
 
 .sheet-run-gutter {
-  width: 26px;
-  padding: 4.5px 2px;
+  width: 30px;
+  min-width: 30px;
+  padding: 4.5px 1px;
   text-align: center;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 8.5px;
@@ -5649,7 +5660,7 @@ kbd {
 
 .sheet-run-more {
   position: relative;
-  padding: 5px 10px 6px 36px;
+  padding: 5px 10px 6px 40px;
   border-top: 1px solid rgba(255, 255, 255, 0.05);
   background: linear-gradient(180deg, rgba(5, 6, 10, 0), rgba(5, 6, 10, 0.78));
   font-size: 10px;
