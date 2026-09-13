@@ -71,6 +71,10 @@ class ApprovalRequiredError(RuntimeError):
 SHEET_PROGRESS_MAX_ROWS = 250
 SHEET_PROGRESS_MAX_COLS = 40
 SHEET_PROGRESS_CELL_CHARS = 160
+# Writes carried by the closing event so a reopened conversation can rebuild
+# the card's grid from persisted metadata alone (the grid only ever exists
+# client-side otherwise).
+SHEET_PROGRESS_REPLAY_LIMIT = 10
 
 
 def _clamp_sheet_values(values: list[list[Any]]) -> list[list[str]]:
@@ -130,10 +134,13 @@ class GoogleSheetsAgent(AgentRuntime):
         )
         # Live sheet card state: per-task sequence, whether any card-facing
         # event went out (so failures can close the card), and the last phase
-        # (so a failure is never reported twice).
+        # (so a failure is never reported twice). The replay buffer remembers
+        # this task's writes so the closing event can carry them.
         self._sheet_progress_seq = 0
         self._sheet_progress_active = False
         self._sheet_progress_last_phase: str | None = None
+        self._sheet_progress_replay: list[dict[str, Any]] = []
+        self._sheet_progress_last_header: dict[str, Any] | None = None
 
     async def on_startup(self) -> None:
         self.store_root.mkdir(parents=True, exist_ok=True)
@@ -151,6 +158,8 @@ class GoogleSheetsAgent(AgentRuntime):
         self._sheet_progress_seq = 0
         self._sheet_progress_active = False
         self._sheet_progress_last_phase = None
+        self._sheet_progress_replay = []
+        self._sheet_progress_last_header = None
         result = await self._execute_inner(task)
         if (
             self._sheet_progress_active
@@ -164,6 +173,7 @@ class GoogleSheetsAgent(AgentRuntime):
                 phase="failed",
                 message=f"Sheets operation stopped: {error}",
                 error=error,
+                include_replay=True,
             )
         return result
 
@@ -238,6 +248,7 @@ class GoogleSheetsAgent(AgentRuntime):
         values: list[list[Any]] | None = None,
         header: dict[str, Any] | None = None,
         error: str = "",
+        include_replay: bool = False,
     ) -> None:
         """Mirror one write onto the live sheet card channel.
 
@@ -245,7 +256,9 @@ class GoogleSheetsAgent(AgentRuntime):
         a task.progress event whose payload lands on the desktop verbatim and
         is rendered as a read-only grid. Values are the delta just written,
         positioned absolutely by `range`, so replayed or merged events stay
-        idempotent client-side.
+        idempotent client-side. Closing events set include_replay to carry
+        every write of the task (plus the last header state) so history
+        restore can rebuild the grid without re-reading Google.
         """
         self._sheet_progress_seq += 1
         self._sheet_progress_last_phase = phase
@@ -263,9 +276,19 @@ class GoogleSheetsAgent(AgentRuntime):
             "range": str(range_name or ""),
         }
         if values:
-            payload["values"] = _clamp_sheet_values(values)
+            clamped = _clamp_sheet_values(values)
+            payload["values"] = clamped
+            self._sheet_progress_replay = (
+                self._sheet_progress_replay
+                + [{"op": str(op or ""), "range": str(range_name or ""), "values": clamped}]
+            )[-SHEET_PROGRESS_REPLAY_LIMIT:]
         if header:
             payload["header"] = header
+            self._sheet_progress_last_header = header
+        elif include_replay and self._sheet_progress_last_header:
+            payload["header"] = self._sheet_progress_last_header
+        if include_replay and self._sheet_progress_replay:
+            payload["replay"] = list(self._sheet_progress_replay)
         if error:
             payload["error"] = str(error)[:300]
         account = self._account_info()
@@ -433,6 +456,7 @@ class GoogleSheetsAgent(AgentRuntime):
             spreadsheet_id=spreadsheet_id,
             title=str(final_structure.get("title") or spreadsheet.get("title") or title),
             url=sheet_url,
+            include_replay=True,
         )
         output = {
             "status": "completed",
@@ -761,6 +785,9 @@ class GoogleSheetsAgent(AgentRuntime):
             card_range = str(card_updates.get("updatedRange") or card_range)
         elif operation == "clear_range":
             card_range = str(card_response.get("clearedRange") or card_range)
+        if operation in {"update_cells", "append_rows", "clear_range"} and not sheet_card_tab:
+            # The A1 range names the tab; the card footer should too.
+            sheet_card_tab = self._sheet_name_from_range(card_range)
         card_rows = len(sheet_card_values) if sheet_card_values else 0
         if operation == "append_rows":
             card_message = f"Appended {card_rows} row(s) to {card_range or 'the sheet'}."
@@ -808,6 +835,7 @@ class GoogleSheetsAgent(AgentRuntime):
             spreadsheet_id=spreadsheet_id,
             title=title or card_title,
             url=card_url,
+            include_replay=True,
         )
         output = {
             "status": "completed",

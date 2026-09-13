@@ -1,4 +1,4 @@
-import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, Mail, Maximize2, Mic, Minimize2, MousePointerClick, Pencil, Presentation, Save, Shield, Square, Table, X } from 'lucide-react'
+import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, Mail, Maximize2, Mic, Minimize2, MousePointerClick, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
 import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
@@ -1277,7 +1277,9 @@ const historyToMessages = (history: any[] = []): Message[] => {
       progress: normalizeTabularProgress(item?.metadata?.tabular_progress) ?? normalizeDocsProgress(item?.metadata?.docs_progress),
       slideProgress: normalizeSlideProgress(item?.metadata?.slide_progress),
       browserProgress: normalizeBrowserProgress(item?.metadata?.browser_progress),
-      sheetsProgress: normalizeSheetProgress(item?.metadata?.sheets_progress),
+      // The persisted payload closes with a replay of the task's writes —
+      // fold it here so a reopened conversation rebuilds the grid.
+      sheetsProgress: mergeSheetsProgress(undefined, normalizeSheetProgress(item?.metadata?.sheets_progress)),
     })))
 }
 
@@ -3014,6 +3016,18 @@ const SHEET_RUN_OP_LABEL: Record<string, string> = {
   resize_rows: 'Resized rows',
 }
 
+/** The Google Sheets mark — green sheet, white grid — so the card names its
+ * subject at a glance instead of a generic table glyph. */
+const GoogleSheetsLogo = ({ size = 12 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" style={{ display: 'block' }}>
+    <rect x="3.5" y="1.5" width="17" height="21" rx="2.2" fill="#0F9D58" />
+    <path
+      fill="#FFFFFF"
+      d="M7 9.5h10v2H7zM7 12.7h4.55v2.1H7zM12.45 12.7H17v2.1h-4.55zM7 16h4.55v2.1H7zM12.45 16H17v2.1h-4.55z"
+    />
+  </svg>
+)
+
 const SHEET_RUN_VISIBLE_ROWS = 8
 const SHEET_RUN_VISIBLE_COLS = 8
 
@@ -3075,8 +3089,16 @@ const SheetRunCard = ({
   const visibleColCount = Math.min(Math.max(totalCols, 1), SHEET_RUN_VISIBLE_COLS)
   const hiddenRows = Math.max(0, totalRows - visibleRowCount)
   const span = progress.lastSpan
-  const freshRow = (rowIndex: number) =>
-    Boolean(live && span && rowIndex + 1 >= (span.startRow ?? 1) && rowIndex + 1 <= (span.endRow ?? span.startRow ?? 1))
+  // The window shows the freshest write, not just the top of the sheet: a
+  // task that appended at rows 11-16 must render rows 9-16, because rows
+  // 1-10 were an earlier task's write and this card mirrors only its own.
+  const freshEndRow = Math.min(span?.endRow ?? span?.startRow ?? 1, Math.max(totalRows, 1))
+  const windowStart =
+    span && (span.startRow ?? 1) > visibleRowCount
+      ? Math.max(1, freshEndRow - visibleRowCount + 1)
+      : 1
+  const freshRow = (rowNumber: number) =>
+    Boolean(live && span && rowNumber >= (span.startRow ?? 1) && rowNumber <= (span.endRow ?? span.startRow ?? 1))
   const freshCol = (colIndex: number) =>
     Boolean(live && span && colIndex + 1 >= (span.startCol ?? 1) && colIndex + 1 <= (span.endCol ?? span.startCol ?? 1))
   const trail = (progress.trail || []).slice(-3)
@@ -3090,7 +3112,7 @@ const SheetRunCard = ({
     >
       <div className="sheet-run-head">
         <span className="docs-progress-kicker">
-          <Table size={12} aria-hidden />
+          <GoogleSheetsLogo size={12} />
           Google Sheets
         </span>
         <span className={`docs-progress-stage ${statusKey}`}>{statusLabel}</span>
@@ -3122,14 +3144,15 @@ const SheetRunCard = ({
             </thead>
             <tbody>
               {Array.from({ length: visibleRowCount }, (_, rowIndex) => {
-                const row = grid[rowIndex] || []
-                const isHeaderRow = rowIndex === 0 && Boolean(progress.header?.formatted)
+                const rowNumber = windowStart + rowIndex
+                const row = grid[rowNumber - 1] || []
+                const isHeaderRow = windowStart === 1 && rowIndex === 0 && Boolean(progress.header?.formatted)
                 const cellStyle = isHeaderRow && headerTint ? { background: headerTint } : undefined
                 return (
-                  <tr key={rowIndex} className={isHeaderRow ? 'is-header' : undefined}>
-                    <td className="sheet-run-gutter" style={cellStyle || undefined}>{rowIndex + 1}</td>
+                  <tr key={rowNumber} className={isHeaderRow ? 'is-header' : undefined}>
+                    <td className="sheet-run-gutter" style={cellStyle || undefined}>{rowNumber}</td>
                     {Array.from({ length: visibleColCount }, (_, colIndex) => {
-                      const fresh = freshRow(rowIndex) && freshCol(colIndex)
+                      const fresh = freshRow(rowNumber) && freshCol(colIndex)
                       return (
                         <td
                           key={colIndex}

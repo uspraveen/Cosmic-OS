@@ -148,6 +148,44 @@ describe('mergeSheetRunProgress', () => {
     expect(tabled.header?.table).toBe(true)
   })
 
+  it('rebuilds the grid from a closing event replay after reopen', () => {
+    // What history restore sees: metadata holds only the closing event,
+    // whose replay carries the task's earlier writes.
+    const restored = mergeSheetRunProgress(
+      undefined,
+      reading({
+        op: 'verify',
+        phase: 'done',
+        range: '',
+        header: { formatted: true, color: '#E8F0FE', frozen_rows: 1 },
+        replay: [
+          { op: 'update_cells', range: 'Jobs!A1:J2', values: [['Role', 'Comp'], ['MTS', '$210K']] },
+        ],
+      }),
+    ) as SheetProgressState
+    expect(restored.grid).toEqual([
+      ['Role', 'Comp'],
+      ['MTS', '$210K'],
+    ])
+    expect(restored.rows).toBe(2)
+    expect(restored.trail?.map((entry) => entry.op)).toEqual(['update_cells'])
+    expect(restored.header).toEqual({ formatted: true, color: '#E8F0FE', frozenRows: 1 })
+    // folded deltas don't stay on the state
+    expect(restored.replay).toBeUndefined()
+  })
+
+  it('re-folding a replay over the live grid is a no-op', () => {
+    const write = { op: 'append_rows', range: 'A11:A12', values: [['r11'], ['r12']] }
+    const live = mergeSheetRunProgress(undefined, reading({ op: 'append_rows', range: 'A11:A12', values: [['r11'], ['r12']] }))
+    const closed = mergeSheetRunProgress(
+      live,
+      reading({ op: 'verify', phase: 'done', replay: [write] }),
+    ) as SheetProgressState
+    expect(closed.grid).toEqual([[], [], [], [], [], [], [], [], [], [], ['r11'], ['r12']])
+    expect(closed.trail?.map((entry) => entry.op)).toEqual(['append_rows'])
+    expect(closed.rows).toBe(12)
+  })
+
   it('caps the grid and the trail', () => {
     let merged: SheetProgressState | undefined
     for (let batch = 0; batch < 10; batch += 1) {

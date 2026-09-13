@@ -16678,18 +16678,37 @@ class GatewayRuntime:
         The payload carries the cell values the agent just wrote so the client
         can render a live, read-only grid without ever calling Google. The
         agent already caps the payload; clamp again here so a runaway value
-        can't flood the WebSocket channel.
+        can't flood the WebSocket channel. The closing event's `replay` (the
+        task's earlier writes, for history restore) gets the same treatment.
         """
         hydrated = dict(payload)
         values = hydrated.get("values")
         if isinstance(values, list):
-            cleaned: list[list[str]] = []
-            for row in values[:250]:
-                if not isinstance(row, list):
+            hydrated["values"] = self._clamp_sheet_progress_values(values)
+        replay = hydrated.get("replay")
+        if isinstance(replay, list):
+            cleaned_replay: list[dict[str, Any]] = []
+            for entry in replay[:10]:
+                if not isinstance(entry, dict):
                     continue
-                cleaned.append([self._safe_text(cell)[:160] for cell in row[:40]])
-            hydrated["values"] = cleaned
+                cleaned_replay.append(
+                    {
+                        "op": self._safe_text(entry.get("op"))[:40],
+                        "range": self._safe_text(entry.get("range"))[:160],
+                        "values": self._clamp_sheet_progress_values(entry.get("values")),
+                    }
+                )
+            hydrated["replay"] = cleaned_replay
         return hydrated
+
+    def _clamp_sheet_progress_values(self, values: Any) -> list[list[str]]:
+        if not isinstance(values, list):
+            return []
+        return [
+            [self._safe_text(cell)[:160] for cell in row[:40]]
+            for row in values[:250]
+            if isinstance(row, list)
+        ]
 
     async def publish_browser_live_frame(self, *, task_id: str, frame: str) -> None:
         """Fire-and-forget broadcast of one live CDP screencast frame.

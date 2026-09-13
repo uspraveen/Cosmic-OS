@@ -17,6 +17,17 @@ export interface SheetRunTrailEntry {
   rows: number
 }
 
+/**
+ * One write the task already made, carried on the closing event so a
+ * reopened conversation can rebuild the grid from persisted metadata alone
+ * (live events carry their delta once; the grid only exists client-side).
+ */
+export interface SheetRunReplayEntry {
+  op?: string
+  range?: string
+  values?: string[][]
+}
+
 /** Where a delta landed, 1-based and inclusive. Open ends stay null. */
 export interface SheetRangeSpan {
   tab: string
@@ -59,6 +70,8 @@ export interface SheetProgressState {
    * "just landed" highlight on the card. */
   lastSpan?: SheetRangeSpan | null
   trail?: SheetRunTrailEntry[]
+  /** Earlier writes of the same task, on the closing event only. */
+  replay?: SheetRunReplayEntry[]
   error?: string
   truncated?: boolean
 }
@@ -81,6 +94,7 @@ export interface SheetRunProgressLike {
   grid?: string[][]
   lastSpan?: SheetRangeSpan | null
   trail?: SheetRunTrailEntry[]
+  replay?: SheetRunReplayEntry[]
 }
 
 /** Bounds so one runaway payload can't balloon the message state. Mirrors the
@@ -91,6 +105,8 @@ export const SHEET_PAYLOAD_MAX_ROWS = 250
 export const SHEET_PAYLOAD_MAX_COLS = 40
 const SHEET_CELL_MAX_CHARS = 160
 const TRAIL_LIMIT = 5
+/** Mirror of the agent-side cap on writes carried by the closing event. */
+const SHEET_REPLAY_LIMIT = 10
 
 const cleanText = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
 
@@ -216,6 +232,7 @@ export const normalizeSheetProgress = (value: unknown): SheetProgressState | und
     header: raw.header === undefined ? undefined : normalizeHeader(raw.header),
     lastSpan: (raw.lastSpan as SheetRangeSpan | null | undefined) ?? null,
     trail: trail && trail.length > 0 ? trail : undefined,
+    replay: normalizeSheetReplay(raw.replay),
     error: cleanText(raw.error) || undefined,
     truncated: Boolean(raw.truncated),
   }
@@ -242,6 +259,25 @@ export const normalizeSheetTrail = (value: unknown): SheetRunTrailEntry[] | unde
     })
     .filter((entry) => Boolean(entry.op))
     .slice(-TRAIL_LIMIT)
+  return entries.length > 0 ? entries : undefined
+}
+
+const normalizeSheetReplay = (value: unknown): SheetRunReplayEntry[] | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+  const entries = value
+    .map((item): SheetRunReplayEntry | null => {
+      const entry = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>
+      const values = normalizeSheetValues(entry.values)
+      const range = cleanText(entry.range)
+      if (!values || !range) {
+        return null
+      }
+      return { op: cleanText(entry.op) || 'write', range, values }
+    })
+    .filter((entry): entry is SheetRunReplayEntry => entry !== null)
+    .slice(-SHEET_REPLAY_LIMIT)
   return entries.length > 0 ? entries : undefined
 }
 
@@ -275,6 +311,24 @@ export const mergeSheetRunProgress = <T extends SheetRunProgressLike>(
     let grid = cloneGrid(undefined)
     let lastSpan: SheetRangeSpan | null = null
     let trail: SheetRunTrailEntry[] = []
+    // The closing event carries the task's earlier writes so a reopened
+    // conversation can rebuild the grid from metadata alone. Positions are
+    // absolute, so folding these again later is a no-op.
+    for (const entry of incomingState.replay ?? []) {
+      const entryValues = normalizeSheetValues(entry.values)
+      if (!entryValues) {
+        continue
+      }
+      const entrySpan = parseSheetRange(entry.range)
+      const applied = applyValues(
+        grid,
+        entrySpan ?? { tab: '', startRow: grid.length + 1, startCol: 1, endRow: null, endCol: null },
+        entryValues,
+      )
+      grid = applied.grid
+      lastSpan = applied.span
+      trail = pushTrail(trail, { op: cleanText(entry.op) || 'write', range: cleanText(entry.range), rows: entryValues.length })
+    }
     if (values && span) {
       const applied = applyValues(grid, span, values)
       grid = applied.grid
@@ -289,10 +343,11 @@ export const mergeSheetRunProgress = <T extends SheetRunProgressLike>(
     } else if (!values && cleanText(incomingState.op) === 'create_table' && incomingState.range) {
       trail = pushTrail(trail, { op: 'create_table', range: cleanText(incomingState.range), rows: 0 })
     }
-    // `values` has been folded into the grid — drop it so the merged state
-    // doesn't carry the delta twice.
+    // `values` and `replay` have been folded into the grid — drop them so
+    // the merged state doesn't carry the deltas twice.
     const rest = { ...incomingState } as Record<string, unknown>
     delete rest.values
+    delete rest.replay
     return {
       ...rest,
       grid: grid.length > 0 ? grid : undefined,
@@ -311,6 +366,23 @@ export const mergeSheetRunProgress = <T extends SheetRunProgressLike>(
   let lastSpan = prevState.lastSpan ?? null
   let trail = incomingState.trail ?? prevState.trail ?? []
   const op = cleanText(incomingState.op)
+
+  // Replayed earlier writes (closing event) fold before the fresh delta.
+  // Absolute positions make the re-fold a no-op on a live grid.
+  for (const entry of incomingState.replay ?? []) {
+    const entryValues = normalizeSheetValues(entry.values)
+    if (!entryValues) {
+      continue
+    }
+    const entrySpan = parseSheetRange(entry.range)
+    const applied = applyValues(
+      grid,
+      entrySpan ?? { tab: '', startRow: grid.length + 1, startCol: 1, endRow: null, endCol: null },
+      entryValues,
+    )
+    lastSpan = applied.span
+    trail = pushTrail(trail, { op: cleanText(entry.op) || 'write', range: cleanText(entry.range), rows: entryValues.length })
+  }
 
   if (values && span) {
     const applied = applyValues(grid, span, values, op === 'clear_range')
@@ -335,6 +407,7 @@ export const mergeSheetRunProgress = <T extends SheetRunProgressLike>(
   const header = incomingState.header !== undefined ? incomingState.header : prevState.header ?? null
   const rest = { ...incomingState } as Record<string, unknown>
   delete rest.values
+  delete rest.replay
   return {
     ...rest,
     grid: grid.length > 0 ? grid : undefined,

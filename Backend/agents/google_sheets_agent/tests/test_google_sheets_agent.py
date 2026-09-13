@@ -474,6 +474,9 @@ class _FakeSheetsClient:
     async def get_values(self, spreadsheet_id: str, range_name: str, **kwargs) -> dict:
         return {"range": range_name, "values": [], "row_count": 0, "column_count": 0}
 
+    async def append_values(self, spreadsheet_id: str, range_name: str, values, **kwargs) -> dict:
+        return {"updates": {"updatedRange": range_name, "updatedRows": len(values)}}
+
     async def batch_update(self, spreadsheet_id: str, requests: list[dict]) -> dict:
         if self.fail_table_requests and any("addTable" in request for request in requests):
             request = httpx.Request("POST", f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}:batchUpdate")
@@ -613,3 +616,97 @@ def test_edit_create_table_falls_back_to_header_format_and_banding(tmp_path: Pat
     assert "overlaps an existing table" in result.output["result"]["response"]["table_error"]
     assert any("repeatCell" in request for batch in client.batch_requests for request in batch)
     assert any("addBanding" in request for batch in client.batch_requests for request in batch)
+
+
+# --- Live card persistence (replay on the closing event) ------------------
+
+
+def test_closing_event_carries_replay_and_last_header(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    task = _card_task()
+
+    asyncio.run(
+        agent._emit_sheet_progress(
+            task,
+            op="update_cells",
+            phase="writing",
+            message="Wrote 2 row(s).",
+            spreadsheet_id="sheet_123",
+            title="Target Jobs",
+            url="https://docs.google.com/spreadsheets/d/sheet_123/edit",
+            tab="Jobs",
+            range_name="'Jobs'!A1:B2",
+            values=[["Role", "Comp"], ["MTS", "$210K"]],
+            header={"formatted": True, "table": True, "table_name": "Jobs", "frozen_rows": 1},
+        )
+    )
+    asyncio.run(
+        agent._emit_sheet_progress(
+            task,
+            op="verify",
+            phase="done",
+            message="Sheet updated.",
+            spreadsheet_id="sheet_123",
+            title="Target Jobs",
+            url="https://docs.google.com/spreadsheets/d/sheet_123/edit",
+            include_replay=True,
+        )
+    )
+
+    payloads = _sheet_payloads(agent)
+    done = payloads[-1]
+    assert done["phase"] == "done"
+    assert done["replay"] == [
+        {"op": "update_cells", "range": "'Jobs'!A1:B2", "values": [["Role", "Comp"], ["MTS", "$210K"]]}
+    ]
+    # The header state rides along so the restored card keeps its header row.
+    assert done["header"]["table_name"] == "Jobs"
+    # Interim events stay lean — no replay until the closing event.
+    assert "replay" not in payloads[0]
+
+
+def test_replay_buffer_keeps_only_recent_writes(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    task = _card_task()
+    for index in range(12):
+        asyncio.run(
+            agent._emit_sheet_progress(
+                task,
+                op="append_rows",
+                phase="writing",
+                message=f"Wrote row {index}.",
+                range_name=f"'Jobs'!A{index + 1}:A{index + 1}",
+                values=[[f"row-{index}"]],
+            )
+        )
+
+    assert len(agent._sheet_progress_replay) == 10
+    assert agent._sheet_progress_replay[0]["values"] == [["row-2"]]
+
+
+def test_edit_append_names_the_tab_and_replays_on_done(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    asyncio.run(agent.on_startup())
+    client = _FakeSheetsClient()
+    _with_client(agent, client)
+    task = _card_task("sheets.edit").model_copy(
+        update={
+            "input": {
+                "spreadsheet_id": "sheet_123",
+                "operation": "append_rows",
+                "range": "Jobs!A11:J11",
+                "values": [["Role", "Comp"]],
+            }
+        }
+    )
+
+    result = asyncio.run(agent.handle_sheets_edit(task))
+
+    assert result.status == "completed"
+    payloads = _sheet_payloads(agent)
+    append_payload = next(payload for payload in payloads if payload["op"] == "append_rows")
+    assert append_payload["tab"] == "Jobs"
+    done = payloads[-1]
+    assert done["phase"] == "done"
+    assert len(done["replay"]) == 1
+    assert "'Jobs'!" in done["replay"][0]["range"]
