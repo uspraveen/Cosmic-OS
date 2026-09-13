@@ -520,8 +520,12 @@
 }
 
 .spaces-rail.collapsed .spaces-rail-button {
-  grid-template-columns: 34px;
-  justify-items: center;
+  /* Flex-center the lone icon. The old fixed 34px grid track was wider than the
+     collapsed button's content box, so the icon rode the track from its left
+     edge and overflowed past the right border instead of centering. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 10px;
   gap: 0;
 }
@@ -8269,7 +8273,9 @@
 
   .spaces-rail.collapsed .spaces-rail-button {
     min-width: auto;
-    grid-template-columns: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     padding: 10px;
     gap: 0;
   }
