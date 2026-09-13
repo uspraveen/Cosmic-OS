@@ -3021,9 +3021,7 @@
   flex-wrap: wrap;
 }
 
-.prophet-toolbar-btn,
-.prophet-settings-save,
-.prophet-settings-secondary {
+.prophet-toolbar-btn {
   border-radius: 999px;
   height: 34px;
   padding: 0 14px;
@@ -3046,8 +3044,7 @@
   transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
 }
 
-.prophet-toolbar-btn:hover,
-.prophet-settings-secondary:hover:not(:disabled) {
+.prophet-toolbar-btn:hover {
   transform: translateY(-1px);
   border-color: rgba(121, 201, 255, 0.34);
   box-shadow:
@@ -3061,8 +3058,7 @@
   border-color: rgba(118, 210, 255, 0.38);
 }
 
-.prophet-toolbar-btn.primary,
-.prophet-settings-save {
+.prophet-toolbar-btn.primary {
   color: #08141d;
   background: linear-gradient(180deg, #a8e2ff, #76d2ff);
   border-color: rgba(168, 226, 255, 0.7);
@@ -3071,9 +3067,50 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
-.prophet-toolbar-btn.primary:hover,
-.prophet-settings-save:hover:not(:disabled) {
+.prophet-toolbar-btn.primary:hover {
   filter: brightness(1.05);
+}
+
+/* Settings actions follow the console button language (same tokens as the
+   agent-email console buttons: flat, 32px, radius 8 — no pill gradients). */
+.prophet-settings-save,
+.prophet-settings-secondary {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.prophet-settings-secondary {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.prophet-settings-secondary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.prophet-settings-save {
+  background: rgba(255, 255, 255, 0.11);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+.prophet-settings-save:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.22);
 }
 
 .prophet-settings-save:disabled,
@@ -3099,15 +3136,24 @@
 }
 
 .prophet-settings-notice {
-  font-size: 11px;
-  font-weight: 600;
-  color: rgba(160, 220, 255, 0.9);
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.78);
 }
 
 .prophet-settings-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 14px 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
 }
 
 .prophet-settings-field {
@@ -3116,12 +3162,16 @@
   gap: 8px;
 }
 
+.prophet-settings-field--wide {
+  grid-column: 1 / -1;
+}
+
 .prophet-settings-label {
   font-size: 10px;
   font-weight: 800;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.48);
+  color: rgba(255, 255, 255, 0.36);
 }
 
 .prophet-settings-inline {
@@ -3129,6 +3179,24 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* Add rows under the interests chips and the source records. */
+.prophet-settings-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.prophet-settings-add-row .prophet-text-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.prophet-settings-add-row .prophet-select {
+  flex: 0 0 auto;
+  width: auto;
 }
 
 .prophet-settings-value {
@@ -3144,29 +3212,32 @@
 }
 
 .prophet-settings-hint {
-  font-size: 11.5px;
+  font-size: 12px;
+  line-height: 1.5;
   color: rgba(255, 255, 255, 0.42);
 }
 
 .prophet-time-input,
 .prophet-text-input,
 .prophet-select {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(255, 255, 255, 0.94);
-  border-radius: 10px;
-  padding: 8px 10px;
+  min-height: 42px;
+  padding: 0 13px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.9);
+  border-radius: 12px;
   font-family: inherit;
   font-size: 12.5px;
   color-scheme: dark;
+  outline: none;
+  transition: border-color 0.18s ease, background 0.18s ease;
 }
 
 .prophet-time-input:focus,
 .prophet-text-input:focus,
 .prophet-select:focus {
-  outline: none;
-  border-color: rgba(118, 210, 255, 0.4);
-  box-shadow: 0 0 0 2px rgba(118, 210, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .prophet-time-input:disabled {
@@ -3193,46 +3264,61 @@
   accent-color: #76d2ff;
 }
 
-.prophet-toggle {
+/* Switch — same track/thumb pattern as the app's preferences switch:
+   42x24 track, 18px thumb, green when enabled, ON/OFF label. */
+.prophet-switch {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 999px;
-  padding: 4px 12px 4px 5px;
+  gap: 10px;
+  padding: 0;
+  border: none;
+  background: none;
   cursor: pointer;
   font-family: inherit;
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.62);
-  transition: background 0.18s ease, border-color 0.18s ease;
+  /* The field is a column flex box; without this the switch stretches. */
+  align-self: flex-start;
 }
 
-.prophet-toggle.small {
-  padding: 4px;
-  gap: 0;
+.prophet-switch-track {
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.18s ease;
 }
 
-.prophet-toggle-knob {
-  width: 16px;
-  height: 16px;
+.prophet-switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.32);
-  transition: background 0.18s ease, box-shadow 0.18s ease;
+  background: #fff;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.24);
+  transition: transform 0.18s ease;
 }
 
-.prophet-toggle.on {
-  color: rgba(255, 255, 255, 0.95);
-  background: rgba(118, 210, 255, 0.16);
-  border-color: rgba(118, 210, 255, 0.36);
+.prophet-switch.enabled .prophet-switch-track {
+  background: rgba(57, 181, 124, 0.68);
 }
 
-.prophet-toggle.on .prophet-toggle-knob {
-  background: #9fe0ff;
-  box-shadow: 0 0 10px rgba(118, 210, 255, 0.55);
+.prophet-switch.enabled .prophet-switch-thumb {
+  transform: translateX(18px);
+}
+
+.prophet-switch-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.56);
+}
+
+.prophet-switch.enabled .prophet-switch-label {
+  color: rgba(255, 255, 255, 0.92);
 }
 
 .prophet-chip-row {
@@ -3319,15 +3405,19 @@
 .prophet-source-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .prophet-source-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.75);
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.8);
 }
 
 .prophet-source-kind {
@@ -3336,9 +3426,10 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: rgba(160, 220, 255, 0.9);
-  border: 1px solid rgba(118, 210, 255, 0.3);
-  border-radius: 6px;
-  padding: 2px 6px;
+  border: 1px solid rgba(118, 210, 255, 0.24);
+  background: rgba(118, 210, 255, 0.07);
+  border-radius: 7px;
+  padding: 3px 7px;
   flex-shrink: 0;
 }
 
@@ -8098,6 +8189,7 @@
   .spaces-plane-grid,
   .spaces-storage-grid,
   .spaces-command-columns,
+  .prophet-settings-grid,
   .agent-email-detail-grid {
     grid-template-columns: 1fr;
   }
