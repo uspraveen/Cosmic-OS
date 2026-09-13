@@ -86,7 +86,8 @@ body,
 
 /* WIDE MODE — the panel breathes. Same glass, same identity: the surface cap
    lifts and the extra width flows to structure (code, consoles, tables,
-   images) while prose keeps a readable measure. Chat only. */
+   images) while prose keeps a readable measure. Chat only; Spaces adopts the
+   same surface below so the two full screens stay identical. */
 .overlay.chat-wide {
   --chat-surface-width: min(1280px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
 }
@@ -103,6 +104,11 @@ body,
 }
 
 .overlay.spaces-active {
+  /* Spaces is a full surface, not a spotlight card, so it always runs at the
+     chat wide-mode width. Same expression as .overlay.chat-wide above — if one
+     changes, change both. The task rail never shows in Spaces, so the reserve
+     resolves to 0px here. */
+  --chat-surface-width: min(1280px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
   justify-content: center;
   padding-bottom: 0;
   transition: background-color 0.4s ease, backdrop-filter 0.4s ease, opacity 0.3s ease, padding-top 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);

@@ -1,8 +1,11 @@
 /* ── Spaces shell: always in DOM, visibility-driven ── */
 
 .response-container.spaces-shell {
-  width: min(1100px, calc(100vw - 72px));
-  max-width: min(93vw, calc(100vw - 72px));
+  /* Full-surface width: Spaces reads the same --chat-surface-width ceiling as
+     wide chat (set on .overlay.spaces-active), so the launcher screen and the
+     wide chat surface are always the same width. */
+  width: var(--chat-surface-width);
+  max-width: var(--chat-surface-width);
   max-height: calc(100vh - 152px);
   contain: layout style;
   display: flex !important;
