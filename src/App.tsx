@@ -1482,6 +1482,7 @@ const mergeHydratedMessages = (
       activityLog: message.activityLog ?? existing.activityLog,
       alphaTerminalLog: message.alphaTerminalLog ?? existing.alphaTerminalLog,
       alphaConsoleAnchors: message.alphaConsoleAnchors ?? existing.alphaConsoleAnchors,
+      browserConsoleAnchors: message.browserConsoleAnchors ?? existing.browserConsoleAnchors,
       sheetRunAnchors: message.sheetRunAnchors ?? existing.sheetRunAnchors,
       sources: message.sources ?? existing.sources,
       requestId: message.requestId ?? existing.requestId,
@@ -1990,6 +1991,7 @@ const normalizeBackgroundTask = (value: unknown): BackgroundTask | null => {
     alphaTerminalLog: normalizeAlphaTerminalLog((value as any).alpha_terminal_log ?? (value as any).alphaTerminalLog),
     alphaConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).alpha_console_anchors ?? (value as any).alphaConsoleAnchors),
     browserConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).browser_console_anchors ?? (value as any).browserConsoleAnchors),
+    sheetRunAnchors: normalizeAlphaConsoleAnchors((value as any).sheet_run_anchors ?? (value as any).sheetRunAnchors),
     progress: normalizeTabularProgress((value as any).tabular_progress) ?? normalizeDocsProgress((value as any).docs_progress),
     slideProgress: normalizeSlideProgress((value as any).slide_progress ?? (value as any).slideProgress),
     browserProgress: normalizeBrowserProgress((value as any).browser_progress ?? (value as any).browserProgress),
@@ -6814,6 +6816,15 @@ export default function App() {
         ? nextMessages.findIndex((message) => message.id === existingMessageId)
         : -1
       const existingMessage = existingIndex >= 0 ? nextMessages[existingIndex] : null
+      // The live bubble this rebuild is replacing. Browser/sheet anchors are
+      // stamped client-side at invocation and do not exist in server history
+      // before this release, so they can only survive a resume rebuild by
+      // being carried from here (or from the snapshot, once the gateway
+      // stamps and returns them).
+      const liveMessageId = findAssistantMessageIdForForegroundStream(messagesRef.current, stream)
+      const liveMessage = liveMessageId
+        ? messagesRef.current.find((message) => message.id === liveMessageId) || null
+        : null
       const nextMessage: Message = {
         ...(existingMessage || createAssistantMessage({ id: fallbackMessageId })),
         id: existingMessage?.id || fallbackMessageId,
@@ -6823,6 +6834,12 @@ export default function App() {
         activity: typeof stream.activity === 'string' ? stream.activity : existingMessage?.activity,
         activityLog: stream.activityLog ?? existingMessage?.activityLog,
         alphaTerminalLog: mergeAlphaTerminalLogs(existingMessage?.alphaTerminalLog, stream.alphaTerminalLog),
+        browserConsoleAnchors: stream.browserConsoleAnchors
+          ?? existingMessage?.browserConsoleAnchors
+          ?? liveMessage?.browserConsoleAnchors,
+        sheetRunAnchors: stream.sheetRunAnchors
+          ?? existingMessage?.sheetRunAnchors
+          ?? liveMessage?.sheetRunAnchors,
         progress: stream.progress ?? existingMessage?.progress,
         slideProgress: stream.slideProgress ?? existingMessage?.slideProgress,
         browserProgress: mergeBrowserProgress(existingMessage?.browserProgress, stream.browserProgress),
@@ -7804,6 +7821,9 @@ export default function App() {
             : existingTask?.activity || existingAssistantMessage?.activity || '',
           activity_log: (event as any)?.activity_log ?? existingTask?.activityLog ?? existingAssistantMessage?.activityLog,
           alpha_terminal_log: (event as any)?.alpha_terminal_log ?? existingTask?.alphaTerminalLog ?? existingAssistantMessage?.alphaTerminalLog,
+          alpha_console_anchors: (event as any)?.alpha_console_anchors ?? existingTask?.alphaConsoleAnchors ?? existingAssistantMessage?.alphaConsoleAnchors,
+          browser_console_anchors: (event as any)?.browser_console_anchors ?? existingTask?.browserConsoleAnchors ?? existingAssistantMessage?.browserConsoleAnchors,
+          sheet_run_anchors: (event as any)?.sheet_run_anchors ?? existingTask?.sheetRunAnchors ?? existingAssistantMessage?.sheetRunAnchors,
           docs_progress: docsProgress ?? (existingTask?.progress?.kind === 'docs_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'docs_parse' ? existingAssistantMessage.progress : undefined),
           tabular_progress: tabularProgress ?? (existingTask?.progress?.kind === 'tabular_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'tabular_parse' ? existingAssistantMessage.progress : undefined),
           slide_progress: (event as any)?.slide_progress ?? existingTask?.slideProgress ?? existingAssistantMessage?.slideProgress,
@@ -7870,6 +7890,9 @@ export default function App() {
             : preservedTask?.partialThinking || '',
           activity_log: (event as any)?.activity_log ?? preservedTask?.activityLog,
           alpha_terminal_log: (event as any)?.alpha_terminal_log ?? preservedTask?.alphaTerminalLog,
+          alpha_console_anchors: (event as any)?.alpha_console_anchors ?? preservedTask?.alphaConsoleAnchors,
+          browser_console_anchors: (event as any)?.browser_console_anchors ?? preservedTask?.browserConsoleAnchors,
+          sheet_run_anchors: (event as any)?.sheet_run_anchors ?? preservedTask?.sheetRunAnchors,
           docs_progress: (event as any)?.docs_progress ?? (preservedTask?.progress?.kind === 'docs_parse' ? preservedTask.progress : undefined),
           tabular_progress: (event as any)?.tabular_progress ?? (preservedTask?.progress?.kind === 'tabular_parse' ? preservedTask.progress : undefined),
           slide_progress: (event as any)?.slide_progress ?? preservedTask?.slideProgress,
@@ -7901,6 +7924,9 @@ export default function App() {
           activity: foregroundTask?.activity,
           activityLog: foregroundTask?.activityLog,
           alphaTerminalLog: foregroundTask?.alphaTerminalLog,
+          alphaConsoleAnchors: foregroundTask?.alphaConsoleAnchors,
+          browserConsoleAnchors: foregroundTask?.browserConsoleAnchors,
+          sheetRunAnchors: foregroundTask?.sheetRunAnchors,
           progress: foregroundTask?.progress,
           slideProgress: foregroundTask?.slideProgress,
           browserProgress: foregroundTask?.browserProgress,
@@ -8378,6 +8404,7 @@ export default function App() {
         const alphaTerminalLog = normalizeAlphaTerminalLog((event as any).alpha_terminal_log)
         const alphaConsoleAnchors = normalizeAlphaConsoleAnchors((event as any).alpha_console_anchors)
         const browserConsoleAnchors = normalizeAlphaConsoleAnchors((event as any).browser_console_anchors)
+        const sheetRunAnchors = normalizeAlphaConsoleAnchors((event as any).sheet_run_anchors)
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
           const persistedMessageId = typeof (event as any).message_id === 'string'
@@ -8403,6 +8430,7 @@ export default function App() {
               alphaTerminalLog: mergeAlphaTerminalLogs(message.alphaTerminalLog, alphaTerminalLog),
               alphaConsoleAnchors: alphaConsoleAnchors ?? message.alphaConsoleAnchors,
               browserConsoleAnchors: browserConsoleAnchors ?? message.browserConsoleAnchors,
+              sheetRunAnchors: sheetRunAnchors ?? message.sheetRunAnchors,
               requestId: typeof event.request_id === 'string' ? event.request_id : message.requestId,
               source: typeof event.source === 'string' ? event.source : message.source,
               sourceId: typeof event.source_id === 'string' ? event.source_id : message.sourceId,
@@ -9181,6 +9209,9 @@ export default function App() {
         activity: task.activity,
         activityLog: task.activityLog,
         alphaTerminalLog: task.alphaTerminalLog,
+        alphaConsoleAnchors: task.alphaConsoleAnchors,
+        browserConsoleAnchors: task.browserConsoleAnchors,
+        sheetRunAnchors: task.sheetRunAnchors,
         progress: task.progress,
         slideProgress: task.slideProgress,
         browserProgress: task.browserProgress,

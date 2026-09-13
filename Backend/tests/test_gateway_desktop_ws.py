@@ -4036,6 +4036,55 @@ def test_desktop_resume_includes_foreground_active_request(test_client: TestClie
     assert foreground_streams[0]["updated_at"]
 
 
+def test_desktop_resume_carries_specialist_card_anchors(test_client: TestClient) -> None:
+    """Regression: a resume must rebuild specialist cards where they were invoked.
+
+    Browser / Sheets anchors are stamped once at the first progress reading.
+    The resume snapshot has to carry them or the client's transcript rebuild
+    re-pins the card at the end of the streamed text and it visibly jumps.
+    """
+    runtime = test_client.app.state.gateway_runtime
+    session_id = runtime._current_session_id()
+    state = ActiveRequest(
+        request_id="req_anchor_resume",
+        session_id=session_id,
+        channel="desktop:desk_anchor_resume",
+        route="opus",
+        task_id="task_anchor_resume",
+        partial_content="Firing the browser agent.",
+    )
+    pinned = len("Firing the browser agent.")
+    runtime._track_partial_stream(
+        state,
+        {
+            "type": "task.progress",
+            "browser_progress": {"step": 1, "max_steps": 10},
+        },
+    )
+    assert state.browser_console_anchors == {"_default": pinned}
+    runtime.active_requests[state.request_id] = state
+
+    with test_client.websocket_connect(
+        "/ws?token=test-token&device_id=desk_anchor_resume"
+    ) as websocket:
+        websocket.send_json(
+            {
+                "type": "resume",
+                "request_id": "resume_anchor_001",
+                "session_id": session_id,
+                "known_task_ids": [],
+            }
+        )
+        resume = websocket.receive_json()
+
+    foreground_streams = resume["foreground_streams"]
+    assert len(foreground_streams) == 1
+    assert foreground_streams[0]["request_id"] == "req_anchor_resume"
+    assert foreground_streams[0]["browser_console_anchors"] == [
+        {"task_id": None, "offset": pinned}
+    ]
+
+
 def test_desktop_resume_includes_recent_failed_foreground_stream(test_client: TestClient) -> None:
     runtime = test_client.app.state.gateway_runtime
     session_id = runtime._current_session_id()

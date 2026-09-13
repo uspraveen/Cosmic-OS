@@ -332,6 +332,64 @@ def test_track_partial_stream_pins_alpha_anchor_at_delegation_boundary() -> None
     assert state.alpha_console_anchors["tsk_alpha_2"] == blocking_pinned
 
 
+def test_track_partial_stream_pins_browser_and_sheet_anchors_at_first_progress() -> None:
+    """Regression: specialist cards pin where the specialist was invoked.
+
+    The first browser/sheets progress reading is the invocation point. A run
+    that pauses because the agent ran out of turns — the orchestrator narrates
+    the extension and resumes the run — must keep the card at that first
+    reading instead of dragging it down the newly streamed narration.
+    """
+    from gateway.runtime import ActiveRequest
+
+    runtime = object.__new__(GatewayRuntime)
+    state = ActiveRequest(
+        request_id="req_2",
+        session_id="sess_1",
+        channel="desktop:desk_1",
+        route="opus",
+    )
+
+    runtime._track_partial_stream(
+        state,
+        {"type": "response.chunk", "content": "Firing the browser agent."},
+    )
+    pinned = len("Firing the browser agent.")
+
+    runtime._track_partial_stream(
+        state,
+        {"type": "task.progress", "browser_progress": {"step": 1, "max_steps": 10}},
+    )
+    assert state.browser_console_anchors == {"_default": pinned}
+
+    # Out of turns: the orchestrator grants more and streams the update. The
+    # resumed readings must not re-pin the anchor.
+    runtime._track_partial_stream(
+        state,
+        {"type": "response.chunk", "content": "\n\nIt ran out of turns; granting more."},
+    )
+    runtime._track_partial_stream(
+        state,
+        {"type": "task.progress", "browser_progress": {"step": 11, "max_steps": 30}},
+    )
+    assert state.browser_console_anchors == {"_default": pinned}
+    assert state.browser_progress == {"step": 11, "max_steps": 30}
+
+    runtime._track_partial_stream(
+        state,
+        {"type": "task.progress", "sheets_progress": {"op": "append", "rows": 2}},
+    )
+    assert state.sheet_run_anchors == {
+        "_default": len("Firing the browser agent.\n\nIt ran out of turns; granting more."),
+    }
+
+    # The persisted payload is the same shape the client's normalizer reads
+    # from history metadata and resume snapshots.
+    assert runtime._alpha_console_anchors_payload(state.browser_console_anchors) == [
+        {"task_id": None, "offset": pinned}
+    ]
+
+
 def test_gateway_shapes_zen_catalog_and_semver_compare() -> None:
     payload = GatewayRuntime._shape_opencode_models_payload(
         {

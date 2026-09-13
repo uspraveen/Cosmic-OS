@@ -481,6 +481,12 @@ class ActiveRequest:
     activity_log: list[dict[str, Any]] = field(default_factory=list)
     alpha_terminal_log: list[dict[str, Any]] = field(default_factory=list)
     alpha_console_anchors: dict[str, int] = field(default_factory=dict)
+    # Browser / Sheets card anchors, same contract as alpha_console_anchors:
+    # stamped once at the first progress event (the point the specialist was
+    # invoked) and never re-stamped, so a run that pauses for more turns and
+    # resumes keeps its card exactly where the invocation narration was.
+    browser_console_anchors: dict[str, int] = field(default_factory=dict)
+    sheet_run_anchors: dict[str, int] = field(default_factory=dict)
     slide_progress: dict[str, Any] | None = None
     browser_progress: dict[str, Any] | None = None
     sheets_progress: dict[str, Any] | None = None
@@ -10989,6 +10995,12 @@ class GatewayRuntime:
                 "activity": state.activity,
                 "activity_log": state.activity_log,
                 "alpha_terminal_log": state.alpha_terminal_log,
+                "browser_console_anchors": self._alpha_console_anchors_payload(
+                    state.browser_console_anchors
+                ),
+                "sheet_run_anchors": self._alpha_console_anchors_payload(
+                    state.sheet_run_anchors
+                ),
                 "slide_progress": state.slide_progress,
                 "browser_progress": state.browser_progress,
                 "sheets_progress": state.sheets_progress,
@@ -11035,6 +11047,12 @@ class GatewayRuntime:
                     "activity": state.activity,
                     "activity_log": state.activity_log,
                     "alpha_terminal_log": state.alpha_terminal_log,
+                    "browser_console_anchors": self._alpha_console_anchors_payload(
+                        state.browser_console_anchors
+                    ),
+                    "sheet_run_anchors": self._alpha_console_anchors_payload(
+                        state.sheet_run_anchors
+                    ),
                     "slide_progress": state.slide_progress,
                     "browser_progress": state.browser_progress,
                     "sheets_progress": state.sheets_progress,
@@ -12633,6 +12651,15 @@ class GatewayRuntime:
             "supporting_artifacts": [dict(item) for item in state.supporting_artifacts],
             "activity": state.activity or "Request failed.",
             "alpha_terminal_log": [dict(item) for item in state.alpha_terminal_log],
+            "alpha_console_anchors": self._alpha_console_anchors_payload(
+                state.alpha_console_anchors
+            ),
+            "browser_console_anchors": self._alpha_console_anchors_payload(
+                state.browser_console_anchors
+            ),
+            "sheet_run_anchors": self._alpha_console_anchors_payload(
+                state.sheet_run_anchors
+            ),
             "completed": True,
             "failed": True,
             "error": state.error_message or None,
@@ -12666,6 +12693,16 @@ class GatewayRuntime:
         alpha_console_anchors = self._alpha_console_anchors_payload(state.alpha_console_anchors)
         if alpha_console_anchors:
             metadata["alpha_console_anchors"] = alpha_console_anchors
+        browser_console_anchors = self._alpha_console_anchors_payload(
+            state.browser_console_anchors
+        )
+        if browser_console_anchors:
+            metadata["browser_console_anchors"] = browser_console_anchors
+        sheet_run_anchors = self._alpha_console_anchors_payload(
+            state.sheet_run_anchors
+        )
+        if sheet_run_anchors:
+            metadata["sheet_run_anchors"] = sheet_run_anchors
         if state.error_message:
             metadata["error"] = state.error_message
         if state.partial_content:
@@ -15505,6 +15542,12 @@ class GatewayRuntime:
                 "activity": state.activity,
                 "activity_log": state.activity_log,
                 "alpha_terminal_log": state.alpha_terminal_log,
+                "browser_console_anchors": self._alpha_console_anchors_payload(
+                    state.browser_console_anchors
+                ),
+                "sheet_run_anchors": self._alpha_console_anchors_payload(
+                    state.sheet_run_anchors
+                ),
                 "slide_progress": state.slide_progress,
                 "browser_progress": state.browser_progress,
                 "sheets_progress": state.sheets_progress,
@@ -15531,6 +15574,12 @@ class GatewayRuntime:
                 "activity": state.activity or "Working on your request...",
                 "activity_log": state.activity_log,
                 "alpha_terminal_log": state.alpha_terminal_log,
+                "browser_console_anchors": self._alpha_console_anchors_payload(
+                    state.browser_console_anchors
+                ),
+                "sheet_run_anchors": self._alpha_console_anchors_payload(
+                    state.sheet_run_anchors
+                ),
                 "slide_progress": state.slide_progress,
                 "browser_progress": state.browser_progress,
                 "sheets_progress": state.sheets_progress,
@@ -15588,6 +15637,16 @@ class GatewayRuntime:
                     "snapshot_seq": None,
                     "activity": self._safe_text(snapshot.get("activity"))
                     or "Request failed.",
+                    "browser_console_anchors": [
+                        dict(item)
+                        for item in snapshot.get("browser_console_anchors", [])
+                        if isinstance(item, dict)
+                    ],
+                    "sheet_run_anchors": [
+                        dict(item)
+                        for item in snapshot.get("sheet_run_anchors", [])
+                        if isinstance(item, dict)
+                    ],
                     "completed": True,
                     "failed": True,
                     "error": self._safe_text(snapshot.get("error")) or None,
@@ -21399,6 +21458,21 @@ class GatewayRuntime:
                 if request_state is not None and request_state.alpha_console_anchors
                 else self._alpha_console_anchors_from_terminal_log(alpha_terminal_log)
             )
+            # Browser / Sheets card anchors ride the same rails as the alpha
+            # console anchor: stamped once on the in-flight request at the
+            # specialist's first progress reading and persisted with the
+            # message, so a reopen (or a mid-run resume) rebuilds the card at
+            # the invocation point instead of at the top or the tail.
+            browser_console_anchors = (
+                self._alpha_console_anchors_payload(request_state.browser_console_anchors)
+                if request_state is not None and request_state.browser_console_anchors
+                else []
+            )
+            sheet_run_anchors = (
+                self._alpha_console_anchors_payload(request_state.sheet_run_anchors)
+                if request_state is not None and request_state.sheet_run_anchors
+                else []
+            )
             # The live browser card is driven entirely by browser_progress, and
             # until now that only ever existed on the in-flight stream — so
             # reopening the response screen (which rebuilds messages from
@@ -21459,6 +21533,8 @@ class GatewayRuntime:
                     "activity_log": activity_log,
                     "alpha_terminal_log": alpha_terminal_log,
                     "alpha_console_anchors": alpha_console_anchors,
+                    "browser_console_anchors": browser_console_anchors,
+                    "sheet_run_anchors": sheet_run_anchors,
                     "browser_progress": browser_progress,
                     "sheets_progress": sheets_progress,
                 },
@@ -21507,6 +21583,10 @@ class GatewayRuntime:
                 event["alpha_terminal_log"] = alpha_terminal_log
             if alpha_console_anchors:
                 event["alpha_console_anchors"] = alpha_console_anchors
+            if browser_console_anchors:
+                event["browser_console_anchors"] = browser_console_anchors
+            if sheet_run_anchors:
+                event["sheet_run_anchors"] = sheet_run_anchors
             event_channel_platform = self._channel_platform(event_channel)
             email_delivery = (
                 self._effective_email_delivery(event)
@@ -25268,8 +25348,20 @@ class GatewayRuntime:
                 state.slide_progress = event["slide_progress"]
             if isinstance(event.get("browser_progress"), dict):
                 state.browser_progress = event["browser_progress"]
+                # One card per response, so the run's own `_default` anchor is
+                # the single slot. setdefault, not assignment: after the agent
+                # runs out of turns and the orchestrator hands it more, the
+                # follow-up readings must not drag the card down the text.
+                state.browser_console_anchors.setdefault(
+                    "_default",
+                    len(state.partial_content or ""),
+                )
             if isinstance(event.get("sheets_progress"), dict):
                 state.sheets_progress = event["sheets_progress"]
+                state.sheet_run_anchors.setdefault(
+                    "_default",
+                    len(state.partial_content or ""),
+                )
             state.activity = progress_label or self._safe_text(event.get("message")) or state.activity
             activity_entry = self._build_task_activity_entry(event)
             if activity_entry:
