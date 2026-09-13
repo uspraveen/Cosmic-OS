@@ -771,11 +771,18 @@
 .m-answer-markdown code:not(pre code) {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 6px;
   padding: 1px 5px;
-  color: #f5f6fa;
+  margin: 0 1px;
+  color: rgba(255, 255, 255, 0.92);
+  vertical-align: baseline;
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 .m-code-block,

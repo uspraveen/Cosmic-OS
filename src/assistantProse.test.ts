@@ -24,4 +24,17 @@ describe('scrubAssistantProse', () => {
       'Intro\n```\nstatus = "✅"\n```\nOut',
     )
   })
+
+  it('preserves spaces around inline code spans', () => {
+    expect(scrubAssistantProse('lives at `/opt/portfolio-blog-api/` today')).toBe(
+      'lives at `/opt/portfolio-blog-api/` today',
+    )
+    expect(scrubAssistantProse('gray for `Crawler` (datacenter)')).toBe(
+      'gray for `Crawler` (datacenter)',
+    )
+    expect(scrubAssistantProse('top of `classify_visit()` in `/opt/app.py`')).toBe(
+      'top of `classify_visit()` in `/opt/app.py`',
+    )
+    expect(scrubAssistantProse('`a` `b`')).toBe('`a` `b`')
+  })
 })

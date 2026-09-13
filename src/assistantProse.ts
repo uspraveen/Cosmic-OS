@@ -24,8 +24,30 @@ const scrubChunk = (chunk: string): string =>
 
 export const scrubAssistantProse = (text: string): string => {
   if (!text) return text
-  return text
-    .split(FENCE_OR_INLINE_CODE)
-    .map((part, index) => (index % 2 === 1 ? part : scrubChunk(part)))
+  const parts = text.split(FENCE_OR_INLINE_CODE)
+  return parts
+    .map((part, index) => {
+      if (index % 2 === 1) return part
+      const original = part
+      const scrubbed = scrubChunk(part)
+      // scrubChunk trims line-leading/trailing whitespace, but chunk edges
+      // adjacent to a code span are mid-line, not line edges. If the source
+      // had a space separating prose from code, keep exactly one so words
+      // don't glue to pills (e.g. `at` + `/opt/...` -> `at/opt/...`).
+      if (parts.length === 1) return scrubbed
+      const touchesCodeBefore = index > 0
+      const touchesCodeAfter = index + 1 < parts.length
+      const hadLeadingSpace = /^[ \t]/.test(original)
+      const hadTrailingSpace = /[ \t]$/.test(original)
+      let restored = scrubbed
+      const needsLeading =
+        touchesCodeBefore && hadLeadingSpace && !/^\s/.test(restored)
+      const needsTrailing =
+        touchesCodeAfter && hadTrailingSpace && !/\s$/.test(restored)
+      if (needsLeading && needsTrailing && restored === '') return ' '
+      if (needsLeading) restored = ` ${restored}`
+      if (needsTrailing) restored = `${restored} `
+      return restored
+    })
     .join('')
 }
