@@ -115,6 +115,7 @@ class GoogleSheetsClient:
         range_name: str,
         *,
         value_render_option: str = "FORMATTED_VALUE",
+        date_time_render_option: str | None = None,
     ) -> dict[str, Any]:
         if not spreadsheet_id:
             raise ValueError("spreadsheet_id is required.")
@@ -123,6 +124,11 @@ class GoogleSheetsClient:
         encoded_id = urllib.parse.quote(spreadsheet_id, safe="")
         encoded_range = urllib.parse.quote(range_name, safe="")
         params = {"valueRenderOption": value_render_option}
+        if date_time_render_option:
+            # With UNFORMATTED_VALUE this renders real date cells as ISO
+            # strings instead of serial numbers, so callers can tell a date
+            # column from a prose column without guessing the locale format.
+            params["dateTimeRenderOption"] = date_time_render_option
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.get(
                 f"{_SHEETS_BASE}/spreadsheets/{encoded_id}/values/{encoded_range}",
@@ -368,9 +374,28 @@ def _normalize_raw_tables(sheet_title: str, value: Any) -> list[dict[str, Any]]:
                 "range_a1": grid_range_to_a1(sheet_title, grid_range),
                 "row_count": row_count,
                 "column_count": column_count,
+                "column_properties": _normalize_table_columns(item.get("columnProperties")),
             }
         )
     return tables
+
+
+def _normalize_table_columns(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    columns: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        columns.append(
+            {
+                "column_index": item.get("columnIndex"),
+                "column_name": str(item.get("columnName") or "").strip(),
+                # Absent means the column is untyped/free — no validation.
+                "column_type": str(item.get("columnType") or "").strip(),
+            }
+        )
+    return columns
 
 
 def normalize_values_response(payload: dict[str, Any]) -> dict[str, Any]:

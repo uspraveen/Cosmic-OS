@@ -76,6 +76,10 @@ SHEET_PROGRESS_CELL_CHARS = 160
 # client-side otherwise).
 SHEET_PROGRESS_REPLAY_LIMIT = 10
 
+# ISO dates (optionally with a time tail) — how real date cells read back when
+# values are fetched with dateTimeRenderOption=STRING.
+_TABLE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ].*)?$")
+
 
 def _clamp_sheet_values(values: list[list[Any]]) -> list[list[str]]:
     clamped: list[list[str]] = []
@@ -367,6 +371,7 @@ class GoogleSheetsAgent(AgentRuntime):
 
         verified_ranges: list[dict[str, Any]] = []
         created_tables: list[str] = []
+        created_table_specs: list[dict[str, Any]] = []
         latest_structure = await client.get_spreadsheet(spreadsheet_id)
         navigator = SheetNavigator(latest_structure)
         for spec in sheet_specs:
@@ -395,6 +400,10 @@ class GoogleSheetsAgent(AgentRuntime):
                 # anything else (or any addTable failure — tables can't
                 # overlap an existing table) keeps the plain header format.
                 table_name = ""
+                # We just wrote these rows, so classify them in place: any
+                # mixed-type column gets pinned untyped, or Google's wrap-time
+                # inference would flag the minority values invalid.
+                column_properties = self._mixed_table_columns(rows) if len(rows) >= 2 else []
                 if len(rows) >= 2:
                     try:
                         table = await self._add_table(
@@ -404,6 +413,7 @@ class GoogleSheetsAgent(AgentRuntime):
                             range_name=updated_range,
                             table_name=str(spec["title"]),
                             taken_names=created_tables,
+                            column_properties=column_properties,
                         )
                         table_name = str((table or {}).get("name") or "")
                         if table_name:
@@ -417,11 +427,19 @@ class GoogleSheetsAgent(AgentRuntime):
                             detail[:300],
                         )
                 if table_name:
+                    created_table_specs.append(
+                        {"name": table_name, "range": updated_range, "values": rows}
+                    )
+                    pinned_note = (
+                        f" Kept {len(column_properties)} mixed column(s) as free text."
+                        if column_properties
+                        else ""
+                    )
                     await self._emit_sheet_progress(
                         task,
                         op="create_table",
                         phase="writing",
-                        message=f"Wrapped {updated_range} in a native table '{table_name}'.",
+                        message=f"Wrapped {updated_range} in a native table '{table_name}'.{pinned_note}",
                         spreadsheet_id=spreadsheet_id,
                         title=str(spreadsheet.get("title") or title),
                         url=sheet_url,
@@ -447,6 +465,27 @@ class GoogleSheetsAgent(AgentRuntime):
         await self._step(3, "completed", f"Wrote {len(verified_ranges)} populated range(s).")
 
         final_structure = await client.get_spreadsheet(spreadsheet_id)
+        # Harness check: if Google still typed a column whose values violate
+        # it, re-pin those columns free text instead of leaving red markers.
+        table_checks: list[dict[str, Any]] = []
+        for created in created_table_specs:
+            try:
+                check = await self._repair_typed_table_columns(
+                    client,
+                    spreadsheet_id,
+                    final_structure,
+                    table_name=created["name"],
+                    values=created["values"],
+                )
+            except Exception as exc:
+                logger.info(
+                    "google_sheets_agent.table_check_failed task_id=%s table=%s error=%s",
+                    task.task_id,
+                    created["name"],
+                    str(exc)[:200],
+                )
+                check = {"violations": [], "repaired": False, "error": str(exc)[:200]}
+            table_checks.append(check)
         await self._step(4, "completed", "Verified workbook structure.")
         await self._emit_sheet_progress(
             task,
@@ -467,6 +506,7 @@ class GoogleSheetsAgent(AgentRuntime):
             "url": spreadsheet_url(spreadsheet_id),
             "account": self._account_info(),
             "verified_ranges": verified_ranges,
+            **({"table_checks": table_checks} if table_checks else {}),
         }
         self._record_edit(
             task,
@@ -704,15 +744,23 @@ class GoogleSheetsAgent(AgentRuntime):
             requested_name = str(task.input.get("table_name") or task.input.get("name") or "").strip()
             table_error = ""
             table: dict[str, Any] = {}
+            table_check: dict[str, Any] = {}
             header_response: dict[str, Any] = {}
             banding_response: dict[str, Any] = {}
+            table_values: list[list[Any]] = []
+            column_properties: list[dict[str, Any]] = []
             try:
+                # Classify before wrapping so mixed-type columns can be pinned
+                # untyped instead of letting inference flag them invalid.
+                table_values = await self._read_values_for_table_scan(client, spreadsheet_id, range_name)
+                column_properties = self._mixed_table_columns(table_values)
                 table = await self._add_table(
                     client,
                     spreadsheet_id,
                     navigator,
                     range_name=range_name,
                     table_name=requested_name,
+                    column_properties=column_properties,
                 )
             except Exception as exc:
                 # Tables can't overlap an existing table (often one the user
@@ -742,9 +790,29 @@ class GoogleSheetsAgent(AgentRuntime):
             after_structure = await client.get_spreadsheet(spreadsheet_id)
             sheet_card_tab = self._sheet_name_from_range(range_name)
             if table:
+                try:
+                    table_check = await self._repair_typed_table_columns(
+                        client,
+                        spreadsheet_id,
+                        after_structure,
+                        table_name=str((table or {}).get("name") or ""),
+                        values=table_values,
+                    )
+                except Exception as exc:
+                    logger.info(
+                        "google_sheets_agent.table_check_failed task_id=%s table=%s error=%s",
+                        task.task_id,
+                        table.get("name"),
+                        str(exc)[:200],
+                    )
+                    table_check = {"violations": [], "repaired": False, "error": str(exc)[:200]}
                 result_payload = {
                     "range": range_name,
-                    "response": {"table": table},
+                    "response": {
+                        "table": table,
+                        "pinned_columns": len(column_properties),
+                        **({"table_check": table_check} if table_check else {}),
+                    },
                     "before": structure,
                     "after": after_structure,
                 }
@@ -754,7 +822,12 @@ class GoogleSheetsAgent(AgentRuntime):
                     "table_name": str(table.get("name") or ""),
                     "frozen_rows": 1,
                 }
-                sheet_card_message = f"Converted {range_name} to a native table '{table.get('name') or ''}'."
+                notes = ""
+                if column_properties:
+                    notes += f" Kept {len(column_properties)} mixed column(s) as free text."
+                if table_check.get("repaired"):
+                    notes += f" Re-typed {len(table_check.get('repaired_columns') or [])} column(s) after checking."
+                sheet_card_message = f"Converted {range_name} to a native table '{table.get('name') or ''}'.{notes}"
             else:
                 result_payload = {
                     "range": range_name,
@@ -977,6 +1050,54 @@ class GoogleSheetsAgent(AgentRuntime):
         ]
         return await client.batch_update(spreadsheet_id, requests)
 
+    @staticmethod
+    def _table_column_class(value: Any) -> str:
+        """empty | date | number | text — for table column typing checks.
+
+        Values come back UNFORMATTED_VALUE with dateTimeRenderOption=STRING,
+        so real date cells arrive as ISO strings while numbers stay JSON
+        numbers; that makes the classes locale-independent.
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return "empty"
+        if isinstance(value, bool):
+            return "text"
+        if isinstance(value, (int, float)):
+            return "number"
+        text = str(value).strip()
+        if _TABLE_DATE_RE.match(text):
+            return "date"
+        return "text"
+
+    @classmethod
+    def _mixed_table_columns(cls, values: list[list[Any]]) -> list[dict[str, Any]]:
+        """columnProperties pinning mixed-type columns as free text.
+
+        Native tables infer column types from the data; a column holding both
+        dates and prose ("2026-07-31" and "Live as of 2026-09-13") gets typed
+        by majority and the minority cells end up flagged invalid. Pinning
+        just those columns untyped keeps the wrap lossless while uniform
+        columns keep Google's nicer inference (date pickers, dropdowns).
+        """
+        if not values:
+            return []
+        width = max(len(row) for row in values)
+        classes: list[set[str]] = [set() for _ in range(width)]
+        for row in values[1:]:
+            for index in range(width):
+                classes[index].add(cls._table_column_class(row[index] if index < len(row) else None))
+        header = values[0]
+        pinned: list[dict[str, Any]] = []
+        for index, present in enumerate(classes):
+            present.discard("empty")
+            if len(present) > 1:
+                entry: dict[str, Any] = {"columnIndex": index}
+                name = str(header[index] if index < len(header) else "").strip()
+                if name:
+                    entry["columnName"] = name[:80]
+                pinned.append(entry)
+        return pinned
+
     async def _add_table(
         self,
         client: GoogleSheetsClient,
@@ -986,27 +1107,26 @@ class GoogleSheetsAgent(AgentRuntime):
         range_name: str,
         table_name: str = "",
         taken_names: list[str] | None = None,
+        column_properties: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Wrap a bounded range in a native Google Sheets table.
 
         The addTable request and the header-row freeze travel in one
         batchUpdate so the table lands complete or not at all. Failure is the
         caller's cue to fall back to plain header formatting — tables can't
-        overlap a table that already exists on the tab.
+        overlap a table that already exists on the tab. `column_properties`
+        pins mixed-type columns untyped so wrap-time inference can't flag
+        existing values invalid.
         """
         grid_range = navigator.grid_range(range_name)
         taken = set(navigator.table_names())
         taken.update(str(name or "").strip() for name in taken_names or [])
         name = self._unique_table_name(table_name or navigator.title or "Table", taken)
+        table_spec: dict[str, Any] = {"name": name, "range": grid_range}
+        if column_properties:
+            table_spec["columnProperties"] = list(column_properties)
         requests = [
-            {
-                "addTable": {
-                    "table": {
-                        "name": name,
-                        "range": grid_range,
-                    }
-                }
-            },
+            {"addTable": {"table": table_spec}},
             {
                 "updateSheetProperties": {
                     "properties": {
@@ -1043,6 +1163,98 @@ class GoogleSheetsAgent(AgentRuntime):
         if "!" not in raw:
             return ""
         return raw.rsplit("!", 1)[0].strip().strip("'")
+
+    async def _read_values_for_table_scan(
+        self,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        range_name: str,
+    ) -> list[list[Any]]:
+        """Values rendered for column classification: dates as ISO strings,
+        numbers as numbers — locale-independent."""
+        response = await client.get_values(
+            spreadsheet_id,
+            range_name,
+            value_render_option="UNFORMATTED_VALUE",
+            date_time_render_option="STRING",
+        )
+        return response.get("values") or []
+
+    async def _repair_typed_table_columns(
+        self,
+        client: GoogleSheetsClient,
+        spreadsheet_id: str,
+        structure: dict[str, Any],
+        *,
+        table_name: str,
+        values: list[list[Any]],
+    ) -> dict[str, Any]:
+        """Post-wrap harness check: a typed table column whose existing values
+        violate its type leaves red 'invalid' markers on the sheet. Find any,
+        re-pin those columns as free text, and report honestly.
+        """
+        check: dict[str, Any] = {"violations": [], "repaired": False}
+        table: dict[str, Any] | None = None
+        for sheet in structure.get("sheets") or []:
+            for candidate in sheet.get("tables") or []:
+                if str(candidate.get("name") or "") == table_name and candidate.get("table_id"):
+                    table = candidate
+                    break
+            if table:
+                break
+        if not table:
+            check["error"] = "created table not found in workbook structure"
+            return check
+        columns = table.get("column_properties") or []
+        if not columns:
+            return check
+        body = values[1:] if len(values) > 1 else []
+        offending: list[int] = []
+        for column in columns:
+            column_type = str(column.get("column_type") or "").strip().upper()
+            index = column.get("column_index")
+            if not column_type or not isinstance(index, int):
+                continue
+            for row in body:
+                cell = row[index] if isinstance(row, list) and index < len(row) else None
+                if cell is None or (isinstance(cell, str) and not cell.strip()):
+                    continue
+                matches = (
+                    bool(_TABLE_DATE_RE.match(str(cell).strip()))
+                    if column_type in {"DATE", "DATE_TIME"}
+                    else True
+                )
+                if not matches:
+                    check["violations"].append(
+                        {"column_index": index, "column_type": column_type, "value": str(cell)[:80]}
+                    )
+                    if index not in offending:
+                        offending.append(index)
+                    break
+        if not offending:
+            return check
+        fixed_columns: list[dict[str, Any]] = []
+        for column in columns:
+            payload_column: dict[str, Any] = {"columnIndex": column.get("column_index")}
+            if column.get("column_name"):
+                payload_column["columnName"] = str(column["column_name"])
+            if column.get("column_type") and column.get("column_index") not in offending:
+                payload_column["columnType"] = str(column["column_type"])
+            fixed_columns.append(payload_column)
+        await client.batch_update(
+            spreadsheet_id,
+            [
+                {
+                    "updateTable": {
+                        "table": {"tableId": table["table_id"], "columnProperties": fixed_columns},
+                        "fields": "columnProperties",
+                    }
+                }
+            ],
+        )
+        check["repaired"] = True
+        check["repaired_columns"] = offending
+        return check
 
     async def _format_range(
         self,

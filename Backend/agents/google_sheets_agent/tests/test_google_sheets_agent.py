@@ -618,6 +618,235 @@ def test_edit_create_table_falls_back_to_header_format_and_banding(tmp_path: Pat
     assert any("addBanding" in request for batch in client.batch_requests for request in batch)
 
 
+# --- Table column typing (no invalid flags on mixed columns) ---------------
+
+
+def test_table_column_class_is_locale_independent() -> None:
+    assert GoogleSheetsAgent._table_column_class("2026-07-31") == "date"
+    assert GoogleSheetsAgent._table_column_class("2026-07-31T00:00:00") == "date"
+    assert GoogleSheetsAgent._table_column_class("Live as of 2026-09-13") == "text"
+    assert GoogleSheetsAgent._table_column_class(150000) == "number"
+    assert GoogleSheetsAgent._table_column_class(True) == "text"
+    assert GoogleSheetsAgent._table_column_class("") == "empty"
+    assert GoogleSheetsAgent._table_column_class(None) == "empty"
+
+
+def test_mixed_table_columns_pins_only_mixed_columns() -> None:
+    values = [
+        ["Role", "Posted", "Salary", "Status"],
+        ["A", "2026-07-31", 150000, "To apply"],
+        ["B", "Live as of 2026-09-13", "TBD", "Backup"],
+        ["C", None, 9, ""],
+    ]
+    pinned = GoogleSheetsAgent._mixed_table_columns(values)
+    # Posted mixes dates and prose; Salary mixes number and text. Uniform
+    # text columns stay unpinned so Google can still infer dropdowns.
+    assert pinned == [
+        {"columnIndex": 1, "columnName": "Posted"},
+        {"columnIndex": 2, "columnName": "Salary"},
+    ]
+
+
+def test_add_table_carries_column_properties_in_request() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.batches: list[tuple[str, list[dict]]] = []
+
+        async def batch_update(self, spreadsheet_id: str, requests: list[dict]) -> dict:
+            self.batches.append((spreadsheet_id, requests))
+            name = requests[0]["addTable"]["table"]["name"]
+            return {"spreadsheetId": spreadsheet_id, "replies": [{"addTable": {"table": {"name": name, "tableId": "tbl_1"}}}, {}]}
+
+    client = FakeClient()
+    agent = object.__new__(GoogleSheetsAgent)
+    navigator = SheetNavigator(_sample_spreadsheet())
+    asyncio.run(
+        agent._add_table(
+            client,
+            "sheet_123",
+            navigator,
+            range_name="'Pipeline'!A1:C3",
+            table_name="Pipeline",
+            column_properties=[{"columnIndex": 1, "columnName": "Posted"}],
+        )
+    )
+    table = client.batches[0][1][0]["addTable"]["table"]
+    assert table["columnProperties"] == [{"columnIndex": 1, "columnName": "Posted"}]
+
+
+def test_repair_typed_table_columns_retypes_violations() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.batches: list[tuple[str, list[dict]]] = []
+
+        async def batch_update(self, spreadsheet_id: str, requests: list[dict]) -> dict:
+            self.batches.append((spreadsheet_id, requests))
+            return {"spreadsheetId": spreadsheet_id, "replies": [{}]}
+
+    structure = normalize_spreadsheet(
+        {
+            "spreadsheetId": "sheet_123",
+            "properties": {"title": "Target Jobs"},
+            "sheets": [
+                {
+                    "properties": {"sheetId": 111, "title": "Jobs", "gridProperties": {"rowCount": 100, "columnCount": 26}},
+                    "tables": [
+                        {
+                            "tableId": "tbl_1",
+                            "name": "Jobs",
+                            "range": {"sheetId": 111, "startRowIndex": 0, "endRowIndex": 3, "startColumnIndex": 0, "endColumnIndex": 3},
+                            "columnProperties": [
+                                {"columnIndex": 0, "columnName": "Role"},
+                                {"columnIndex": 1, "columnName": "Posted", "columnType": "DATE"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    client = FakeClient()
+    agent = object.__new__(GoogleSheetsAgent)
+    values = [
+        ["Role", "Posted"],
+        ["A", "2026-07-31"],
+        ["B", "Live as of 2026-09-13"],
+    ]
+
+    check = asyncio.run(
+        agent._repair_typed_table_columns(client, "sheet_123", structure, table_name="Jobs", values=values)
+    )
+
+    assert check["repaired"] is True
+    assert check["violations"][0]["column_index"] == 1
+    update = client.batches[0][1][0]["updateTable"]
+    assert update["table"]["tableId"] == "tbl_1"
+    assert update["fields"] == "columnProperties"
+    columns = update["table"]["columnProperties"]
+    assert columns[0] == {"columnIndex": 0, "columnName": "Role"}
+    assert "columnType" not in columns[1]
+
+
+def test_repair_typed_table_columns_leaves_clean_tables_alone() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.batches: list[tuple[str, list[dict]]] = []
+
+        async def batch_update(self, spreadsheet_id: str, requests: list[dict]) -> dict:
+            self.batches.append((spreadsheet_id, requests))
+            return {"spreadsheetId": spreadsheet_id, "replies": [{}]}
+
+    structure = normalize_spreadsheet(
+        {
+            "spreadsheetId": "sheet_123",
+            "properties": {"title": "Target Jobs"},
+            "sheets": [
+                {
+                    "properties": {"sheetId": 111, "title": "Jobs", "gridProperties": {"rowCount": 100, "columnCount": 26}},
+                    "tables": [
+                        {
+                            "tableId": "tbl_1",
+                            "name": "Jobs",
+                            "range": {"sheetId": 111, "startRowIndex": 0, "endRowIndex": 3, "startColumnIndex": 0, "endColumnIndex": 2},
+                            "columnProperties": [{"columnIndex": 1, "columnName": "Posted", "columnType": "DATE"}],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    client = FakeClient()
+    agent = object.__new__(GoogleSheetsAgent)
+    values = [
+        ["Role", "Posted"],
+        ["A", "2026-07-31"],
+        ["B", "2025-11-05"],
+    ]
+
+    check = asyncio.run(
+        agent._repair_typed_table_columns(client, "sheet_123", structure, table_name="Jobs", values=values)
+    )
+
+    assert check == {"violations": [], "repaired": False}
+    assert client.batches == []
+
+
+def test_normalize_spreadsheet_extracts_table_column_types() -> None:
+    structure = normalize_spreadsheet(
+        {
+            "spreadsheetId": "sheet_123",
+            "properties": {"title": "T"},
+            "sheets": [
+                {
+                    "properties": {"sheetId": 111, "title": "Jobs", "gridProperties": {"rowCount": 100, "columnCount": 26}},
+                    "tables": [
+                        {
+                            "tableId": "tbl_1",
+                            "name": "Jobs",
+                            "range": {"sheetId": 111, "startRowIndex": 0, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 2},
+                            "columnProperties": [
+                                {"columnIndex": 0, "columnName": "Role"},
+                                {"columnIndex": 1, "columnName": "Posted", "columnType": "DATE"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    navigator = SheetNavigator(structure)
+    columns = navigator.tables_for("Jobs")[0]["column_properties"]
+    assert columns[0] == {"column_index": 0, "column_name": "Role", "column_type": ""}
+    assert columns[1] == {"column_index": 1, "column_name": "Posted", "column_type": "DATE"}
+
+
+def test_edit_create_table_scans_values_and_reports_check(tmp_path: Path) -> None:
+    agent = _build_agent(tmp_path)
+    asyncio.run(agent.on_startup())
+    client = _FakeSheetsClient()
+    seen_kwargs: dict = {}
+
+    async def scanning_get_values(spreadsheet_id: str, range_name: str, **kwargs) -> dict:
+        seen_kwargs.update(kwargs)
+        return {
+            "range": range_name,
+            "values": [
+                ["Role", "Posted", "Status"],
+                ["A", "2026-07-31", "To apply"],
+                ["B", "Live as of 2026-09-13", "Backup"],
+            ],
+            "row_count": 3,
+            "column_count": 3,
+        }
+
+    client.get_values = scanning_get_values  # type: ignore[method-assign]
+    _with_client(agent, client)
+    task = _card_task("sheets.edit").model_copy(
+        update={
+            "input": {
+                "spreadsheet_id": "sheet_123",
+                "operation": "create_table",
+                "range": "Jobs!A1:C3",
+                "table_name": "Jobs",
+            }
+        }
+    )
+
+    result = asyncio.run(agent.handle_sheets_edit(task))
+
+    assert result.status == "completed"
+    # The scan read used locale-independent rendering for classification.
+    assert seen_kwargs.get("value_render_option") == "UNFORMATTED_VALUE"
+    assert seen_kwargs.get("date_time_render_option") == "STRING"
+    response = result.output["result"]["response"]
+    table_request = next(request for batch in client.batch_requests for request in batch if "addTable" in request)
+    pinned = table_request["addTable"]["table"].get("columnProperties")
+    assert pinned == [{"columnIndex": 1, "columnName": "Posted"}]
+    assert response["pinned_columns"] == 1
+    # Clean check: no repair needed, no error surfaced.
+    assert response["table_check"].get("repaired", False) is False
+
+
 # --- Live card persistence (replay on the closing event) ------------------
 
 

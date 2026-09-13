@@ -46,6 +46,10 @@ Core behavior:
   native table automatically; to convert an existing grid, use create_table
   (it falls back to header formatting + banding if a table already covers
   the range, e.g. one the user made by hand in the Sheets UI).
+- Keep column values type-consistent. When a date or number is unknown,
+  leave the cell empty or put the context in a neighboring column — never
+  write prose like "Live as of 2026-09-13" into a date column; typed table
+  columns flag mismatched values as invalid.
 - Use format_range, set_borders, add_banding, resize_columns/rows,
   auto_resize_columns/rows, freeze_panes, merge_cells, and clear_formatting
   when the user asks for visual polish, colored cells, alignment, wrapping,

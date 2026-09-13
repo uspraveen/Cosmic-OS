@@ -177,6 +177,7 @@ def _normalize_tables(value: Any) -> list[dict[str, Any]]:
     for item in value:
         if not isinstance(item, dict):
             continue
+        columns = item.get("column_properties")
         tables.append(
             {
                 "table_id": str(item.get("table_id") or "").strip(),
@@ -185,6 +186,7 @@ def _normalize_tables(value: Any) -> list[dict[str, Any]]:
                 "range_a1": str(item.get("range_a1") or "").strip(),
                 "row_count": int(item.get("row_count") or 0),
                 "column_count": int(item.get("column_count") or 0),
+                "column_properties": [dict(col) for col in columns] if isinstance(columns, list) else [],
             }
         )
     return tables
