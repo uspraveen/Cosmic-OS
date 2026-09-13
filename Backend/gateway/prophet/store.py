@@ -21,6 +21,7 @@ PROPHET_MIN_STORIES = 5
 PROPHET_MAX_STORIES_HARD_CAP = 30
 PROPHET_DEFAULT_MAX_STORIES = 15
 PROPHET_DEDUP_WINDOW_DAYS = 3
+PROPHET_SEMANTIC_WINDOW_DAYS = 28
 PROPHET_MAX_IMAGES = 4
 
 VALID_LAYOUTS = ("feature", "columns", "briefs", "gallery", "essay")
@@ -128,6 +129,33 @@ def _url_hash(url: str | None) -> str | None:
     if not normalized:
         return None
     return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:20]
+
+
+def _parse_embedding_vector(value: Any) -> list[float] | None:
+    if isinstance(value, list):
+        raw = value
+    else:
+        parsed = _json_load(value, None)
+        raw = parsed if isinstance(parsed, list) else None
+    if not raw:
+        return None
+    try:
+        vector = [float(item) for item in raw]
+    except (TypeError, ValueError):
+        return None
+    if not vector:
+        return None
+    magnitude = sum(component * component for component in vector) ** 0.5
+    if magnitude <= 0:
+        return None
+    return [component / magnitude for component in vector]
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    length = min(len(left), len(right))
+    if length <= 0:
+        return 0.0
+    return sum(left[index] * right[index] for index in range(length))
 
 
 def _normalize_source(raw: Any) -> dict[str, str]:
@@ -580,7 +608,14 @@ class ProphetStore:
                     headline TEXT NOT NULL,
                     headline_key TEXT NOT NULL,
                     section_id TEXT,
-                    shown_at TEXT NOT NULL
+                    dek TEXT,
+                    source_name TEXT,
+                    source_url TEXT,
+                    shown_at TEXT NOT NULL,
+                    embedding_model TEXT,
+                    embedding_dimensions INTEGER,
+                    embedding_vector_json TEXT,
+                    embedding_updated_at TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_prophet_story_index_shown
@@ -593,6 +628,7 @@ class ProphetStore:
             )
             now = utcnow_iso()
             self._ensure_settings_columns(connection)
+            self._ensure_story_index_columns(connection)
             connection.execute(
                 """
                 INSERT INTO prophet_settings (
@@ -953,9 +989,12 @@ class ProphetStore:
                         headline,
                         headline_key,
                         section_id,
+                        dek,
+                        source_name,
+                        source_url,
                         shown_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         f"pstory_{uuid4().hex[:12]}",
@@ -967,6 +1006,9 @@ class ProphetStore:
                         headline,
                         _normalize_headline_key(headline),
                         _clean_text(story.get("section_id"), limit=60),
+                        _clean_text(story.get("dek"), limit=400),
+                        _clean_text(source.get("name"), limit=200) if source else None,
+                        url,
                         now,
                     ),
                 )
@@ -1099,6 +1141,122 @@ class ProphetStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_story_index(
+        self,
+        *,
+        days: int = PROPHET_SEMANTIC_WINDOW_DAYS,
+        limit: int = 400,
+        embedded_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))).isoformat().replace(
+            "+00:00", "Z"
+        )
+        query = """
+            SELECT *
+            FROM prophet_story_index
+            WHERE shown_at >= ?
+        """
+        if embedded_only:
+            query += " AND embedding_vector_json IS NOT NULL"
+        query += " ORDER BY shown_at DESC LIMIT ?"
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(
+                query,
+                (cutoff, max(1, min(800, int(limit)))),
+            ).fetchall()
+        return [self._story_index_record(row) for row in rows]
+
+    def list_story_index_for_edition(self, edition_id: str) -> list[dict[str, Any]]:
+        normalized = _clean_text(edition_id, limit=80)
+        if not normalized:
+            return []
+        with self._lock, closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM prophet_story_index
+                WHERE edition_id = ?
+                ORDER BY shown_at DESC
+                """,
+                (normalized,),
+            ).fetchall()
+        return [self._story_index_record(row) for row in rows]
+
+    def update_story_embedding(
+        self,
+        story_row_id: str,
+        *,
+        embedding_model: str,
+        embedding_dimensions: int,
+        embedding_vector: list[float],
+        embedding_updated_at: str | None = None,
+    ) -> None:
+        normalized_id = _clean_text(story_row_id, limit=80)
+        if not normalized_id or not embedding_vector:
+            return
+        stamped = embedding_updated_at or utcnow_iso()
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute(
+                """
+                UPDATE prophet_story_index
+                SET embedding_model = ?,
+                    embedding_dimensions = ?,
+                    embedding_vector_json = ?,
+                    embedding_updated_at = ?
+                WHERE story_row_id = ?
+                """,
+                (
+                    _clean_text(embedding_model, limit=120),
+                    int(embedding_dimensions),
+                    _json_dumps(embedding_vector),
+                    stamped,
+                    normalized_id,
+                ),
+            )
+            connection.commit()
+
+    def similar_stories(
+        self,
+        query_vectors: list[list[float]],
+        *,
+        days: int = PROPHET_SEMANTIC_WINDOW_DAYS,
+        exclude_edition_id: str | None = None,
+        exclude_headline_keys: set[str] | None = None,
+        exclude_story_row_ids: set[str] | None = None,
+        min_similarity: float = 0.55,
+        limit: int = 24,
+    ) -> list[dict[str, Any]]:
+        if not query_vectors:
+            return []
+        scored: list[tuple[float, dict[str, Any]]] = []
+        excluded_edition = _clean_text(exclude_edition_id, limit=80)
+        excluded_keys = exclude_headline_keys or set()
+        excluded_ids = exclude_story_row_ids or set()
+        for item in self.list_story_index(days=days, embedded_only=True):
+            story_row_id = str(item.get("story_row_id") or "")
+            if story_row_id and story_row_id in excluded_ids:
+                continue
+            if excluded_edition and item.get("edition_id") == excluded_edition:
+                continue
+            headline_key = str(item.get("headline_key") or "")
+            if headline_key and headline_key in excluded_keys:
+                continue
+            vector = item.get("embedding_vector")
+            if not isinstance(vector, list) or not vector:
+                continue
+            similarity = max(
+                (_cosine_similarity(query, vector) for query in query_vectors),
+                default=0.0,
+            )
+            if similarity < min_similarity:
+                continue
+            scored.append((similarity, {**item, "semantic_similarity": round(similarity, 4)}))
+        scored.sort(
+            key=lambda entry: (entry[0], str(entry[1].get("shown_at") or "")),
+            reverse=True,
+        )
+        return [entry[1] for entry in scored[: max(1, min(80, int(limit)))]]
+
     def summary(self) -> dict[str, Any]:
         settings = self.get_settings()
         with self._lock, closing(self._connect()) as connection:
@@ -1186,6 +1344,36 @@ class ProphetStore:
             connection.execute(
                 "ALTER TABLE prophet_settings ADD COLUMN paper_style TEXT NOT NULL DEFAULT 'parchment'"
             )
+
+    @staticmethod
+    def _ensure_story_index_columns(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(prophet_story_index)")
+        }
+        if not columns:
+            return
+        additions = (
+            ("dek", "TEXT"),
+            ("source_name", "TEXT"),
+            ("source_url", "TEXT"),
+            ("embedding_model", "TEXT"),
+            ("embedding_dimensions", "INTEGER"),
+            ("embedding_vector_json", "TEXT"),
+            ("embedding_updated_at", "TEXT"),
+        )
+        for name, declaration in additions:
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE prophet_story_index ADD COLUMN {name} {declaration}"
+                )
+
+    @staticmethod
+    def _story_index_record(row: sqlite3.Row) -> dict[str, Any]:
+        record = dict(row)
+        record["embedding_vector"] = _parse_embedding_vector(
+            record.pop("embedding_vector_json", None)
+        )
+        return record
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=30)

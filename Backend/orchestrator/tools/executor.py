@@ -2715,6 +2715,34 @@ class ToolExecutor:
         editions = payload.get("editions") if isinstance(payload, dict) else None
         return {"editions": editions if isinstance(editions, list) else []}
 
+    async def _search_prophet_archive(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        if not self.gateway_url:
+            return {"error": True, "message": "Gateway Daily Prophet store is not configured."}
+        query = str(tool_input.get("query") or "").strip()
+        if not query:
+            return {"error": True, "message": "query is required"}
+        days_raw = tool_input.get("days")
+        try:
+            days = int(days_raw) if days_raw is not None else 28
+        except (TypeError, ValueError):
+            days = 28
+        body: dict[str, Any] = {"query": query, "days": max(1, min(28, days))}
+        if context and context.request_id:
+            body["request_id"] = context.request_id
+        payload = await self._request_gateway_json(
+            "POST",
+            "/internal/prophet/archive/search",
+            json_body=body,
+        )
+        if not isinstance(payload, dict):
+            return {"error": True, "message": "Daily Prophet archive returned an unexpected response."}
+        return payload
+
     async def _update_prophet_preferences(
         self,
         tool_input: dict[str, Any],

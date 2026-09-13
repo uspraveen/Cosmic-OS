@@ -322,3 +322,112 @@ def test_weak_and_duplicate_images_are_dropped(tmp_path: Path) -> None:
     extra = next(section for section in edition["sections"] if section["id"] == "extra")
     assert "image" not in extra["stories"][0]
     assert any("duplicate image" in warning for warning in result["warnings"])
+
+
+def test_story_index_migrates_embedding_columns(tmp_path: Path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "legacy-stories.db"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE prophet_settings (
+            config_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            morning_time TEXT NOT NULL DEFAULT '05:00',
+            evening_enabled INTEGER NOT NULL DEFAULT 1,
+            evening_time TEXT NOT NULL DEFAULT '19:00',
+            max_stories INTEGER NOT NULL DEFAULT 15,
+            notifications_enabled INTEGER NOT NULL DEFAULT 1,
+            sections_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE prophet_story_index (
+            story_row_id TEXT PRIMARY KEY,
+            edition_id TEXT NOT NULL,
+            edition_date TEXT NOT NULL,
+            slot TEXT NOT NULL,
+            story_id TEXT,
+            url_hash TEXT,
+            headline TEXT NOT NULL,
+            headline_key TEXT NOT NULL,
+            section_id TEXT,
+            shown_at TEXT NOT NULL
+        );
+        INSERT INTO prophet_settings (config_id, updated_at)
+        VALUES ('default', '2026-01-01T00:00:00Z');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = ProphetStore(db_path)
+    store.initialize()
+    result = store.publish_edition(_edition())
+    rows = store.list_story_index_for_edition(result["edition_id"])
+    assert rows
+    assert "dek" in rows[0]
+    store.update_story_embedding(
+        rows[0]["story_row_id"],
+        embedding_model="pplx-embed-v1-4b",
+        embedding_dimensions=2,
+        embedding_vector=[1.0, 0.0],
+    )
+    reloaded = store.list_story_index_for_edition(result["edition_id"])
+    assert reloaded[0]["embedding_vector"] is not None
+    assert abs(reloaded[0]["embedding_vector"][0]) > 0.9
+
+
+def test_similar_stories_ranks_by_cosine_and_respects_window(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = store.publish_edition(_edition())
+    evening = _edition()
+    evening["slot"] = "evening"
+    evening["lead"]["headline"] = "Completely unrelated markets note"
+    evening["lead"]["source"] = {"name": "FT", "url": "https://example.com/markets"}
+    evening["sections"][0]["stories"] = [
+        {
+            "headline": "Bond yields jumped",
+            "source": {"name": "FT", "url": "https://example.com/bonds"},
+        }
+    ]
+    second = store.publish_edition(evening)
+
+    agent_rows = store.list_story_index_for_edition(first["edition_id"])
+    market_rows = store.list_story_index_for_edition(second["edition_id"])
+    for row in agent_rows:
+        store.update_story_embedding(
+            row["story_row_id"],
+            embedding_model="test",
+            embedding_dimensions=2,
+            embedding_vector=[1.0, 0.0],
+        )
+    for row in market_rows:
+        store.update_story_embedding(
+            row["story_row_id"],
+            embedding_model="test",
+            embedding_dimensions=2,
+            embedding_vector=[0.0, 1.0],
+        )
+
+    matches = store.similar_stories(
+        [[1.0, 0.0]],
+        days=28,
+        exclude_edition_id=first["edition_id"],
+        min_similarity=0.7,
+        limit=8,
+    )
+    assert matches == []
+
+    matches = store.similar_stories(
+        [[1.0, 0.0]],
+        days=28,
+        exclude_edition_id=second["edition_id"],
+        min_similarity=0.7,
+        limit=8,
+    )
+    assert matches
+    assert all("agent" in str(item["headline"]).lower() or "tech" in str(item["headline"]).lower()
+               or item["edition_id"] == first["edition_id"] for item in matches)
+    assert matches[0]["semantic_similarity"] >= 0.99
+

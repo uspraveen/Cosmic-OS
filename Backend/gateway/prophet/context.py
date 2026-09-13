@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .archive import pack_archive_lines
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -20,6 +21,8 @@ Work rules:
 - Images: a couple of visuals carry a paper — aim for the lead and up to two more, using each article's own main image when you have a URL you trust. Skip icons, logos, avatars, and anything you cannot verify.
 - You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections). Aim for a full paper — roughly eight to {max_stories} stories — and go smaller only on a genuinely quiet day.
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
+- Never write the edition as a chat message, and never ask the user to publish it.
+- Context may include recently shown headlines (last 3 days) and a labelled semantic archive of related coverage from the last 4 weeks. That archive is Cosmic's own prior newspaper, not live research. Skip repeats unless there is a major update; connect to prior coverage when it helps. Use search_prophet_archive if you need to check a candidate topic against that archive.
 - If publish_prophet_edition is rejected, correct the specific problem and republish the real edition. Never publish placeholder, sample, or test stories.
 - After the publish succeeds, reply with one short line confirming the edition is ready."""
 
@@ -33,6 +36,8 @@ Work rules:
 - Images: a couple of visuals carry a paper — aim for the lead and up to two more, using each article's own main image when you have a URL you trust. Skip icons, logos, avatars, and anything you cannot verify.
 - You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections). Aim for a full paper — roughly eight to {max_stories} stories — and go smaller only on a genuinely quiet day.
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
+- Never write the edition as a chat message, and never ask the user to publish it.
+- Context may include recently shown headlines (last 3 days) and a labelled semantic archive of related coverage from the last 4 weeks. That archive is Cosmic's own prior newspaper, not live research. Skip repeats unless there is a major update; connect to prior coverage when it helps. Use search_prophet_archive if you need to check a candidate topic against that archive.
 - If publish_prophet_edition is rejected, correct the specific problem and republish the real edition. Never publish placeholder, sample, or test stories.
 - After the publish succeeds, reply with one short line confirming the edition is ready."""
 
@@ -84,6 +89,8 @@ def render_prophet_context_block(
     *,
     slot: str,
     max_stories: int,
+    related_archive: list[dict[str, Any]] | None = None,
+    related_archive_rendered: str | None = None,
 ) -> str:
     settings = store.get_settings()
     interests = store.list_interests(include_muted=False)
@@ -128,10 +135,21 @@ def render_prophet_context_block(
             )
         )
     if recent:
-        lines.extend(["", "Recently shown stories (avoid unless there is a major update):"])
+        lines.extend(
+            [
+                "",
+                "Recently shown stories — last 3 days, exact headlines already published to My Prophet.",
+                "Avoid repeating these unless there is a major update:",
+            ]
+        )
         for item in recent[:24]:
             section = item.get("section_id") or "general"
             lines.append(
                 f"- {item['edition_date']} {item['slot']} [{section}] {item['headline']}"
             )
+    archive_block = (related_archive_rendered or "").strip()
+    if not archive_block and related_archive:
+        archive_block = pack_archive_lines(related_archive)
+    if archive_block:
+        lines.extend(["", archive_block])
     return "\n".join(lines)

@@ -60,6 +60,13 @@ class ProphetPublishRequest(BaseModel):
     slot: str | None = Field(default=None, max_length=20)
 
 
+class ProphetArchiveSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(..., min_length=1, max_length=500)
+    days: int | None = Field(default=None, ge=1, le=28)
+    request_id: str | None = Field(default=None, max_length=120)
+
+
 def _apply_preferences(
     runtime: GatewayRuntime,
     payload: ProphetPreferencesUpdateRequest,
@@ -199,6 +206,19 @@ async def publish_internal_prophet_edition(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": exc.code, "message": str(exc), "details": exc.details},
         ) from exc
+
+
+@router.post("/internal/prophet/archive/search")
+async def search_internal_prophet_archive(
+    payload: ProphetArchiveSearchRequest,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return await runtime.search_prophet_archive(
+        payload.query,
+        days=payload.days,
+        request_id=payload.request_id,
+    )
 
 
 @router.post("/internal/prophet/preferences")

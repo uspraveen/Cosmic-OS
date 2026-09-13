@@ -9,6 +9,7 @@ from pathlib import Path
 BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(BACKEND_ROOT))
 
+from gateway.prophet import PROPHET_MORNING_CRON_ID
 from gateway.runtime import GatewayRuntime
 from gateway.runtime import ActiveRequest
 from gateway.runtime import GMAIL_SURFACE_DECISION_SOURCE
@@ -348,6 +349,39 @@ def test_autonomous_request_backgrounds_across_sessions_on_same_visible_channel(
     )
 
 
+def test_prophet_cron_always_runs_off_composer_even_when_chat_is_idle() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.active_requests = {}
+    runtime.request_records = {}
+    prophet_record = {
+        "request_id": "req_prophet_morning",
+        "session_id": "sess_1",
+        "channel": "desktop",
+        "source": "cron",
+        "source_id": PROPHET_MORNING_CRON_ID,
+    }
+
+    assert runtime._should_background_autonomous_request(prophet_record)
+
+    runtime.active_requests["req_user"] = ActiveRequest(
+        request_id="req_user",
+        session_id="sess_1",
+        channel="desktop",
+        route="opus",
+        source="user",
+        foreground=True,
+    )
+    assert runtime._should_background_autonomous_request(prophet_record)
+    assert not runtime._should_background_autonomous_request(
+        {
+            "request_id": "req_compose_now",
+            "session_id": "sess_1",
+            "channel": "desktop",
+            "source": "user",
+        }
+    )
+
+
 def test_user_and_plain_webhook_records_do_not_auto_background() -> None:
     runtime = object.__new__(GatewayRuntime)
     runtime.active_requests = {
@@ -457,14 +491,25 @@ def test_user_backgrounded_work_is_parked_in_inbox_autonomous_is_not() -> None:
         foreground=True,
     )
 
+    prophet_bg = ActiveRequest(
+        request_id="req_prophet_bg",
+        session_id="sess_1",
+        channel="desktop",
+        route="opus",
+        source="cron",
+        source_id=PROPHET_MORNING_CRON_ID,
+        foreground=False,
+    )
+
     assert runtime._should_park_in_background_inbox(user_bg) is True
     assert runtime._should_park_in_background_inbox(heartbeat_bg) is False
     assert runtime._should_park_in_background_inbox(gmail_bg) is False
+    assert runtime._should_park_in_background_inbox(prophet_bg) is False
     assert runtime._should_park_in_background_inbox(user_fg) is False
     assert runtime._should_park_in_background_inbox(None) is False
 
 
-def test_silent_live_progress_covers_heartbeat_gmail_and_weekly_review() -> None:
+def test_silent_live_progress_covers_heartbeat_gmail_weekly_review_and_prophet() -> None:
     runtime = object.__new__(GatewayRuntime)
     runtime.active_requests = {}
     runtime.request_records = {}
@@ -485,6 +530,13 @@ def test_silent_live_progress_covers_heartbeat_gmail_and_weekly_review() -> None
             "request_id": "req_cron_weekly",
         }
     )
+    assert runtime._is_silent_live_progress_event(
+        {
+            "source": "cron",
+            "source_id": PROPHET_MORNING_CRON_ID,
+            "request_id": "req_prophet_abc",
+        }
+    )
     assert not runtime._is_silent_live_progress_event(
         {"source": "user", "request_id": "req_user_abc"}
     )
@@ -496,8 +548,137 @@ def test_silent_live_progress_covers_heartbeat_gmail_and_weekly_review() -> None
         source="heartbeat",
         foreground=True,
     )
+    runtime.active_requests["req_prophet_live"] = ActiveRequest(
+        request_id="req_prophet_live",
+        session_id="sess_1",
+        channel="desktop",
+        route="opus",
+        source="cron",
+        source_id=PROPHET_MORNING_CRON_ID,
+        foreground=False,
+    )
     assert runtime._is_silent_live_progress_request("req_heartbeat_live")
+    assert runtime._is_silent_live_progress_request("req_prophet_live")
     assert not runtime._is_silent_live_progress_request("req_user_abc")
+
+
+def test_prophet_live_and_terminal_events_do_not_reach_desktop_during_user_fg() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.request_records = {
+        "req_prophet": {
+            "source": "cron",
+            "source_id": PROPHET_MORNING_CRON_ID,
+        }
+    }
+    runtime.active_requests = {
+        "req_user": ActiveRequest(
+            request_id="req_user",
+            session_id="sess_1",
+            channel="desktop",
+            route="opus",
+            source="user",
+            foreground=True,
+        ),
+        "req_prophet": ActiveRequest(
+            request_id="req_prophet",
+            session_id="sess_1",
+            channel="desktop",
+            route="opus",
+            source="cron",
+            source_id=PROPHET_MORNING_CRON_ID,
+            foreground=False,
+        ),
+    }
+    runtime.active_task_channels = {"tsk_prophet": "desktop"}
+    runtime.active_requests_by_task = {"tsk_prophet": "req_prophet"}
+    runtime._trace_request_event = lambda **_kwargs: None
+    sent: list[dict] = []
+
+    async def send(event: dict) -> None:
+        sent.append(event)
+
+    def store_assistant_message(*_args, **_kwargs):
+        raise AssertionError("prophet live output must not persist to chat")
+
+    async def scenario() -> None:
+        for event_type in (
+            "route_result",
+            "task.created",
+            "task.progress",
+            "response.chunk",
+            "tool.call",
+            "task.completed",
+        ):
+            await runtime._handle_orchestrator_event(
+                {
+                    "type": event_type,
+                    "request_id": "req_prophet",
+                    "task_id": "tsk_prophet",
+                    "session_id": "sess_1",
+                    "channel": "desktop",
+                    "source": "cron",
+                    "source_id": PROPHET_MORNING_CRON_ID,
+                    "content": "Researching today's edition...",
+                },
+                send=send,
+                store_assistant_message=store_assistant_message,
+            )
+
+    asyncio.run(scenario())
+    assert sent == []
+    assert "tsk_prophet" not in runtime.active_task_channels
+    assert "tsk_prophet" not in runtime.active_requests_by_task
+
+
+def test_unpublished_prophet_complete_is_not_sent_to_desktop() -> None:
+    runtime = object.__new__(GatewayRuntime)
+    runtime.request_records = {
+        "req_prophet": {
+            "source": "cron",
+            "source_id": PROPHET_MORNING_CRON_ID,
+        }
+    }
+    runtime.active_requests = {}
+    runtime.active_task_channels = {}
+    runtime.active_requests_by_task = {}
+    traces: list[str] = []
+
+    def trace(**kwargs):
+        traces.append(str(kwargs.get("title") or ""))
+
+    runtime._trace_request_event = trace
+    runtime.prophet_store = type(
+        "Store",
+        (),
+        {"find_edition_by_request_id": staticmethod(lambda _request_id: None)},
+    )()
+    sent: list[dict] = []
+
+    async def send(event: dict) -> None:
+        sent.append(event)
+
+    def store_assistant_message(*_args, **_kwargs):
+        raise AssertionError("unpublished prophet dump must not persist to chat")
+
+    async def scenario() -> None:
+        await runtime._handle_orchestrator_event(
+            {
+                "type": "response.complete",
+                "request_id": "req_prophet",
+                "task_id": "tsk_prophet",
+                "session_id": "sess_1",
+                "channel": "desktop",
+                "source": "cron",
+                "source_id": PROPHET_MORNING_CRON_ID,
+                "content": "Research is done. Say publish it.",
+            },
+            send=send,
+            store_assistant_message=store_assistant_message,
+        )
+
+    asyncio.run(scenario())
+    assert sent == []
+    assert "Daily Prophet did not publish" in traces
 
 
 def test_heartbeat_recent_delivery_facts_include_completed_mobile_cron_across_rollover(tmp_path) -> None:

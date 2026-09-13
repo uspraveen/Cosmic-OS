@@ -82,8 +82,8 @@ Curator (orchestrator tool) may only add/remove/mute `inferred` entries; user-ad
   avatars, SVGs, duplicates), and caps the edition at four images.
 - Fresh context packet per run (`prophet/context.py`): settings summary, enabled sections, active
   interests, muted topics, preferred sources, and the last three days of shown headlines for dedup.
-- The run response is suppressed from chat when `prophet_store.find_edition_by_request_id()` finds a
-  published edition for the request; failures stay visible.
+- Cron run responses never occupy chat. Published editions are suppressed because My Prophet is the
+  surface; unpublished completes are also suppressed so research dumps cannot leak into chat.
 
 ## Orchestrator tools
 

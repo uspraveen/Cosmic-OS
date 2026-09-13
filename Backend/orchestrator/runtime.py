@@ -79,6 +79,15 @@ _PARALLEL_SAFE_TOOLS = get_parallel_safe_local_tool_names()
 # Daily Prophet editions are research-heavy and must still end with a publish
 # tool call, so they get a deeper iteration budget than a normal chat turn.
 PROPHET_CRON_TOOL_ITERATIONS = 45
+PROPHET_PUBLISH_TOOL_NAME = "publish_prophet_edition"
+PROPHET_PUBLISH_RESERVE_ITERATIONS = 3
+PROPHET_PUBLISH_NUDGE = (
+    "Stop research. Convert the notes you already gathered into a real Daily "
+    "Prophet edition and call publish_prophet_edition now. Skip unfinished "
+    "threads, including X or social search that did not return. Do not ask the "
+    "user. Do not write the edition as chat. If the notes are thin, publish "
+    "the strongest subset you have."
+)
 
 
 @dataclass(slots=True)
@@ -431,6 +440,108 @@ class OrchestratorRuntime:
             return max(configured, PROPHET_CRON_TOOL_ITERATIONS)
         return configured
 
+    @staticmethod
+    def _is_prophet_cron_task(task: TaskEnvelope) -> bool:
+        return task.source == "cron" and str(task.source_id or "").startswith("prophet.")
+
+    @staticmethod
+    def _filter_tools_by_name(
+        tools: list[dict[str, Any]],
+        names: set[str] | frozenset[str],
+    ) -> list[dict[str, Any]]:
+        wanted = {str(name) for name in names}
+        filtered: list[dict[str, Any]] = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            name = str(tool.get("name") or "").strip()
+            if not name:
+                function = tool.get("function")
+                if isinstance(function, dict):
+                    name = str(function.get("name") or "").strip()
+            if name in wanted:
+                filtered.append(tool)
+        return filtered
+
+    @staticmethod
+    def _prophet_publish_result_succeeded(result_str: str) -> bool:
+        try:
+            parsed = json.loads(result_str)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if not isinstance(parsed, dict):
+            return False
+        if parsed.get("error"):
+            return False
+        return bool(parsed.get("published"))
+
+    @staticmethod
+    def _prophet_should_restrict_to_publish(
+        *,
+        is_prophet_cron: bool,
+        published: bool,
+        iteration: int,
+        max_iterations: int,
+        forced_publish_turn: bool,
+        last_stop_reason: str | None,
+    ) -> bool:
+        if not is_prophet_cron or published:
+            return False
+        if forced_publish_turn:
+            return True
+        if last_stop_reason in {"pause_turn"}:
+            return False
+        reserve = min(PROPHET_PUBLISH_RESERVE_ITERATIONS, max(1, max_iterations))
+        return iteration > max_iterations - reserve
+
+    @staticmethod
+    def _prophet_should_force_publish_turn(
+        *,
+        is_prophet_cron: bool,
+        published: bool,
+        already_forced: bool,
+        stop_reason: str | None,
+    ) -> bool:
+        if not is_prophet_cron or published or already_forced:
+            return False
+        return stop_reason not in {"tool_use", "pause_turn", "tool_calls"}
+
+    @staticmethod
+    def _append_user_nudge(messages: list[dict[str, Any]], text: str) -> None:
+        nudge = str(text or "").strip()
+        if not nudge:
+            return
+        block = {"type": "text", "text": nudge}
+
+        def _new_user_message(sample: Any) -> dict[str, Any]:
+            if isinstance(sample, list):
+                return {"role": "user", "content": [block]}
+            return {"role": "user", "content": nudge}
+
+        if not messages:
+            messages.append({"role": "user", "content": nudge})
+            return
+        last = messages[-1]
+        if not isinstance(last, dict) or last.get("role") != "user":
+            sample = next(
+                (
+                    item.get("content")
+                    for item in reversed(messages)
+                    if isinstance(item, dict) and item.get("role") in {"user", "assistant"}
+                ),
+                None,
+            )
+            messages.append(_new_user_message(sample))
+            return
+        content = last.get("content")
+        if isinstance(content, str):
+            last["content"] = f"{content.rstrip()}\n\n{nudge}"
+            return
+        if isinstance(content, list):
+            content.append(block)
+            return
+        messages.append(_new_user_message(content))
+
     async def stream_task(self, task: TaskEnvelope) -> AsyncIterator[dict[str, Any]]:
         if not verify_task_envelope(task, self.config.signing_secret):
             raise RuntimeError("TaskEnvelope signature verification failed.")
@@ -535,6 +646,11 @@ class OrchestratorRuntime:
             )
             tools = get_model_tool_definitions(self._featured_specialist_agent_ids())
             max_iterations = self._max_iterations_for_task(task)
+            is_prophet_cron = self._is_prophet_cron_task(task)
+            prophet_published = False
+            prophet_forced_publish_turn = False
+            prophet_nudge_injected = False
+            last_turn_stop_reason: str | None = None
 
             iteration = 0
             full_response_text = ""
@@ -589,6 +705,25 @@ class OrchestratorRuntime:
                 )
                 max_request_message_count = max(max_request_message_count, len(messages))
 
+                turn_tools = tools
+                if self._prophet_should_restrict_to_publish(
+                    is_prophet_cron=is_prophet_cron,
+                    published=prophet_published,
+                    iteration=iteration,
+                    max_iterations=max_iterations,
+                    forced_publish_turn=prophet_forced_publish_turn,
+                    last_stop_reason=last_turn_stop_reason,
+                ):
+                    publish_tools = self._filter_tools_by_name(
+                        tools,
+                        {PROPHET_PUBLISH_TOOL_NAME},
+                    )
+                    if publish_tools:
+                        turn_tools = publish_tools
+                        if not prophet_nudge_injected:
+                            self._append_user_nudge(messages, PROPHET_PUBLISH_NUDGE)
+                            prophet_nudge_injected = True
+
                 # ── Stream one Anthropic turn ───────────────────
                 turn_overload_retries = 0
                 turn_model_override: str | None = None
@@ -614,7 +749,7 @@ class OrchestratorRuntime:
                     stream_kwargs: dict[str, Any] = {
                         "system_prompt": system_prompt,
                         "messages": messages,
-                        "tools": tools,
+                        "tools": turn_tools,
                         "container_id": container_id,
                         "usage_context": {
                             "task_id": task.task_id,
@@ -873,6 +1008,7 @@ class OrchestratorRuntime:
                 # ── End of Anthropic turn ───────────────────────
                 cumulative_usage = self._merge_usage(cumulative_usage, turn_usage)
                 stop_reason = turn_stop_reason
+                last_turn_stop_reason = turn_stop_reason
 
                 # Collect text and reasoning from this turn
                 turn_text_parts: list[str] = []
@@ -997,6 +1133,11 @@ class OrchestratorRuntime:
                     # Collect results and emit tool.result events
                     tool_results: list[dict[str, Any]] = []
                     for tb, pi, result_str in zip(turn_tool_blocks, parsed_inputs, result_strs):
+                        if (
+                            tb.tool_name == PROPHET_PUBLISH_TOOL_NAME
+                            and self._prophet_publish_result_succeeded(result_str)
+                        ):
+                            prophet_published = True
                         if tb.tool_name == "perplexity_research":
                             research_paths.add("perplexity_research")
                             self._collect_perplexity_sources(result_str, collected_sources)
@@ -1088,9 +1229,30 @@ class OrchestratorRuntime:
                             tools_called=[tb.tool_name for tb in turn_tool_blocks],
                         ):
                             yield boundary_event
+                    if (
+                        is_prophet_cron
+                        and not prophet_published
+                        and iteration >= max_iterations
+                    ):
+                        prophet_forced_publish_turn = True
+                        max_iterations = iteration + 1
                     continue
 
                 # ── Final response (end_turn or other) ──────────
+                if self._prophet_should_force_publish_turn(
+                    is_prophet_cron=is_prophet_cron,
+                    published=prophet_published,
+                    already_forced=prophet_forced_publish_turn,
+                    stop_reason=turn_stop_reason,
+                ):
+                    assistant_content, _dropped_server_blocks = (
+                        self._sanitize_server_tool_replay_blocks(blocks)
+                    )
+                    messages.append({"role": "assistant", "content": assistant_content})
+                    prophet_forced_publish_turn = True
+                    if iteration >= max_iterations:
+                        max_iterations = iteration + 1
+                    continue
                 break
 
             # ── Emit completion ─────────────────────────────────
@@ -1143,6 +1305,8 @@ class OrchestratorRuntime:
                         if text.endswith(AWAITING_REPLY_TAG):
                             block["text"] = text.removesuffix(AWAITING_REPLY_TAG).rstrip()
                         break
+            if is_prophet_cron:
+                awaiting_reply = False
 
             result_payload = {
                 "content": display_text,
@@ -1353,6 +1517,11 @@ class OrchestratorRuntime:
             ]
             tools = self._tools_to_openai_chat(get_local_tool_definitions(self._featured_specialist_agent_ids()))
             max_iterations = self._max_iterations_for_task(task)
+            is_prophet_cron = self._is_prophet_cron_task(task)
+            prophet_published = False
+            prophet_forced_publish_turn = False
+            prophet_nudge_injected = False
+            last_turn_stop_reason: str | None = None
             visual_coordinator = (
                 VisualEnrichmentCoordinator(
                     config=self.config,
@@ -1401,6 +1570,24 @@ class OrchestratorRuntime:
                         "reason": turn_selection.fallback_reason,
                     }
                 last_announced_selection_key = selection_key
+                turn_tools = tools
+                if self._prophet_should_restrict_to_publish(
+                    is_prophet_cron=is_prophet_cron,
+                    published=prophet_published,
+                    iteration=iteration,
+                    max_iterations=max_iterations,
+                    forced_publish_turn=prophet_forced_publish_turn,
+                    last_stop_reason=last_turn_stop_reason,
+                ):
+                    publish_tools = self._filter_tools_by_name(
+                        tools,
+                        {PROPHET_PUBLISH_TOOL_NAME},
+                    )
+                    if publish_tools:
+                        turn_tools = publish_tools
+                        if not prophet_nudge_injected:
+                            self._append_user_nudge(openai_messages, PROPHET_PUBLISH_NUDGE)
+                            prophet_nudge_injected = True
                 max_request_context_chars = max(
                     max_request_context_chars,
                     self._estimate_openai_request_context_chars(openai_messages),
@@ -1505,7 +1692,7 @@ class OrchestratorRuntime:
                 async for payload in self._stream_openai_chat_events(
                     model_name=effective_model,
                     messages=openai_messages,
-                    tools=tools,
+                    tools=turn_tools,
                     usage_context={
                         "task_id": task.task_id,
                         "request_id": request_id,
@@ -1591,6 +1778,7 @@ class OrchestratorRuntime:
 
                 cumulative_usage = self._merge_usage(cumulative_usage, turn_usage)
                 stop_reason = turn_finish_reason
+                last_turn_stop_reason = turn_finish_reason
                 turn_text = "".join(turn_text_parts)
                 turn_reasoning = "".join(turn_reasoning_parts)
                 normalized_tool_calls = self._normalize_openai_tool_calls(turn_tool_calls)
@@ -1677,6 +1865,11 @@ class OrchestratorRuntime:
 
                     for item, parsed_input, result_str in zip(normalized_tool_calls, parsed_inputs, result_strs):
                         tool_name = item["name"]
+                        if (
+                            tool_name == PROPHET_PUBLISH_TOOL_NAME
+                            and self._prophet_publish_result_succeeded(result_str)
+                        ):
+                            prophet_published = True
                         if tool_name == "think_deeper":
                             try:
                                 think_deeper_result = json.loads(result_str)
@@ -1783,14 +1976,39 @@ class OrchestratorRuntime:
                             tools_called=[item["name"] for item in normalized_tool_calls],
                         ):
                             yield boundary_event
+                    if (
+                        is_prophet_cron
+                        and not prophet_published
+                        and iteration >= max_iterations
+                    ):
+                        prophet_forced_publish_turn = True
+                        max_iterations = iteration + 1
                     continue
 
+                if self._prophet_should_force_publish_turn(
+                    is_prophet_cron=is_prophet_cron,
+                    published=prophet_published,
+                    already_forced=prophet_forced_publish_turn,
+                    stop_reason=turn_finish_reason,
+                ):
+                    openai_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": turn_text or None,
+                        }
+                    )
+                    prophet_forced_publish_turn = True
+                    if iteration >= max_iterations:
+                        max_iterations = iteration + 1
+                    continue
                 break
 
             hit_max_iterations = iteration >= max_iterations and bool(stop_reason == "tool_calls")
             result_type = "max_iterations" if hit_max_iterations else "success"
 
-            if hit_max_iterations and not full_response_text.strip():
+            if hit_max_iterations and not full_response_text.strip() and not (
+                is_prophet_cron and not prophet_published
+            ):
                 openai_messages.append(
                     {
                         "role": "user",
@@ -1811,7 +2029,9 @@ class OrchestratorRuntime:
             # gateway delivery layer does not tolerate. Force one tools-less
             # completion at a known-good reasoning level so the turn always ends
             # with real visible text.
-            if not full_response_text.strip():
+            if not full_response_text.strip() and not (
+                is_prophet_cron and not prophet_published
+            ):
                 try:
                     finalize_text, finalize_usage = await self._finalize_openai_text_without_tools(
                         model_name=effective_model,
@@ -1904,6 +2124,8 @@ class OrchestratorRuntime:
                         if text.endswith(AWAITING_REPLY_TAG):
                             block["text"] = text.removesuffix(AWAITING_REPLY_TAG).rstrip()
                         break
+            if is_prophet_cron:
+                awaiting_reply = False
 
             result_payload = {
                 "content": display_text,

@@ -15,6 +15,9 @@ from orchestrator.config import OrchestratorConfig
 from orchestrator.prompts import build_agentic_system_prompt, get_prompt_asset_hashes
 from orchestrator.runtime import (
     PROPHET_CRON_TOOL_ITERATIONS,
+    PROPHET_PUBLISH_NUDGE,
+    PROPHET_PUBLISH_RESERVE_ITERATIONS,
+    PROPHET_PUBLISH_TOOL_NAME,
     ActiveTaskRun,
     OrchestratorRuntime,
 )
@@ -153,6 +156,208 @@ def test_prophet_cron_gets_deeper_tool_budget(tmp_path) -> None:
     assert runtime._max_iterations_for_task(prophet_task) == PROPHET_CRON_TOOL_ITERATIONS
     assert runtime._max_iterations_for_task(review_task) == 25
     assert runtime._max_iterations_for_task(chat_task) == 25
+
+
+def test_prophet_publish_helpers_reserve_and_force_end_turn(tmp_path) -> None:
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        max_tool_iterations=25,
+        task_ledger_db_path=tmp_path / "task_ledger_prophet_helpers.db",
+    )
+    runtime = OrchestratorRuntime(config)
+    tools = [
+        {"name": "web_search"},
+        {"name": PROPHET_PUBLISH_TOOL_NAME},
+        {"type": "function", "function": {"name": PROPHET_PUBLISH_TOOL_NAME}},
+    ]
+
+    assert runtime._filter_tools_by_name(tools, {PROPHET_PUBLISH_TOOL_NAME}) == [
+        {"name": PROPHET_PUBLISH_TOOL_NAME},
+        {"type": "function", "function": {"name": PROPHET_PUBLISH_TOOL_NAME}},
+    ]
+    assert runtime._prophet_publish_result_succeeded(
+        json.dumps({"published": True, "edition_id": "edn_1"})
+    )
+    assert not runtime._prophet_publish_result_succeeded(
+        json.dumps({"error": True, "message": "sections are required"})
+    )
+    assert runtime._prophet_should_restrict_to_publish(
+        is_prophet_cron=True,
+        published=False,
+        iteration=PROPHET_CRON_TOOL_ITERATIONS - PROPHET_PUBLISH_RESERVE_ITERATIONS + 1,
+        max_iterations=PROPHET_CRON_TOOL_ITERATIONS,
+        forced_publish_turn=False,
+        last_stop_reason="tool_use",
+    )
+    assert not runtime._prophet_should_restrict_to_publish(
+        is_prophet_cron=True,
+        published=False,
+        iteration=PROPHET_CRON_TOOL_ITERATIONS,
+        max_iterations=PROPHET_CRON_TOOL_ITERATIONS,
+        forced_publish_turn=False,
+        last_stop_reason="pause_turn",
+    )
+    assert runtime._prophet_should_force_publish_turn(
+        is_prophet_cron=True,
+        published=False,
+        already_forced=False,
+        stop_reason="end_turn",
+    )
+    assert not runtime._prophet_should_force_publish_turn(
+        is_prophet_cron=True,
+        published=False,
+        already_forced=True,
+        stop_reason="end_turn",
+    )
+
+    messages = [{"role": "user", "content": [{"type": "text", "text": "tool results"}]}]
+    runtime._append_user_nudge(messages, PROPHET_PUBLISH_NUDGE)
+    assert messages[-1]["content"][-1]["text"] == PROPHET_PUBLISH_NUDGE
+
+
+@pytest.mark.asyncio
+async def test_prophet_cron_forces_publish_after_end_turn_dump(tmp_path) -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        anthropic_model="claude-opus-4-6",
+        max_tool_iterations=25,
+        task_ledger_db_path=tmp_path / "task_ledger_prophet_publish.db",
+    )
+    runtime = OrchestratorRuntime(config, client=client)
+    stream_calls: list[dict[str, object]] = []
+
+    async def scripted_stream(**kwargs):
+        stream_calls.append(kwargs)
+        call = len(stream_calls)
+        if call == 1:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 12}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                (
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {
+                            "type": "text_delta",
+                            "text": "Research is done. Say publish it.<awaiting_reply/>",
+                        },
+                    },
+                ),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 8}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        elif call == 2:
+            tool_names = [
+                str(tool.get("name") or "")
+                for tool in (kwargs.get("tools") or [])
+                if isinstance(tool, dict)
+            ]
+            assert tool_names == [PROPHET_PUBLISH_TOOL_NAME]
+            rendered = json.dumps(kwargs.get("messages") or [])
+            assert "Stop research" in rendered
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 18}}}),
+                (
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": "tool_publish_1",
+                            "name": PROPHET_PUBLISH_TOOL_NAME,
+                        },
+                    },
+                ),
+                (
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": json.dumps(
+                                {
+                                    "slot": "evening",
+                                    "sections": [
+                                        {
+                                            "id": "tech",
+                                            "label": "Technology",
+                                            "stories": [{"headline": "Lead story"}],
+                                        }
+                                    ],
+                                }
+                            ),
+                        },
+                    },
+                ),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 9}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        else:
+            events = [
+                ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 20}}}),
+                ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+                (
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": "Evening edition is ready."},
+                    },
+                ),
+                ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 6}}),
+                ("message_stop", {"type": "message_stop"}),
+            ]
+        for event_name, payload in events:
+            yield type("SSE", (), {"event": event_name, "data": json.dumps(payload)})()
+
+    async def fake_execute(tool_name: str, tool_input: dict[str, object], *, context=None) -> str:
+        del context, tool_input
+        assert tool_name == PROPHET_PUBLISH_TOOL_NAME
+        return json.dumps({"published": True, "edition_id": "edn_forced"})
+
+    runtime._stream_anthropic_events = scripted_stream  # type: ignore[method-assign]
+    task = _signed_task("signing-secret").model_copy(
+        update={
+            "task_id": "tsk_prophet_force_publish",
+            "source": "cron",
+            "source_id": "prophet.evening",
+            "priority": "low",
+            "input": {
+                "query": "Compose today's evening edition",
+                "request_id": "req_prophet_force_publish",
+                "conversation_context": [],
+                "cosmic_orchestrator_model": {
+                    "provider": "anthropic",
+                    "model": "claude-opus-4-6",
+                },
+            },
+        }
+    )
+    task = task.model_copy(update={"signature": sign_task_envelope(task, "signing-secret")})
+
+    await runtime.start()
+    assert runtime._tool_executor is not None
+    runtime._tool_executor.execute = fake_execute  # type: ignore[method-assign]
+    try:
+        streamed_events = [event async for event in runtime.stream_task(task)]
+    finally:
+        await runtime.stop()
+
+    complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
+    assert len(stream_calls) == 3
+    assert complete_event["awaiting_reply"] is False
+    assert "Evening edition is ready." in complete_event["content"]
+    assert any(event.get("tool_name") == PROPHET_PUBLISH_TOOL_NAME for event in streamed_events)
 
 
 @pytest.mark.asyncio

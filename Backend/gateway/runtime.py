@@ -87,6 +87,7 @@ from .prophet import (
     prophet_cron_specs,
     render_prophet_context_block,
 )
+from .prophet.archive import ProphetArchiveService, pack_archive_lines
 from orchestrator.local_code_sandbox import LocalCodeSandboxSettings, run_local_code_sandbox
 from orchestrator.sandbox_permissions import session_grant_covers, union_session_grant
 from orchestrator.store.ledger import TaskLedger
@@ -621,6 +622,12 @@ class GatewayRuntime:
             adjudicator_model=config.capability_wishlist_adjudicator_model,
             usage_recorder=self._record_local_usage_event,
             owner_user_id=config.owner_user_id or None,
+        )
+        self.prophet_archive = ProphetArchiveService(
+            store=self.prophet_store,
+            memory_client=self.memory_client,
+            embedding_model=config.capability_wishlist_embedding_model,
+            embedding_dimensions=config.capability_wishlist_embedding_dimensions,
         )
         self.tool_opportunity_service = ToolOpportunityService(
             store=self.tool_opportunity_store,
@@ -9156,10 +9163,26 @@ class GatewayRuntime:
                 prophet_settings = self.prophet_store.get_settings()
             except Exception:
                 prophet_settings = {}
+            related_archive: list[dict[str, Any]] = []
+            related_archive_rendered = ""
+            try:
+                interests = [
+                    str(item.get("topic") or "").strip()
+                    for item in self.prophet_store.list_interests(include_muted=False)
+                    if str(item.get("topic") or "").strip()
+                ]
+                related_archive = await self.prophet_archive.related_archive_for_briefing(
+                    interests=interests,
+                )
+                related_archive_rendered = pack_archive_lines(related_archive)
+            except Exception:
+                logger.exception("gateway.prophet_archive_briefing_failed")
             cron_context_block = render_prophet_context_block(
                 self.prophet_store,
                 slot=self._safe_text(metadata.get("prophet_slot")) or "morning",
                 max_stories=int(prophet_settings.get("max_stories") or 15),
+                related_archive=related_archive,
+                related_archive_rendered=related_archive_rendered,
             )
         else:
             cron_context_block = self._render_scheduler_context_block(context_packet)
@@ -9691,8 +9714,28 @@ class GatewayRuntime:
             request_id=request_id,
             slot=slot,
         )
+        try:
+            result = await self.prophet_archive.after_publish(
+                result,
+                request_id=request_id,
+            )
+        except Exception:
+            logger.exception("gateway.prophet_archive_embed_failed")
         await self._broadcast_prophet_edition(result)
         return result
+
+    async def search_prophet_archive(
+        self,
+        query: str,
+        *,
+        days: int | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.prophet_archive.search(
+            query,
+            days=days or 28,
+            request_id=request_id,
+        )
 
     async def _enrich_prophet_edition_images(
         self, edition: dict[str, Any]
@@ -10681,11 +10724,12 @@ class GatewayRuntime:
         return self._is_autonomous_source(state.source, state.source_id)
 
     def _is_silent_live_progress_event(self, event: dict[str, Any]) -> bool:
-        """Heartbeat / Gmail-surface / weekly-review turns must not stream live."""
+        """Turns whose output is not the composer must not stream live."""
         return (
             self._is_heartbeat_event(event)
             or self._is_gmail_surface_decision_event(event)
             or self._is_weekly_my_tools_review_event(event)
+            or self._is_prophet_event(event)
         )
 
     def _is_silent_live_progress_request(self, request_id: str | None) -> bool:
@@ -10756,9 +10800,20 @@ class GatewayRuntime:
     def _should_background_autonomous_request(
         self, request_record: dict[str, Any]
     ) -> bool:
-        return self._is_autonomous_request_record(
-            request_record
-        ) and self._active_foreground_collision_for_request(request_record) is not None
+        if not self._is_autonomous_request_record(request_record):
+            return False
+        # Daily Prophet publishes to Spaces, never the composer. Always run it
+        # off-foreground so an in-flight edition cannot occupy the slot a user
+        # turn needs, even when chat is idle.
+        if self._is_prophet_event(
+            {
+                "source": request_record.get("source"),
+                "source_id": request_record.get("source_id"),
+                "request_id": request_record.get("request_id"),
+            }
+        ):
+            return True
+        return self._active_foreground_collision_for_request(request_record) is not None
 
     async def _fulfill_autonomous_request(
         self, request_record: dict[str, Any]
@@ -10787,7 +10842,7 @@ class GatewayRuntime:
             if self._is_autonomous_request_record(request_record)
             else None
         )
-        backgrounded = foreground_collision is not None
+        backgrounded = self._should_background_autonomous_request(request_record)
         state = ActiveRequest(
             request_id=request_id,
             session_id=session_id,
@@ -10800,7 +10855,7 @@ class GatewayRuntime:
             user_query_excerpt=query_text[:120].strip(),
             activity=(
                 "Running in background until the current response finishes."
-                if backgrounded
+                if foreground_collision is not None
                 else ""
             ),
         )
@@ -20894,6 +20949,36 @@ class GatewayRuntime:
                     execution_event=event,
                 )
                 return
+        if self._is_prophet_event(event):
+            if event_type in AUTONOMOUS_LIVE_HOLD_EVENT_TYPES:
+                return
+            if event_type in {"task.completed", "task.failed", "task.cancelled", "error"}:
+                if task_id:
+                    self.active_task_channels.pop(task_id, None)
+                    self.active_requests_by_task.pop(task_id, None)
+                status = (
+                    "failed"
+                    if event_type in {"task.failed", "error"}
+                    else "cancelled"
+                    if event_type == "task.cancelled"
+                    else "completed"
+                )
+                self._trace_request_event(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=self._safe_text(event.get("channel")),
+                    route=self._safe_text(event.get("route")) or "opus",
+                    event_type=event_type,
+                    stage="terminal",
+                    status=status,
+                    title="Daily Prophet terminal event",
+                    detail=self._safe_text(event.get("message"))
+                    or self._safe_text(event.get("content")),
+                    task_id=task_id,
+                    completed=True,
+                    execution_event=event,
+                )
+                return
         if request_id and task_id:
             previous_bound_request_id = self.active_requests_by_task.get(task_id)
             self.active_requests_by_task[task_id] = request_id
@@ -21030,6 +21115,24 @@ class GatewayRuntime:
                         execution_event=event,
                     )
                     return
+                self._trace_request_event(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel=event_channel,
+                    route=self._safe_text(event.get("route")) or "opus",
+                    event_type="response.complete",
+                    stage="response",
+                    status="suppressed",
+                    title="Daily Prophet did not publish",
+                    detail=(
+                        "Unpublished Prophet complete suppressed so research "
+                        "notes do not occupy chat."
+                    ),
+                    task_id=task_id,
+                    completed=False,
+                    execution_event=event,
+                )
+                return
             is_heartbeat_response = self._is_heartbeat_event(event)
             heartbeat_decision = (
                 self._parse_heartbeat_decision(event)
@@ -21669,7 +21772,10 @@ class GatewayRuntime:
         request_id = self._safe_text(event.get("request_id"))
         if not request_id:
             return False
-        request_record = self.request_records.get(request_id)
+        records = getattr(self, "request_records", None)
+        if not isinstance(records, dict):
+            return False
+        request_record = records.get(request_id)
         return (
             isinstance(request_record, dict)
             and self._safe_text(request_record.get("source")) == "cron"

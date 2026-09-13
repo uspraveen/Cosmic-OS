@@ -2905,6 +2905,39 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         read_only=True,
     ),
     ToolSpec(
+        name="search_prophet_archive",
+        api_definition={
+            "name": "search_prophet_archive",
+            "description": (
+                "Search Cosmic's own Daily Prophet archive for previously shown stories similar to a "
+                "candidate headline or topic. This is not live web search and not the user's memory. "
+                "Use it to avoid repeating coverage and to connect today's story to prior editions. "
+                "Results are from the last 4 weeks, labelled with edition date and slot."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Candidate headline or topic to check against previously shown Prophet stories.",
+                    },
+                    "days": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 28,
+                        "description": "How many days of archive to search. Defaults to 28.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        group="prophet",
+        prompt_summary="Check a candidate topic against previously shown Daily Prophet coverage from the last 4 weeks.",
+        progress_builder=lambda _tool_input: "Checking the Daily Prophet archive...",
+        handler_method="_search_prophet_archive",
+        read_only=True,
+    ),
+    ToolSpec(
         name="update_prophet_preferences",
         api_definition={
             "name": "update_prophet_preferences",
