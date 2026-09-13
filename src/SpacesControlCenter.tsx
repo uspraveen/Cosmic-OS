@@ -5828,9 +5828,12 @@ export default function SpacesControlCenter({
             </button>
           </div>
         </div>
-        <div className="prophet-settings-grid">
-          <div className="prophet-settings-field">
-            <span className="prophet-settings-label">Daily editions</span>
+        <div className="prophet-settings-rows">
+          <div className="prophet-settings-row">
+            <div className="prophet-settings-row-copy">
+              <span className="prophet-settings-row-label">Daily editions</span>
+              <span className="prophet-settings-row-hint">Press a fresh edition automatically</span>
+            </div>
             <button
               type="button"
               role="switch"
@@ -5844,25 +5847,11 @@ export default function SpacesControlCenter({
               <span className="prophet-switch-label">{prophetDraft.enabled ? 'On' : 'Off'}</span>
             </button>
           </div>
-          <div className="prophet-settings-field">
-            <span className="prophet-settings-label">Notifications</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={prophetDraft.notificationsEnabled}
-              className={`prophet-switch ${prophetDraft.notificationsEnabled ? 'enabled' : ''}`}
-              onClick={() =>
-                setProphetDraft((prev) => ({ ...prev, notificationsEnabled: !prev.notificationsEnabled }))
-              }
-            >
-              <span className="prophet-switch-track">
-                <span className="prophet-switch-thumb" />
-              </span>
-              <span className="prophet-switch-label">{prophetDraft.notificationsEnabled ? 'On' : 'Off'}</span>
-            </button>
-          </div>
-          <div className="prophet-settings-field">
-            <span className="prophet-settings-label">Morning edition</span>
+          <div className="prophet-settings-row">
+            <div className="prophet-settings-row-copy">
+              <span className="prophet-settings-row-label">Morning edition</span>
+              <span className="prophet-settings-row-hint">When the first edition lands</span>
+            </div>
             <input
               type="time"
               className="prophet-time-input"
@@ -5870,9 +5859,12 @@ export default function SpacesControlCenter({
               onChange={(event) => setProphetDraft((prev) => ({ ...prev, morningTime: event.target.value }))}
             />
           </div>
-          <div className="prophet-settings-field">
-            <span className="prophet-settings-label">Evening edition</span>
-            <div className="prophet-settings-inline">
+          <div className="prophet-settings-row">
+            <div className="prophet-settings-row-copy">
+              <span className="prophet-settings-row-label">Evening edition</span>
+              <span className="prophet-settings-row-hint">A second dispatch for late-breaking stories</span>
+            </div>
+            <div className="prophet-settings-row-control">
               <button
                 type="button"
                 role="switch"
@@ -5894,9 +5886,32 @@ export default function SpacesControlCenter({
               />
             </div>
           </div>
-          <div className="prophet-settings-field prophet-settings-field--wide">
-            <span className="prophet-settings-label">Story cap</span>
-            <div className="prophet-settings-inline">
+          <div className="prophet-settings-row">
+            <div className="prophet-settings-row-copy">
+              <span className="prophet-settings-row-label">Notifications</span>
+              <span className="prophet-settings-row-hint">Ping you when a new edition is ready</span>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={prophetDraft.notificationsEnabled}
+              className={`prophet-switch ${prophetDraft.notificationsEnabled ? 'enabled' : ''}`}
+              onClick={() =>
+                setProphetDraft((prev) => ({ ...prev, notificationsEnabled: !prev.notificationsEnabled }))
+              }
+            >
+              <span className="prophet-switch-track">
+                <span className="prophet-switch-thumb" />
+              </span>
+              <span className="prophet-switch-label">{prophetDraft.notificationsEnabled ? 'On' : 'Off'}</span>
+            </button>
+          </div>
+          <div className="prophet-settings-row">
+            <div className="prophet-settings-row-copy">
+              <span className="prophet-settings-row-label">Story cap</span>
+              <span className="prophet-settings-row-hint">Most stories pressed into one edition</span>
+            </div>
+            <div className="prophet-settings-row-control prophet-settings-cap">
               <input
                 type="range"
                 min={5}
@@ -5912,7 +5927,6 @@ export default function SpacesControlCenter({
         </div>
       </section>
 
-      <section className="spaces-two-column">
       <section className="spaces-card">
         <div className="spaces-card-head compact">
           <div>
@@ -5965,9 +5979,7 @@ export default function SpacesControlCenter({
           ))}
         </div>
       </section>
-      </section>
 
-      <section className="spaces-two-column">
       <section className="spaces-card">
         <div className="spaces-card-head compact">
           <div>
@@ -6101,7 +6113,6 @@ export default function SpacesControlCenter({
             Add
           </button>
         </div>
-      </section>
       </section>
     </div>
   )
