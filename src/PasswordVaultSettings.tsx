@@ -5,6 +5,15 @@ import {
   setVaultEditorVisible,
   type VaultEditorDraft,
 } from './vaultEditorSession'
+import VaultDatePicker from './VaultDatePicker'
+import {
+  VAULT_CREDENTIAL_KIND_OPTIONS,
+  formatVaultExpiry,
+  normalizeVaultCredentialKind,
+  vaultExpiryIsPast,
+  vaultKindLabel,
+  type VaultCredentialKind,
+} from './vaultKinds'
 import './vault-settings.css'
 
 interface VaultPolicy {
@@ -26,6 +35,9 @@ interface VaultEntry {
   has_notes?: boolean
   created_at?: string | null
   updated_at?: string | null
+  credential_kind?: string | null
+  expires_at?: string | null
+  expired?: boolean
   policy?: VaultPolicy | null
 }
 
@@ -42,6 +54,8 @@ interface VaultPendingRequest {
     site_domain?: string | null
     username?: string | null
     password_mask?: string | null
+    credential_kind?: string | null
+    expires_at?: string | null
   } | null
 }
 
@@ -68,6 +82,8 @@ const EMPTY_EDITOR: EditorState = {
   password: '',
   totpSeed: '',
   notes: '',
+  credentialKind: 'login',
+  expiresAt: '',
 }
 
 const REVEAL_HIDE_MS = 15000
@@ -128,6 +144,76 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   request_rejected: 'Request denied',
   save_requested: 'Cosmic asked to save credentials',
   lookup_denied: 'Access needed approval',
+}
+
+function VaultKindSelect({
+  value,
+  onChange,
+}: {
+  value: VaultCredentialKind
+  onChange: (next: VaultCredentialKind) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const selected = VAULT_CREDENTIAL_KIND_OPTIONS.find((option) => option.id === value) || VAULT_CREDENTIAL_KIND_OPTIONS[0]
+
+  useEffect(() => {
+    if (!open) return
+    const onPointer = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      setOpen(false)
+    }
+    window.addEventListener('mousedown', onPointer)
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      window.removeEventListener('mousedown', onPointer)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [open])
+
+  return (
+    <div className="vault-kind-select" ref={rootRef}>
+      <button
+        type="button"
+        className={`vault-select-trigger ${open ? 'open' : ''}`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>{selected.label}</span>
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden>
+          <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open ? (
+        <div className="vault-select-menu" role="listbox">
+          {VAULT_CREDENTIAL_KIND_OPTIONS.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              role="option"
+              aria-selected={option.id === value}
+              className={option.id === value ? 'active' : ''}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                onChange(option.id)
+                setOpen(false)
+              }}
+            >
+              <strong>{option.label}</strong>
+              <span>{option.hint}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function ShieldGlyph({ className }: { className?: string }) {
@@ -286,6 +372,8 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
             password: '',
             totpSeed: '',
             notes: '',
+            credentialKind: normalizeVaultCredentialKind(entry.credential_kind),
+            expiresAt: String(entry.expires_at || '').slice(0, 10),
           }
         : { ...EMPTY_EDITOR },
     )
@@ -302,6 +390,8 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
           site_url: editor.siteUrl,
           username: editor.username,
           notes: editor.notes,
+          credential_kind: normalizeVaultCredentialKind(editor.credentialKind),
+          expires_at: editor.expiresAt || '',
         }
         if (editor.password) patch.password = editor.password
         if (editor.totpSeed) patch.totp_seed = editor.totpSeed
@@ -314,6 +404,8 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
           password: editor.password,
           totp_seed: editor.totpSeed,
           notes: editor.notes,
+          credential_kind: normalizeVaultCredentialKind(editor.credentialKind),
+          expires_at: editor.expiresAt || undefined,
         })
       }
       setEditor(null)
@@ -472,8 +564,8 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
         <div className="vault-hero-copy">
           <h3>Password Vault</h3>
           <p>
-            Logins Cosmic can use to sign in for you — encrypted on your VM. The agent only ever
-            handles a reference, never the password itself.
+            Logins, API keys, and tokens Cosmic can use for you — encrypted on your VM. The agent
+            only ever handles a reference, never the secret itself.
           </p>
         </div>
       </div>
@@ -490,15 +582,21 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
               <article key={item.request_id} className="vault-pending-card">
                 <div className="vault-pending-main">
                   <div className="vault-pending-headline">
-                    {isAdd ? 'Cosmic wants to save a new login' : 'Cosmic wants to use a saved login'}
+                    {isAdd ? 'Cosmic wants to save a new credential' : 'Cosmic wants to use a saved credential'}
                   </div>
                   <div className="vault-pending-site">
                     {payload.title || payload.site_domain || 'Unknown site'}
                     {payload.site_domain && payload.title ? ` · ${payload.site_domain}` : ''}
                     {payload.username ? ` · ${payload.username}` : ''}
+                    {payload.credential_kind ? ` · ${vaultKindLabel(payload.credential_kind)}` : ''}
                   </div>
                   {isAdd && payload.password_mask ? (
-                    <div className="vault-pending-detail">Password {payload.password_mask} — stored encrypted on approval.</div>
+                    <div className="vault-pending-detail">Secret {payload.password_mask} — stored encrypted on approval.</div>
+                  ) : null}
+                  {payload.expires_at ? (
+                    <div className="vault-pending-detail">
+                      {vaultExpiryIsPast(payload.expires_at) ? 'Expired' : 'Expires'} {formatVaultExpiry(payload.expires_at)}
+                    </div>
                   ) : null}
                   {item.purpose ? <div className="vault-pending-detail">Reason: {item.purpose}</div> : null}
                 </div>
@@ -527,7 +625,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
       ) : null}
 
       <div className="vault-toolbar">
-        <div className="vault-section-label">Saved Logins</div>
+        <div className="vault-section-label">Saved credentials</div>
         <div className="vault-toolbar-actions">
           <button
             type="button"
@@ -563,11 +661,36 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
           </div>
 
           <div className="vault-editor-body">
-            <div className="vault-editor-group-label">Site</div>
+            <div className="vault-editor-group-label">Type</div>
+            <div className="vault-field-grid">
+              <div className="vault-field">
+                <span>Credential</span>
+                <VaultKindSelect
+                  value={normalizeVaultCredentialKind(editor.credentialKind)}
+                  onChange={(kind) => setEditor({ ...editor, credentialKind: kind })}
+                />
+              </div>
+              <div className="vault-field">
+                <span>Expires</span>
+                <VaultDatePicker
+                  value={editor.expiresAt || ''}
+                  onChange={(next) => setEditor({ ...editor, expiresAt: next })}
+                />
+              </div>
+            </div>
+            <div className="vault-field-hint">
+              {normalizeVaultCredentialKind(editor.credentialKind) === 'login'
+                ? 'Website sign-in. Expiry is optional.'
+                : 'Optional expiry is stored on the VM so Cosmic can warn you before using a stale key.'}
+            </div>
+
+            <div className="vault-editor-group-label">
+              {normalizeVaultCredentialKind(editor.credentialKind) === 'login' ? 'Site' : 'Service'}
+            </div>
             {deriveSiteDomain(editor.siteUrl) ? (
               <div className="vault-match-preview">
                 <span className="vault-match-preview-dot" aria-hidden="true" />
-                Cosmic will match this login on <strong>{deriveSiteDomain(editor.siteUrl)}</strong>
+                Cosmic will match this on <strong>{deriveSiteDomain(editor.siteUrl)}</strong>
               </div>
             ) : null}
             <div className="vault-field-grid">
@@ -576,35 +699,51 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                 <input
                   type="text"
                   value={editor.title}
-                  placeholder="GitHub"
+                  placeholder={normalizeVaultCredentialKind(editor.credentialKind) === 'api_key' ? 'OpenAI' : 'GitHub'}
                   onChange={(event) => setEditor({ ...editor, title: event.target.value })}
                 />
               </label>
               <label className="vault-field">
-                <span>Site URL</span>
+                <span>{normalizeVaultCredentialKind(editor.credentialKind) === 'login' ? 'Site URL' : 'Service URL'}</span>
                 <input
                   type="text"
                   value={editor.siteUrl}
-                  placeholder="https://github.com"
+                  placeholder={normalizeVaultCredentialKind(editor.credentialKind) === 'login' ? 'https://github.com' : 'https://api.openai.com'}
                   onChange={(event) => setEditor({ ...editor, siteUrl: event.target.value })}
                 />
               </label>
             </div>
 
-            <div className="vault-editor-group-label">Sign-in</div>
+            <div className="vault-editor-group-label">
+              {normalizeVaultCredentialKind(editor.credentialKind) === 'login' ? 'Sign-in' : 'Secret'}
+            </div>
             <div className="vault-field-grid">
               <label className="vault-field">
-                <span>Username</span>
+                <span>
+                  {normalizeVaultCredentialKind(editor.credentialKind) === 'api_key'
+                    ? 'Key id'
+                    : normalizeVaultCredentialKind(editor.credentialKind) === 'token'
+                      ? 'Account'
+                      : 'Username'}
+                </span>
                 <input
                   type="text"
                   value={editor.username}
                   autoComplete="off"
-                  placeholder="you@example.com"
+                  placeholder={normalizeVaultCredentialKind(editor.credentialKind) === 'login' ? 'you@example.com' : 'optional'}
                   onChange={(event) => setEditor({ ...editor, username: event.target.value })}
                 />
               </label>
               <label className="vault-field">
-                <span>{editor.entryId ? 'New password (blank to keep)' : 'Password'}</span>
+                <span>
+                  {editor.entryId
+                    ? `New ${normalizeVaultCredentialKind(editor.credentialKind) === 'login' ? 'password' : vaultKindLabel(editor.credentialKind).toLowerCase()} (blank to keep)`
+                    : normalizeVaultCredentialKind(editor.credentialKind) === 'api_key'
+                      ? 'API key'
+                      : normalizeVaultCredentialKind(editor.credentialKind) === 'token'
+                        ? 'Token'
+                        : 'Password'}
+                </span>
                 <input
                   type="password"
                   value={editor.password}
@@ -614,22 +753,26 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
               </label>
             </div>
 
-            <div className="vault-editor-group-label">
-              Two-factor <em>optional</em>
-            </div>
-            <label className="vault-field">
-              <span>2FA seed (base32)</span>
-              <input
-                type="password"
-                value={editor.totpSeed}
-                autoComplete="off"
-                placeholder="JBSWY3DPEHPK3PXP"
-                onChange={(event) => setEditor({ ...editor, totpSeed: event.target.value })}
-              />
-            </label>
-            <div className="vault-field-hint">
-              With a seed stored, Cosmic generates fresh login codes for you on demand.
-            </div>
+            {normalizeVaultCredentialKind(editor.credentialKind) === 'login' ? (
+              <>
+                <div className="vault-editor-group-label">
+                  Two-factor <em>optional</em>
+                </div>
+                <label className="vault-field">
+                  <span>2FA seed (base32)</span>
+                  <input
+                    type="password"
+                    value={editor.totpSeed}
+                    autoComplete="off"
+                    placeholder="JBSWY3DPEHPK3PXP"
+                    onChange={(event) => setEditor({ ...editor, totpSeed: event.target.value })}
+                  />
+                </label>
+                <div className="vault-field-hint">
+                  With a seed stored, Cosmic generates fresh login codes for you on demand.
+                </div>
+              </>
+            ) : null}
 
             <div className="vault-editor-group-label">
               Notes <em>optional</em>
@@ -701,7 +844,13 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                       {entry.title || entry.entry_id}
                     </strong>
                     <div className="vault-entry-badges">
+                      <span className="vault-tag">{vaultKindLabel(entry.credential_kind)}</span>
                       {entry.has_totp ? <span className="vault-tag">2FA</span> : null}
+                      {entry.expired || vaultExpiryIsPast(entry.expires_at) ? (
+                        <span className="vault-tag is-expired">Expired</span>
+                      ) : entry.expires_at ? (
+                        <span className="vault-tag is-expiry">Expires {formatVaultExpiry(entry.expires_at)}</span>
+                      ) : null}
                       {entry.source === 'agent' ? <span className="vault-tag is-agent">By Cosmic</span> : null}
                       {mode === 'window' && windowActive(policy) ? (
                         <span className="vault-tag is-window">Window open</span>
@@ -761,7 +910,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                   disabled={!entry.has_password}
                   onClick={() => void handleReveal(entry)}
                 >
-                  {isRevealed ? 'Hide password' : 'Reveal'}
+                  {isRevealed ? 'Hide' : 'Reveal'}
                 </button>
                 {entry.has_totp ? (
                   <button

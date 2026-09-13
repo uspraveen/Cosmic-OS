@@ -85,7 +85,7 @@ const MAIN_SETTINGS_GROUPS: Array<{ label: string; items: MainSettingsNavItem[] 
       {
         view: 'vault',
         title: 'Password Vault',
-        description: 'Saved logins Cosmic can use to sign in for you, with per-site access rules.',
+        description: 'Saved logins, API keys, and tokens Cosmic can use for you, with per-site access rules.',
         icon: ShieldCheck,
       },
       {

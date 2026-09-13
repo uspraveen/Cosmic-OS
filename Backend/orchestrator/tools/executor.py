@@ -531,6 +531,8 @@ class ToolExecutor:
                     "password": password,
                     "totp_seed": str(tool_input.get("totp_seed") or ""),
                     "notes": str(tool_input.get("notes") or ""),
+                    "credential_kind": str(tool_input.get("credential_kind") or "login").strip() or "login",
+                    "expires_at": str(tool_input.get("expires_at") or "").strip() or None,
                     "tags": [str(t) for t in tool_input.get("tags") or [] if str(t).strip()],
                     "task_id": self._coerce_task_id(tool_input, context),
                     "session_id": context.session_id if context else None,

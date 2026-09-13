@@ -28,6 +28,23 @@ POLICY_ALWAYS_ALLOW = "always_allow"
 POLICY_WINDOW = "window"
 POLICY_MODES = (POLICY_ALWAYS_ASK, POLICY_ALWAYS_ALLOW, POLICY_WINDOW)
 
+CREDENTIAL_KIND_LOGIN = "login"
+CREDENTIAL_KIND_API_KEY = "api_key"
+CREDENTIAL_KIND_TOKEN = "token"
+CREDENTIAL_KINDS = (CREDENTIAL_KIND_LOGIN, CREDENTIAL_KIND_API_KEY, CREDENTIAL_KIND_TOKEN)
+CREDENTIAL_KIND_ALIASES = {
+    "password": CREDENTIAL_KIND_LOGIN,
+    "passwords": CREDENTIAL_KIND_LOGIN,
+    "login": CREDENTIAL_KIND_LOGIN,
+    "api": CREDENTIAL_KIND_API_KEY,
+    "api_key": CREDENTIAL_KIND_API_KEY,
+    "apikey": CREDENTIAL_KIND_API_KEY,
+    "token": CREDENTIAL_KIND_TOKEN,
+    "bearer": CREDENTIAL_KIND_TOKEN,
+    "access_token": CREDENTIAL_KIND_TOKEN,
+    "bearer_token": CREDENTIAL_KIND_TOKEN,
+}
+
 PENDING_STATUS_PENDING = "pending"
 PENDING_STATUS_APPROVED = "approved"
 PENDING_STATUS_REJECTED = "rejected"
@@ -58,6 +75,38 @@ def mask_secret(value: str) -> str:
     return "•" * max(8, min(len(value), 24))
 
 
+def normalize_credential_kind(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    kind = CREDENTIAL_KIND_ALIASES.get(raw, raw)
+    return kind if kind in CREDENTIAL_KINDS else CREDENTIAL_KIND_LOGIN
+
+
+def normalize_expires_at(value: Any) -> str | None:
+    """Store expiry as YYYY-MM-DD. Empty / invalid values mean no expiry."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    date_part = raw[:10] if len(raw) >= 10 and raw[4] == "-" and raw[7] == "-" else ""
+    if date_part:
+        try:
+            datetime.strptime(date_part, "%Y-%m-%d")
+            return date_part
+        except ValueError:
+            pass
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return parsed.date().isoformat()
+    except ValueError:
+        return None
+
+
+def entry_is_expired(expires_at: Any) -> bool:
+    day = normalize_expires_at(expires_at)
+    if not day:
+        return False
+    return day < datetime.now(timezone.utc).date().isoformat()
+
+
 class VaultStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -83,7 +132,9 @@ class VaultStore:
                     source TEXT NOT NULL DEFAULT 'user',
                     created_by_task_id TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    credential_kind TEXT NOT NULL DEFAULT 'login',
+                    expires_at TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_vault_entries_domain
@@ -128,6 +179,8 @@ class VaultStore:
                 );
                 """
             )
+            self._ensure_column(connection, "vault_entries", "credential_kind", "TEXT NOT NULL DEFAULT 'login'")
+            self._ensure_column(connection, "vault_entries", "expires_at", "TEXT")
             connection.commit()
 
     @contextmanager
@@ -167,6 +220,8 @@ class VaultStore:
             "created_by_task_id": str(item.get("created_by_task_id") or "").strip() or None,
             "created_at": now,
             "updated_at": now,
+            "credential_kind": normalize_credential_kind(item.get("credential_kind")),
+            "expires_at": normalize_expires_at(item.get("expires_at")),
         }
         with self._lock, self._connection() as connection:
             connection.execute(
@@ -174,14 +229,16 @@ class VaultStore:
                 INSERT INTO vault_entries (
                     entry_id, title, site_url, site_domain, username,
                     password_encrypted, totp_seed_encrypted, notes_encrypted,
-                    tags_json, source, created_by_task_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tags_json, source, created_by_task_id, created_at, updated_at,
+                    credential_kind, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["entry_id"], row["title"], row["site_url"], row["site_domain"],
                     row["username"], row["password_encrypted"], row["totp_seed_encrypted"],
                     row["notes_encrypted"], row["tags_json"], row["source"],
                     row["created_by_task_id"], row["created_at"], row["updated_at"],
+                    row["credential_kind"], row["expires_at"],
                 ),
             )
             connection.commit()
@@ -276,6 +333,12 @@ class VaultStore:
                     ensure_ascii=False,
                 )
             )
+        if "credential_kind" in patch and patch["credential_kind"] is not None:
+            assignments.append("credential_kind = ?")
+            params.append(normalize_credential_kind(patch["credential_kind"]))
+        if "expires_at" in patch:
+            assignments.append("expires_at = ?")
+            params.append(normalize_expires_at(patch["expires_at"]))
         if not assignments:
             return existing
         assignments.append("updated_at = ?")
@@ -492,6 +555,15 @@ class VaultStore:
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _ensure_column(connection: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
+        existing = {
+            str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column in existing:
+            return
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
     def _row_to_entry(self, row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         try:
@@ -499,6 +571,9 @@ class VaultStore:
         except (TypeError, ValueError):
             data["tags"] = []
         data.pop("tags_json", None)
+        data["credential_kind"] = normalize_credential_kind(data.get("credential_kind"))
+        data["expires_at"] = normalize_expires_at(data.get("expires_at"))
+        data["expired"] = entry_is_expired(data["expires_at"])
         data["has_password"] = bool(data.get("password_encrypted"))
         data["has_totp"] = bool(data.get("totp_seed_encrypted"))
         data["has_notes"] = bool(data.get("notes_encrypted"))

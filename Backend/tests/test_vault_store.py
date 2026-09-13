@@ -22,6 +22,9 @@ from gateway.vault.store import (  # noqa: E402
     VaultStore,
     decrypt_entry_secrets,
     derive_site_domain,
+    entry_is_expired,
+    normalize_credential_kind,
+    normalize_expires_at,
 )
 
 
@@ -177,3 +180,80 @@ def test_audit_is_append_only_and_ordered(store):
     actions = [row["action"] for row in rows]
     assert actions[0] == "view_password"  # newest first
     assert "use" in actions
+
+
+def test_normalize_credential_kind_aliases_and_unknown():
+    assert normalize_credential_kind("API-key") == "api_key"
+    assert normalize_credential_kind("bearer") == "token"
+    assert normalize_credential_kind("password") == "login"
+    assert normalize_credential_kind("nope") == "login"
+    assert normalize_expires_at("2027-03-12T15:00:00Z") == "2027-03-12"
+    assert normalize_expires_at("") is None
+    assert normalize_expires_at("not-a-date") is None
+    assert entry_is_expired("1999-01-01") is True
+    assert entry_is_expired("2999-01-01") is False
+    assert entry_is_expired(None) is False
+
+
+def test_add_entry_stores_kind_and_expiry(store):
+    entry = _entry(store, credential_kind="api_key", expires_at="2027-06-01")
+    assert entry["credential_kind"] == "api_key"
+    assert entry["expires_at"] == "2027-06-01"
+    assert entry["expired"] is False
+
+
+def test_add_entry_defaults_kind_to_login(store):
+    entry = _entry(store)
+    assert entry["credential_kind"] == "login"
+    assert entry["expires_at"] is None
+    assert entry["expired"] is False
+
+
+def test_update_entry_can_set_and_clear_expiry(store):
+    entry = _entry(store, credential_kind="token")
+    updated = store.update_entry(entry["entry_id"], {"expires_at": "2020-01-01", "credential_kind": "api_key"})
+    assert updated["credential_kind"] == "api_key"
+    assert updated["expires_at"] == "2020-01-01"
+    assert updated["expired"] is True
+    cleared = store.update_entry(entry["entry_id"], {"expires_at": ""})
+    assert cleared["expires_at"] is None
+    assert cleared["expired"] is False
+
+
+def test_initialize_migrates_kind_and_expiry_columns(tmp_path, monkeypatch):
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", key)
+    from gateway.credentials import encryption
+
+    encryption._CIPHER = None
+    db_path = tmp_path / "legacy-vault.db"
+    import sqlite3
+
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE vault_entries (
+            entry_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            site_url TEXT NOT NULL DEFAULT '',
+            site_domain TEXT NOT NULL DEFAULT '',
+            username TEXT NOT NULL DEFAULT '',
+            password_encrypted TEXT NOT NULL DEFAULT '',
+            totp_seed_encrypted TEXT NOT NULL DEFAULT '',
+            notes_encrypted TEXT NOT NULL DEFAULT '',
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            source TEXT NOT NULL DEFAULT 'user',
+            created_by_task_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    vault = VaultStore(db_path)
+    vault.initialize()
+    entry = vault.add_entry({"title": "Legacy", "password": "x", "credential_kind": "api_key"})
+    assert entry["credential_kind"] == "api_key"
+    encryption._CIPHER = None

@@ -5382,6 +5382,8 @@ class GatewayRuntime:
                     "totp_seed_encrypted": payload.get("totp_seed_encrypted"),
                     "notes_encrypted": payload.get("notes_encrypted"),
                     "tags": payload.get("tags") or [],
+                    "credential_kind": payload.get("credential_kind") or "login",
+                    "expires_at": payload.get("expires_at"),
                     "source": "agent",
                     "created_by_task_id": task_id,
                 }

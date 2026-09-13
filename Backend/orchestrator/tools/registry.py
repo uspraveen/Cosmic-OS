@@ -886,12 +886,14 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "vault_lookup",
             "description": (
-                "Look up a saved login (username + credential reference) for a website from the "
-                "user's password vault so a specialist agent can sign in on their behalf. Returns "
-                "the username and a credential_ref to pass in delegate_to_agent input — NEVER a "
-                "password. Depending on the user's per-site policy this either succeeds immediately, "
-                "or pauses for an inline user approval card: if the result says permission_required, "
-                "briefly tell the user why vault access is needed, end your turn, and wait — the turn "
+                "Look up a saved credential (login, API key, or token) from the user's "
+                "password vault so a specialist agent can use it on their behalf. Returns "
+                "the username, credential_kind, expiry metadata, and a credential_ref to pass "
+                "in delegate_to_agent input — NEVER a password or API key. If expired is true, "
+                "tell the user the credential is past its expiry before using it. Depending on "
+                "the user's per-site policy this either succeeds immediately, or pauses for an "
+                "inline user approval card: if the result says permission_required, briefly tell "
+                "the user why vault access is needed, end your turn, and wait — the turn "
                 "resumes automatically after they approve, then call vault_lookup again."
             ),
             "input_schema": {
@@ -911,8 +913,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         },
         group="integrations",
         prompt_summary=(
-            "Fetch a saved login from the user's password vault by site. Returns a credential_ref "
-            "for delegation — never a password. May pause for user approval."
+            "Fetch a saved login, API key, or token from the user's password vault. "
+            "Returns a credential_ref for delegation — never the secret. May pause for user approval."
         ),
         progress_builder=lambda tool_input: (
             f"Looking up vault credentials for {str((tool_input or {}).get('site') or '')[:60]}..."
@@ -926,24 +928,36 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "vault_save_entry",
             "description": (
-                "Save credentials the user asked you to create (for example after signing up on a "
-                "site for them) into their password vault. Always pauses for an inline user approval "
-                "card before anything is stored: briefly tell the user what you are saving, end your "
-                "turn, and wait — you will be resumed after they approve or reject."
+                "Save credentials the user asked you to create (a site login, API key, or token) "
+                "into their password vault. Always pauses for an inline user approval card before "
+                "anything is stored: briefly tell the user what you are saving, end your turn, and "
+                "wait — you will be resumed after they approve or reject. Use credential_kind "
+                "'login' for website usernames/passwords, 'api_key' for API keys, and 'token' for "
+                "bearer or access tokens. Set expires_at (YYYY-MM-DD) when the secret has a known "
+                "expiry, especially for API keys."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "title": {
                         "type": "string",
-                        "description": "Human-readable entry name, e.g. 'GitHub' or 'Nexus forum'.",
+                        "description": "Human-readable entry name, e.g. 'GitHub' or 'OpenAI API'.",
                     },
                     "site_url": {
                         "type": "string",
-                        "description": "The site's URL, e.g. https://github.com.",
+                        "description": "The site or service URL, e.g. https://github.com or https://api.openai.com.",
                     },
-                    "username": {"type": "string", "description": "Username or email used to sign in."},
-                    "password": {"type": "string", "description": "The password to store encrypted."},
+                    "username": {"type": "string", "description": "Username, email, or key id."},
+                    "password": {"type": "string", "description": "The password, API key, or token to store encrypted."},
+                    "credential_kind": {
+                        "type": "string",
+                        "enum": ["login", "api_key", "token"],
+                        "description": "login (default), api_key, or token.",
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "description": "Optional expiry date as YYYY-MM-DD. Use for rotating API keys and tokens.",
+                    },
                     "totp_seed": {
                         "type": "string",
                         "description": "Optional base32 TOTP/2FA seed so Cosmic can generate login codes.",
@@ -972,14 +986,15 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "vault_list_sites",
             "description": (
-                "List which sites have saved logins in the user's password vault (titles, domains, "
-                "usernames, and access policy). Metadata only — contains no secrets. Use this when a "
-                "task needs a login and you want to know whether one is already saved."
+                "List which credentials are saved in the user's password vault (titles, domains, "
+                "usernames, credential_kind, expiry, and access policy). Metadata only — contains "
+                "no secrets. Use this when a task needs a login or API key and you want to know "
+                "whether one is already saved."
             ),
             "input_schema": {"type": "object", "properties": {}},
         },
         group="integrations",
-        prompt_summary="List sites with saved logins in the password vault (metadata only).",
+        prompt_summary="List vault credentials (kind, expiry, titles, domains — metadata only).",
         read_only=True,
         handler_method="_vault_list_sites",
     ),

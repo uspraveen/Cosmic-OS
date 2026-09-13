@@ -348,6 +348,8 @@ interface Window {
       totp_seed?: string
       notes?: string
       tags?: string[]
+      credential_kind?: string
+      expires_at?: string
     }) => Promise<{ entry: any }>
     vaultUpdateEntry: (entryId: string, payload: Record<string, unknown>) => Promise<{ entry: any }>
     vaultDeleteEntry: (entryId: string) => Promise<{ status: string }>

@@ -8,6 +8,8 @@ export type VaultEditorDraft = {
   password: string
   totpSeed: string
   notes: string
+  credentialKind: string
+  expiresAt: string
 }
 
 let draft: VaultEditorDraft | null = null

@@ -25,7 +25,10 @@ from .store import (
     VaultStore,
     decrypt_entry_secrets,
     derive_site_domain,
+    entry_is_expired,
     mask_secret,
+    normalize_credential_kind,
+    normalize_expires_at,
 )
 from .totp import generate_totp_code
 
@@ -47,6 +50,8 @@ class CreateEntryRequest(BaseModel):
     totp_seed: str = ""
     notes: str = ""
     tags: list[str] = Field(default_factory=list)
+    credential_kind: str = "login"
+    expires_at: str | None = None
 
 
 class UpdateEntryRequest(BaseModel):
@@ -57,6 +62,8 @@ class UpdateEntryRequest(BaseModel):
     totp_seed: str | None = None
     notes: str | None = None
     tags: list[str] | None = None
+    credential_kind: str | None = None
+    expires_at: str | None = None
 
 
 class PolicyRequest(BaseModel):
@@ -86,6 +93,8 @@ class AgentSaveEntryRequest(BaseModel):
     totp_seed: str = ""
     notes: str = ""
     tags: list[str] = Field(default_factory=list)
+    credential_kind: str = "login"
+    expires_at: str | None = None
     task_id: str | None = None
     session_id: str | None = None
     channel: str | None = None
@@ -153,6 +162,7 @@ def _check_internal_token(request: Request) -> None:
 
 def _entry_summary(store: VaultStore, entry: dict[str, Any]) -> dict[str, Any]:
     policy = store.get_policy(entry["entry_id"])
+    expires_at = normalize_expires_at(entry.get("expires_at"))
     return {
         "entry_id": entry["entry_id"],
         "title": entry["title"],
@@ -161,6 +171,9 @@ def _entry_summary(store: VaultStore, entry: dict[str, Any]) -> dict[str, Any]:
         "username": entry["username"],
         "tags": entry.get("tags") or [],
         "source": entry.get("source") or "user",
+        "credential_kind": normalize_credential_kind(entry.get("credential_kind")),
+        "expires_at": expires_at,
+        "expired": entry_is_expired(expires_at),
         "has_password": entry.get("has_password", False),
         "has_totp": entry.get("has_totp", False),
         "has_notes": entry.get("has_notes", False),
@@ -216,6 +229,8 @@ async def create_entry(body: CreateEntryRequest, request: Request):
             "totp_seed": body.totp_seed,
             "notes": body.notes,
             "tags": body.tags,
+            "credential_kind": body.credential_kind,
+            "expires_at": body.expires_at,
             "source": "user",
         }
     )
@@ -239,7 +254,8 @@ async def get_entry(entry_id: str, request: Request):
 async def update_entry(entry_id: str, body: UpdateEntryRequest, request: Request):
     _check_local_token(request)
     store = _get_store(request)
-    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    dumped = body.model_dump(exclude_unset=True)
+    patch = {k: v for k, v in dumped.items() if k == "expires_at" or v is not None}
     entry = store.update_entry(entry_id, patch)
     if not entry:
         raise HTTPException(status_code=404, detail="Vault entry not found.")
@@ -351,6 +367,9 @@ async def internal_list_sites(request: Request):
                 "site_url": entry["site_url"],
                 "site_domain": entry["site_domain"],
                 "username": entry["username"],
+                "credential_kind": normalize_credential_kind(entry.get("credential_kind")),
+                "expires_at": normalize_expires_at(entry.get("expires_at")),
+                "expired": entry_is_expired(entry.get("expires_at")),
                 "has_totp": entry.get("has_totp", False),
                 "policy_mode": policy.get("mode") or POLICY_ALWAYS_ASK,
             }
@@ -381,6 +400,8 @@ async def internal_lookup(body: LookupRequest, request: Request):
                         "title": entry["title"],
                         "site_domain": entry["site_domain"],
                         "username": entry["username"],
+                        "credential_kind": normalize_credential_kind(entry.get("credential_kind")),
+                        "expires_at": normalize_expires_at(entry.get("expires_at")),
                     }
                     for entry in matches[:8]
                 ],
@@ -406,6 +427,8 @@ async def internal_lookup(body: LookupRequest, request: Request):
                     "site_url": entry["site_url"],
                     "site_domain": entry["site_domain"],
                     "username": entry["username"],
+                    "credential_kind": normalize_credential_kind(entry.get("credential_kind")),
+                    "expires_at": normalize_expires_at(entry.get("expires_at")),
                 },
             }
         )
@@ -443,6 +466,9 @@ async def internal_lookup(body: LookupRequest, request: Request):
         "site_url": entry["site_url"],
         "site_domain": entry["site_domain"],
         "username": entry["username"],
+        "credential_kind": normalize_credential_kind(entry.get("credential_kind")),
+        "expires_at": normalize_expires_at(entry.get("expires_at")),
+        "expired": entry_is_expired(entry.get("expires_at")),
         "totp_code": totp_code,
         "totp_seconds_remaining": totp_remaining,
     }
@@ -475,6 +501,9 @@ async def internal_resolve(body: ResolveRequest, request: Request):
         "password": secrets["password"],
         "totp_seed": secrets["totp_seed"],
         "notes": secrets["notes"],
+        "credential_kind": normalize_credential_kind(entry.get("credential_kind")),
+        "expires_at": normalize_expires_at(entry.get("expires_at")),
+        "expired": entry_is_expired(entry.get("expires_at")),
     }
 
 
@@ -503,6 +532,8 @@ async def internal_save_entry(body: AgentSaveEntryRequest, request: Request):
                 "totp_seed_encrypted": _encrypt_or_empty(body.totp_seed),
                 "notes_encrypted": _encrypt_or_empty(body.notes),
                 "tags": body.tags,
+                "credential_kind": normalize_credential_kind(body.credential_kind),
+                "expires_at": normalize_expires_at(body.expires_at),
                 "has_password": bool(body.password),
                 "has_totp": bool(body.totp_seed),
                 "password_mask": mask_secret(body.password),
