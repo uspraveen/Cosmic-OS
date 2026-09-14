@@ -34,6 +34,7 @@ import { findPendingApprovals } from './pendingApprovals'
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
+import { groupAssistantFlowEntries } from './assistantFlow'
 import { mergeSheetRunProgress, normalizeSheetProgress, sheetRunVisibleWindow, type SheetProgressState } from './sheetRunPreview'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
 import {
@@ -3403,30 +3404,13 @@ const AssistantFlowTimeline = memo(({
   if (!entries || entries.length <= 0) {
     return null
   }
-  const delegationMap = new Map<string, ActivityLogEntry>()
-  for (const entry of entries) {
-    const delegatedTaskId = String(entry.delegatedTaskId || '').trim()
-    if (delegatedTaskId) {
-      delegationMap.set(delegatedTaskId, entry)
-    }
-  }
-  const childEntriesByParent = new Map<string, ActivityLogEntry[]>()
-  const rootEntries: ActivityLogEntry[] = []
-  for (const entry of entries) {
-    const parentDelegatedTaskId = String(entry.parentDelegatedTaskId || '').trim()
-    if (parentDelegatedTaskId && delegationMap.has(parentDelegatedTaskId)) {
-      const existing = childEntriesByParent.get(parentDelegatedTaskId) || []
-      childEntriesByParent.set(parentDelegatedTaskId, [...existing, entry])
-      continue
-    }
-    rootEntries.push(entry)
-  }
+  const { roots: rootEntries, childrenByParent } = groupAssistantFlowEntries(entries)
   return (
     <div className="assistant-flow" title="Agentic flow captured during this response">
       {showLabel && <div className="assistant-flow-label">Flow</div>}
       <div className="assistant-flow-list">
         {rootEntries.map((entry, index) => {
-          const children = childEntriesByParent.get(String(entry.delegatedTaskId || '').trim()) || []
+          const children = childrenByParent.get(String(entry.delegatedTaskId || '').trim()) || []
           const signal = resolveAgentSignal(entry)
           const isLastRoot = index === rootEntries.length - 1
           // Only one row is the work in progress: the newest one, unless it has
