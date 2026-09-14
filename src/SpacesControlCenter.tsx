@@ -6231,7 +6231,7 @@ export default function SpacesControlCenter({
               <span className="prophet-edition-dot" />
               <span>{edition?.slot === 'evening' ? 'Evening Edition' : 'COSMIC Edition'}</span>
               <span className="prophet-edition-dot" />
-              <span>Proprietor: COSMIC Systems</span>
+              <span>Proprietor: Cosmic</span>
             </div>
           </div>
           <div className="prophet-rule prophet-rule-thick" />

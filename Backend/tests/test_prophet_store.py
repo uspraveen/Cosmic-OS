@@ -530,3 +530,31 @@ def test_notification_upsert_on_republish(tmp_path: Path) -> None:
     )
     assert note['notification_id'] == note2['notification_id']
     assert note2['headline'] == 'Updated headline'
+
+
+def test_publish_slot_kwarg_overrides_payload_and_keeps_editions_apart(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    morning = store.publish_edition(_edition(), slot="morning")
+    assert morning["slot"] == "morning"
+
+    evening_payload = _edition()
+    evening_payload["slot"] = "morning"
+    evening_payload["lead"]["headline"] = "Evening wrap about agents"
+    evening = store.publish_edition(evening_payload, slot="evening")
+    assert evening["slot"] == "evening"
+    assert evening["edition_id"] != morning["edition_id"]
+    assert store.get_edition("2026-09-11", "morning")["payload"]["lead"]["headline"] == "Lead story about agents"
+    assert store.get_edition("2026-09-11", "evening")["payload"]["lead"]["headline"] == "Evening wrap about agents"
+
+
+def test_prophet_slot_from_source_id() -> None:
+    from gateway.prophet import (
+        PROPHET_EVENING_CRON_ID,
+        PROPHET_MORNING_CRON_ID,
+        prophet_slot_from_source_id,
+    )
+
+    assert prophet_slot_from_source_id(PROPHET_EVENING_CRON_ID) == "evening"
+    assert prophet_slot_from_source_id(PROPHET_MORNING_CRON_ID) == "morning"
+    assert prophet_slot_from_source_id("cron_todo") is None
+    assert prophet_slot_from_source_id(None) is None

@@ -903,7 +903,10 @@ class ProphetStore:
         settings = self.get_settings()
         max_stories = int(settings.get("max_stories") or PROPHET_DEFAULT_MAX_STORIES)
         candidate = dict(payload) if isinstance(payload, dict) else {}
-        if slot and not candidate.get("slot"):
+        if slot:
+            # Caller-supplied slot is authoritative. Models often omit slot or
+            # copy "morning" onto an evening wrap; that would overwrite today's
+            # morning edition instead of creating the evening one.
             candidate["slot"] = slot
         normalized, warnings = validate_edition_payload(candidate, max_stories=max_stories)
         edition_date = normalized["edition_date"]

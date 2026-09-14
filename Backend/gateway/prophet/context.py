@@ -11,6 +11,20 @@ PROPHET_MORNING_CRON_ID = "prophet.morning"
 PROPHET_EVENING_CRON_ID = "prophet.evening"
 PROPHET_CRON_IDS = frozenset({PROPHET_MORNING_CRON_ID, PROPHET_EVENING_CRON_ID})
 
+
+def prophet_slot_from_source_id(source_id: str | None) -> str | None:
+    """Map a Prophet cron source_id to its edition slot.
+
+    Scheduled publishes must use this slot even if the model omits `slot`
+    or writes the wrong one; otherwise an evening wrap is stored as morning.
+    """
+    normalized = str(source_id or "").strip()
+    if normalized == PROPHET_EVENING_CRON_ID:
+        return "evening"
+    if normalized == PROPHET_MORNING_CRON_ID:
+        return "morning"
+    return None
+
 PROPHET_MORNING_PROMPT = """Compose today's morning edition of The Daily Prophet — COSMIC's personalized newspaper for this user.
 
 This is not a headline dump. Write the user's own edition: choose the stories that matter to them, rewrite headlines and body copy in COSMIC's editorial voice, add framing that connects each story to their world (their projects, interests, and goals), and order everything front-page-first.
@@ -19,7 +33,7 @@ Work rules:
 - Do not ask the user anything and do not narrate your process.
 - Keep research bounded and prioritize quality over quantity; do not chase every thread or start long delegations late.
 - Images: a couple of visuals carry a paper — aim for the lead and up to two more, using each article's own main image when you have a URL you trust. Skip icons, logos, avatars, and anything you cannot verify.
-- You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections). Aim for a full paper — roughly eight to {max_stories} stories — and go smaller only on a genuinely quiet day.
+- You MUST end this run by calling publish_prophet_edition with slot=morning and the complete edition (lead plus sections). Aim for a full paper — roughly eight to {max_stories} stories — and go smaller only on a genuinely quiet day.
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
 - Never write the edition as a chat message, and never ask the user to publish it.
 - Context may include recently shown headlines (last 3 days) and a labelled semantic archive of related coverage from the last 4 weeks. That archive is Cosmic's own prior newspaper, not live research. Skip repeats unless there is a major update; connect to prior coverage when it helps. Use search_prophet_archive if you need to check a candidate topic against that archive.
@@ -34,7 +48,7 @@ Work rules:
 - Do not ask the user anything and do not narrate your process.
 - Keep research bounded and prioritize quality over quantity; do not chase every thread or start long delegations late.
 - Images: a couple of visuals carry a paper — aim for the lead and up to two more, using each article's own main image when you have a URL you trust. Skip icons, logos, avatars, and anything you cannot verify.
-- You MUST end this run by calling publish_prophet_edition with the complete edition (lead plus sections). Aim for a full paper — roughly eight to {max_stories} stories — and go smaller only on a genuinely quiet day.
+- You MUST end this run by calling publish_prophet_edition with slot=evening and the complete edition (lead plus sections). Aim for a full paper — roughly eight to {max_stories} stories — and go smaller only on a genuinely quiet day.
 - If you are running low on tool budget, publish the strongest stories you already have instead of doing more research.
 - Never write the edition as a chat message, and never ask the user to publish it.
 - Context may include recently shown headlines (last 3 days) and a labelled semantic archive of related coverage from the last 4 weeks. That archive is Cosmic's own prior newspaper, not live research. Skip repeats unless there is a major update; connect to prior coverage when it helps. Use search_prophet_archive if you need to check a candidate topic against that archive.

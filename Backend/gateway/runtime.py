@@ -85,6 +85,7 @@ from .prophet import (
     cron_expression_for_time,
     is_weak_image_url,
     prophet_cron_specs,
+    prophet_slot_from_source_id,
     render_prophet_context_block,
 )
 from .prophet.archive import ProphetArchiveService, pack_archive_lines
@@ -9772,11 +9773,14 @@ class GatewayRuntime:
         request_id: str | None = None,
         slot: str | None = None,
     ) -> dict[str, Any]:
+        authoritative_slot = self._safe_text(slot) or self._prophet_slot_for_request(
+            request_id
+        )
         enriched = await self._enrich_prophet_edition_images(edition)
         result = self.prophet_store.publish_edition(
             enriched,
             request_id=request_id,
-            slot=slot,
+            slot=authoritative_slot,
         )
         try:
             result = await self.prophet_archive.after_publish(
@@ -21988,6 +21992,20 @@ class GatewayRuntime:
             isinstance(request_record, dict)
             and self._safe_text(request_record.get("source")) == "cron"
             and self._safe_text(request_record.get("source_id")) in PROPHET_CRON_IDS
+        )
+
+    def _prophet_slot_for_request(self, request_id: str | None) -> str | None:
+        normalized = self._safe_text(request_id)
+        if not normalized:
+            return None
+        records = getattr(self, "request_records", None)
+        if not isinstance(records, dict):
+            return None
+        request_record = records.get(normalized)
+        if not isinstance(request_record, dict):
+            return None
+        return prophet_slot_from_source_id(
+            self._safe_text(request_record.get("source_id"))
         )
 
     def _is_heartbeat_noop_response(self, event: dict[str, Any]) -> bool:

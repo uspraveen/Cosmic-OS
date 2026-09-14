@@ -2867,7 +2867,15 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "type": "object",
                 "properties": {
                     "edition_date": {"type": "string", "description": "YYYY-MM-DD; defaults to today."},
-                    "slot": {"type": "string", "enum": ["morning", "evening"]},
+                    "slot": {
+                        "type": "string",
+                        "enum": ["morning", "evening"],
+                        "description": (
+                            "Edition slot. Scheduled runs must match the cron "
+                            "(morning or evening). If omitted, Cosmic infers it "
+                            "from the cron; do not publish an evening wrap as morning."
+                        ),
+                    },
                     "editor_note": {
                         "type": "string",
                         "description": "Short note recording this edition's editorial choices and reasoning.",

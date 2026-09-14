@@ -5,6 +5,7 @@ from .context import (
     PROPHET_CRON_IDS,
     cron_expression_for_time,
     prophet_cron_specs,
+    prophet_slot_from_source_id,
     render_prophet_context_block,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "PROPHET_CRON_IDS",
     "cron_expression_for_time",
     "prophet_cron_specs",
+    "prophet_slot_from_source_id",
     "render_prophet_context_block",
 ]

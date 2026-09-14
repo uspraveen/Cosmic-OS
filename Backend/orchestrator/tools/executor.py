@@ -21,6 +21,7 @@ import httpx
 from shared import BackpressureError, begin_metered_call, build_model_key, build_usage_event, post_usage_event, validate_safe_sheet_id
 from shared.contracts import AgentResult, TaskEnvelope, TaskInProgress
 from shared.scratchpad import truncate_keeping_newest
+from gateway.prophet import prophet_slot_from_source_id
 
 from ..config import BACKEND_ROOT
 from ..firecrawl_tool_enrichment import enrich_firecrawl_tool_result
@@ -2649,8 +2650,11 @@ class ToolExecutor:
         sections = edition.get("sections")
         if not isinstance(sections, list) or not sections:
             return {"error": True, "message": "sections are required and must be a non-empty array"}
+        cron_slot = prophet_slot_from_source_id(context.source_id if context else None)
+        if cron_slot:
+            edition["slot"] = cron_slot
         body: dict[str, Any] = {"edition": edition}
-        slot = str(tool_input.get("slot") or "").strip()
+        slot = cron_slot or str(tool_input.get("slot") or "").strip()
         if slot:
             body["slot"] = slot
         if context and context.request_id:

@@ -1695,3 +1695,56 @@ async def test_tool_executor_github_repo_search_notes_empty_grant() -> None:
     result = json.loads(raw_result)
     assert result["count"] == 0
     assert "No repositories are connected" in result["scope_note"]
+
+
+@pytest.mark.asyncio
+async def test_publish_prophet_edition_forces_cron_slot_over_model_input() -> None:
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode())
+        return httpx.Response(
+            201,
+            json={
+                "edition_id": "ped_evening",
+                "edition_date": "2026-09-13",
+                "slot": "evening",
+                "story_count": 8,
+                "revision": 1,
+                "warnings": [],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    try:
+        raw_result = await executor.execute(
+            "publish_prophet_edition",
+            {
+                "slot": "morning",
+                "sections": [
+                    {
+                        "id": "tech",
+                        "label": "Technology",
+                        "stories": [{"headline": "Wrap", "body": ["Body."]}],
+                    }
+                ],
+            },
+            context=ToolExecutionContext(
+                request_id="req_evening",
+                source="cron",
+                source_id="prophet.evening",
+            ),
+        )
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert result["published"] is True
+    assert result["slot"] == "evening"
+    assert captured["body"]["slot"] == "evening"
+    assert captured["body"]["edition"]["slot"] == "evening"
