@@ -1119,6 +1119,19 @@ class ToolExecutor:
         )
         if payload is None:
             return {"error": True, "message": "GitHub repository search did not return a payload."}
+        # The model plans from this result, so the grant boundary travels with
+        # it: a repo-scoped connector can never create or reach other repos.
+        if payload.get("repositories"):
+            payload["scope_note"] = (
+                "The GitHub connector is repo-scoped: the connected repositories "
+                "listed here are the entirety of the user's GitHub access. "
+                "Creating new repositories or pushing anywhere else is not possible."
+            )
+        else:
+            payload["scope_note"] = (
+                "No repositories are connected, so GitHub operations are "
+                "unavailable until one is connected in Cosmic settings."
+            )
         return payload
 
     async def _custom_tool_opportunity_capture(

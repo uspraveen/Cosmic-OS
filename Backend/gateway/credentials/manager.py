@@ -23,7 +23,7 @@ from secrets import token_urlsafe
 from typing import Any
 from urllib.parse import urlencode
 
-from .github_client import GitHubApiClient
+from .github_client import GitHubApiClient, GitHubScopeError
 from .providers import GoogleAdapter, ProviderAdapter, get_provider_adapter
 from .store import CredentialStore
 
@@ -832,6 +832,16 @@ class CredentialManager:
                     installation_id,
                     max_pages=max_pages,
                 )
+        except GitHubScopeError as exc:
+            # The token authenticated; GitHub denied the operation because the
+            # connector's grant is repo-scoped and this call is outside it.
+            # The account stays healthy — reconnecting cannot widen the grant.
+            self._store.log_audit(
+                action="github_repo_sync",
+                provider="github",
+                result="scope_denied",
+            )
+            raise
         except PermissionError as exc:
             # GitHub rejected the credential at the API level: the grant is
             # dead right now, not merely stale. Condemn the account so health
@@ -1185,6 +1195,27 @@ class CredentialManager:
             user = await self._github_api_client().get_authenticated_user(token)
         except PermissionError as exc:
             message = str(exc).strip() or "GitHub rejected the credential."
+            if isinstance(exc, GitHubScopeError):
+                # The credential works; the operation is outside the
+                # repo-scoped grant. Reconnecting cannot fix that — surface
+                # the actual grant instead of sending the user to reconnect.
+                names = ", ".join(
+                    str(row.get("full_name") or "")
+                    for row in self.list_github_repositories(limit=20)
+                    if row.get("full_name")
+                )
+                message = (
+                    f"{message} The connector is repo-scoped to: "
+                    f"{names or '(no repositories connected)'}."
+                )
+                result.update(
+                    {
+                        "status": "scope_denied",
+                        "needs_reconnect": False,
+                        "error": message,
+                    }
+                )
+                return result
             self.mark_account_auth_error(account_id, message)
             result.update(
                 {

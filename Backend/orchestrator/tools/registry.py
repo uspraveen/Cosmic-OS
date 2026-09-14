@@ -1303,7 +1303,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "(branch, last commit sha/message/author/time, ahead/behind, alpha project id). "
                 "Use this whenever the user references one of their GitHub repositories, asks which "
                 "repositories are connected, or needs to know where Alpha last worked before "
-                "delegating repo work to alpha.execute."
+                "delegating repo work to alpha.execute. The connector is repo-scoped: the "
+                "connected repositories returned here are the entirety of the user's GitHub "
+                "access — creating new repositories or pushing anywhere else is not possible."
             ),
             "input_schema": {
                 "type": "object",

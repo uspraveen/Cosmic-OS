@@ -429,6 +429,39 @@ def _cli_identity_line(cli: str) -> str:
     return ""
 
 
+def _render_connected_repos_section(connected_repos: list[str] | None) -> str:
+    """§4 body. `None` keeps the legacy generic text; a list states the grant."""
+    base = (
+        "Connected GitHub repositories live under a single canonical checkout root "
+        "(`ALPHA_REPOS_ROOT`, default `/var/lib/cosmic/alpha/repos`), one path per "
+        "repo: `<root>/<owner>/<repo>`. The orchestrator resolves the exact path for "
+        "you, so start there rather than re-cloning. Before working in a repository, "
+        "verify it is in sync: run `git status`, `git fetch origin`, and compare your "
+        "branch to `origin/` — a clean tree that is strictly behind fast-forwards, "
+        "local/remote divergence and uncommitted edits must be reconciled or reported "
+        "before you change files. Never force-push or amend pushed history; push only "
+        "when the goal explicitly asks for it."
+    )
+    if connected_repos is None:
+        return base
+    if not connected_repos:
+        return (
+            base
+            + "\n\nGitHub access: no repositories are connected right now. The COSMIC "
+            "connector is repo-scoped — it cannot create new repositories or "
+            "authenticate work on any other repo."
+        )
+    shown = connected_repos[:8]
+    names = ", ".join(f"`{name}`" for name in shown)
+    more = "" if len(connected_repos) <= len(shown) else f" (+{len(connected_repos) - len(shown)} more)"
+    return (
+        base
+        + f"\n\nConnected right now: {names}{more}. GitHub access is repo-scoped to "
+        "exactly these repositories via App-installation tokens — creating a new "
+        "repository or pushing anywhere else will fail."
+    )
+
+
 def render_global_instructions(
     *,
     cli: str,
@@ -436,6 +469,7 @@ def render_global_instructions(
     runtime_mode: RuntimeMode | None = None,
     vm_facts: VmFacts | None = None,
     capabilities: list[tuple[str, str]] | None = None,
+    connected_repos: list[str] | None = None,
 ) -> str:
     """Render the deck-wide instructions for one CLI's home dir.
 
@@ -469,17 +503,7 @@ def render_global_instructions(
     parts.append("")
     parts.append(_render_capability_lines(caps))
     parts.append("\n## 4 · Connected repositories\n")
-    parts.append(
-        "Connected GitHub repositories live under a single canonical checkout root "
-        "(`ALPHA_REPOS_ROOT`, default `/var/lib/cosmic/alpha/repos`), one path per "
-        "repo: `<root>/<owner>/<repo>`. The orchestrator resolves the exact path for "
-        "you, so start there rather than re-cloning. Before working in a repository, "
-        "verify it is in sync: run `git status`, `git fetch origin`, and compare your "
-        "branch to `origin/` — a clean tree that is strictly behind fast-forwards, "
-        "local/remote divergence and uncommitted edits must be reconciled or reported "
-        "before you change files. Never force-push or amend pushed history; push only "
-        "when the goal explicitly asks for it."
-    )
+    parts.append(_render_connected_repos_section(connected_repos))
     parts.append("\n## 5 · How you work\n")
     parts.append(_OPERATING_MODEL_BLOCK)
     parts.append("\n## 6 · How this user thinks\n")
@@ -639,9 +663,12 @@ def ensure_codex_global_instructions(
     *,
     codex_home: Path,
     codex_sandbox: str | None = None,
+    connected_repos: list[str] | None = None,
 ) -> dict[str, object]:
     """Idempotently write the Alpha AGENTS.md into `$CODEX_HOME`."""
-    content = render_global_instructions(cli="codex", codex_sandbox=codex_sandbox)
+    content = render_global_instructions(
+        cli="codex", codex_sandbox=codex_sandbox, connected_repos=connected_repos
+    )
     target = Path(codex_home).expanduser() / CODEX_GLOBAL_INSTRUCTIONS_RELATIVE
     try:
         wrote = _atomic_write_if_changed(target, content)
@@ -654,9 +681,10 @@ def ensure_codex_global_instructions(
 def ensure_cursor_global_instructions(
     *,
     cursor_home: Path,
+    connected_repos: list[str] | None = None,
 ) -> dict[str, object]:
     """Idempotently write the Alpha cosmic.md into `$CURSOR_HOME/.cursor/rules/`."""
-    content = render_global_instructions(cli="cursor")
+    content = render_global_instructions(cli="cursor", connected_repos=connected_repos)
     target = Path(cursor_home).expanduser() / CURSOR_GLOBAL_INSTRUCTIONS_RELATIVE
     try:
         wrote = _atomic_write_if_changed(target, content)
@@ -669,13 +697,14 @@ def ensure_cursor_global_instructions(
 def ensure_opencode_global_instructions(
     *,
     opencode_home: Path,
+    connected_repos: list[str] | None = None,
 ) -> dict[str, object]:
-    """Idempotently write the Alpha AGENTS.md into the OpenCode config dir.
+    """Write the Alpha AGENTS.md into the OpenCode config dir.
 
     The CLI reads global rules from `$HOME/.config/opencode/AGENTS.md`; the
     Alpha home overrides HOME, so this lives inside the OpenCode home.
     """
-    content = render_global_instructions(cli="opencode")
+    content = render_global_instructions(cli="opencode", connected_repos=connected_repos)
     target = (
         Path(opencode_home).expanduser() / OPENCODE_GLOBAL_INSTRUCTIONS_RELATIVE
     )
@@ -690,6 +719,7 @@ def ensure_opencode_global_instructions(
 def ensure_zcode_global_instructions(
     *,
     zcode_home: Path,
+    connected_repos: list[str] | None = None,
 ) -> dict[str, object]:
     """Idempotently write the Alpha AGENTS.md into the ZCode home.
 
@@ -697,7 +727,7 @@ def ensure_zcode_global_instructions(
     walk from the working directory; the Alpha home overrides HOME, so this
     lives inside the ZCode home.
     """
-    content = render_global_instructions(cli="zcode")
+    content = render_global_instructions(cli="zcode", connected_repos=connected_repos)
     target = Path(zcode_home).expanduser() / ZCODE_GLOBAL_INSTRUCTIONS_RELATIVE
     try:
         wrote = _atomic_write_if_changed(target, content)
@@ -714,6 +744,7 @@ def ensure_alpha_global_instructions(
     opencode_home: Path | None = None,
     zcode_home: Path | None = None,
     codex_sandbox: str | None = None,
+    connected_repos: list[str] | None = None,
 ) -> dict[str, dict[str, object]]:
     """Write whichever home(s) the caller passes. Idempotent and never raises.
 
@@ -724,16 +755,22 @@ def ensure_alpha_global_instructions(
     result: dict[str, dict[str, object]] = {}
     if codex_home is not None:
         result["codex"] = ensure_codex_global_instructions(
-            codex_home=codex_home, codex_sandbox=codex_sandbox
+            codex_home=codex_home,
+            codex_sandbox=codex_sandbox,
+            connected_repos=connected_repos,
         )
     if cursor_home is not None:
-        result["cursor"] = ensure_cursor_global_instructions(cursor_home=cursor_home)
+        result["cursor"] = ensure_cursor_global_instructions(
+            cursor_home=cursor_home, connected_repos=connected_repos
+        )
     if opencode_home is not None:
         result["opencode"] = ensure_opencode_global_instructions(
-            opencode_home=opencode_home
+            opencode_home=opencode_home, connected_repos=connected_repos
         )
     if zcode_home is not None:
-        result["zcode"] = ensure_zcode_global_instructions(zcode_home=zcode_home)
+        result["zcode"] = ensure_zcode_global_instructions(
+            zcode_home=zcode_home, connected_repos=connected_repos
+        )
     return result
 
 

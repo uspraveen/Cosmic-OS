@@ -181,6 +181,7 @@ class OpenCodeWorkspaceRunner:
         timeout_sec: float | None = None,
         event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         cancel_check: Callable[[], Awaitable[bool]] | None = None,
+        connected_repos: list[str] | None = None,
     ) -> OpenCodeRunResult:
         paths.workspace.mkdir(parents=True, exist_ok=True)
         paths.artifacts.mkdir(parents=True, exist_ok=True)
@@ -188,7 +189,10 @@ class OpenCodeWorkspaceRunner:
         # Idempotent — same content produces no disk write. Keeps the global
         # AGENTS.md under the OpenCode config dir in sync with current VM state.
         try:
-            ensure_opencode_global_instructions(opencode_home=self.config.opencode_home)
+            ensure_opencode_global_instructions(
+                opencode_home=self.config.opencode_home,
+                connected_repos=connected_repos,
+            )
         except OSError:
             pass
         output_path = paths.artifacts / "opencode-last-message.md"

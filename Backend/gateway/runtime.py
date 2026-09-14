@@ -22956,6 +22956,23 @@ class GatewayRuntime:
 
         return await self.get_desktop_codex_status()
 
+    def _alpha_connected_repo_names(self) -> list[str]:
+        """Full names of the currently connected GitHub repos, best-effort.
+
+        Rendered into the Alpha global instructions so the stated GitHub
+        grant always matches the gateway's github_repositories table.
+        """
+        try:
+            rows = self.credential_manager.list_github_repositories(limit=20)
+        except Exception:
+            logger.exception("gateway.alpha_connected_repo_names_failed")
+            return []
+        return [
+            str(row.get("full_name") or "").strip()
+            for row in rows
+            if isinstance(row, dict) and str(row.get("full_name") or "").strip()
+        ]
+
     async def start_desktop_codex_login(self) -> dict[str, Any]:
         self.agent_auth_store.save_codex(
             auth_mode="chatgpt",
@@ -22996,6 +23013,7 @@ class GatewayRuntime:
             ensure_codex_global_instructions(
                 codex_home=self.config.alpha_codex_home,
                 codex_sandbox=getattr(self.config, "alpha_codex_sandbox", None),
+                connected_repos=self._alpha_connected_repo_names(),
             )
         except Exception:
             logger.exception(
@@ -23335,6 +23353,7 @@ class GatewayRuntime:
 
             ensure_zcode_global_instructions(
                 zcode_home=self.config.alpha_zcode_home,
+                connected_repos=self._alpha_connected_repo_names(),
             )
         except Exception:
             logger.exception(

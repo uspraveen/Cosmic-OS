@@ -211,6 +211,7 @@ class CursorWorkspaceRunner:
         timeout_sec: float | None = None,
         event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         cancel_check: Callable[[], Awaitable[bool]] | None = None,
+        connected_repos: list[str] | None = None,
     ) -> CursorRunResult:
         paths.workspace.mkdir(parents=True, exist_ok=True)
         paths.artifacts.mkdir(parents=True, exist_ok=True)
@@ -222,7 +223,10 @@ class CursorWorkspaceRunner:
             config_warning = f"Unable to update Cursor CLI non-Fast config: {exc}"
         # Idempotent — same content produces no disk write. Keeps the
         # global cosmic.md rule in sync with current VM state.
-        ensure_cursor_global_instructions(cursor_home=self.config.cursor_home)
+        ensure_cursor_global_instructions(
+            cursor_home=self.config.cursor_home,
+            connected_repos=connected_repos,
+        )
         output_path = paths.artifacts / "cursor-last-message.md"
         requested_model = normalize_cursor_model(model)
         command = self.build_command(

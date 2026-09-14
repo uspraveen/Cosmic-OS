@@ -155,6 +155,7 @@ class ZcodeWorkspaceRunner:
         timeout_sec: float | None = None,
         event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         cancel_check: Callable[[], Awaitable[bool]] | None = None,
+        connected_repos: list[str] | None = None,
     ) -> ZcodeRunResult:
         paths.workspace.mkdir(parents=True, exist_ok=True)
         paths.artifacts.mkdir(parents=True, exist_ok=True)
@@ -162,7 +163,10 @@ class ZcodeWorkspaceRunner:
         # Idempotent — same content produces no disk write. Keeps the global
         # ~/.zcode/AGENTS.md under the ZCode home in sync with current VM state.
         try:
-            ensure_zcode_global_instructions(zcode_home=self.config.zcode_home)
+            ensure_zcode_global_instructions(
+                zcode_home=self.config.zcode_home,
+                connected_repos=connected_repos,
+            )
         except OSError:
             pass
         # The thinking default is config-driven (the CLI has no per-run flag);

@@ -131,6 +131,7 @@ class CodexWorkspaceRunner:
         timeout_sec: float | None = None,
         event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         cancel_check: Callable[[], Awaitable[bool]] | None = None,
+        connected_repos: list[str] | None = None,
     ) -> CodexRunResult:
         paths.workspace.mkdir(parents=True, exist_ok=True)
         paths.artifacts.mkdir(parents=True, exist_ok=True)
@@ -140,6 +141,7 @@ class CodexWorkspaceRunner:
         ensure_codex_global_instructions(
             codex_home=self.config.codex_home,
             codex_sandbox=sandbox or self.config.codex_sandbox,
+            connected_repos=connected_repos,
         )
         output_path = paths.artifacts / "codex-last-message.md"
         command = self.build_command(

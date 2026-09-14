@@ -1671,3 +1671,27 @@ async def test_tool_executor_github_repo_search_uses_internal_route() -> None:
     assert result["count"] == 1
     assert result["repositories"][0]["full_name"] == "uspraveen/portfolio"
     assert result["repositories"][0]["last_commit"]["sha"] == "abc123"
+    assert "repo-scoped" in result["scope_note"]
+    assert "Creating new repositories" in result["scope_note"]
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_github_repo_search_notes_empty_grant() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/internal/github/repositories"
+        return httpx.Response(200, json={"repositories": [], "count": 0})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    try:
+        raw_result = await executor.execute("github_repo_search", {})
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert result["count"] == 0
+    assert "No repositories are connected" in result["scope_note"]

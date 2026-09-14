@@ -37,6 +37,17 @@ class GitHubApiError(RuntimeError):
     """A GitHub API call failed in a way the caller should surface."""
 
 
+class GitHubScopeError(PermissionError):
+    """GitHub accepted the credential but denied the operation.
+
+    This is the repo-scoped-grant case: the connector's App installation only
+    covers the connected repositories, so operations outside them (creating a
+    new repo, touching an unconnected one) fail with 403 even though the
+    token itself is healthy. Callers must NOT route this to the reconnect
+    path — a reconnect would not change the grant.
+    """
+
+
 class GitHubApiClient:
     """Small stateless client for the two enumeration calls Alpha needs."""
 
@@ -118,6 +129,16 @@ class GitHubApiClient:
             params=params or None,
         )
         if response.status_code in (401, 403):
+            if response.status_code == 403 and (
+                "resource not accessible" in response.text.lower()
+            ):
+                # GitHub's canonical permission-denial for App-scoped tokens:
+                # the credential is alive, the operation is outside the grant.
+                raise GitHubScopeError(
+                    "GitHub denied the operation (403): the COSMIC connector "
+                    "is repo-scoped to the connected repositories, and this "
+                    f"operation is outside that grant. {response.text[:200]}"
+                )
             # The credential is dead or the installation was revoked/suspended.
             # PermissionError maps onto the reconnect path upstream.
             raise PermissionError(

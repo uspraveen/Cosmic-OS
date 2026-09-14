@@ -273,6 +273,10 @@ class AlphaAgent(AgentRuntime):
 
         preferred_harness = await self._resolve_preferred_harness(task)
         candidate_harnesses = self._candidate_harnesses(preferred_harness, task)
+        # The GitHub grant is rendered into the global instructions every run,
+        # so Alpha knows which repos the connector covers before it plans any
+        # git work. Best-effort: a fetch miss keeps the generic instructions.
+        connected_repo_names = await self._fetch_connected_repo_names()
         if not candidate_harnesses:
             return self._fail(
                 code="UNSUPPORTED_OPERATION",
@@ -454,6 +458,7 @@ class AlphaAgent(AgentRuntime):
                     timeout_sec=self.config.opencode_timeout_sec,
                     event_callback=emit_alpha_terminal,
                     cancel_check=cancel_check,
+                    connected_repos=connected_repo_names,
                 )
             elif active_harness == "zcode":
                 selected_model = self._select_zcode_model(task, provider_status)
@@ -485,6 +490,7 @@ class AlphaAgent(AgentRuntime):
                     timeout_sec=self.config.zcode_timeout_sec,
                     event_callback=emit_alpha_terminal,
                     cancel_check=cancel_check,
+                    connected_repos=connected_repo_names,
                 )
             elif active_harness == "cursor":
                 selected_model = self._select_cursor_model(task, provider_status)
@@ -511,6 +517,7 @@ class AlphaAgent(AgentRuntime):
                     timeout_sec=self.config.cursor_timeout_sec,
                     event_callback=emit_alpha_terminal,
                     cancel_check=cancel_check,
+                    connected_repos=connected_repo_names,
                 )
             else:
                 selected_model = self._select_codex_model(task, provider_status)
@@ -531,6 +538,7 @@ class AlphaAgent(AgentRuntime):
                     timeout_sec=self.config.codex_timeout_sec,
                     event_callback=emit_alpha_terminal,
                     cancel_check=cancel_check,
+                    connected_repos=connected_repo_names,
                 )
             native_session = self._record_observed_native_session(
                 project=project,
@@ -810,6 +818,39 @@ class AlphaAgent(AgentRuntime):
         except Exception:
             logger.debug("alpha.github_repo_resolve_failed ref=%s", ref, exc_info=True)
             return None
+
+    async def _fetch_connected_repo_names(self) -> list[str] | None:
+        """Full names of the connected GitHub repositories, best-effort.
+
+        Feeds the "Connected repositories" section of the global instructions
+        so the rendered grant matches what the gateway currently holds. A
+        missing gateway or empty token returns None (generic instructions);
+        an authoritative empty list is returned as-is so the instructions say
+        no repos are connected.
+        """
+        if not self.gateway_internal_token:
+            return None
+        try:
+            response = await self._http_client.get(
+                f"{self.gateway_url.rstrip('/')}/internal/github/repositories",
+                headers={"X-Internal-Token": self.gateway_internal_token},
+                params={"limit": "20"},
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            logger.debug("alpha.connected_repos_fetch_failed", exc_info=True)
+            return None
+        repositories = payload.get("repositories") if isinstance(payload, dict) else None
+        if not isinstance(repositories, list):
+            return None
+        names = [
+            str(item.get("full_name") or "").strip()
+            for item in repositories
+            if isinstance(item, dict)
+        ]
+        return [name for name in names if name]
 
     async def _report_repo_progress(
         self,
