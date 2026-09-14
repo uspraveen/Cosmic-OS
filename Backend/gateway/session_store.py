@@ -1260,6 +1260,41 @@ class SessionStore:
                 connection.commit()
         return changed
 
+    def response_action_block_persisted(
+        self,
+        *,
+        session_id: str,
+        block_id: str,
+    ) -> bool:
+        """True when any message in the session already carries this block id."""
+        normalized_session_id = str(session_id or "").strip()
+        normalized_block_id = str(block_id or "").strip()
+        if not normalized_session_id or not normalized_block_id:
+            return False
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT message_id, metadata_json
+                FROM messages
+                WHERE session_id = ? AND metadata_json LIKE ?
+                """,
+                (normalized_session_id, f"%{normalized_block_id}%"),
+            ).fetchall()
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(metadata, dict):
+                continue
+            blocks = metadata.get("response_blocks")
+            if not isinstance(blocks, list):
+                continue
+            for existing in blocks:
+                if isinstance(existing, dict) and str(existing.get("id") or "").strip() == normalized_block_id:
+                    return True
+        return False
+
     def list_turn_ledger(
         self,
         session_id: str,

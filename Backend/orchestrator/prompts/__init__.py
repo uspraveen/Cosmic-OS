@@ -16,6 +16,7 @@ _PROMPT_ASSETS = (
     "soul.md",
     "policies.md",
     "visual_response_policy.md",
+    "content_response_policy.md",
     "memory_authority.md",
 )
 
@@ -31,6 +32,9 @@ ORCHESTRATOR_SOUL_PROMPT = _load_prompt_asset("soul.md")
 ORCHESTRATOR_POLICIES_PROMPT = _load_prompt_asset("policies.md")
 ORCHESTRATOR_VISUAL_RESPONSE_POLICY_PROMPT = _load_prompt_asset(
     "visual_response_policy.md"
+)
+ORCHESTRATOR_CONTENT_RESPONSE_POLICY_PROMPT = _load_prompt_asset(
+    "content_response_policy.md"
 )
 ORCHESTRATOR_MEMORY_AUTHORITY_INSTRUCTION = _load_prompt_asset("memory_authority.md")
 
@@ -57,6 +61,8 @@ def build_agentic_system_prompt(
     featured_specialists: list[dict[str, object]] | None = None,
     visual_response_enhancement_enabled: bool = False,
     visual_supported_slot_kinds: list[str] | None = None,
+    trusted_ui_enabled: bool = False,
+    channel: str | None = None,
 ) -> str:
     now_utc = datetime.now(timezone.utc)
     date_line = f"Current date and time (UTC): {now_utc.strftime('%A, %B %d, %Y at %H:%M UTC')}."
@@ -80,12 +86,13 @@ def build_agentic_system_prompt(
         AGENTIC_ORCHESTRATOR_SYSTEM_PROMPT,
         ORCHESTRATOR_SOUL_PROMPT,
         build_featured_specialists_prompt(featured_specialists),
-        build_tool_prompt_catalog(featured_agent_ids),
+        build_tool_prompt_catalog(featured_agent_ids, channel=channel),
         ORCHESTRATOR_POLICIES_PROMPT,
         build_visual_response_policy_prompt(
             enabled=visual_response_enhancement_enabled,
             supported_slot_kinds=visual_supported_slot_kinds,
         ),
+        ORCHESTRATOR_CONTENT_RESPONSE_POLICY_PROMPT if trusted_ui_enabled else "",
         date_line,
     ]
     prompt = "\n\n".join(section.strip() for section in sections if section.strip())

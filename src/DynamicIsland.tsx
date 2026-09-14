@@ -1013,9 +1013,16 @@ export default function DynamicIsland({
     return () => offShown?.()
   }, [loadVaultIslandFromPending])
 
-  const actOnVaultIsland = useCallback(async (kind: 'approve' | 'window' | 'reject') => {
+  const actOnVaultIsland = useCallback(async (kind: 'approve' | 'window' | 'reject' | 'provide') => {
     const request = vaultIslandRequest
     if (!request || vaultIslandBusy) return
+    if (kind === 'provide') {
+      // Browser credential requests need a username/password form — the island
+      // is too compact, so open the vault settings card that hosts the form.
+      setSettingsInitialView('vault')
+      setShowSettings(true)
+      return
+    }
     const cosmicApi = window.cosmic
     if (!cosmicApi || (kind === 'reject' ? !cosmicApi.vaultRejectPending : !cosmicApi.vaultApprovePending)) {
       setVaultIslandError('Vault approval is unavailable.')
@@ -2999,7 +3006,7 @@ export default function DynamicIsland({
             disabled={busy}
             onClick={(event) => {
               event.stopPropagation()
-              void actOnVaultIsland('approve')
+              void actOnVaultIsland(request.action === 'browser_credential_request' ? 'provide' : 'approve')
             }}
           >
             {vaultIslandBusy === 'approve' ? 'Working…' : vaultIslandAllowLabel(request)}

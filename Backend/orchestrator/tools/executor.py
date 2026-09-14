@@ -19,6 +19,13 @@ from urllib.parse import quote
 import httpx
 
 from shared import BackpressureError, begin_metered_call, build_model_key, build_usage_event, post_usage_event, validate_safe_sheet_id
+from shared.content_cards import (
+    INTENT_PRESENTATION,
+    channel_supports_trusted_ui,
+    content_card_presentation_contract,
+    normalize_content_cards,
+    project_specialist_content_cards,
+)
 from shared.contracts import AgentResult, TaskEnvelope, TaskInProgress
 from shared.scratchpad import truncate_keeping_newest
 from gateway.prophet import prophet_slot_from_source_id
@@ -188,6 +195,33 @@ class ToolExecutor:
         if handler is None:
             return {"error": True, "message": f"Tool handler is not implemented: {tool_name}"}
         return await handler(tool_input, context=context)
+
+    async def _present_content_cards(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        channel = context.channel if context else None
+        if not channel_supports_trusted_ui(channel):
+            return {
+                "error": True,
+                "message": "Content cards are only available on desktop and mobile.",
+            }
+        normalized = normalize_content_cards(tool_input.get("cards"))
+        if normalized.get("error"):
+            return {"error": True, "message": normalized.get("message") or "Invalid content cards."}
+        response = {
+            "status": "presented",
+            "card_count": normalized["card_count"],
+            "dropped_count": normalized.get("dropped_count") or 0,
+            "response_blocks": normalized["response_blocks"],
+        }
+        response["_cosmic_ui"] = content_card_presentation_contract(
+            covers=list(normalized.get("covers") or []),
+            card_count=int(normalized["card_count"]),
+        )
+        return response
 
     # ── Perplexity Research ──────────────────────────────────────
 
@@ -3006,23 +3040,42 @@ class ToolExecutor:
         )
         if presentation_contract:
             response["_cosmic_ui"] = presentation_contract
-        elif response.get("approval_required") is True:
-            # The approval card only renders on desktop and mobile. On any other
-            # channel the block is correctly withheld -- but nothing used to tell
-            # the model that, so it still wrote "approve it when you get a chance"
-            # into an email, pointing the reader at a button that is not in front
-            # of them. Suppressing the UI and not saying so is what made the reply
-            # unactionable in the channel it arrived in.
-            response["_cosmic_ui_unavailable"] = {
-                "reason": "approval_ui_not_available_on_this_channel",
-                "channel": str(context.channel if context else "") or "unknown",
-                "guidance": (
-                    "This channel cannot render the approval card, so the user has no button "
-                    "to press. Do not tell them to approve, tap, or click anything. Say plainly "
-                    "that the message is waiting for approval and can be actioned from the "
-                    "desktop or mobile app, or give them the answer directly here instead."
-                ),
-            }
+        else:
+            projected = project_specialist_content_cards(
+                intent=intent,
+                response=response,
+                presentation=INTENT_PRESENTATION.get(intent),
+                channel=context.channel if context else None,
+            )
+            if projected and projected.get("response_blocks"):
+                response["response_blocks"] = projected["response_blocks"]
+                ui = content_card_presentation_contract(
+                    covers=list(projected.get("covers") or ["notable posts"]),
+                    card_count=int(projected.get("card_count") or 0),
+                )
+                spec = INTENT_PRESENTATION.get(intent) or {}
+                if spec.get("instruction"):
+                    ui["instruction"] = spec["instruction"]
+                if spec.get("response_mode"):
+                    ui["response_mode"] = spec["response_mode"]
+                response["_cosmic_ui"] = ui
+            elif response.get("approval_required") is True:
+                # The approval card only renders on desktop and mobile. On any other
+                # channel the block is correctly withheld -- but nothing used to tell
+                # the model that, so it still wrote "approve it when you get a chance"
+                # into an email, pointing the reader at a button that is not in front
+                # of them. Suppressing the UI and not saying so is what made the reply
+                # unactionable in the channel it arrived in.
+                response["_cosmic_ui_unavailable"] = {
+                    "reason": "approval_ui_not_available_on_this_channel",
+                    "channel": str(context.channel if context else "") or "unknown",
+                    "guidance": (
+                        "This channel cannot render the approval card, so the user has no button "
+                        "to press. Do not tell them to approve, tap, or click anything. Say plainly "
+                        "that the message is waiting for approval and can be actioned from the "
+                        "desktop or mobile app, or give them the answer directly here instead."
+                    ),
+                }
         return response
 
     @staticmethod

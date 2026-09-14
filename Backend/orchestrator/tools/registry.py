@@ -26,6 +26,7 @@ class ToolSpec:
     read_only: bool = False
     exposed_to_model: bool = True
     specialist_agent_id: str | None = None
+    trusted_ui_only: bool = False
 
     @property
     def is_local(self) -> bool:
@@ -34,7 +35,17 @@ class ToolSpec:
     def to_definition(self) -> dict[str, Any]:
         return deepcopy(self.api_definition)
 
-    def is_visible_to_model(self, featured_agent_ids: set[str] | None = None) -> bool:
+    def is_visible_to_model(
+        self,
+        featured_agent_ids: set[str] | None = None,
+        *,
+        channel: str | None = None,
+    ) -> bool:
+        if self.trusted_ui_only:
+            from shared.content_cards import channel_supports_trusted_ui
+
+            if not channel_supports_trusted_ui(channel):
+                return False
         if self.specialist_agent_id:
             return bool(featured_agent_ids and self.specialist_agent_id in featured_agent_ids)
         return self.exposed_to_model
@@ -51,6 +62,16 @@ def _preview_list(value: Any, *, limit: int = 2) -> str:
     if len(normalized) > len(items):
         preview += ", ..."
     return preview
+
+
+def _present_content_cards_progress(tool_input: dict[str, Any]) -> str:
+    cards = tool_input.get("cards")
+    count = len(cards) if isinstance(cards, list) else 0
+    if count == 1:
+        return "Preparing a response card..."
+    if count > 1:
+        return f"Preparing {count} response cards..."
+    return "Preparing response cards..."
 
 
 def _web_search_progress(tool_input: dict[str, Any]) -> str:
@@ -691,7 +712,12 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                     },
                     "credential_ref": {
                         "type": "string",
-                        "description": "Vault credential ref (vault:<entry_id>) from vault_lookup when the site needs login.",
+                        "description": (
+                            "Vault credential ref (vault:<entry_id>) exactly as returned by "
+                            "vault_lookup when the site needs login. Never fabricate or guess one "
+                            "from an entry_id — unapproved or self-made refs fail at dispatch; "
+                            "call vault_lookup first."
+                        ),
                     },
                     "wait_timeout_sec": {
                         "type": "number",
@@ -717,8 +743,11 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "browser_credential_request",
             "description": (
                 "Ask the user to add site credentials (username/password) so the browser agent can log in. "
-                "Use this when a browser_task ended with status=credentials_needed, or when you know the site "
-                "requires login and no vault entry exists. The user gets a credential addition card in the "
+                "Use this ONLY when a browser_task ended with status=credentials_needed, or when the site "
+                "requires login and vault_list_sites shows NO vault entry for it. If a vault entry exists "
+                "for the site (or for the identity provider behind a 'Sign in with Google/Apple/etc.' "
+                "button), call vault_lookup for it instead and pass the credential_ref to browser_task. "
+                "The user gets a credential addition card in the "
                 "desktop app; on completion this request resolves automatically and the turn continues with a "
                 "credential_ref you can pass to browser_task. NEVER use this to ask for credentials you already "
                 "have a vault ref for."
@@ -890,7 +919,11 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "password vault so a specialist agent can use it on their behalf. Returns "
                 "the username, credential_kind, expiry metadata, any usage notes the user "
                 "left for Cosmic, and a credential_ref to pass in delegate_to_agent input — "
-                "NEVER a password or API key. Obey notes (for example 'use this Hugging Face "
+                "NEVER a password or API key. This is the ONLY way to authorize credential "
+                "use: the vault rejects any credential_ref at dispatch time unless this tool "
+                "handed it out under the user's policy, so always call this before using a "
+                "site you saw in vault_list_sites, and never construct a credential_ref from "
+                "an entry_id or any other source. Obey notes (for example 'use this Hugging Face "
                 "key only to read'). If expired is true, tell the user the credential is past "
                 "its expiry before using it. Depending on the user's per-site policy this either "
                 "succeeds immediately, or pauses for an inline user approval card: if the result "
@@ -996,9 +1029,13 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "vault_list_sites",
             "description": (
                 "List which credentials are saved in the user's password vault (titles, domains, "
-                "usernames, credential_kind, expiry, and access policy). Metadata only — contains "
-                "no secrets. Use this when a task needs a login or API key and you want to know "
-                "whether one is already saved."
+                "usernames, credential_kind, expiry, access policy, and each entry's credential_ref). "
+                "Metadata only — contains no secrets. Use this when a task needs a login or API key "
+                "and you want to know whether one is already saved. IMPORTANT: a credential_ref from "
+                "this list is NOT yet authorized for use — before passing any credential_ref to a "
+                "specialist you MUST call vault_lookup for that site, which enforces the user's "
+                "approval policy (raising an approval card when needed) and is the only tool that "
+                "authorizes use. Never construct, guess, or modify a credential_ref yourself."
             ),
             "input_schema": {"type": "object", "properties": {}},
         },
@@ -1189,6 +1226,130 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Capture a real missing capability directly when you notice COSMIC would materially help the user better if it already had that capability.",
         progress_builder=_wishlist_capture_progress,
         handler_method="_cosmics_capability_wishlist_capture",
+    ),
+    ToolSpec(
+        name="present_content_cards",
+        api_definition={
+            "name": "present_content_cards",
+            "description": (
+                "Present portable objects as native Cosmic cards beside the final response. "
+                "Use this after you have authored copy the user will take: X/Twitter drafts, checklists, option sets, "
+                "or compact summaries. The client owns layout. Do not send HTML, CSS, colors, or privileged actions. "
+                "Allowed actions are copy and open_url. After this tool returns _cosmic_ui, do not repeat covered card content in Markdown."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "cards": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 5,
+                        "description": "One to five cards to present.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "preset": {
+                                    "type": "string",
+                                    "enum": ["social_post", "copy_payload", "option_set", "checklist"],
+                                    "description": "Optional Cosmic preset. Use social_post for X/Twitter or similar drafts.",
+                                },
+                                "brand": {
+                                    "type": "string",
+                                    "enum": ["x", "gmail", "github", "generic"],
+                                    "description": "Trusted brand mark. Use x for X/Twitter drafts.",
+                                },
+                                "title": {"type": "string", "description": "Short card title."},
+                                "subtitle": {"type": "string", "description": "Optional supporting line."},
+                                "body": {
+                                    "type": "string",
+                                    "description": "Exact copy for social_post or copy_payload. This is what Copy will copy.",
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "Optional character limit. Defaults to 280 for X social_post.",
+                                },
+                                "tags": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Hashtags or chips.",
+                                },
+                                "mentions": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Account tags such as @handle.",
+                                },
+                                "items": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Checklist or option items when using those presets.",
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Option set choices.",
+                                },
+                                "group_id": {
+                                    "type": "string",
+                                    "description": "Shared id for variants that should stack together.",
+                                },
+                                "variant_index": {"type": "integer"},
+                                "variant_total": {"type": "integer"},
+                                "sections": {
+                                    "type": "array",
+                                    "description": "Generic sections when no preset fits: text, key_value, chips, list, code, quote.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {
+                                                "type": "string",
+                                                "enum": ["text", "key_value", "chips", "list", "code", "quote"],
+                                            },
+                                            "text": {"type": "string"},
+                                            "code": {"type": "string"},
+                                            "language": {"type": "string"},
+                                            "items": {"type": "array", "items": {"type": "string"}},
+                                            "style": {"type": "string"},
+                                            "rows": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "label": {"type": "string"},
+                                                        "value": {"type": "string"},
+                                                    },
+                                                },
+                                            },
+                                        },
+                                        "required": ["type"],
+                                    },
+                                },
+                                "actions": {
+                                    "type": "array",
+                                    "description": "copy and/or open_url only.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {"type": "string", "enum": ["copy", "open_url"]},
+                                            "label": {"type": "string"},
+                                            "text": {"type": "string"},
+                                            "url": {"type": "string"},
+                                        },
+                                        "required": ["type"],
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                "required": ["cards"],
+            },
+        },
+        group="presentation",
+        prompt_summary="Present copyable or choosable objects as native Cosmic cards. Use social_post for X drafts. Never invent HTML or privileged buttons.",
+        progress_builder=_present_content_cards_progress,
+        handler_method="_present_content_cards",
+        read_only=True,
+        trusted_ui_only=True,
     ),
     ToolSpec(
         name="custom_tool_opportunities_list",
@@ -3078,6 +3239,7 @@ _GROUP_ORDER = (
     "documents",
     "spreadsheets",
     "planning",
+    "presentation",
     "memory",
     "history",
     "automations",
@@ -3095,6 +3257,7 @@ _GROUP_TITLES = {
     "documents": "Documents",
     "spreadsheets": "Spreadsheets",
     "planning": "Planning & Wishlist",
+    "presentation": "Response Surfaces",
     "memory": "Memory",
     "history": "History",
     "automations": "Event Automations",
@@ -3104,15 +3267,27 @@ _GROUP_TITLES = {
 }
 
 
-def get_model_tool_definitions(featured_agent_ids: set[str] | None = None) -> list[dict[str, Any]]:
-    return [spec.to_definition() for spec in _MODEL_TOOL_SPECS if spec.is_visible_to_model(featured_agent_ids)]
-
-
-def get_local_tool_definitions(featured_agent_ids: set[str] | None = None) -> list[dict[str, Any]]:
+def get_model_tool_definitions(
+    featured_agent_ids: set[str] | None = None,
+    *,
+    channel: str | None = None,
+) -> list[dict[str, Any]]:
     return [
         spec.to_definition()
         for spec in _MODEL_TOOL_SPECS
-        if spec.is_local and spec.is_visible_to_model(featured_agent_ids)
+        if spec.is_visible_to_model(featured_agent_ids, channel=channel)
+    ]
+
+
+def get_local_tool_definitions(
+    featured_agent_ids: set[str] | None = None,
+    *,
+    channel: str | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        spec.to_definition()
+        for spec in _MODEL_TOOL_SPECS
+        if spec.is_local and spec.is_visible_to_model(featured_agent_ids, channel=channel)
     ]
 
 
@@ -3149,10 +3324,14 @@ def build_tool_progress_message(tool_name: str, tool_input: dict[str, Any]) -> s
     return spec.progress_builder(tool_input)
 
 
-def build_tool_prompt_catalog(featured_agent_ids: set[str] | None = None) -> str:
+def build_tool_prompt_catalog(
+    featured_agent_ids: set[str] | None = None,
+    *,
+    channel: str | None = None,
+) -> str:
     grouped: dict[str, list[str]] = {}
     for spec in _MODEL_TOOL_SPECS:
-        if not spec.is_visible_to_model(featured_agent_ids) or not spec.prompt_summary:
+        if not spec.is_visible_to_model(featured_agent_ids, channel=channel) or not spec.prompt_summary:
             continue
         grouped.setdefault(spec.group, []).append(f"- `{spec.name}`: {spec.prompt_summary}")
 
@@ -3167,22 +3346,30 @@ def build_tool_prompt_catalog(featured_agent_ids: set[str] | None = None) -> str
     return "\n".join(lines).strip()
 
 
-def get_tool_registry_snapshot(featured_agent_ids: set[str] | None = None) -> dict[str, Any]:
+def get_tool_registry_snapshot(
+    featured_agent_ids: set[str] | None = None,
+    *,
+    channel: str | None = None,
+) -> dict[str, Any]:
     return {
-        "model_tools": [spec.name for spec in _MODEL_TOOL_SPECS if spec.is_visible_to_model(featured_agent_ids)],
+        "model_tools": [
+            spec.name
+            for spec in _MODEL_TOOL_SPECS
+            if spec.is_visible_to_model(featured_agent_ids, channel=channel)
+        ],
         "local_tools": [
             spec.name
             for spec in _MODEL_TOOL_SPECS
-            if spec.is_local and spec.is_visible_to_model(featured_agent_ids)
+            if spec.is_local and spec.is_visible_to_model(featured_agent_ids, channel=channel)
         ],
         "server_tools": [
             spec.name
             for spec in _MODEL_TOOL_SPECS
-            if not spec.is_local and spec.is_visible_to_model(featured_agent_ids)
+            if not spec.is_local and spec.is_visible_to_model(featured_agent_ids, channel=channel)
         ],
         "read_only_local_tools": sorted(
             spec.name
             for spec in _MODEL_TOOL_SPECS
-            if spec.is_local and spec.read_only and spec.is_visible_to_model(featured_agent_ids)
+            if spec.is_local and spec.read_only and spec.is_visible_to_model(featured_agent_ids, channel=channel)
         ),
     }

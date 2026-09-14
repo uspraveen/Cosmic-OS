@@ -18,6 +18,104 @@ def test_cosmic_code_execution_is_registered_as_local_tool() -> None:
     assert "cosmic_code_execution" in tool_names
     assert "heartbeat_notes" in tool_names
     assert "heartbeat_watchpoints" in tool_names
+    assert "present_content_cards" not in tool_names
+
+
+def test_present_content_cards_is_desktop_only() -> None:
+    desktop_names = {tool.get("name") for tool in get_local_tool_definitions(channel="desktop")}
+    mobile_names = {tool.get("name") for tool in get_local_tool_definitions(channel="mobile")}
+    whatsapp_names = {tool.get("name") for tool in get_local_tool_definitions(channel="whatsapp")}
+    assert "present_content_cards" in desktop_names
+    assert "present_content_cards" in mobile_names
+    assert "present_content_cards" not in whatsapp_names
+    catalog = build_tool_prompt_catalog(channel="desktop")
+    assert "`present_content_cards`" in catalog
+    assert "Response Surfaces" in catalog
+
+
+@pytest.mark.asyncio
+async def test_present_content_cards_returns_validated_blocks() -> None:
+    executor = ToolExecutor()
+    raw = await executor.execute(
+        "present_content_cards",
+        {
+            "cards": [
+                {
+                    "preset": "social_post",
+                    "brand": "x",
+                    "title": "Draft 1",
+                    "body": "Launch the glass cards tonight.",
+                    "tags": ["#cosmic"],
+                }
+            ]
+        },
+        context=ToolExecutionContext(channel="desktop"),
+    )
+    result = json.loads(raw)
+    assert result["status"] == "presented"
+    assert result["_cosmic_ui"]["block_type"] == "content_card"
+    assert result["response_blocks"][0]["preset"] == "social_post"
+    assert result["response_blocks"][0]["actions"][0]["type"] == "copy"
+
+
+@pytest.mark.asyncio
+async def test_present_content_cards_hidden_off_desktop() -> None:
+    executor = ToolExecutor()
+    raw = await executor.execute(
+        "present_content_cards",
+        {"cards": [{"title": "Nope", "body": "secret"}]},
+        context=ToolExecutionContext(channel="whatsapp"),
+    )
+    result = json.loads(raw)
+    assert result["error"] is True
+
+
+@pytest.mark.asyncio
+async def test_x_search_projects_notable_posts_into_content_cards() -> None:
+    async def dispatcher(**kwargs):
+        del kwargs
+        return AgentResult(
+            status="completed",
+            output={
+                "response": "briefing",
+                "message": "briefing",
+                "query": "cosmic",
+                "summary": "People like the cards.",
+                "key_findings": ["Cards landed"],
+                "notable_posts": [
+                    {
+                        "author_handle": "foo",
+                        "excerpt": "The glass cards look native.",
+                        "why_it_matters": "Current reaction.",
+                        "post_url": "https://x.com/foo/status/1",
+                    }
+                ],
+                "citations": [],
+                "filters": {},
+            },
+        )
+
+    executor = ToolExecutor(agent_dispatcher=dispatcher)
+    parent = _parent_task()
+    raw = await executor.execute(
+        "x_search",
+        {"query": "cosmic cards"},
+        context=ToolExecutionContext(channel="desktop", session_id="sess_x", parent_task=parent),
+    )
+    result = json.loads(raw)
+    assert result["_cosmic_ui"]["block_type"] == "content_card"
+    assert result["response_blocks"][0]["brand"] == "x"
+    assert result["response_blocks"][0]["title"] == "@foo"
+
+    whatsapp = json.loads(
+        await executor.execute(
+            "x_search",
+            {"query": "cosmic cards"},
+            context=ToolExecutionContext(channel="whatsapp", session_id="sess_x", parent_task=parent),
+        )
+    )
+    assert "_cosmic_ui" not in whatsapp
+    assert "response_blocks" not in whatsapp
 
 
 def test_cosmic_code_execution_warns_maps_must_use_map_specialist() -> None:

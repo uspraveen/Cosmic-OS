@@ -129,6 +129,30 @@ def test_pending_use_request_is_consumed_once(store):
     assert store.get_pending(pending["request_id"])["status"] == "consumed"
 
 
+def test_peek_approved_use_does_not_consume(store):
+    entry = _entry(store)
+    pending = store.create_pending(
+        {"action": "use_entry", "entry_id": entry["entry_id"], "task_id": "t1", "session_id": "s1"}
+    )
+    store.mark_pending(pending["request_id"], "approved")
+    assert store.peek_approved_use(entry["entry_id"], "t1", "s1") is not None
+    # Peeking again still finds the grant — only take consumes it.
+    assert store.peek_approved_use(entry["entry_id"], "t1", "s1") is not None
+    assert store.take_approved_use(entry["entry_id"], "t1", "s1") is not None
+    assert store.peek_approved_use(entry["entry_id"], "t1", "s1") is None
+
+
+def test_record_approved_use_mints_single_use_grant(store):
+    entry = _entry(store)
+    grant = store.record_approved_use(entry["entry_id"], "task-1", "sess-1")
+    assert grant["status"] == "approved"
+    assert grant["action"] == "use_entry"
+    assert grant["entry_id"] == entry["entry_id"]
+    # The minted grant is consumable exactly once, like any Allow-once approval.
+    assert store.take_approved_use(entry["entry_id"], "task-1") is not None
+    assert store.take_approved_use(entry["entry_id"], "task-1") is None
+
+
 def test_take_approved_use_survives_continuation_task_id(store):
     entry = _entry(store)
     pending = store.create_pending(

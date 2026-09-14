@@ -31,6 +31,7 @@ import { canAdoptTaskForActiveStream, canClaimActiveStreamSlot, extractEventStre
 import { groupRepliesWithTheirQuery } from './transcriptOrder'
 import { groupEmailThreads, stripEmailEnvelope, type EmailThreadUnit } from './emailThreads'
 import { findPendingApprovals } from './pendingApprovals'
+import { ContentCardStack, normalizeContentCard, type ContentCardBlock } from './responseSurfaces'
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
@@ -347,6 +348,7 @@ type ResponseBlock =
   | MapArtifactBlock
   | ResponseSlotBlock
   | ResponseActionBlock
+  | ContentCardBlock
 
 interface ActivityLogEntry {
   id: string
@@ -730,6 +732,11 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
             : null,
         timeoutMs: Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : null,
       })
+      continue
+    }
+    if (type === 'content_card') {
+      const card = normalizeContentCard(item, id)
+      if (card) normalized.push(card)
       continue
     }
     if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event' || type === 'sandbox_permission_request' || type === 'slide_workflow_choice' || type === 'vault_permission_request' || type === 'browser_credential_request') {
@@ -5186,6 +5193,23 @@ const DeckPreviewStrip = ({ slides }: { slides: ResponseArtifactBlock[] }) => {
   )
 }
 
+const VAULT_ACTION_BLOCK_TYPES = new Set(['vault_permission_request', 'browser_credential_request'])
+
+// Snapshots/complete events replace a message's block list wholesale, but vault
+// approval cards arrive out-of-band via response.action.updated — preserve them
+// across those replacements so the card never vanishes mid-turn.
+const mergePreservingVaultActionBlocks = <T extends { id: string; type: string }>(
+  incoming: T[] | null | undefined,
+  existing: T[] | undefined,
+): T[] | null | undefined => {
+  if (!incoming) return incoming
+  const carried = (existing ?? []).filter(
+    (block) => VAULT_ACTION_BLOCK_TYPES.has(block.type)
+      && !incoming.some((item) => item.id === block.id),
+  )
+  return carried.length > 0 ? [...incoming, ...carried] : incoming
+}
+
 const AssistantResponseBlocks = memo(({
   blocks,
 }: {
@@ -5195,28 +5219,54 @@ const AssistantResponseBlocks = memo(({
     return null
   }
   // Consecutive per-slide preview renders collapse into one scrollable strip.
-  const grouped: Array<{ kind: 'block'; block: ResponseBlock } | { kind: 'strip'; slides: ResponseArtifactBlock[] }> = []
+  const grouped: Array<
+    | { kind: 'block'; block: ResponseBlock }
+    | { kind: 'strip'; slides: ResponseArtifactBlock[] }
+    | { kind: 'cards'; cards: ContentCardBlock[] }
+  > = []
   let previewRun: ResponseArtifactBlock[] = []
+  let cardRun: ContentCardBlock[] = []
   const flushPreviewRun = () => {
     if (previewRun.length > 0) {
       grouped.push({ kind: 'strip', slides: previewRun })
       previewRun = []
     }
   }
+  const flushCardRun = () => {
+    if (cardRun.length > 0) {
+      grouped.push({ kind: 'cards', cards: cardRun })
+      cardRun = []
+    }
+  }
   for (const block of blocks) {
     if (isSlidePreviewBlock(block)) {
+      flushCardRun()
       previewRun.push(block)
       continue
     }
+    if (block.type === 'content_card') {
+      flushPreviewRun()
+      const groupId = block.group?.id || ''
+      if (cardRun.length > 0 && (cardRun[0].group?.id || '') !== groupId) {
+        flushCardRun()
+      }
+      cardRun.push(block)
+      continue
+    }
     flushPreviewRun()
+    flushCardRun()
     grouped.push({ kind: 'block', block })
   }
   flushPreviewRun()
+  flushCardRun()
   return (
     <div className="assistant-response-blocks">
       {grouped.map((entry, entryIndex) => {
         if (entry.kind === 'strip') {
           return <DeckPreviewStrip key={`deck-preview-${entryIndex}`} slides={entry.slides} />
+        }
+        if (entry.kind === 'cards') {
+          return <ContentCardStack key={`content-cards-${entryIndex}`} cards={entry.cards} />
         }
         const block = entry.block
         if (block.type === 'markdown') {
@@ -8426,7 +8476,7 @@ export default function App() {
             }
             return {
               ...message,
-              responseBlocks: responseBlocks ?? message.responseBlocks,
+              responseBlocks: mergePreservingVaultActionBlocks(responseBlocks, message.responseBlocks) ?? message.responseBlocks,
               supportingArtifacts: supportingArtifacts ?? message.supportingArtifacts,
               progress: undefined,
               stopped: false,
@@ -8474,7 +8524,7 @@ export default function App() {
               sources,
               producedArtifacts: producedArtifacts ?? message.producedArtifacts,
               supportingArtifacts: supportingArtifacts ?? message.supportingArtifacts,
-              responseBlocks: responseBlocks ?? message.responseBlocks,
+              responseBlocks: mergePreservingVaultActionBlocks(responseBlocks, message.responseBlocks) ?? message.responseBlocks,
               activityLog: mergeActivityLogEntries(message.activityLog, activityLog),
               alphaTerminalLog: mergeAlphaTerminalLogs(message.alphaTerminalLog, alphaTerminalLog),
               alphaConsoleAnchors: alphaConsoleAnchors ?? message.alphaConsoleAnchors,
@@ -8575,6 +8625,30 @@ export default function App() {
 
       if (eventType === 'response.action.updated') {
         const normalizedBlock = normalizeResponseBlocks([(event as any).response_block])?.[0]
+        const isVaultActionBlock = Boolean(
+          normalizedBlock && (
+            normalizedBlock.type === 'vault_permission_request'
+            || normalizedBlock.type === 'browser_credential_request'
+          ),
+        )
+        if (isVaultActionBlock && normalizedBlock) {
+          // Diagnostic breadcrumb: vault cards historically rendered with no
+          // traceable payload source, so log exactly what arrives live.
+          const vaultBlock = normalizedBlock as ResponseActionBlock
+          console.debug('[vault-card] response.action.updated', {
+            id: vaultBlock.id,
+            type: vaultBlock.type,
+            action: vaultBlock.action,
+            status: vaultBlock.status,
+            title: vaultBlock.title,
+            siteDomain: vaultBlock.siteDomain,
+            site: vaultBlock.site,
+            username: vaultBlock.username,
+            usernameHint: vaultBlock.usernameHint,
+            purpose: vaultBlock.purpose,
+            sessionId: typeof (event as any).session_id === 'string' ? (event as any).session_id : null,
+          })
+        }
         if (normalizedBlock && (
           normalizedBlock.type === 'gmail_draft_approval'
           || normalizedBlock.type === 'agent_email_draft_approval'
@@ -8584,12 +8658,40 @@ export default function App() {
           || normalizedBlock.type === 'vault_permission_request'
           || normalizedBlock.type === 'browser_credential_request'
         )) {
-          setMessages((prev) => prev.map((message) => ({
-            ...message,
-            responseBlocks: message.responseBlocks?.map((block) => (
-              block.id === normalizedBlock.id ? normalizedBlock : block
-            )),
-          })))
+          setMessages((prev) => {
+            const exists = prev.some((message) =>
+              message.responseBlocks?.some((block) => block.id === normalizedBlock.id))
+            if (exists) {
+              return prev.map((message) => ({
+                ...message,
+                responseBlocks: message.responseBlocks?.map((block) => (
+                  block.id === normalizedBlock.id ? normalizedBlock : block
+                )),
+              }))
+            }
+            // Vault approval cards are published mid-turn, before any snapshot
+            // can carry them — attach the card to the active assistant message
+            // so it renders live instead of never appearing.
+            if (!isVaultActionBlock) return prev
+            const eventSessionId = String((event as any).session_id || '').trim()
+            if (
+              eventSessionId &&
+              activeSessionIdRef.current &&
+              eventSessionId !== activeSessionIdRef.current
+            ) {
+              return prev
+            }
+            for (let index = prev.length - 1; index >= 0; index -= 1) {
+              if (prev[index].role !== 'assistant') continue
+              const next = [...prev]
+              next[index] = {
+                ...next[index],
+                responseBlocks: [...(next[index].responseBlocks ?? []), normalizedBlock],
+              }
+              return next
+            }
+            return prev
+          })
           return
         }
         const approvalId = String(event.approval_id || event.permission_id || '').trim()

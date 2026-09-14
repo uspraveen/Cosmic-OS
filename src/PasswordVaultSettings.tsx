@@ -54,6 +54,7 @@ interface VaultPendingRequest {
     site_url?: string | null
     site_domain?: string | null
     username?: string | null
+    username_hint?: string | null
     password_mask?: string | null
     credential_kind?: string | null
     expires_at?: string | null
@@ -234,6 +235,185 @@ function ShieldGlyph({ className }: { className?: string }) {
       />
       <circle cx="12" cy="8.7" r="1.05" fill="currentColor" />
     </svg>
+  )
+}
+
+/** The vault shield as a dot-matrix mark — same treatment as the island card. */
+function VaultPendingShield() {
+  return (
+    <svg viewBox="0 0 72 92" width="72" height="92" fill="none" aria-hidden>
+      <defs>
+        <pattern id="vaultPendingDotGrid" width="3" height="3" patternUnits="userSpaceOnUse">
+          <circle cx="1.5" cy="1.5" r="0.95" fill="#fff" />
+        </pattern>
+        <linearGradient id="vaultPendingFieldFade" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0.1" stopColor="#fff" />
+          <stop offset="0.88" stopColor="#000" />
+        </linearGradient>
+        <mask id="vaultPendingFieldMask" maskUnits="userSpaceOnUse" x="0" y="0" width="72" height="92">
+          <rect width="72" height="92" fill="url(#vaultPendingFieldFade)" />
+        </mask>
+        <filter id="vaultPendingDotBlur" x="-40%" y="-40%" width="180%" height="180%">
+          <feGaussianBlur stdDeviation="0.6" />
+        </filter>
+        <mask id="vaultPendingGlyphMask" maskUnits="userSpaceOnUse" x="0" y="0" width="72" height="92">
+          <rect width="72" height="92" fill="#000" />
+          <g transform="translate(13 9) scale(3.4)" stroke="#fff" strokeLinecap="round" strokeLinejoin="round" fill="none">
+            <g strokeWidth="2.4" filter="url(#vaultPendingDotBlur)">
+              <path d="M12 3.25 5.25 6v5.4c0 4.3 2.85 8.05 6.75 9.35 3.9-1.3 6.75-5.05 6.75-9.35V6L12 3.25Z" />
+              <path d="M12 10.6v3" />
+              <circle cx="12" cy="8.7" r="0.9" />
+            </g>
+            <g strokeWidth="1.05">
+              <path d="M12 3.25 5.25 6v5.4c0 4.3 2.85 8.05 6.75 9.35 3.9-1.3 6.75-5.05 6.75-9.35V6L12 3.25Z" />
+              <path d="M12 10.6v3" />
+              <circle cx="12" cy="8.7" r="0.9" />
+            </g>
+          </g>
+        </mask>
+      </defs>
+      <rect width="72" height="92" fill="url(#vaultPendingDotGrid)" opacity="0.12" mask="url(#vaultPendingFieldMask)" />
+      <rect width="72" height="92" fill="url(#vaultPendingDotGrid)" mask="url(#vaultPendingGlyphMask)" />
+    </svg>
+  )
+}
+
+interface VaultPendingCardProps {
+  item: VaultPendingRequest
+  busy: boolean
+  onAction: (requestId: string, kind: 'approve' | 'window' | 'reject') => void
+  onProvide: (requestId: string, form: { username: string; password: string; totpSeed: string }) => void
+}
+
+function VaultPendingCard({ item, busy, onAction, onProvide }: VaultPendingCardProps) {
+  const payload = item.payload || {}
+  const isAdd = item.action === 'add_entry'
+  const isBrowser = item.action === 'browser_credential_request'
+  const [username, setUsername] = useState(String(payload.username_hint || '').trim())
+  const [password, setPassword] = useState('')
+  const [totpSeed, setTotpSeed] = useState('')
+  const [formError, setFormError] = useState('')
+
+  const headline = isAdd
+    ? 'Cosmic wants to save a new credential'
+    : isBrowser
+      ? 'The browser agent needs credentials'
+      : 'Cosmic wants to use a saved credential'
+  const kindLabel = payload.credential_kind ? vaultKindLabel(payload.credential_kind) : 'Login'
+  const site = String(payload.site_domain || payload.title || '').trim()
+  const account = String(payload.username || payload.username_hint || '').trim()
+  const expired = payload.expires_at ? vaultExpiryIsPast(payload.expires_at) : false
+
+  const submitProvide = () => {
+    if (!password.trim()) {
+      setFormError('A password is required.')
+      return
+    }
+    setFormError('')
+    onProvide(item.request_id, { username: username.trim(), password, totpSeed: totpSeed.trim() })
+  }
+
+  return (
+    <article className="vault-pending-card">
+      <div className="vault-pending-mark" aria-hidden>
+        <VaultPendingShield />
+      </div>
+      <div className="vault-pending-body">
+        <div className="vault-pending-kicker">
+          <span>Password Vault</span>
+          <span className="vault-pending-kind">{kindLabel}</span>
+        </div>
+        <div className="vault-pending-headline">{headline}</div>
+        <dl className="vault-pending-details">
+          {site ? <div><dt>Site</dt><dd>{site}</dd></div> : null}
+          {account ? <div><dt>Username</dt><dd>{account}</dd></div> : null}
+          {isAdd && payload.password_mask ? (
+            <div><dt>Secret</dt><dd>{payload.password_mask} — stored encrypted on approval</dd></div>
+          ) : null}
+          {payload.expires_at ? (
+            <div><dt>{expired ? 'Expired' : 'Expires'}</dt><dd>{formatVaultExpiry(payload.expires_at)}</dd></div>
+          ) : null}
+          {item.purpose ? <div><dt>Reason</dt><dd>{item.purpose}</dd></div> : null}
+          {isBrowser ? (
+            <div><dt>Note</dt><dd>Saved encrypted in your vault — the password is never shown to any agent</dd></div>
+          ) : null}
+        </dl>
+        {isBrowser ? (
+          <div className="vault-pending-form">
+            <label>
+              <span>Username or email</span>
+              <input
+                type="text"
+                value={username}
+                autoComplete="off"
+                onChange={(event) => setUsername(event.target.value)}
+                placeholder="you@example.com"
+              />
+            </label>
+            <label>
+              <span>Password</span>
+              <input
+                type="password"
+                value={password}
+                autoComplete="new-password"
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Required"
+              />
+            </label>
+            <label>
+              <span>2FA seed (optional)</span>
+              <input
+                type="password"
+                value={totpSeed}
+                autoComplete="off"
+                onChange={(event) => setTotpSeed(event.target.value)}
+                placeholder="TOTP base32 seed — leave empty if none"
+              />
+            </label>
+          </div>
+        ) : null}
+        {formError ? <div className="vault-pending-form-error">{formError}</div> : null}
+        <div className="vault-pending-actions">
+          <button
+            type="button"
+            className="vault-btn vault-btn--ghost"
+            disabled={busy}
+            onClick={() => onAction(item.request_id, 'reject')}
+          >
+            Deny
+          </button>
+          {!isAdd && !isBrowser ? (
+            <button
+              type="button"
+              className="vault-btn vault-btn--ghost"
+              disabled={busy}
+              onClick={() => onAction(item.request_id, 'window')}
+            >
+              {vaultIslandAllowWindowLabel()}
+            </button>
+          ) : null}
+          {isBrowser ? (
+            <button
+              type="button"
+              className="vault-btn vault-btn--primary"
+              disabled={busy}
+              onClick={submitProvide}
+            >
+              {busy ? 'Saving…' : 'Save & continue'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="vault-btn vault-btn--primary"
+              disabled={busy}
+              onClick={() => onAction(item.request_id, 'approve')}
+            >
+              {busy ? 'Working…' : isAdd ? 'Allow & save' : 'Allow once'}
+            </button>
+          )}
+        </div>
+      </div>
+    </article>
   )
 }
 
@@ -525,6 +705,31 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
     }
   }, [refresh])
 
+  const handlePendingProvide = useCallback(async (
+    requestId: string,
+    form: { username: string; password: string; totpSeed: string },
+  ) => {
+    if (!window.cosmic?.vaultProvidePending) return
+    setBusyEntryId(requestId)
+    setError(null)
+    try {
+      const result = await window.cosmic.vaultProvidePending(requestId, {
+        username: form.username,
+        password: form.password,
+        totp_seed: form.totpSeed,
+        save_to_vault: true,
+      })
+      if (String(result?.status || '').trim() === 'ignored') {
+        throw new Error('This vault request was already handled on another device.')
+      }
+      await refresh()
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Failed to provide the credentials.'))
+    } finally {
+      setBusyEntryId(null)
+    }
+  }, [refresh])
+
   const toggleAudit = useCallback(async () => {
     const next = !showAudit
     setShowAudit(next)
@@ -596,62 +801,15 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
       {openPending.length > 0 ? (
         <>
           <div className="vault-section-label">Awaiting your approval</div>
-          {openPending.map((item) => {
-            const payload = item.payload || {}
-            const isAdd = item.action === 'add_entry'
-            return (
-              <article key={item.request_id} className="vault-pending-card">
-                <div className="vault-pending-main">
-                  <div className="vault-pending-headline">
-                    {isAdd ? 'Cosmic wants to save a new credential' : 'Cosmic wants to use a saved credential'}
-                  </div>
-                  <div className="vault-pending-site">
-                    {payload.title || payload.site_domain || 'Unknown site'}
-                    {payload.site_domain && payload.title ? ` · ${payload.site_domain}` : ''}
-                    {payload.username ? ` · ${payload.username}` : ''}
-                    {payload.credential_kind ? ` · ${vaultKindLabel(payload.credential_kind)}` : ''}
-                  </div>
-                  {isAdd && payload.password_mask ? (
-                    <div className="vault-pending-detail">Secret {payload.password_mask} — stored encrypted on approval.</div>
-                  ) : null}
-                  {payload.expires_at ? (
-                    <div className="vault-pending-detail">
-                      {vaultExpiryIsPast(payload.expires_at) ? 'Expired' : 'Expires'} {formatVaultExpiry(payload.expires_at)}
-                    </div>
-                  ) : null}
-                  {item.purpose ? <div className="vault-pending-detail">Reason: {item.purpose}</div> : null}
-                </div>
-                <div className="vault-pending-actions">
-                  <button
-                    type="button"
-                    className="vault-btn vault-btn--ghost"
-                    disabled={busyEntryId === item.request_id}
-                    onClick={() => void handlePendingAction(item.request_id, 'reject')}
-                  >
-                    Deny
-                  </button>
-                  {!isAdd ? (
-                    <button
-                      type="button"
-                      className="vault-btn vault-btn--ghost"
-                      disabled={busyEntryId === item.request_id}
-                      onClick={() => void handlePendingAction(item.request_id, 'window')}
-                    >
-                      {vaultIslandAllowWindowLabel()}
-                    </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    className="vault-btn vault-btn--primary"
-                    disabled={busyEntryId === item.request_id}
-                    onClick={() => void handlePendingAction(item.request_id, 'approve')}
-                  >
-                    {busyEntryId === item.request_id ? 'Working…' : isAdd ? 'Allow & save' : 'Allow once'}
-                  </button>
-                </div>
-              </article>
-            )
-          })}
+          {openPending.map((item) => (
+            <VaultPendingCard
+              key={item.request_id}
+              item={item}
+              busy={busyEntryId === item.request_id}
+              onAction={(requestId, kind) => void handlePendingAction(requestId, kind)}
+              onProvide={(requestId, form) => void handlePendingProvide(requestId, form)}
+            />
+          ))}
         </>
       ) : null}
 

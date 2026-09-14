@@ -58,6 +58,9 @@ from shared import (
     describe_claims,
     is_supported_image_artifact,
     lookup_model_spec,
+    extract_content_card_blocks,
+    merge_content_cards_into_response_blocks,
+    channel_supports_trusted_ui,
 )
 
 from .config import BACKEND_ROOT, OrchestratorConfig
@@ -633,6 +636,7 @@ class OrchestratorRuntime:
                 config=self.config,
                 task_input=task.input if isinstance(task.input, dict) else {},
             )
+            trusted_ui_enabled = channel_supports_trusted_ui(channel)
             system_prompt = build_agentic_system_prompt(
                 str(task.input.get("memory_context") or "").strip() or None,
                 user_timezone=str(task.input.get("user_timezone") or "").strip() or None,
@@ -643,8 +647,10 @@ class OrchestratorRuntime:
                 )
                 if visual_mode_enabled
                 else None,
+                trusted_ui_enabled=trusted_ui_enabled,
+                channel=channel,
             )
-            tools = get_model_tool_definitions(self._featured_specialist_agent_ids())
+            tools = get_model_tool_definitions(self._featured_specialist_agent_ids(), channel=channel)
             max_iterations = self._max_iterations_for_task(task)
             is_prophet_cron = self._is_prophet_cron_task(task)
             prophet_published = False
@@ -659,6 +665,7 @@ class OrchestratorRuntime:
             collected_sources: list[dict[str, str]] = []
             produced_artifacts: list[dict[str, Any]] = []
             supporting_artifacts: list[dict[str, Any]] = []
+            content_card_blocks: list[dict[str, Any]] = []
             surface_tool_artifacts = task.source != "heartbeat"
             usage_operation = (
                 "orchestrator.heartbeat"
@@ -1169,6 +1176,7 @@ class OrchestratorRuntime:
                             result_str,
                             specialist_receipts=specialist_receipts,
                         )
+                        self._collect_content_card_blocks(result_str, content_card_blocks)
 
                         yield {
                             **ev, "type": "tool.result",
@@ -1294,6 +1302,11 @@ class OrchestratorRuntime:
                 )
             else:
                 display_text = full_response_text.rstrip()
+            final_response_blocks = merge_content_cards_into_response_blocks(
+                final_response_blocks,
+                content_card_blocks,
+                display_text=display_text,
+            )
             awaiting_reply = display_text.endswith(AWAITING_REPLY_TAG)
             if awaiting_reply:
                 display_text = display_text.removesuffix(AWAITING_REPLY_TAG).rstrip()
@@ -1465,6 +1478,7 @@ class OrchestratorRuntime:
         collected_sources: list[dict[str, str]] = []
         produced_artifacts: list[dict[str, Any]] = []
         supporting_artifacts: list[dict[str, Any]] = []
+        content_card_blocks: list[dict[str, Any]] = []
         surface_tool_artifacts = task.source != "heartbeat"
         usage_operation = (
             "orchestrator.heartbeat"
@@ -1499,6 +1513,7 @@ class OrchestratorRuntime:
                 config=self.config,
                 task_input=task.input if isinstance(task.input, dict) else {},
             )
+            trusted_ui_enabled = channel_supports_trusted_ui(channel)
             system_prompt = build_agentic_system_prompt(
                 str(task.input.get("memory_context") or "").strip() or None,
                 user_timezone=str(task.input.get("user_timezone") or "").strip() or None,
@@ -1509,13 +1524,17 @@ class OrchestratorRuntime:
                 )
                 if visual_mode_enabled
                 else None,
+                trusted_ui_enabled=trusted_ui_enabled,
+                channel=channel,
             )
             system_prompt = self._with_fireworks_runtime_note(system_prompt)
             openai_messages = [
                 {"role": "system", "content": system_prompt},
                 *self._messages_to_openai_chat(messages),
             ]
-            tools = self._tools_to_openai_chat(get_local_tool_definitions(self._featured_specialist_agent_ids()))
+            tools = self._tools_to_openai_chat(
+                get_local_tool_definitions(self._featured_specialist_agent_ids(), channel=channel)
+            )
             max_iterations = self._max_iterations_for_task(task)
             is_prophet_cron = self._is_prophet_cron_task(task)
             prophet_published = False
@@ -1916,6 +1935,7 @@ class OrchestratorRuntime:
                             result_str,
                             specialist_receipts=specialist_receipts,
                         )
+                        self._collect_content_card_blocks(result_str, content_card_blocks)
                         yield {
                             **ev,
                             "type": "tool.result",
@@ -2113,6 +2133,11 @@ class OrchestratorRuntime:
                 )
             else:
                 display_text = full_response_text.rstrip()
+            final_response_blocks = merge_content_cards_into_response_blocks(
+                final_response_blocks,
+                content_card_blocks,
+                display_text=display_text,
+            )
             awaiting_reply = display_text.endswith(AWAITING_REPLY_TAG)
             if awaiting_reply:
                 display_text = display_text.removesuffix(AWAITING_REPLY_TAG).rstrip()
@@ -3677,6 +3702,22 @@ class OrchestratorRuntime:
             raise RuntimeError(
                 "The vault credential referenced by this task no longer exists. "
                 "Ask the user to re-check the entry in the Password Vault settings."
+            )
+        if response.status_code in {400, 403}:
+            # The gateway returns a model-actionable detail (malformed/self-made
+            # ref, or approval required). Surface it verbatim so the model can
+            # self-correct instead of guessing why dispatch failed.
+            detail = ""
+            try:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    detail = str(payload.get("detail") or "").strip()
+            except ValueError:
+                detail = ""
+            raise RuntimeError(
+                detail
+                or "The vault rejected this credential_ref. Call vault_lookup(site) to "
+                "obtain an authorized credential_ref — never construct one yourself."
             )
         response.raise_for_status()
         resolved = response.json()
@@ -6886,6 +6927,14 @@ class OrchestratorRuntime:
         except (json.JSONDecodeError, TypeError):
             return None
         return payload if isinstance(payload, dict) else None
+
+    def _collect_content_card_blocks(self, result_str: str, cards: list[dict[str, Any]]) -> None:
+        payload = self._parse_tool_result_json(result_str)
+        for block in extract_content_card_blocks(payload):
+            block_id = str(block.get("id") or "").strip()
+            if block_id and any(str(existing.get("id") or "") == block_id for existing in cards):
+                continue
+            cards.append(block)
 
     @staticmethod
     def _dedupe_preserve_order(values: list[str]) -> list[str]:

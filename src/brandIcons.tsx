@@ -35,7 +35,7 @@ export function CursorMark({ size = 20, mono = false }: { size?: number; mono?: 
   )
 }
 
-export function OpenCodeMark({
+export function ZCodeMark({ size = 20 }: { size?: number }) {
   size = 20,
   tone = 'dark',
 }: {
@@ -64,6 +64,14 @@ export function ZCodeMark({ size = 20 }: { size?: number }) {
       <path d="M2.7 3h10L11.1 5.6H2.7V3Z" />
       <path d="M12.7 18.4h8.1V21H11l1.7-2.6Z" />
       <path d="M13.6 3h7.9L10.5 21H2.5L13.6 3Z" />
+    </svg>
+  )
+}
+
+export function XMark({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231Zm-1.161 17.52h1.833L7.084 4.126H5.117Z" />
     </svg>
   )
 }

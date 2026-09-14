@@ -1,6 +1,6 @@
 import { normalizeVaultCredentialKind, vaultKindLabel } from './vaultKinds'
 
-export type VaultIslandAction = 'use_entry' | 'add_entry'
+export type VaultIslandAction = 'use_entry' | 'add_entry' | 'browser_credential_request'
 
 export type VaultApproveGrant = 'once' | 'window'
 
@@ -27,7 +27,7 @@ function text(value: unknown): string {
 
 function islandAction(value: unknown): VaultIslandAction | null {
   const action = text(value) || 'use_entry'
-  if (action === 'add_entry' || action === 'use_entry') return action
+  if (action === 'add_entry' || action === 'use_entry' || action === 'browser_credential_request') return action
   return null
 }
 
@@ -37,7 +37,10 @@ function fromFields(fields: Record<string, unknown>, fallbacks: Record<string, u
   if (!requestId || !action) return null
   const title = text(fields.title || fallbacks.title)
   const siteDomain = text(fields.site_domain || fields.siteDomain || fallbacks.site_domain || fallbacks.siteDomain)
-  const username = text(fields.username || fallbacks.username)
+  const username = text(
+    fields.username || fallbacks.username
+    || fields.username_hint || fields.usernameHint || fallbacks.username_hint || fallbacks.usernameHint,
+  )
   const purpose = text(fields.purpose || fallbacks.purpose)
   const credentialKind = normalizeVaultCredentialKind(
     text(fields.credential_kind || fields.credentialKind || fallbacks.credential_kind || fallbacks.credentialKind) || 'login',
@@ -56,13 +59,15 @@ function fromFields(fields: Record<string, unknown>, fallbacks: Record<string, u
 }
 
 export function vaultIslandHeadline(request: VaultIslandRequest): string {
-  return request.action === 'add_entry'
-    ? 'Cosmic wants to save a credential'
-    : 'Cosmic wants to use a saved credential'
+  if (request.action === 'add_entry') return 'Cosmic wants to save a credential'
+  if (request.action === 'browser_credential_request') return 'The browser agent needs credentials'
+  return 'Cosmic wants to use a saved credential'
 }
 
 export function vaultIslandAllowLabel(request: VaultIslandRequest): string {
-  return request.action === 'add_entry' ? 'Allow & save' : 'Allow once'
+  if (request.action === 'add_entry') return 'Allow & save'
+  if (request.action === 'browser_credential_request') return 'Provide credentials'
+  return 'Allow once'
 }
 
 export function vaultIslandAllowWindowLabel(): string {
@@ -87,6 +92,7 @@ export function vaultIslandFromPending(item: unknown): VaultIslandRequest | null
       title: payload.title,
       site_domain: payload.site_domain,
       username: payload.username,
+      username_hint: payload.username_hint,
       credential_kind: payload.credential_kind,
     },
     row,
@@ -103,7 +109,7 @@ export function parseVaultIslandOpen(event: unknown): VaultIslandRequest | null 
   if (type === 'response.action.updated') {
     const block = asRecord(rec.response_block)
     const blockType = text(rec.block_type || block?.type)
-    if (blockType !== 'vault_permission_request') return null
+    if (blockType !== 'vault_permission_request' && blockType !== 'browser_credential_request') return null
     const status = text(rec.status || block?.status).toLowerCase()
     if (status && status !== 'pending') return null
     if (!block) return null
@@ -124,7 +130,7 @@ export function isVaultIslandResolved(event: unknown, requestId: string): boolea
   if (eventRequestId !== requestId) return false
   if (type === 'response.action.updated') {
     const blockType = text(rec.block_type || block?.type)
-    if (blockType && blockType !== 'vault_permission_request') return false
+    if (blockType && blockType !== 'vault_permission_request' && blockType !== 'browser_credential_request') return false
     const status = text(rec.status || block?.status).toLowerCase()
     return Boolean(status) && status !== 'pending'
   }

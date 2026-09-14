@@ -3260,11 +3260,26 @@ def test_build_agentic_system_prompt_gates_visual_response_policy() -> None:
     )
 
 
+def test_build_agentic_system_prompt_gates_content_cards() -> None:
+    disabled_prompt = build_agentic_system_prompt()
+    enabled_prompt = build_agentic_system_prompt(trusted_ui_enabled=True, channel="desktop")
+
+    assert "## Content Cards" not in disabled_prompt
+    assert "### Response Surfaces" not in disabled_prompt
+    assert "- `present_content_cards`:" not in disabled_prompt
+    assert "## Content Cards" in enabled_prompt
+    assert "### Response Surfaces" in enabled_prompt
+    assert "- `present_content_cards`:" in enabled_prompt
+    assert "Never request Send, Post, Approve" in enabled_prompt
+
+
 def test_get_prompt_asset_hashes_includes_visual_response_policy_asset() -> None:
     hashes = get_prompt_asset_hashes()
 
     assert "visual_response_policy.md" in hashes
     assert hashes["visual_response_policy.md"]
+    assert "content_response_policy.md" in hashes
+    assert hashes["content_response_policy.md"]
 
 
 @pytest.mark.asyncio

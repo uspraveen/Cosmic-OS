@@ -117,6 +117,13 @@ from .map_artifacts import (
     is_supported_map_artifact,
 )
 from .response_blocks import build_response_blocks
+from .content_cards import (
+    channel_supports_trusted_ui,
+    extract_content_card_blocks,
+    merge_content_cards_into_response_blocks,
+    normalize_content_cards,
+    project_specialist_content_cards,
+)
 from .email_rendering import (
     RenderedEmailBody,
     render_markdown_email_bodies,
@@ -207,6 +214,11 @@ __all__ = [
     "SUPPORTED_TABULAR_EXTENSIONS",
     "SUPPORTED_TABULAR_MIME_TYPES",
     "build_response_blocks",
+    "channel_supports_trusted_ui",
+    "extract_content_card_blocks",
+    "merge_content_cards_into_response_blocks",
+    "normalize_content_cards",
+    "project_specialist_content_cards",
     "render_markdown_email_bodies",
     "render_markdown_email_html",
     "render_markdown_email_text",

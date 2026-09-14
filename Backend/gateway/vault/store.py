@@ -518,6 +518,79 @@ class VaultStore:
                 return None
         return self.get_pending(request_id)
 
+    @staticmethod
+    def _select_approved_use(
+        connection: sqlite3.Connection,
+        entry_id: str,
+        task_id: str | None,
+        session_id: str | None,
+        max_age_seconds: float,
+    ) -> sqlite3.Row | None:
+        """Newest fresh approved use_entry grant: same task, then session, then any."""
+        candidates: list[sqlite3.Row] = []
+        if task_id:
+            row = connection.execute(
+                """
+                SELECT * FROM vault_pending
+                WHERE action = 'use_entry' AND entry_id = ?
+                  AND status = 'approved' AND task_id = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (entry_id, task_id),
+            ).fetchone()
+            if row is not None:
+                candidates.append(row)
+        if session_id:
+            row = connection.execute(
+                """
+                SELECT * FROM vault_pending
+                WHERE action = 'use_entry' AND entry_id = ?
+                  AND status = 'approved' AND session_id = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (entry_id, session_id),
+            ).fetchone()
+            if row is not None:
+                candidates.append(row)
+        row = connection.execute(
+            """
+            SELECT * FROM vault_pending
+            WHERE action = 'use_entry' AND entry_id = ? AND status = 'approved'
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            (entry_id,),
+        ).fetchone()
+        if row is not None:
+            candidates.append(row)
+        seen: set[str] = set()
+        for candidate in candidates:
+            request_id = str(candidate["request_id"])
+            if request_id in seen:
+                continue
+            seen.add(request_id)
+            if not VaultStore._pending_is_fresh(candidate, max_age_seconds):
+                continue
+            return candidate
+        return None
+
+    def peek_approved_use(
+        self,
+        entry_id: str,
+        task_id: str | None,
+        session_id: str | None = None,
+        *,
+        max_age_seconds: float = 30 * 60,
+    ) -> dict[str, Any] | None:
+        """Check for an approved use_entry grant WITHOUT consuming it.
+
+        Lookup uses this so the grant stays intact for the resolve call that
+        actually injects the secret at dispatch time.
+        """
+        with self._lock, self._connection() as connection:
+            connection.row_factory = sqlite3.Row
+            chosen = self._select_approved_use(connection, entry_id, task_id, session_id, max_age_seconds)
+        return self._row_to_pending(chosen) if chosen is not None else None
+
     def take_approved_use(
         self,
         entry_id: str,
@@ -536,52 +609,7 @@ class VaultStore:
         """
         with self._lock, self._connection() as connection:
             connection.row_factory = sqlite3.Row
-            candidates: list[sqlite3.Row] = []
-            if task_id:
-                row = connection.execute(
-                    """
-                    SELECT * FROM vault_pending
-                    WHERE action = 'use_entry' AND entry_id = ?
-                      AND status = 'approved' AND task_id = ?
-                    ORDER BY updated_at DESC LIMIT 1
-                    """,
-                    (entry_id, task_id),
-                ).fetchone()
-                if row is not None:
-                    candidates.append(row)
-            if session_id:
-                row = connection.execute(
-                    """
-                    SELECT * FROM vault_pending
-                    WHERE action = 'use_entry' AND entry_id = ?
-                      AND status = 'approved' AND session_id = ?
-                    ORDER BY updated_at DESC LIMIT 1
-                    """,
-                    (entry_id, session_id),
-                ).fetchone()
-                if row is not None:
-                    candidates.append(row)
-            row = connection.execute(
-                """
-                SELECT * FROM vault_pending
-                WHERE action = 'use_entry' AND entry_id = ? AND status = 'approved'
-                ORDER BY updated_at DESC LIMIT 1
-                """,
-                (entry_id,),
-            ).fetchone()
-            if row is not None:
-                candidates.append(row)
-            chosen = None
-            seen: set[str] = set()
-            for candidate in candidates:
-                request_id = str(candidate["request_id"])
-                if request_id in seen:
-                    continue
-                seen.add(request_id)
-                if not self._pending_is_fresh(candidate, max_age_seconds):
-                    continue
-                chosen = candidate
-                break
+            chosen = self._select_approved_use(connection, entry_id, task_id, session_id, max_age_seconds)
             if chosen is None:
                 return None
             connection.execute(
@@ -590,6 +618,44 @@ class VaultStore:
             )
             connection.commit()
         return self._row_to_pending(chosen)
+
+    def record_approved_use(
+        self,
+        entry_id: str,
+        task_id: str | None = None,
+        session_id: str | None = None,
+        channel: str | None = None,
+        purpose: str | None = None,
+    ) -> dict[str, Any]:
+        """Mint a pre-approved use_entry grant for a credential.
+
+        Used when the user's action IS the approval and no use_entry pending
+        exists: providing browser credentials for a freshly saved entry, or
+        approving an add_entry save for credentials the task needs right now.
+        The grant is single-use (consumed by the next resolve) and expires
+        like any other approved grant.
+        """
+        now = utcnow_iso()
+        request_id = f"vault_req_{uuid4().hex[:12]}"
+        with self._lock, self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO vault_pending (
+                    request_id, action, entry_id, payload_json, status,
+                    task_id, session_id, channel, purpose, created_at, updated_at, resolved_at
+                ) VALUES (?, 'use_entry', ?, '{}', 'approved', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request_id, entry_id,
+                    str(task_id or "").strip() or None,
+                    str(session_id or "").strip() or None,
+                    str(channel or "").strip() or None,
+                    str(purpose or "").strip() or None,
+                    now, now, now,
+                ),
+            )
+            connection.commit()
+        return self.get_pending(request_id) or {}
 
     @staticmethod
     def _pending_is_fresh(row: sqlite3.Row, max_age_seconds: float) -> bool:

@@ -676,6 +676,10 @@ class GatewayRuntime:
             config.orchestrator_task_ledger_db_path
         )
         self._recent_foreground_terminal_streams: dict[str, dict[str, Any]] = {}
+        # Vault/browser approval cards published mid-turn, keyed by session then
+        # block id. Merged into the next assistant message persisted for that
+        # session so the cards survive reloads; pruned after a few hours.
+        self._session_vault_action_blocks: dict[str, dict[str, dict[str, Any]]] = {}
         self.started = False
         self.adapter_errors: dict[str, str] = {}
         self.active_task_channels: dict[str, str] = {}
@@ -5266,6 +5270,7 @@ class GatewayRuntime:
         payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
         status = self._safe_text(pending.get("status")) or "pending"
         request_id = self._safe_text(pending.get("request_id")) or ""
+        session_id = self._safe_text(pending.get("session_id"))
         title = self._safe_text(payload.get("title"))
         entry_id = self._safe_text(pending.get("entry_id"))
         if not title and entry_id:
@@ -5279,6 +5284,7 @@ class GatewayRuntime:
                 "request_id": request_id,
                 "action": action,
                 "entry_id": entry_id,
+                "session_id": session_id,
                 "title": title,
                 "site": self._safe_text(payload.get("site")) or self._safe_text(payload.get("site_domain")),
                 "site_domain": self._safe_text(payload.get("site_domain")),
@@ -5294,6 +5300,7 @@ class GatewayRuntime:
             "request_id": request_id,
             "action": action,
             "entry_id": entry_id,
+            "session_id": session_id,
             "title": title,
             "username": self._safe_text(payload.get("username")),
             "site_domain": self._safe_text(payload.get("site_domain")),
@@ -5307,12 +5314,43 @@ class GatewayRuntime:
     async def _publish_vault_request_block(self, pending: dict[str, Any]) -> None:
         block = self._vault_request_response_block(pending)
         request_id = self._safe_text(pending.get("request_id")) or ""
+        session_id = self._safe_text(pending.get("session_id")) or ""
+        # Patch-only here: the block is published mid-turn, before this turn's
+        # assistant message exists, so appending now would stick the card to the
+        # PREVIOUS message. Initial insertion happens when the turn's message is
+        # persisted (see _merge_session_vault_action_blocks); later status
+        # flips patch the persisted block in place.
+        patched = 0
+        if session_id:
+            patched = self.session_store.update_response_action_block(
+                block_id=self._safe_text(block.get("id")),
+                block_type=self._safe_text(block.get("type")) or "vault_permission_request",
+                patch=block,
+            )
         self._persist_response_action_status(
             approval_id=request_id,
             block_type=self._safe_text(block.get("type")) or "vault_permission_request",
             status=self._safe_text(block.get("status")) or "pending",
         )
-        self._persist_response_action_block(block)
+        logger.info(
+            "vault.block.publish request=%s action=%s status=%s title=%s site_domain=%s "
+            "username=%s purpose=%s session=%s patched=%s",
+            request_id,
+            self._safe_text(block.get("action")),
+            self._safe_text(block.get("status")),
+            self._safe_text(block.get("title")),
+            self._safe_text(block.get("site_domain")),
+            self._safe_text(block.get("username")) or self._safe_text(block.get("username_hint")),
+            self._safe_text(block.get("purpose")),
+            session_id,
+            patched,
+        )
+        if session_id:
+            tracked = self._session_vault_action_blocks.setdefault(session_id, {})
+            tracked[self._safe_text(block.get("id"))] = {
+                "block": dict(block),
+                "recorded_at": time.time(),
+            }
         await self._publish_response_action_update(response_block=block)
 
     async def _publish_vault_notification(self, pending: dict[str, Any]) -> None:
@@ -5338,6 +5376,7 @@ class GatewayRuntime:
             "title": title,
             "site_domain": self._safe_text(payload.get("site_domain")),
             "username": self._safe_text(payload.get("username")),
+            "username_hint": self._safe_text(payload.get("username_hint")),
             "purpose": self._safe_text(pending.get("purpose")),
             "credential_kind": kind,
             "status": self._safe_text(pending.get("status")) or "pending",
@@ -5407,6 +5446,18 @@ class GatewayRuntime:
                 }
             )
             entry_id = entry.get("entry_id")
+            if entry_id:
+                # The user just approved saving credentials this task created —
+                # grant one immediate use so the agent isn't asked to approve
+                # again in the same breath. Single-use and short-lived like any
+                # Allow-once grant.
+                self.vault_store.record_approved_use(
+                    entry_id,
+                    task_id or None,
+                    self._safe_text(pending.get("session_id")) or None,
+                    self._safe_text(pending.get("channel")) or None,
+                    purpose="Approved with the save of these credentials",
+                )
         grant_kind = grant if grant in {"once", "window"} else "once"
         if action == "use_entry" and entry_id and grant_kind == "window":
             seconds = window_seconds if window_seconds and window_seconds > 0 else 15 * 60
@@ -5509,6 +5560,17 @@ class GatewayRuntime:
             )
             entry_id = entry.get("entry_id")
             self.vault_store.append_audit(entry_id, "user", "browser_provide_saved", task_id)
+            if entry_id:
+                # Providing the credentials IS the approval: mint a single-use
+                # grant so the re-dispatched browser run can resolve the ref
+                # immediately instead of hitting the always-ask policy gate.
+                self.vault_store.record_approved_use(
+                    entry_id,
+                    task_id or None,
+                    self._safe_text(pending.get("session_id")) or None,
+                    self._safe_text(pending.get("channel")) or None,
+                    purpose="Credentials provided by user for the browser agent",
+                )
         else:
             self.vault_store.append_audit(None, "user", "browser_provide_skipped_save", task_id)
 
@@ -6157,6 +6219,9 @@ class GatewayRuntime:
             else None,
             "block_type": block_type,
             "status": status,
+            "session_id": self._safe_text(response_block.get("session_id"))
+            if isinstance(response_block, dict)
+            else None,
             "response_block": response_block,
             "timestamp": utcnow_iso(),
         }
@@ -12676,6 +12741,51 @@ class GatewayRuntime:
             normalized.append(entry)
         return normalized
 
+    def _merge_session_vault_action_blocks(
+        self,
+        session_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Fold tracked vault approval cards into a persisted assistant message.
+
+        Approval cards are published mid-turn via response.action.updated, so the
+        turn's final snapshot usually lacks them; without this merge the card
+        would vanish on reload. Blocks already persisted in the session (earlier
+        messages) are skipped so the card is not duplicated across turns.
+        """
+        tracked = self._session_vault_action_blocks.get(session_id)
+        if not tracked:
+            return metadata
+        cutoff = time.time() - 6 * 3600
+        for block_id, entry in list(tracked.items()):
+            if not isinstance(entry, dict) or float(entry.get("recorded_at") or 0.0) < cutoff:
+                tracked.pop(block_id, None)
+        if not tracked:
+            return metadata
+        base = dict(metadata) if isinstance(metadata, dict) else {}
+        blocks = list(base.get("response_blocks")) if isinstance(base.get("response_blocks"), list) else []
+        known = {
+            self._safe_text(item.get("id"))
+            for item in blocks
+            if isinstance(item, dict) and self._safe_text(item.get("id"))
+        }
+        for block_id, entry in tracked.items():
+            if block_id in known:
+                continue
+            if self.session_store.response_action_block_persisted(
+                session_id=session_id,
+                block_id=block_id,
+            ):
+                continue
+            block = entry.get("block")
+            if isinstance(block, dict):
+                blocks.append(dict(block))
+                known.add(block_id)
+        if not blocks:
+            return metadata
+        base["response_blocks"] = blocks
+        return base
+
     def _append_session_message(
         self,
         session_id: str,
@@ -12688,6 +12798,8 @@ class GatewayRuntime:
         metadata: dict[str, Any] | None = None,
         in_reply_to_request_id: str | None = None,
     ) -> str | None:
+        if role == "assistant":
+            metadata = self._merge_session_vault_action_blocks(session_id, metadata)
         if not content:
             renderable_payload = False
             if isinstance(metadata, dict):

@@ -27,13 +27,43 @@ describe('vaultIsland', () => {
     expect(vaultIslandAllowWindowLabel()).toBe('Allow 15 min')
   })
 
-  it('ignores browser credential requests that need a form', () => {
-    expect(parseVaultIslandOpen({
+  it('opens browser credential requests with a provide-credentials action', () => {
+    const request = parseVaultIslandOpen({
       type: 'vault.notification',
       request_id: 'req_2',
       action: 'browser_credential_request',
       title: 'github.com',
-    })).toBeNull()
+      purpose: 'Log in to download invoices',
+    })
+    expect(request?.requestId).toBe('req_2')
+    expect(request?.action).toBe('browser_credential_request')
+    expect(vaultIslandHeadline(request!)).toBe('The browser agent needs credentials')
+    expect(vaultIslandAllowLabel(request!)).toBe('Provide credentials')
+  })
+
+  it('maps a browser credential pending row with the username hint', () => {
+    const request = vaultIslandFromPending({
+      request_id: 'req_2b',
+      action: 'browser_credential_request',
+      status: 'pending',
+      purpose: 'Sign in with Google on Appollo',
+      payload: { title: 'accounts.google.com', site_domain: 'accounts.google.com', username_hint: 'you@gmail.com' },
+    })
+    expect(request).toMatchObject({
+      requestId: 'req_2b',
+      action: 'browser_credential_request',
+      title: 'accounts.google.com',
+      username: 'you@gmail.com',
+    })
+  })
+
+  it('resolves browser credential requests from block updates', () => {
+    expect(isVaultIslandResolved({
+      type: 'response.action.updated',
+      block_type: 'browser_credential_request',
+      status: 'approved',
+      response_block: { request_id: 'req_2', status: 'approved' },
+    }, 'req_2')).toBe(true)
   })
 
   it('opens from a pending vault permission block and closes when it resolves', () => {

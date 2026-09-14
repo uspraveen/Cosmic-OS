@@ -2851,6 +2851,106 @@ kbd {
   background: rgba(255, 255, 255, 0.12);
 }
 
+.assistant-content-card-stack {
+  width: var(--response-block-width, min(100%, 760px));
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.assistant-content-card-stack .assistant-action-card {
+  width: 100%;
+}
+
+.assistant-content-card-subtitle {
+  margin-top: 8px;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.assistant-content-card-sections,
+.assistant-content-card .assistant-action-card-body {
+  margin-top: 12px;
+}
+
+.assistant-content-card-text,
+.assistant-content-card-post {
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.assistant-content-card-post {
+  padding: 2px 0 10px;
+}
+
+.assistant-content-card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.assistant-content-card-chip {
+  padding: 3px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.62);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11px;
+  letter-spacing: 0.01em;
+}
+
+.assistant-content-card-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.assistant-content-card-list.is-check {
+  list-style: none;
+  padding-left: 0;
+}
+
+.assistant-content-card-list.is-check li {
+  position: relative;
+  padding-left: 18px;
+}
+
+.assistant-content-card-list.is-check li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.55em;
+  width: 7px;
+  height: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 2px;
+}
+
+.assistant-content-card-code {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.24);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.assistant-action-card-status.is-over {
+  color: rgba(255, 174, 191, 0.9);
+}
+
 .assistant-action-button.is-selected {
   border-color: rgba(255, 255, 255, 0.28);
   color: rgba(255, 255, 255, 0.96);

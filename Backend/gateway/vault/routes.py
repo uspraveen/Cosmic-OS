@@ -386,6 +386,7 @@ async def internal_list_sites(request: Request):
         sites.append(
             {
                 "entry_id": entry["entry_id"],
+                "credential_ref": f"{CREDENTIAL_REF_PREFIX}{entry['entry_id']}",
                 "title": entry["title"],
                 "site_url": entry["site_url"],
                 "site_domain": entry["site_domain"],
@@ -437,7 +438,10 @@ async def internal_lookup(body: LookupRequest, request: Request):
     policy = store.get_policy(entry_id)
     allowed = store.policy_allows_use(entry_id)
     if not allowed:
-        allowed = store.take_approved_use(entry_id, body.task_id, body.session_id) is not None
+        # Peek, don't consume: the grant must survive until /internal/vault/resolve
+        # actually injects the secret at dispatch time — that is the single
+        # consumption point that binds one Allow-once to one secret release.
+        allowed = store.peek_approved_use(entry_id, body.task_id, body.session_id) is not None
     logger.info(
         "vault.lookup entry=%s policy_mode=%s window_expires_at=%s allowed=%s task=%s session=%s",
         entry_id,
@@ -531,15 +535,62 @@ async def internal_resolve(body: ResolveRequest, request: Request):
     _check_internal_token(request)
     store = _get_store(request)
     ref = str(body.credential_ref or "").strip()
+    if not ref:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "credential_ref is empty. Pass the exact credential_ref returned by "
+                "vault_lookup (format 'vault:<entry_id>') — never construct one yourself."
+            ),
+        )
     if not ref.startswith(CREDENTIAL_REF_PREFIX):
-        raise HTTPException(status_code=400, detail="credential_ref must be a vault ref.")
+        # A bare entry_id (e.g. copied from vault_list_sites) is unambiguous —
+        # normalize it instead of failing, then let the policy gate below decide.
+        if store.get_entry(ref):
+            ref = f"{CREDENTIAL_REF_PREFIX}{ref}"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Malformed credential_ref {ref!r}: expected the exact ref returned by "
+                    "vault_lookup, formatted 'vault:<entry_id>'. Never construct or guess a "
+                    "credential_ref — call vault_lookup(site) to obtain one."
+                ),
+            )
     entry = store.get_entry(ref[len(CREDENTIAL_REF_PREFIX):])
     if not entry:
-        raise HTTPException(status_code=404, detail="Vault entry not found.")
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No vault entry exists for credential_ref {ref!r}. Call vault_list_sites to see "
+                "what is actually saved, then vault_lookup(site) for a valid ref."
+            ),
+        )
+    # Policy gate: a well-formed ref is not authorization. The secret only
+    # leaves the vault when the entry's policy currently allows use, or a fresh
+    # user-approved grant is consumed here. Anything else must go through
+    # vault_lookup so the user gets an approval card.
+    if not store.policy_allows_use(entry["entry_id"]):
+        grant = store.take_approved_use(entry["entry_id"], body.task_id)
+        if grant is None:
+            store.append_audit(
+                entry["entry_id"], "orchestrator", "resolve_denied", body.task_id,
+                result="permission_required",
+            )
+            logger.info(
+                "vault.resolve_denied entry=%s task=%s reason=no_policy_or_grant",
+                entry["entry_id"],
+                body.task_id,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Vault entry {entry['title']!r} requires user approval before its secret "
+                    "can be used. Call vault_lookup(site) now — it will raise an approval card "
+                    "for the user and return an authorized credential_ref."
+                ),
+            )
     secrets = decrypt_entry_secrets(entry)
-    # Allow once is consumed when the secret is actually injected, so a leftover
-    # approval cannot skip the next unrelated lookup.
-    store.take_approved_use(entry["entry_id"], body.task_id)
     store.append_audit(entry["entry_id"], "orchestrator", "resolve", body.task_id)
     return {
         "credential_ref": ref,
