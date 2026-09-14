@@ -2862,6 +2862,56 @@ kbd {
   opacity: 0.52;
 }
 
+/* ── Ask-the-human form fields (browser agent questions, vault fills) ── */
+
+.assistant-action-card-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 13px;
+}
+
+.assistant-action-card-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.assistant-action-card-form label span {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.assistant-action-card-form input {
+  width: 100%;
+  min-height: 32px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  outline: none;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.24);
+  font: inherit;
+  font-size: 13px;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.assistant-action-card-form input::placeholder {
+  color: rgba(255, 255, 255, 0.28);
+}
+
+.assistant-action-card-form input:focus {
+  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.34);
+}
+
+/* The browser question card only renders while its run card sits in the
+   is-waiting attention state — echo that warm tone on the focused field. */
+.browser-run-interrupt .assistant-action-card-form input:focus {
+  border-color: rgba(230, 170, 60, 0.45);
+}
+
 /* ── Deck preview strip (per-slide renders) ──────────────────────────── */
 
 .deck-preview {
