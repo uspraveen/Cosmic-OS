@@ -103,10 +103,52 @@ async def internal_ask_user(body: AskUserRequest, request: Request) -> dict[str,
         raise HTTPException(status_code=400, detail="question is required.")
     runtime = request.app.state.gateway_runtime
     timeout_sec = min(max(float(body.timeout_sec or 240.0), _MIN_WAIT_SEC), _MAX_WAIT_SEC)
+    kind = str(body.kind or "generic").strip().lower()
+    # Context questions (address, phone, which option) get one deterministic
+    # check against what the user already told the orchestrator this session
+    # before a human is bothered at all. Secrets and physical actions skip
+    # this path entirely — they still go straight to the user/vault.
+    if kind == "generic":
+        decision: Any = None
+        try:
+            decision = await runtime.orchestrator.resolve_browser_interrupt(
+                session_id=body.session_id,
+                task_id=body.task_id,
+                channel=body.channel,
+                question=question,
+                kind=kind,
+                page_url=body.page_url,
+                timeout_sec=min(8.0, timeout_sec),
+            )
+        except Exception:
+            logger.warning("browser.interrupt_resolver_failed", exc_info=True)
+        if isinstance(decision, dict) and str(decision.get("status") or "") == "answered":
+            answer = str(decision.get("answer") or "").strip()
+            if answer:
+                logger.info(
+                    "browser.ask_user_answered_from_memory task_id=%s topic=%s",
+                    body.task_id,
+                    decision.get("topic"),
+                )
+                return {
+                    "request_id": str(body.request_id or "").strip(),
+                    "status": "answered",
+                    "answer": answer,
+                    "source": str(decision.get("source") or "orchestrator"),
+                }
+        options = decision.get("options") if isinstance(decision, dict) else None
+        if isinstance(options, list) and options:
+            try:
+                await runtime.publish_browser_interrupt_options(
+                    task_id=body.task_id,
+                    options=[str(item) for item in options],
+                )
+            except Exception:
+                logger.warning("browser.interrupt_options_publish_failed", exc_info=True)
     result = await runtime.browser_interrupts.create_and_wait(
         request_id=str(body.request_id or "").strip(),
         question=question,
-        kind=str(body.kind or "generic").strip().lower(),
+        kind=kind,
         task_id=body.task_id,
         session_id=body.session_id,
         channel=body.channel,

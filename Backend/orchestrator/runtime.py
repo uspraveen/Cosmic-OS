@@ -69,6 +69,7 @@ from shared import (
 )
 
 from .config import BACKEND_ROOT, OrchestratorConfig
+from .interrupt_memory import select_reused_answer
 from .prompts import build_agentic_system_prompt
 from .store.ledger import TaskLedger
 from .tools.executor import ToolExecutionContext, ToolExecutor
@@ -3437,6 +3438,51 @@ class OrchestratorRuntime:
         finally:
             if future.done() or (wait_timeout_sec is None or wait_timeout_sec <= 0):
                 self._pending_input_futures.pop(irid, None)
+
+    async def resolve_browser_interrupt(
+        self,
+        *,
+        session_id: str | None,
+        question: str,
+        kind: str = "generic",
+    ) -> dict[str, Any]:
+        """First refusal for a browser specialist's generic question.
+
+        Answered from what the user already told the orchestrator in this
+        session (same topic) — no model call, no second card. Escalates with
+        candidate options when a near-miss prior answer exists. Secrets and
+        physical actions never reach this path: the gateway routes only
+        context questions here.
+        """
+        normalized_kind = str(kind or "generic").strip().lower()
+        if normalized_kind != "generic":
+            return {"status": "escalate", "reason": "non_context_kind", "options": []}
+        rows: list[dict[str, Any]] = []
+        try:
+            rows = self.task_ledger.find_answered_input_requests(str(session_id or ""))
+        except Exception:
+            logger.exception("orchestrator.browser_interrupt_memory_failed")
+        decision = select_reused_answer(rows, question)
+        answer = decision.get("answer")
+        if answer:
+            logger.info(
+                "orchestrator.browser_interrupt_answered_from_memory session_id=%s topic=%s",
+                session_id,
+                decision.get("topic"),
+            )
+            return {
+                "status": "answered",
+                "answer": answer,
+                "source": "session_memory",
+                "topic": decision.get("topic"),
+                "options": [],
+            }
+        return {
+            "status": "escalate",
+            "reason": decision.get("reason") or "no_match",
+            "topic": decision.get("topic"),
+            "options": decision.get("options") or [],
+        }
 
     async def accept_reverse_task(self, task: TaskEnvelope) -> dict[str, Any]:
         if task.recipient != self.config.orchestrator_agent_id:

@@ -46,6 +46,15 @@ class TaskInputRequestBody(BaseModel):
     wait_timeout_sec: float | None = Field(default=None, ge=0, le=3600)
 
 
+class BrowserInterruptResolveRequest(BaseModel):
+    session_id: str | None = Field(default=None, max_length=128)
+    task_id: str | None = Field(default=None, max_length=128)
+    channel: str | None = Field(default=None, max_length=128)
+    question: str = Field(..., min_length=1, max_length=8000)
+    kind: str = Field(default="generic", max_length=64)
+    page_url: str | None = Field(default=None, max_length=2048)
+
+
 def get_runtime(request: Request) -> OrchestratorRuntime:
     runtime = getattr(request.app.state, "orchestrator_runtime", None)
     if runtime is None:
@@ -149,6 +158,26 @@ async def request_task_input(
         "ok": True,
         **payload,
     }
+
+
+@app.post("/internal/browser-interrupt/resolve")
+async def resolve_browser_interrupt(
+    body: BrowserInterruptResolveRequest,
+    _: None = Depends(require_internal_token),
+    runtime: OrchestratorRuntime = Depends(get_runtime),
+) -> dict[str, object]:
+    """First refusal for a specialist's generic question.
+
+    Answers from what the user already told the orchestrator this session,
+    or hands back candidate options for the desktop card. Never touches
+    secrets — the gateway does not route those here.
+    """
+    decision = await runtime.resolve_browser_interrupt(
+        session_id=body.session_id,
+        question=body.question,
+        kind=body.kind,
+    )
+    return {"ok": True, **decision}
 
 
 @app.post("/internal/reverse-tasks")

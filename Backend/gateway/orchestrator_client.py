@@ -135,6 +135,47 @@ class OrchestratorClient:
             raise RuntimeError("Orchestrator registry agents returned a non-object response")
         return payload
 
+    async def resolve_browser_interrupt(
+        self,
+        *,
+        session_id: str | None,
+        task_id: str | None,
+        channel: str | None,
+        question: str,
+        kind: str = "generic",
+        page_url: str | None = None,
+        timeout_sec: float | None = None,
+    ) -> dict[str, Any]:
+        """Ask the orchestrator whether it can answer this browser question.
+
+        Answered-from-memory decisions return immediately (no model call);
+        everything else comes back as an escalate verdict, optionally with
+        candidate options for the desktop card.
+        """
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Token": self.internal_token,
+        }
+        response = await self._client.post(
+            f"{self.base_url}/internal/browser-interrupt/resolve",
+            headers=headers,
+            json={
+                "session_id": session_id,
+                "task_id": task_id,
+                "channel": channel,
+                "question": str(question or ""),
+                "kind": str(kind or "generic"),
+                "page_url": page_url,
+            },
+            timeout=timeout_sec if timeout_sec is not None else self._request_timeout,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(self._error_from_response(response.content, response.status_code))
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Orchestrator interrupt resolver returned a non-object response")
+        return payload
+
     def _error_from_response(self, body: bytes, status_code: int) -> str:
         try:
             payload = json.loads(body.decode("utf-8"))

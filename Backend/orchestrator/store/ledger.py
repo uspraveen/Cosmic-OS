@@ -721,6 +721,46 @@ class TaskLedger:
             )
             connection.commit()
 
+    def find_answered_input_requests(
+        self,
+        session_id: str,
+        *,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Recent answered input requests for a session, newest first.
+
+        Feeds the browser-interrupt resolver: a question the user already
+        answered once (address, phone, moving date) can be answered from here
+        on the next run instead of surfacing the same card again.
+        """
+        normalized = str(session_id or "").strip()
+        if not normalized:
+            return []
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT input_request_id, task_id, question, options_json,
+                       reply_content, replied_at
+                FROM task_input_requests
+                WHERE session_id = ?
+                  AND status = 'answered'
+                  AND reply_content IS NOT NULL
+                  AND TRIM(reply_content) != ''
+                ORDER BY replied_at DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (normalized, max(1, int(limit))),
+            ).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["options"] = json.loads(item.pop("options_json") or "[]")
+            except Exception:
+                item["options"] = []
+            results.append(item)
+        return results
+
     def create_task_input_wait(
         self,
         *,

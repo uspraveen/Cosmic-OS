@@ -17205,6 +17205,54 @@ class GatewayRuntime:
             "intent": intent,
         }
 
+    async def publish_browser_interrupt_options(
+        self,
+        *,
+        task_id: str | None,
+        options: list[str],
+    ) -> bool:
+        """Attach orchestrator-suggested options to a live browser ask card.
+
+        The card is driven entirely by browser_progress; the gateway holds the
+        last state for the in-flight request, so a small progress re-emit is
+        enough to add clickable options without changing the browser agent's
+        own protocol (the agent still receives one free-text answer).
+        """
+        normalized_options = [str(item).strip() for item in options if str(item).strip()]
+        if not normalized_options:
+            return False
+        context = self._resolve_specialist_request_context(task_id)
+        if context is None:
+            return False
+        request_id = self._safe_text(context.get("request_id"))
+        if not request_id:
+            return False
+        request_state = self.active_requests.get(request_id)
+        browser_progress = getattr(request_state, "browser_progress", None) if request_state else None
+        if not isinstance(browser_progress, dict):
+            return False
+        interrupt = browser_progress.get("interrupt")
+        if not isinstance(interrupt, dict):
+            return False
+        updated = dict(browser_progress)
+        updated["interrupt"] = {**interrupt, "options": normalized_options[:6]}
+        forwarded = {
+            "type": "task.progress",
+            "route": "opus",
+            "request_id": request_id,
+            "session_id": context.get("session_id"),
+            "task_id": context.get("root_task_id"),
+            "channel": context.get("channel"),
+            "status": "specialist_progress",
+            "message": "",
+            "browser_progress": updated,
+        }
+        await self._deliver_or_queue_channel_event(
+            forwarded,
+            channel=self._safe_text(context.get("channel")),
+        )
+        return True
+
     def _specialist_agent_label(self, agent_id: str | None) -> str:
         raw = self._safe_text(agent_id) or "specialist"
         normalized = raw
