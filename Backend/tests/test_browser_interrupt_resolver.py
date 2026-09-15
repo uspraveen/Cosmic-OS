@@ -108,24 +108,56 @@ def test_exact_normalized_match_reuses_without_a_topic():
     assert decision["reason"] == "exact_match"
 
 
-def test_runtime_resolver_answers_from_session_memory(tmp_path) -> None:
+def _model_response(content: str, *, status: int = 200, calls: list | None = None):
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url).endswith("/chat/completions"):
+            if calls is not None:
+                calls.append(request)
+            if status >= 400:
+                return httpx.Response(status, text="resolver unavailable")
+            return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        return httpx.Response(204)
+
+    return httpx.MockTransport(handler)
+
+
+def _runtime_with_client(tmp_path, handler, **config_overrides) -> OrchestratorRuntime:
+    import httpx
+
     config = OrchestratorConfig(
         internal_token="internal-token",
         signing_secret="signing-secret",
+        fireworks_api_key=config_overrides.pop("fireworks_api_key", "test-key"),
         task_ledger_db_path=tmp_path / "interrupt_resolver.db",
+        **config_overrides,
     )
-    runtime = OrchestratorRuntime(config)
+    runtime = OrchestratorRuntime(config, client=httpx.AsyncClient(transport=handler))
     runtime.task_ledger.initialize()
+    return runtime
+
+
+def _seed_address_answer(runtime: OrchestratorRuntime, session_id: str = "sess_1") -> None:
     runtime.task_ledger.create_task_input_request(
         input_request_id="uir_1",
         task_id="tsk_1",
-        session_id="sess_1",
+        session_id=session_id,
         channel="desktop:abc",
         agent="cosmic/orchestrator:1.0.0",
         question=ADDRESS_QUESTION,
         options=[],
     )
     runtime.task_ledger.mark_task_input_replied("uir_1", content=ADDRESS_ANSWER)
+
+
+def test_runtime_resolver_answers_from_session_memory(tmp_path) -> None:
+    calls: list = []
+    runtime = _runtime_with_client(
+        tmp_path,
+        _model_response('{"decision":"escalate"}', calls=calls),
+    )
+    _seed_address_answer(runtime)
 
     answered = asyncio.run(
         runtime.resolve_browser_interrupt(
@@ -136,6 +168,8 @@ def test_runtime_resolver_answers_from_session_memory(tmp_path) -> None:
     assert answered["status"] == "answered"
     assert answered["answer"] == ADDRESS_ANSWER
     assert answered["source"] == "session_memory"
+    # Deterministic memory wins: the model is never called for a known answer.
+    assert calls == []
 
     escalated = asyncio.run(
         runtime.resolve_browser_interrupt(
@@ -162,3 +196,118 @@ def test_runtime_resolver_answers_from_session_memory(tmp_path) -> None:
     )
     assert wrong_kind["status"] == "escalate"
     assert wrong_kind["reason"] == "non_context_kind"
+
+
+def test_runtime_resolver_model_can_answer_when_memory_cannot_match(tmp_path) -> None:
+    calls: list = []
+    runtime = _runtime_with_client(
+        tmp_path,
+        _model_response(
+            '{"decision":"answer","answer":"No pets declaration","confidence":0.9,"reason":"resident has no pets"}',
+            calls=calls,
+        ),
+    )
+    runtime.task_ledger.create_task_input_request(
+        input_request_id="uir_pets",
+        task_id="tsk_pets",
+        session_id="sess_1",
+        channel="desktop:abc",
+        agent="cosmic/orchestrator:1.0.0",
+        question="Does the resident have pets or assistance animals?",
+        options=[],
+    )
+    runtime.task_ledger.mark_task_input_replied("uir_pets", content="No pets / no assistance animals")
+
+    decision = asyncio.run(
+        runtime.resolve_browser_interrupt(
+            session_id="sess_1",
+            question="Should I select the declaration that applies to this lease?",
+            page_url="https://thewatersatchenal.petscreening.com/profile",
+        )
+    )
+    assert decision["status"] == "answered"
+    assert decision["source"] == "model"
+    assert decision["answer"] == "No pets declaration"
+    assert len(calls) == 1
+    # The decider runs on the configured Fireworks brain, never a hardcoded provider.
+    payload = calls[0].content.decode("utf-8")
+    assert "accounts/fireworks/models/glm-5p3" in payload
+    assert "No pets / no assistance animals" in payload
+
+
+def test_runtime_resolver_escalates_on_low_model_confidence(tmp_path) -> None:
+    runtime = _runtime_with_client(
+        tmp_path,
+        _model_response(
+            '{"decision":"answer","answer":"Maybe the first option","confidence":0.4,"reason":"unclear"}'
+        ),
+    )
+    runtime.task_ledger.create_task_input_request(
+        input_request_id="uir_pets",
+        task_id="tsk_pets",
+        session_id="sess_1",
+        channel="desktop:abc",
+        agent="cosmic/orchestrator:1.0.0",
+        question="Does the resident have pets or assistance animals?",
+        options=[],
+    )
+    runtime.task_ledger.mark_task_input_replied("uir_pets", content="No pets / no assistance animals")
+
+    decision = asyncio.run(
+        runtime.resolve_browser_interrupt(
+            session_id="sess_1",
+            question="Should I select the declaration that applies to this lease?",
+        )
+    )
+    assert decision["status"] == "escalate"
+
+
+def test_runtime_resolver_never_calls_a_non_fireworks_provider(tmp_path) -> None:
+    calls: list = []
+    runtime = _runtime_with_client(
+        tmp_path,
+        _model_response("{}", calls=calls),
+        orchestrator_default_provider="anthropic",
+        fireworks_api_key="",
+    )
+    runtime.task_ledger.create_task_input_request(
+        input_request_id="uir_pets",
+        task_id="tsk_pets",
+        session_id="sess_1",
+        channel="desktop:abc",
+        agent="cosmic/orchestrator:1.0.0",
+        question="Does the resident have pets or assistance animals?",
+        options=[],
+    )
+    runtime.task_ledger.mark_task_input_replied("uir_pets", content="No pets / no assistance animals")
+
+    decision = asyncio.run(
+        runtime.resolve_browser_interrupt(
+            session_id="sess_1",
+            question="Should I select the declaration that applies to this lease?",
+        )
+    )
+    assert decision["status"] == "escalate"
+    assert calls == []
+
+
+def test_runtime_resolver_model_failure_escalates_cleanly(tmp_path) -> None:
+    runtime = _runtime_with_client(tmp_path, _model_response("", status=503))
+    runtime.task_ledger.create_task_input_request(
+        input_request_id="uir_pets",
+        task_id="tsk_pets",
+        session_id="sess_1",
+        channel="desktop:abc",
+        agent="cosmic/orchestrator:1.0.0",
+        question="Does the resident have pets or assistance animals?",
+        options=[],
+    )
+    runtime.task_ledger.mark_task_input_replied("uir_pets", content="No pets / no assistance animals")
+
+    decision = asyncio.run(
+        runtime.resolve_browser_interrupt(
+            session_id="sess_1",
+            question="Should I select the declaration that applies to this lease?",
+        )
+    )
+    assert decision["status"] == "escalate"

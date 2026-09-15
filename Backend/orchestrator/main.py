@@ -176,6 +176,7 @@ async def resolve_browser_interrupt(
         session_id=body.session_id,
         question=body.question,
         kind=body.kind,
+        page_url=body.page_url,
     )
     return {"ok": True, **decision}
 

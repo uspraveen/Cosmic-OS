@@ -110,6 +110,10 @@ async def internal_ask_user(body: AskUserRequest, request: Request) -> dict[str,
     # this path entirely — they still go straight to the user/vault.
     if kind == "generic":
         decision: Any = None
+        # Give the orchestrator room for one bounded model call (it runs on
+        # the Fireworks brain, typically a few seconds) while still leaving
+        # most of the browser agent's wait for the human card if it escalates.
+        resolver_budget = min(25.0, max(5.0, timeout_sec - 15.0))
         try:
             decision = await runtime.orchestrator.resolve_browser_interrupt(
                 session_id=body.session_id,
@@ -118,7 +122,7 @@ async def internal_ask_user(body: AskUserRequest, request: Request) -> dict[str,
                 question=question,
                 kind=kind,
                 page_url=body.page_url,
-                timeout_sec=min(8.0, timeout_sec),
+                timeout_sec=resolver_budget,
             )
         except Exception:
             logger.warning("browser.interrupt_resolver_failed", exc_info=True)

@@ -3445,14 +3445,20 @@ class OrchestratorRuntime:
         session_id: str | None,
         question: str,
         kind: str = "generic",
+        page_url: str | None = None,
     ) -> dict[str, Any]:
         """First refusal for a browser specialist's generic question.
 
-        Answered from what the user already told the orchestrator in this
-        session (same topic) — no model call, no second card. Escalates with
-        candidate options when a near-miss prior answer exists. Secrets and
-        physical actions never reach this path: the gateway routes only
-        context questions here.
+        Two layers, cheapest first:
+        1. Deterministic session memory — the same topic the user already
+           answered (address, phone, ...) is reused without asking again.
+        2. A bounded single-shot model decision on the orchestrator's
+           configured brain (Fireworks GLM here) over those same facts, so a
+           question memory can't pattern-match can still be judged when the
+           facts clearly contain the answer.
+        Secrets and physical actions never reach this path: the gateway routes
+        only context questions here, and the memory layer refuses
+        secret-shaped questions on its own.
         """
         normalized_kind = str(kind or "generic").strip().lower()
         if normalized_kind != "generic":
@@ -3477,11 +3483,193 @@ class OrchestratorRuntime:
                 "topic": decision.get("topic"),
                 "options": [],
             }
+        if decision.get("reason") != "secret_shaped":
+            model_decision = await self._answer_interrupt_with_model(
+                session_id=session_id,
+                question=question,
+                page_url=page_url,
+                rows=rows,
+            )
+            if model_decision:
+                logger.info(
+                    "orchestrator.browser_interrupt_answered_by_model session_id=%s confidence=%s",
+                    session_id,
+                    model_decision.get("confidence"),
+                )
+                return {
+                    "status": "answered",
+                    "answer": model_decision["answer"],
+                    "source": "model",
+                    "topic": decision.get("topic"),
+                    "confidence": model_decision.get("confidence"),
+                    "options": [],
+                }
         return {
             "status": "escalate",
             "reason": decision.get("reason") or "no_match",
             "topic": decision.get("topic"),
             "options": decision.get("options") or [],
+        }
+
+    # Bounded, single-shot model decision for browser interrupts. Runs on the
+    # orchestrator's configured Fireworks brain (GLM by default) — no other
+    # provider is required or assumed. Without a Fireworks provider configured
+    # the decider does not run and the interrupt escalates.
+    _INTERRUPT_RESOLVER_TIMEOUT_SEC = 20.0
+    _INTERRUPT_RESOLVER_MIN_CONFIDENCE = 0.75
+    _INTERRUPT_RESOLVER_MAX_CONTEXT_ROWS = 12
+
+    def _interrupt_resolver_model(self) -> str | None:
+        provider = self._normalize_orchestrator_provider(self.config.orchestrator_default_provider)
+        if not self._is_fireworks_provider(provider):
+            return None
+        return self._default_model_for_orchestrator_provider(provider) or None
+
+    @staticmethod
+    def _extract_json_object(text: str) -> dict[str, Any] | None:
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(raw[start : end + 1])
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    async def _answer_interrupt_with_model(
+        self,
+        *,
+        session_id: str | None,
+        question: str,
+        page_url: str | None,
+        rows: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        model = self._interrupt_resolver_model()
+        if not model:
+            return None
+        facts: list[str] = []
+        for row in rows[: self._INTERRUPT_RESOLVER_MAX_CONTEXT_ROWS]:
+            prior_question = str(row.get("question") or "").strip()
+            prior_answer = str(row.get("reply_content") or "").strip()
+            if prior_question and prior_answer:
+                facts.append(f"- Q: {prior_question}\n  A: {prior_answer}")
+        if not facts:
+            return None
+
+        system_prompt = (
+            "You are COSMIC, answering a question from one of your specialist agents "
+            "on Praveen's behalf. CONTEXT lists facts Praveen already provided in this "
+            "session — those are the ONLY ground truth you may use. Rules:\n"
+            "1. Answer only when CONTEXT clearly contains the answer; quote the fact "
+            "verbatim. Never invent, approximate, or infer personal data.\n"
+            "2. Never answer questions about passwords, one-time codes, payments, "
+            "legal consent/terms, or irreversible choices — those belong to Praveen; "
+            "escalate instead.\n"
+            "3. If the answer is not clearly present, escalate.\n"
+            "4. Prefer escalate over guessing: a wrong answer writes bad data into a "
+            "real account.\n"
+            'Return STRICT JSON only: {"decision":"answer"|"escalate","answer":"...",'
+            '"confidence":0.0,"reason":"..."} with confidence <= 0.5 whenever unsure.'
+        )
+        user_prompt = (
+            "CONTEXT (the only ground truth):\n"
+            + "\n".join(facts)
+            + f"\n\nSPECIALIST QUESTION: {question}"
+            + f"\nPAGE URL: {page_url or 'unknown'}"
+        )
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "temperature": 0,
+        }
+        if "glm" in model.lower():
+            body["reasoning_effort"] = "low"
+        headers = {
+            "Authorization": f"Bearer {self.config.fireworks_api_key}",
+            "Content-Type": "application/json",
+        }
+        usage_context = {
+            "operation": "browser.interrupt_resolve",
+            "session_id": session_id,
+        }
+        metered_call = begin_metered_call(prefix="call")
+        provider_request_id: str | None = None
+        raw_usage: dict[str, Any] = {}
+        try:
+            response = await self._client.post(
+                f"{self.config.fireworks_base_url.rstrip('/')}/chat/completions",
+                headers=headers,
+                json=body,
+                timeout=self._INTERRUPT_RESOLVER_TIMEOUT_SEC,
+            )
+            provider_request_id = (
+                response.headers.get("x-request-id")
+                or response.headers.get("request-id")
+                or response.headers.get("x-fireworks-request-id")
+                or None
+            )
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Fireworks resolver HTTP {response.status_code}: {response.text[:200]}"
+                )
+            payload = response.json()
+            raw_usage = self._extract_openai_usage(payload) or {}
+            choices = payload.get("choices") if isinstance(payload, dict) else None
+            message = {}
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
+            content = str(message.get("content") or "")
+            parsed = self._extract_json_object(content)
+        except Exception:
+            await self._record_internal_usage_event(
+                metered_call=metered_call,
+                model_key=build_model_key("fireworks", model),
+                usage_context=usage_context,
+                provider_request_id=provider_request_id,
+                raw_usage=raw_usage,
+                success=False,
+                error_code="resolver_failed",
+                metadata_json={"streaming": False},
+            )
+            logger.warning(
+                "orchestrator.browser_interrupt_decider_failed model=%s", model, exc_info=True
+            )
+            return None
+        await self._record_internal_usage_event(
+            metered_call=metered_call,
+            model_key=build_model_key("fireworks", model),
+            usage_context=usage_context,
+            provider_request_id=provider_request_id,
+            raw_usage=raw_usage,
+            success=True,
+            error_code=None,
+            metadata_json={"streaming": False},
+        )
+        if not isinstance(parsed, dict):
+            return None
+        if str(parsed.get("decision") or "").strip().lower() != "answer":
+            return None
+        answer = str(parsed.get("answer") or "").strip()
+        try:
+            confidence = float(parsed.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if not answer or confidence < self._INTERRUPT_RESOLVER_MIN_CONFIDENCE:
+            return None
+        return {
+            "answer": answer,
+            "confidence": confidence,
+            "reason": str(parsed.get("reason") or "")[:200],
         }
 
     async def accept_reverse_task(self, task: TaskEnvelope) -> dict[str, Any]:
