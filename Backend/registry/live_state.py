@@ -144,3 +144,68 @@ def _state_is_available(state: dict[str, Any], *, now: datetime) -> bool:
     if (now - last_seen).total_seconds() >= ttl:
         return False
     return True
+
+
+def _state_is_healthy(state: dict[str, Any], *, now: datetime) -> bool:
+    """Healthy ignores capacity: the instance is alive and heartbeating even
+    when its concurrency slot is taken."""
+    if not state:
+        return False
+    if str(state.get("status") or "").strip() not in {"healthy", "degraded"}:
+        return False
+    ttl = _safe_int(state.get("heartbeat_ttl"), fallback=0)
+    last_seen = _parse_utc_timestamp(state.get("last_seen"))
+    if last_seen is None or ttl <= 0:
+        return False
+    if (now - last_seen).total_seconds() >= ttl:
+        return False
+    return True
+
+
+async def find_dispatchable_instance(
+    intent: str,
+    client: redis.Redis,
+    *,
+    allow_busy: bool = False,
+    now: datetime | None = None,
+) -> tuple[str | None, str | None]:
+    """Like find_available_instance, with an opt-in busy fallback.
+
+    A single-concurrency specialist (the browser agent's max_concurrency is 1)
+    is "busy", not "down". For intents whose tasks queue in the agent's Redis
+    stream, dispatching to a healthy-but-busy instance is correct: the task
+    waits and the agent picks it up when the current run finishes, instead of
+    the delegation failing with "no healthy instance" while the agent is
+    clearly alive.
+    """
+    current_time = (now or utcnow()).astimezone(timezone.utc)
+    agent_ids = await client.smembers(intent_members_key(intent))
+
+    for agent_id in sorted(agent_ids):
+        found_agent_id, instance_id = await find_available_instance_for_agent(
+            str(agent_id), client, now=current_time
+        )
+        if found_agent_id and instance_id:
+            return found_agent_id, instance_id
+
+    if not allow_busy:
+        return None, None
+
+    for agent_id in sorted(agent_ids):
+        normalized_agent_id = str(agent_id or "").strip()
+        if not normalized_agent_id:
+            continue
+        cursor = 0
+        while True:
+            cursor, keys = await client.scan(
+                cursor=cursor,
+                match=f"registry:{normalized_agent_id}:*",
+                count=20,
+            )
+            for key in keys:
+                state = await client.hgetall(key)
+                if _state_is_healthy(state, now=current_time):
+                    return normalized_agent_id, key.split(":")[-1]
+            if cursor == 0:
+                break
+    return None, None

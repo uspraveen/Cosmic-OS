@@ -33,7 +33,12 @@ import httpx
 import redis.asyncio as redis
 
 from gateway.adapters.response_processor import AWAITING_REPLY_TAG
-from registry import RegistryStore, find_available_instance, find_available_instance_for_agent
+from registry import (
+    RegistryStore,
+    find_available_instance,
+    find_available_instance_for_agent,
+    find_dispatchable_instance,
+)
 from shared import (
     AgentError,
     AgentResult,
@@ -3832,6 +3837,18 @@ class OrchestratorRuntime:
     def _allow_primary_fallback(self, intent: str) -> bool:
         return self._classify_auth_operation_mode(intent) == "read"
 
+    @staticmethod
+    def _intent_can_queue_busy(intent: str) -> bool:
+        """Intents whose tasks safely queue in the agent's Redis stream.
+
+        The browser agent runs one task at a time by design (max_concurrency:
+        1). Treating a busy instance as unavailable made the orchestrator
+        report the agent as gone ("no healthy instance") and give up on a task
+        it was actively running — the crash story from the PetScreening night.
+        Queue instead: the task waits and the agent picks it up on release.
+        """
+        return str(intent or "").strip() in {"browser.run"}
+
     async def _find_available_agent(
         self,
         intent: str,
@@ -3853,11 +3870,21 @@ class OrchestratorRuntime:
                     raise RuntimeError(f"Agent {normalized_agent_id!r} is not registered.")
                 raise RuntimeError(f"Agent {normalized_agent_id!r} does not advertise intent {intent!r}.")
             found_agent_id, instance_id = await find_available_instance_for_agent(normalized_agent_id, self._redis)
+            if (not found_agent_id or not instance_id) and self._intent_can_queue_busy(intent):
+                queued_agent_id, queued_instance_id = await find_dispatchable_instance(
+                    intent, self._redis, allow_busy=True
+                )
+                if queued_agent_id == normalized_agent_id:
+                    found_agent_id, instance_id = queued_agent_id, queued_instance_id
             if not found_agent_id or not instance_id:
                 raise RuntimeError(f"Agent {normalized_agent_id!r} is registered but has no healthy instance.")
             return {**match, "instance_id": instance_id}
 
         found_agent_id, instance_id = await find_available_instance(intent, self._redis)
+        if (not found_agent_id or not instance_id) and self._intent_can_queue_busy(intent):
+            found_agent_id, instance_id = await find_dispatchable_instance(
+                intent, self._redis, allow_busy=True
+            )
         if not found_agent_id or not instance_id:
             raise RuntimeError(f"No healthy agent instance is available for intent {intent!r}.")
 

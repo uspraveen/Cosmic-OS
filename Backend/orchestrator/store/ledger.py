@@ -16,6 +16,47 @@ def utcnow_iso() -> str:
     return utcnow().isoformat().replace("+00:00", "Z")
 
 
+# Keys whose values are secrets by contract wherever they appear in a task
+# envelope or result. The ledger is an audit/replay surface, so the audit copy
+# must never become a plaintext credential store — browser.run envelopes carry
+# vault-injected passwords, and results can echo user-typed ones.
+_LEDGER_SECRET_KEYS = {
+    "password",
+    "password_encrypted",
+    "totp_seed",
+    "totp_seed_encrypted",
+    "api_key",
+    "apikey",
+    "secret",
+    "client_secret",
+    "access_token",
+    "refresh_token",
+    "id_token",
+}
+
+
+def redact_ledger_secrets(value: Any) -> Any:
+    """Structural redaction: keyed secrets become "[redacted]", prose is left
+    alone (a string payload can still hold a secret, but that requires knowing
+    the shape — these keys are the ones the platform itself defines)."""
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            if (
+                isinstance(key, str)
+                and key.strip().lower().replace("-", "_") in _LEDGER_SECRET_KEYS
+                and isinstance(item, str)
+                and item
+            ):
+                redacted[key] = "[redacted]"
+            else:
+                redacted[key] = redact_ledger_secrets(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_ledger_secrets(item) for item in value]
+    return value
+
+
 class TaskLedger:
     """Minimal durable task ledger for the thin Opus orchestrator."""
 
@@ -327,6 +368,12 @@ class TaskLedger:
 
     def create_task(self, task: TaskEnvelope) -> None:
         payload = task.model_dump(mode="json")
+        # browser.run envelopes can carry vault-injected credentials (auth ->
+        # credentials -> password). Keep the runtime copy untouched and redact
+        # only the audit copy; browser runs are never resumed from this ledger,
+        # so nothing replays a placeholder.
+        if str(task.intent or "").strip() == "browser.run":
+            payload = redact_ledger_secrets(payload)
         query = str(task.input.get("query") or "").strip() or None
         request_id = str(task.input.get("request_id") or "").strip() or None
         created_at = payload["created_at"]
@@ -397,7 +444,7 @@ class TaskLedger:
                 WHERE task_id = ?
                 """,
                 (
-                    json.dumps(result, ensure_ascii=False),
+                    json.dumps(redact_ledger_secrets(result), ensure_ascii=False),
                     completed_at,
                     completed_at,
                     task_id,
