@@ -111,6 +111,32 @@ def test_resolve_unknown_or_already_resolved_returns_none():
     asyncio.run(scenario())
 
 
+def test_wait_carries_the_page_url_for_vault_routing():
+    manager = BrowserInterruptManager()
+
+    async def scenario():
+        wait_task = asyncio.create_task(
+            manager.create_and_wait(
+                request_id="bwi_5",
+                question="Enter your password to continue.",
+                kind="password",
+                task_id="t1",
+                session_id="s1",
+                channel=None,
+                page_url="https://thewatersatchenal.petscreening.com/users/sign_in",
+                timeout_sec=30,
+            )
+        )
+        await asyncio.sleep(0.05)
+        pending = manager.get("bwi_5")
+        assert pending is not None
+        assert pending.page_url == "https://thewatersatchenal.petscreening.com/users/sign_in"
+        manager.skip("bwi_5")
+        await asyncio.wait_for(wait_task, timeout=2)
+
+    asyncio.run(scenario())
+
+
 def test_blank_request_id_is_rejected_without_hanging():
     manager = BrowserInterruptManager()
     result = asyncio.run(
