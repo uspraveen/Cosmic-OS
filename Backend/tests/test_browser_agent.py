@@ -150,8 +150,10 @@ def test_ask_user_bridge_prefers_model_declared_kind_over_keywords(browser_agent
     assert answer == "yes, continue"
     assert interrupt_log[-1]["kind"] == "confirm"
     assert interrupt_log[-1]["status"] == "answered"
-    # Non-secret kinds keep the answer text for the orchestrator's post-hoc view.
-    assert interrupt_log[-1]["answer"] == "yes, continue"
+    # No kind keeps the answer text: the classifier can be wrong, and a
+    # "generic" ask once carried a password into the orchestrator's context.
+    assert "answer" not in interrupt_log[-1]
+    assert interrupt_log[-1]["answer_length"] == len("yes, continue")
     assert browser_agent._http_client.last_request["kind"] == "confirm"
 
 

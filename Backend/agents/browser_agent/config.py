@@ -77,6 +77,12 @@ class BrowserAgentConfig:
 
     working_dir_root: Path = BACKEND_ROOT
     artifacts_root: Path = BACKEND_ROOT / "runs" / "artifacts"
+    # Playwright storage_state file carried across browser runs, so a login
+    # made in one run is still there for the next one instead of every retry
+    # starting at a sign-in page (and re-prompting the user for a password).
+    # Lives under Backend/ because the hardened browser-agent unit mounts the
+    # home directory read-only and only Backend is writable.
+    storage_state_path: Path | None = BACKEND_ROOT / "state" / "browser-agent" / "storage_state.json"
 
     # Session recall ledger (browser.recall_session) — mirrors the Firecrawl
     # specialist's own session-runs store exactly (agents/firecrawl_web_scrape
@@ -92,6 +98,15 @@ class BrowserAgentConfig:
         default_home = BACKEND_ROOT.parent.parent / "cosmic-browser-use" / "cosmic-browser-use"
         home = Path(_first_env("BROWSER_USE_HOME", default=str(default_home)))
         store_root = Path(_first_env("BROWSER_AGENT_STORE_ROOT", default=str(AGENT_ROOT / "store")))
+        storage_state_raw = _first_env(
+            "BROWSER_AGENT_STORAGE_STATE",
+            default=str(BACKEND_ROOT / "state" / "browser-agent" / "storage_state.json"),
+        )
+        storage_state_path = (
+            None
+            if storage_state_raw.strip().lower() in {"0", "off", "none", "disabled"}
+            else Path(storage_state_raw).expanduser()
+        )
         return cls(
             redis_url=_first_env("REDIS_URL", default="redis://127.0.0.1:6379/0"),
             gateway_url=_first_env("GATEWAY_URL", default="http://127.0.0.1:8080"),
@@ -107,6 +122,7 @@ class BrowserAgentConfig:
             ask_user_wait_sec=max(30, _env_int("BROWSER_AGENT_ASK_USER_TIMEOUT_SEC", 240)),
             working_dir_root=Path(_first_env("BROWSER_AGENT_WORKING_DIR_ROOT", default=str(BACKEND_ROOT))),
             artifacts_root=Path(_first_env("BROWSER_AGENT_ARTIFACTS_ROOT", default=str(BACKEND_ROOT / "runs" / "artifacts"))),
+            storage_state_path=storage_state_path,
             store_root=store_root,
             session_db_path=store_root / "data" / "browser_session_runs.db",
         )

@@ -292,6 +292,9 @@ class BrowserAgent(AgentRuntime):
                     ask_user_handler=ask_user_handler,
                     on_live_frame=on_live_frame,
                     working_dir_root=str(self.config.working_dir_root),
+                    storage_state_path=(
+                        str(self.config.storage_state_path) if self.config.storage_state_path else None
+                    ),
                     run_timeout_sec=min(self.config.run_timeout_sec, self.max_task_duration_sec),
                     takeover_session=takeover_session,
                     on_takeover_state=on_takeover_state,
@@ -1204,8 +1207,11 @@ class BrowserAgent(AgentRuntime):
 
         # Recorded for the orchestrator's post-hoc visibility (see
         # `user_interrupts` in handle_browser_run) regardless of outcome.
-        # Secret-bearing kinds never carry the actual answer text — only
-        # whether one was provided.
+        # The answer text never rides the result back to the orchestrator, for
+        # ANY kind: a "generic" ask can still be a password in disguise (the
+        # kind classifier only matches literal keywords), and that is exactly
+        # how a vault-bound secret once reached the orchestrator, the run
+        # ledger and the session store. Status and length only.
         log_entry: dict[str, Any] = {"question": question, "kind": kind}
 
         try:
@@ -1218,6 +1224,7 @@ class BrowserAgent(AgentRuntime):
                     "task_id": task.task_id,
                     "session_id": task.session_id,
                     "timeout_sec": timeout_sec,
+                    "page_url": str(live_state.get("url") or ""),
                 },
                 headers={"X-Internal-Token": self.gateway_internal_token},
                 timeout=timeout_sec + 15.0,
@@ -1236,8 +1243,7 @@ class BrowserAgent(AgentRuntime):
             answer = str(result.get("answer") or "").strip()
             if answer:
                 log_entry["status"] = "answered"
-                if kind not in ("password", "verification_code"):
-                    log_entry["answer"] = answer[:200]
+                log_entry["answer_length"] = len(answer)
                 interrupt_log.append(log_entry)
                 return answer
             log_entry["status"] = "empty_answer"
