@@ -3006,12 +3006,6 @@ kbd {
   background: rgba(0, 0, 0, 0.34);
 }
 
-/* The browser question card only renders while its run card sits in the
-   is-waiting attention state — echo that warm tone on the focused field. */
-.browser-run-interrupt .assistant-action-card-form input:focus {
-  border-color: rgba(230, 170, 60, 0.45);
-}
-
 /* ── Deck preview strip (per-slide renders) ──────────────────────────── */
 
 .deck-preview {
@@ -6143,11 +6137,203 @@ kbd {
   color: #fff;
 }
 
-.browser-run-interrupt {
-  width: 100%;
+/* Lock sheet: the waiting floor of the browser instrument, not a second card.
+   Bleeds to the parent card's radius so it reads as the paused browser's
+   keychain prompt rather than a nested approval surface. */
+.browser-run-ask {
+  margin: 14px -15px -12px;
+  padding: 13px 15px 12px;
+  border-top: 1px solid rgba(230, 170, 60, 0.2);
+  background: linear-gradient(180deg, rgba(230, 170, 60, 0.045), rgba(5, 6, 10, 0.16) 48%);
+}
+
+.browser-run-ask-identity {
+  min-width: 0;
+}
+
+.browser-run-ask-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: rgba(255, 248, 232, 0.96);
+  font-size: 15.5px;
+  font-weight: 600;
+  letter-spacing: -0.022em;
+  line-height: 1.15;
+}
+
+.browser-run-ask-title span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-run-ask-title svg {
+  flex: 0 0 auto;
+  color: rgba(255, 214, 140, 0.88);
+}
+
+.browser-run-ask-account {
+  margin: 4px 0 0 23px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.browser-run-ask-note {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 7px 0 0 23px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.browser-run-ask-compose {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-top: 12px;
-  margin-inline: 0;
-  padding: 14px;
+  padding: 4px 4px 4px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 60%),
+    rgba(0, 0, 0, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.browser-run-ask-compose:focus-within {
+  border-color: rgba(230, 170, 60, 0.55);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 0 0 3px rgba(230, 170, 60, 0.12);
+}
+
+.browser-run-ask-compose.is-confirm {
+  justify-content: flex-end;
+  padding: 4px;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.browser-run-ask-field {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 36px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  color: rgba(255, 255, 255, 0.94);
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+}
+
+.browser-run-ask-field[type='password'] {
+  letter-spacing: 0.12em;
+}
+
+.browser-run-ask-field::placeholder {
+  letter-spacing: 0;
+  color: rgba(255, 255, 255, 0.34);
+}
+
+.browser-run-ask-go {
+  flex: 0 0 auto;
+  height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 9px;
+  background: #e8b45a;
+  color: #16110a;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 720;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+}
+
+.browser-run-ask-go:hover:not(:disabled) {
+  background: #f0c36e;
+}
+
+.browser-run-ask-skip {
+  border: 0;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.38);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 560;
+  cursor: pointer;
+}
+
+.browser-run-ask-compose.is-confirm .browser-run-ask-skip {
+  margin-right: 10px;
+}
+
+.browser-run-ask-skip:hover:not(:disabled) {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.browser-run-ask-skip:disabled,
+.browser-run-ask-go:disabled {
+  cursor: wait;
+  opacity: 0.52;
+}
+
+.browser-run-ask-error {
+  margin-top: 8px;
+  color: rgba(255, 174, 191, 0.9);
+  font-size: 11.5px;
+}
+
+.browser-run-ask-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 18px;
+  margin-top: 8px;
+}
+
+.browser-run-ask-more {
+  margin-left: auto;
+}
+
+.browser-run-ask-more summary {
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.34);
+  font-size: 11.5px;
+  font-weight: 560;
+  list-style: none;
+}
+
+.browser-run-ask-more summary::-webkit-details-marker {
+  display: none;
+}
+
+.browser-run-ask-more div {
+  margin-top: 7px;
+  max-height: 5.6em;
+  overflow: auto;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 @media (prefers-reduced-motion: reduce) {

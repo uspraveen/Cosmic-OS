@@ -1,4 +1,4 @@
-import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, Mail, Maximize2, Mic, Minimize2, MousePointerClick, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
+import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, KeyRound, Mail, Maximize2, Mic, Minimize2, MousePointerClick, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
 import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
@@ -35,6 +35,7 @@ import { ContentCardStack, normalizeContentCard, type ContentCardBlock } from '.
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
+import { presentBrowserInterrupt } from './browserInterrupt'
 import { groupAssistantFlowEntries } from './assistantFlow'
 import { mergeSheetRunProgress, normalizeSheetProgress, sheetRunVisibleWindow, type SheetProgressState } from './sheetRunPreview'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
@@ -2290,14 +2291,6 @@ const resolveBrowserOutcome = (progress: BrowserProgressState): BrowserRunOutcom
   return { label: 'Done', stage: 'ready' }
 }
 
-const BROWSER_INTERRUPT_KIND_LABEL: Record<BrowserProgressInterrupt['kind'], string> = {
-  password: 'Password requested',
-  verification_code: 'Verification code needed',
-  confirm: 'Waiting on you',
-  blocked: 'Stuck — needs help',
-  generic: 'Needs your input',
-}
-
 /** 5x7 cells, one string per row — only the glyphs a clock needs. */
 const BROWSER_MATRIX_FONT: Record<string, string[]> = {
   '0': ['01110', '10001', '10011', '10101', '11001', '10001', '01110'],
@@ -2470,6 +2463,9 @@ const BrowserRunCard = ({
   )
   const interrupt = progress.interrupt
   const requestId = interrupt?.requestId || ''
+  const interruptView = interrupt
+    ? presentBrowserInterrupt(interrupt.question, interrupt.kind, progress.url)
+    : null
 
   useEffect(() => {
     setAnswer('')
@@ -2832,64 +2828,70 @@ const BrowserRunCard = ({
           )}
         </div>
       </div>
-      {interrupt && (
-        <div className="assistant-action-card browser-run-interrupt" data-kind="browser_ask_user">
-          <div className="assistant-action-card-head">
-            <div className="assistant-action-card-heading">
-              <span className="assistant-action-card-icon" aria-hidden="true">
-                <Shield size={15} />
-              </span>
-              <div className="assistant-action-card-heading-copy">
-                <div className="assistant-action-card-kicker">{BROWSER_INTERRUPT_KIND_LABEL[interrupt.kind]}</div>
-                <div className="assistant-action-card-title">{interrupt.question}</div>
-              </div>
+      {interrupt && interruptView && isAwaitingInput && (
+        <section className="browser-run-ask" data-kind={interrupt.kind} aria-label={interruptView.title}>
+          <div className="browser-run-ask-identity">
+            <div className="browser-run-ask-title">
+              {interrupt.kind === 'password' ? <KeyRound size={15} aria-hidden="true" /> : <Shield size={15} aria-hidden="true" />}
+              <span>{interruptView.title}</span>
             </div>
-            <div className="assistant-action-card-head-actions">
-              <div className={`assistant-action-card-status is-${localStatus}`}>{localStatus}</div>
-            </div>
+            {interruptView.username && (
+              <div className="browser-run-ask-account">{interruptView.username}</div>
+            )}
+            {!interruptView.username && interruptView.site && (
+              <div className="browser-run-ask-account">{interruptView.site}</div>
+            )}
+            {interruptView.summary && (
+              <p className="browser-run-ask-note">{interruptView.summary}</p>
+            )}
           </div>
-          {isAwaitingInput && interrupt.kind === 'confirm' ? (
-            <>
-              {error && <div className="assistant-action-card-error">{error}</div>}
-              <div className="assistant-action-card-actions">
-                <button type="button" className="assistant-action-button" disabled={Boolean(busy)} onClick={() => void skip()}>
+          {interrupt.kind === 'confirm' ? (
+            <div className="browser-run-ask-compose is-confirm">
+              <button type="button" className="browser-run-ask-skip" disabled={Boolean(busy)} onClick={() => void skip()}>
+                {busy === 'skip' ? 'Skipping…' : 'Skip'}
+              </button>
+              <button type="button" className="browser-run-ask-go" disabled={Boolean(busy)} onClick={() => void confirmDone()}>
+                {busy === 'answer' ? 'Continuing…' : interruptView.primaryAction}
+              </button>
+            </div>
+          ) : (
+            <div className="browser-run-ask-compose">
+              <input
+                className="browser-run-ask-field"
+                type={interrupt.kind === 'password' ? 'password' : 'text'}
+                value={answer}
+                autoComplete="off"
+                autoFocus
+                spellCheck={false}
+                aria-label={interruptView.fieldLabel}
+                onChange={(event) => setAnswer(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void submitAnswer()
+                }}
+                placeholder={interruptView.placeholder || interruptView.fieldLabel}
+              />
+              <button type="button" className="browser-run-ask-go" disabled={Boolean(busy)} onClick={() => void submitAnswer()}>
+                {busy === 'answer' ? 'Continuing…' : interruptView.primaryAction}
+              </button>
+            </div>
+          )}
+          {error && <div className="browser-run-ask-error">{error}</div>}
+          {(interrupt.kind !== 'confirm' || interruptView.leftover) && (
+            <div className="browser-run-ask-foot">
+              {interrupt.kind !== 'confirm' && (
+                <button type="button" className="browser-run-ask-skip" disabled={Boolean(busy)} onClick={() => void skip()}>
                   {busy === 'skip' ? 'Skipping…' : 'Skip'}
                 </button>
-                <button type="button" className="assistant-action-button is-primary" disabled={Boolean(busy)} onClick={() => void confirmDone()}>
-                  {busy === 'answer' ? 'Continuing…' : 'Done — continue'}
-                </button>
-              </div>
-            </>
-          ) : isAwaitingInput ? (
-            <>
-              <div className="assistant-action-card-form">
-                <label>
-                  <span>{interrupt.kind === 'password' ? 'Password' : interrupt.kind === 'verification_code' ? 'Code' : 'Your answer'}</span>
-                  <input
-                    type={interrupt.kind === 'password' ? 'password' : 'text'}
-                    value={answer}
-                    autoComplete="off"
-                    autoFocus
-                    onChange={(event) => setAnswer(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') void submitAnswer()
-                    }}
-                    placeholder={interrupt.kind === 'verification_code' ? '123456' : 'Type your reply'}
-                  />
-                </label>
-              </div>
-              {error && <div className="assistant-action-card-error">{error}</div>}
-              <div className="assistant-action-card-actions">
-                <button type="button" className="assistant-action-button" disabled={Boolean(busy)} onClick={() => void skip()}>
-                  {busy === 'skip' ? 'Skipping…' : 'Skip'}
-                </button>
-                <button type="button" className="assistant-action-button is-primary" disabled={Boolean(busy)} onClick={() => void submitAnswer()}>
-                  {busy === 'answer' ? 'Sending…' : 'Send'}
-                </button>
-              </div>
-            </>
-          ) : null}
-        </div>
+              )}
+              {interruptView.leftover && (
+                <details className="browser-run-ask-more">
+                  <summary>Details</summary>
+                  <div>{interruptView.leftover}</div>
+                </details>
+              )}
+            </div>
+          )}
+        </section>
       )}
       {lightboxOpen && createPortal(
         <div
