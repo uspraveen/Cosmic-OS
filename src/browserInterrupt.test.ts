@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { presentBrowserInterrupt } from './browserInterrupt'
+import { normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
 
 const ESSAY = (
   "I've reached a sign-in page (https://thewatersatchenal.petscreening.com/welcome/check_email?"
@@ -36,5 +36,29 @@ describe('presentBrowserInterrupt', () => {
     const presented = presentBrowserInterrupt('Which plan should I pick?', 'generic')
     expect(presented.title).toBe('Which plan should I pick?')
     expect(presented.leftover).toBeNull()
+  })
+})
+
+describe('normalizeInterruptOptions', () => {
+  it('trims, dedupes, and drops junk values', () => {
+    const options = normalizeInterruptOptions([
+      '  13500 Chenal Pkwy, Apt 2309  ',
+      '13500 chenal pkwy, apt 2309',
+      42,
+      '',
+      '   ',
+      'No pets',
+    ])
+    expect(options).toEqual(['13500 Chenal Pkwy, Apt 2309', 'No pets'])
+  })
+
+  it('ignores non-arrays and caps the list at six', () => {
+    expect(normalizeInterruptOptions(null)).toEqual([])
+    expect(normalizeInterruptOptions('not-a-list')).toEqual([])
+    expect(normalizeInterruptOptions(['1', '2', '3', '4', '5', '6', '7'])).toHaveLength(6)
+  })
+
+  it('drops options long enough to be an essay', () => {
+    expect(normalizeInterruptOptions(['x'.repeat(300)])).toEqual([])
   })
 })

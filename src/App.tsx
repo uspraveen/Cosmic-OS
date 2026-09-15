@@ -35,7 +35,7 @@ import { ContentCardStack, normalizeContentCard, type ContentCardBlock } from '.
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
-import { presentBrowserInterrupt } from './browserInterrupt'
+import { normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
 import { groupAssistantFlowEntries } from './assistantFlow'
 import { mergeSheetRunProgress, normalizeSheetProgress, sheetRunVisibleWindow, type SheetProgressState } from './sheetRunPreview'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
@@ -448,6 +448,8 @@ interface BrowserProgressInterrupt {
   question: string
   kind: 'password' | 'verification_code' | 'confirm' | 'blocked' | 'generic'
   status: 'pending' | 'answered' | 'skipped'
+  /** One-click answers the orchestrator suggested from what it remembers. */
+  options: string[]
 }
 
 interface BrowserProgressState {
@@ -1896,6 +1898,7 @@ const normalizeBrowserProgress = (value: unknown): BrowserProgressState | undefi
         status: interruptRaw?.status === 'answered' || interruptRaw?.status === 'skipped'
           ? interruptRaw.status
           : 'pending',
+        options: normalizeInterruptOptions(interruptRaw?.options),
       }
     : null
   return {
@@ -2680,9 +2683,10 @@ const BrowserRunCard = ({
   const handBackRef = useRef(handBack)
   handBackRef.current = handBack
 
-  const submitAnswer = async () => {
+  const submitAnswer = async (override?: string) => {
     if (!requestId || busy) return
-    if (!answer.trim()) {
+    const value = String(override ?? answer).trim()
+    if (!value) {
       setError('An answer is required.')
       return
     }
@@ -2691,7 +2695,7 @@ const BrowserRunCard = ({
     try {
       const bridge = window.cosmic?.browserRespondInterrupt
       if (!bridge) throw new Error('Browser answer action is unavailable.')
-      const result = await bridge(requestId, answer.trim())
+      const result = await bridge(requestId, value)
       if (String(result?.status || '').trim() === 'ignored') {
         throw new Error('This question was already answered or timed out.')
       }
@@ -2845,6 +2849,22 @@ const BrowserRunCard = ({
               <p className="browser-run-ask-note">{interruptView.summary}</p>
             )}
           </div>
+          {interrupt.kind !== 'confirm' && interrupt.options.length > 0 && (
+            <div className="browser-run-ask-options" role="list">
+              {interrupt.options.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  role="listitem"
+                  className="browser-run-ask-option"
+                  disabled={Boolean(busy)}
+                  onClick={() => void submitAnswer(option)}
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
+          )}
           {interrupt.kind === 'confirm' ? (
             <div className="browser-run-ask-compose is-confirm">
               <button type="button" className="browser-run-ask-skip" disabled={Boolean(busy)} onClick={() => void skip()}>

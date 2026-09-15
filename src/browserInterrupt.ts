@@ -44,6 +44,24 @@ const clip = (value: string, limit: number) => {
   return `${text.slice(0, Math.max(0, limit - 1)).trimEnd()}…`
 }
 
+/** Keep only plausible one-click answers from a raw options payload. */
+export const normalizeInterruptOptions = (raw: unknown): string[] => {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  const options: string[] = []
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const value = item.trim()
+    if (!value || value.length > 240) continue
+    const key = value.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    options.push(value)
+    if (options.length >= 6) break
+  }
+  return options
+}
+
 const hostnameOf = (value: string | null | undefined): string | null => {
   const raw = String(value || '').trim()
   if (!raw) return null
