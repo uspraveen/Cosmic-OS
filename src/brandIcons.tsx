@@ -35,7 +35,7 @@ export function CursorMark({ size = 20, mono = false }: { size?: number; mono?: 
   )
 }
 
-export function ZCodeMark({ size = 20 }: { size?: number }) {
+export function OpenCodeMark({
   size = 20,
   tone = 'dark',
 }: {
