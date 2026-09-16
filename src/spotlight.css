@@ -114,6 +114,14 @@ body,
   transition: background-color 0.4s ease, backdrop-filter 0.4s ease, opacity 0.3s ease, padding-top 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
+/* Meeting is the third full surface. It follows the user's wide-mode
+   preference instead of always running wide: off keeps the spotlight-card
+   panel it was designed for, on lifts it to the same ceiling as wide chat and
+   Spaces. Same expression as above — if one changes, change both. */
+.overlay.meeting-wide {
+  --chat-surface-width: min(1280px, calc(100vw - var(--task-rail-reserve, 0px) - 72px));
+}
+
 /* ========== RESPONSE CONTAINER ========== */
 .response-container {
   /* Width scales proportionally with viewport across displays — the previous hard 960px cap

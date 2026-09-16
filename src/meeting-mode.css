@@ -2443,3 +2443,111 @@
       0 4px 10px rgba(0, 0, 0, 0.08);
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Wide mode — same glass, tokens, and type as the compact panel; only the
+   layout breathes. The shell width comes from --chat-surface-width on
+   .overlay.meeting-wide (same ceiling as wide chat and Spaces). When the
+   preference is off, none of this applies and the panel is exactly what it
+   always was.
+   The layout rules live behind a 1160px viewport gate: below it the wide
+   surface is still panel-sized, so the compact arrangement has enough room
+   and the three-column active layout would only crowd itself.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.response-container.meeting-wide {
+  width: var(--chat-surface-width);
+  max-width: var(--chat-surface-width);
+  transition: width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), max-width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (min-width: 1160px) {
+  .response-container.meeting-wide .m-header {
+    padding: 18px 34px 12px;
+  }
+
+  .response-container.meeting-wide .m-page {
+    padding: 0 34px 26px;
+  }
+
+  /* ── Active: suggested | transcript | nudges/answers side by side.
+     The compact page stacks cues above the transcript inside the left
+     column; with width to spare they become their own columns so the
+     transcript keeps a full-height reading column. ── */
+  .response-container.meeting-wide .m-content-split {
+    gap: 14px;
+  }
+
+  .response-container.meeting-wide .m-col-left {
+    flex: 7.8 1 0;
+    flex-direction: row;
+    gap: 16px;
+  }
+
+  .response-container.meeting-wide .m-col-right {
+    flex: 4.2 1 0;
+  }
+
+  .response-container.meeting-wide .m-subcol {
+    min-width: 0;
+  }
+
+  .response-container.meeting-wide .m-subcol-suggested {
+    flex: 3.8 1 0;
+  }
+
+  .response-container.meeting-wide .m-subcol-transcript {
+    flex: 5.6 1 0;
+  }
+
+  .response-container.meeting-wide .m-subcol + .m-subcol {
+    border-top: none;
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  /* ── Setup: the form owns the left two-thirds and the defaults card docks
+     to the right at full column height, instead of both sharing narrow
+     grid rows. ── */
+  .response-container.meeting-wide .m-setup-form-grid {
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.2fr) minmax(0, 1fr);
+  }
+
+  .response-container.meeting-wide .m-setup-form-grid > .m-field:first-child {
+    grid-column: 1 / 3;
+  }
+
+  .response-container.meeting-wide .m-setup-form-grid > .m-settings-preview-card {
+    grid-column: 3;
+    grid-row: 1 / span 3;
+  }
+
+  .response-container.meeting-wide .m-setup-form-grid > .m-field-span {
+    grid-column: 1 / 3;
+  }
+
+  /* ── Selection: the two tiles get room to be the heroes of the page. ── */
+  .response-container.meeting-wide .m-selection-tiles {
+    gap: 18px;
+  }
+
+  .response-container.meeting-wide .m-select-tile {
+    padding: 20px 22px;
+  }
+
+  .response-container.meeting-wide .m-select-tile strong {
+    font-size: 22px;
+  }
+
+  /* ── Ended: prose lists on a full-bleed 1200px surface turn into 90-char
+     lines, so the report keeps a single centered reading measure. ── */
+  .response-container.meeting-wide .m-ended-hero,
+  .response-container.meeting-wide .m-kpis,
+  .response-container.meeting-wide .m-tabs,
+  .response-container.meeting-wide .m-tab-body,
+  .response-container.meeting-wide .m-ended > .m-row {
+    width: 100%;
+    max-width: 880px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}

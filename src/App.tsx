@@ -10032,6 +10032,7 @@ export default function App() {
     shouldShowResponseSurface ? 'has-response' : '',
     mode === 'spaces' ? 'spaces-active' : '',
     (chatWideMode && mode === 'chat') ? 'chat-wide' : '',
+    (chatWideMode && mode === 'meeting') ? 'meeting-wide' : '',
     (isInputFocused || shouldShowResponseSurface || isStreaming || mode === 'meeting' || mode === 'spaces') ? 'focused' : ''
   ].join(' ')
   const composerLaunchClass = surfaceLaunch?.target === 'chat' ? 'launcher-expand' : ''
@@ -10337,6 +10338,7 @@ export default function App() {
           containerRef={meetingSurfaceRef}
           containerClassName={meetingLaunchClass}
           containerStyle={meetingLaunchStyle}
+          wide={chatWideMode}
         />
 
         <SpacesControlCenter

@@ -25,6 +25,8 @@ interface MeetingModeProps {
   containerRef?: React.RefObject<HTMLDivElement | null>
   containerClassName?: string
   containerStyle?: React.CSSProperties
+  /** Wide-mode preference: lifts the surface to the shared full-surface width. */
+  wide?: boolean
 }
 
 interface TranscriptSegment {
@@ -219,6 +221,7 @@ export default function MeetingMode({
   containerRef,
   containerClassName,
   containerStyle,
+  wide,
 }: MeetingModeProps) {
   const [page, setPage] = useState<MeetingPage>('selection')
   const [meetingType, setMeetingType] = useState<MeetingType>('online')
@@ -1220,7 +1223,7 @@ export default function MeetingMode({
   return (
     <div
       ref={containerRef}
-      className={`response-container ${active ? 'visible' : ''} ${containerClassName || ''}`}
+      className={`response-container ${active ? 'visible' : ''} ${wide ? 'meeting-wide' : ''} ${containerClassName || ''}`}
       style={{ display: active ? 'flex' : 'none', ...containerStyle }}
       aria-hidden={!active}
     >
