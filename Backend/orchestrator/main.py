@@ -55,6 +55,21 @@ class BrowserInterruptResolveRequest(BaseModel):
     page_url: str | None = Field(default=None, max_length=2048)
 
 
+class BrowserCommitAuthorizeRequest(BaseModel):
+    session_id: str | None = Field(default=None, max_length=128)
+    task_id: str | None = Field(default=None, max_length=128)
+    channel: str | None = Field(default=None, max_length=128)
+    question: str = Field(default="", max_length=4000)
+    commit: dict = Field(default_factory=dict)
+    page_url: str | None = Field(default=None, max_length=2048)
+
+
+class BrowserCommitGrantRequest(BaseModel):
+    task_id: str = Field(..., min_length=1, max_length=128)
+    action_class: str = Field(default="submit", max_length=64)
+    ttl_sec: float | None = Field(default=None, ge=0, le=86400)
+
+
 def get_runtime(request: Request) -> OrchestratorRuntime:
     runtime = getattr(request.app.state, "orchestrator_runtime", None)
     if runtime is None:
@@ -179,6 +194,42 @@ async def resolve_browser_interrupt(
         page_url=body.page_url,
     )
     return {"ok": True, **decision}
+
+
+@app.post("/internal/browser-commit/authorize")
+async def authorize_browser_commit(
+    body: BrowserCommitAuthorizeRequest,
+    _: None = Depends(require_internal_token),
+    runtime: OrchestratorRuntime = Depends(get_runtime),
+) -> dict[str, object]:
+    """Can this browser commit proceed without asking the user?
+
+    Default confirm; authorize only when the user's own instruction explicitly
+    asked for it or a task-scoped grant already exists.
+    """
+    decision = await runtime.authorize_browser_commit(
+        session_id=body.session_id,
+        task_id=body.task_id,
+        question=body.question,
+        commit=body.commit,
+        page_url=body.page_url,
+    )
+    return {"ok": True, **decision}
+
+
+@app.post("/internal/browser-commit/grant")
+async def record_browser_commit_grant(
+    body: BrowserCommitGrantRequest,
+    _: None = Depends(require_internal_token),
+    runtime: OrchestratorRuntime = Depends(get_runtime),
+) -> dict[str, object]:
+    """Record "Approve all for this task" for a commit class."""
+    result = runtime.record_browser_commit_grant(
+        task_id=body.task_id,
+        action_class=body.action_class,
+        ttl_sec=body.ttl_sec,
+    )
+    return {"ok": True, **result}
 
 
 @app.post("/internal/reverse-tasks")

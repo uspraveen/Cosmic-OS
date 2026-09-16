@@ -37,6 +37,7 @@ class BrowserInterrupt:
     session_id: str | None
     channel: str | None
     page_url: str = ""
+    commit: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     status: str = "pending"  # pending | answered | skipped | timeout
     answer: str = ""
@@ -59,6 +60,7 @@ class BrowserInterruptManager:
         session_id: str | None,
         channel: str | None,
         page_url: str | None = None,
+        commit: dict[str, Any] | None = None,
         timeout_sec: float,
     ) -> dict[str, Any]:
         """Register a pending interrupt and block until it's resolved or times out."""
@@ -73,6 +75,7 @@ class BrowserInterruptManager:
             session_id=session_id,
             channel=channel,
             page_url=str(page_url or "").strip(),
+            commit=dict(commit) if isinstance(commit, dict) else {},
         )
         self._pending[request_id] = interrupt
         try:

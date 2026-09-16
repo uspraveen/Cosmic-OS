@@ -29,6 +29,8 @@ from shared.agent_runtime import AgentResult, AgentRuntime, TaskEnvelope
 from shared.contracts import AgentError, ArtifactManifest
 from shared.sqlite_client import connect_sync
 
+from orchestrator.commit_policy import commit_action_class
+
 from .config import AGENT_ROOT, BrowserAgentConfig
 
 logger = logging.getLogger(__name__)
@@ -242,6 +244,15 @@ class BrowserAgent(AgentRuntime):
         async def ask_user_handler(question: str, model_kind: str) -> str:
             return await self._ask_user_bridge(task, question, model_kind, live_state, interrupt_log)
 
+        # Sites + commit classes this run already got an "approve all" for.
+        # "Apply to 50 jobs" confirms once, then each submit flows through.
+        approved_commit_scopes: set[str] = set()
+
+        async def commit_gate_handler(payload: dict[str, Any]) -> dict[str, Any]:
+            return await self._commit_gate_bridge(
+                task, payload, live_state, interrupt_log, approved_commit_scopes
+            )
+
         live_frame_last_sent = {"at": 0.0, "interval": _LIVE_FRAME_MIN_INTERVAL_SEC}
 
         async def on_live_frame(frame_b64: str) -> None:
@@ -290,6 +301,7 @@ class BrowserAgent(AgentRuntime):
                     credentials=credentials,
                     on_progress=on_progress,
                     ask_user_handler=ask_user_handler,
+                    commit_gate_handler=commit_gate_handler,
                     on_live_frame=on_live_frame,
                     working_dir_root=str(self.config.working_dir_root),
                     storage_state_path=(
@@ -1256,6 +1268,119 @@ class BrowserAgent(AgentRuntime):
         log_entry["status"] = "timeout"
         interrupt_log.append(log_entry)
         raise RuntimeError(f"No response from the user within {int(timeout_sec)}s.")
+
+    @staticmethod
+    def _commit_scope_key(url: str, action_class: str) -> str:
+        try:
+            from urllib.parse import urlparse
+
+            host = (urlparse(str(url or "")).netloc or str(url or "")).lower()
+            host = host.split("@")[-1].split(":")[0]
+            if host.startswith("www."):
+                host = host[4:]
+        except Exception:
+            host = ""
+        return f"{host}|{str(action_class or 'submit').strip().lower() or 'submit'}"
+
+    async def _commit_gate_bridge(
+        self,
+        task: TaskEnvelope,
+        payload: dict[str, Any],
+        live_state: dict[str, Any],
+        interrupt_log: list[dict[str, Any]],
+        approved_scopes: set[str],
+    ) -> dict[str, Any]:
+        """Hold a browser commit until the orchestrator/user authorizes it.
+
+        Mirrors the AskUser bridge: the interrupt rides the live progress
+        stream on the BrowserRunCard, and this blocking call returns the
+        authorization. The orchestrator may authorize on the user's explicit
+        instruction; otherwise the card asks. "Approve all for this task" is
+        cached per site + action class for the rest of the run, so a batch of
+        applications asks once, not fifty times.
+        """
+        commit = payload if isinstance(payload, dict) else {}
+        page_url = str(commit.get("url") or live_state.get("url") or "").strip()
+        action_class = commit_action_class(commit)
+        scope_key = self._commit_scope_key(page_url, action_class)
+        if scope_key in approved_scopes:
+            return {"allowed": True, "reason": "approved for this task"}
+
+        control = commit.get("control") if isinstance(commit.get("control"), dict) else {}
+        target = str(commit.get("target") or control.get("name") or "this action").strip()[:160]
+        request_id = f"bwc_{uuid4().hex[:12]}"
+        timeout_sec = max(5.0, float(self.config.ask_user_wait_sec))
+        question = f"Confirm: {target}"
+
+        live_state["interrupt"] = {
+            "request_id": request_id,
+            "question": question,
+            "kind": "commit",
+            "status": "pending",
+            "commit": commit,
+        }
+        await self._emit_progress(task.task_id, question, browser_progress=dict(live_state))
+
+        async def _clear_interrupt() -> None:
+            live_state.pop("interrupt", None)
+            await self._emit_progress(task.task_id, "", browser_progress=dict(live_state))
+
+        # Post-hoc visibility only; the commit payload (with form values) never
+        # lands in the result — class, target and outcome are enough.
+        log_entry: dict[str, Any] = {
+            "question": question,
+            "kind": "commit",
+            "action_class": action_class,
+            "target": target,
+        }
+        try:
+            response = await self._http_client.post(
+                f"{self.gateway_url.rstrip('/')}/internal/browser/ask-user",
+                json={
+                    "request_id": request_id,
+                    "question": question,
+                    "kind": "commit",
+                    "task_id": task.task_id,
+                    "session_id": task.session_id,
+                    "timeout_sec": timeout_sec,
+                    "page_url": page_url,
+                    "commit": commit,
+                },
+                headers={"X-Internal-Token": self.gateway_internal_token},
+                timeout=timeout_sec + 15.0,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as exc:
+            await _clear_interrupt()
+            log_entry["status"] = "error"
+            log_entry["reason"] = f"authorization channel failed: {exc}"[:200]
+            interrupt_log.append(log_entry)
+            return {"allowed": False, "reason": f"authorization channel failed: {exc}"}
+
+        await _clear_interrupt()
+        answer = str(result.get("answer") or "").strip().lower()
+        if answer in {"approve_all", "approve-all", "approveall"}:
+            approved_scopes.add(scope_key)
+        allowed = answer in {
+            "approve",
+            "approve_all",
+            "approve-all",
+            "approveall",
+            "allowed",
+            "yes",
+        }
+        log_entry["status"] = "allowed" if allowed else str(result.get("status") or "denied")
+        if result.get("reason"):
+            log_entry["reason"] = str(result.get("reason"))[:200]
+        interrupt_log.append(log_entry)
+        return {
+            "allowed": allowed,
+            "reason": str(
+                result.get("reason")
+                or ("approved" if allowed else "the user did not authorize this action")
+            )[:200],
+        }
 
     @staticmethod
     def _safe_int(value: Any, default: int) -> int:

@@ -176,6 +176,71 @@ class OrchestratorClient:
             raise RuntimeError("Orchestrator interrupt resolver returned a non-object response")
         return payload
 
+    async def authorize_browser_commit(
+        self,
+        *,
+        session_id: str | None,
+        task_id: str | None,
+        question: str,
+        commit: dict[str, Any] | None,
+        page_url: str | None = None,
+        timeout_sec: float | None = None,
+    ) -> dict[str, Any]:
+        """Ask the orchestrator whether a browser commit may proceed.
+
+        Returns {"status": "authorize"|"confirm"|"deny", ...}; anything else
+        (error, timeout) is the caller's cue to fall through to the user's
+        confirmation card.
+        """
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Token": self.internal_token,
+        }
+        response = await self._client.post(
+            f"{self.base_url}/internal/browser-commit/authorize",
+            headers=headers,
+            json={
+                "session_id": session_id,
+                "task_id": task_id,
+                "question": str(question or ""),
+                "commit": commit if isinstance(commit, dict) else {},
+                "page_url": page_url,
+            },
+            timeout=timeout_sec if timeout_sec is not None else self._request_timeout,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(self._error_from_response(response.content, response.status_code))
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("Orchestrator commit authorizer returned a non-object response")
+        return payload
+
+    async def record_browser_commit_grant(
+        self,
+        *,
+        task_id: str,
+        action_class: str,
+        ttl_sec: float | None = None,
+    ) -> dict[str, Any]:
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Token": self.internal_token,
+        }
+        response = await self._client.post(
+            f"{self.base_url}/internal/browser-commit/grant",
+            headers=headers,
+            json={
+                "task_id": str(task_id or ""),
+                "action_class": str(action_class or "submit"),
+                "ttl_sec": ttl_sec,
+            },
+            timeout=self._request_timeout,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(self._error_from_response(response.content, response.status_code))
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
     def _error_from_response(self, body: bytes, status_code: int) -> str:
         try:
             payload = json.loads(body.decode("utf-8"))

@@ -70,6 +70,7 @@ from shared import (
     channel_supports_trusted_ui,
 )
 
+from .commit_policy import commit_action_class, commit_summary
 from .config import BACKEND_ROOT, OrchestratorConfig
 from .interrupt_memory import select_reused_answer
 from .prompts import build_agentic_system_prompt
@@ -351,6 +352,9 @@ class OrchestratorRuntime:
         self._featured_specialists_cache: list[dict[str, Any]] = []
         self._featured_specialists_refreshed_at: float = 0.0
         self._anthropic_input_file_cache: dict[tuple[str, str, str], str] = {}
+        # Commit grants: task_id|action_class -> expiry epoch. "Approve all for
+        # this task" on a commit card covers the rest of that batch.
+        self._commit_grants: dict[str, float] = {}
 
     def _featured_specialist_agent_ids(self) -> set[str]:
         return {
@@ -3547,6 +3551,100 @@ class OrchestratorRuntime:
             return None
         return parsed if isinstance(parsed, dict) else None
 
+    async def _fireworks_json_decision(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        session_id: str | None,
+        operation: str,
+        timeout_sec: float | None = None,
+    ) -> dict[str, Any] | None:
+        """One bounded, tool-less JSON decision on the orchestrator's brain.
+
+        Runs on the configured Fireworks provider (GLM by default); no other
+        provider is required. Returns the parsed object or None on any failure —
+        callers treat None as "escalate" / "confirm".
+        """
+        model = self._interrupt_resolver_model()
+        if not model:
+            return None
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "temperature": 0,
+        }
+        if "glm" in model.lower():
+            body["reasoning_effort"] = "low"
+        headers = {
+            "Authorization": f"Bearer {self.config.fireworks_api_key}",
+            "Content-Type": "application/json",
+        }
+        usage_context = {
+            "operation": operation,
+            "session_id": session_id,
+        }
+        metered_call = begin_metered_call(prefix="call")
+        provider_request_id: str | None = None
+        raw_usage: dict[str, Any] = {}
+        try:
+            response = await self._client.post(
+                f"{self.config.fireworks_base_url.rstrip('/')}/chat/completions",
+                headers=headers,
+                json=body,
+                timeout=timeout_sec or self._INTERRUPT_RESOLVER_TIMEOUT_SEC,
+            )
+            provider_request_id = (
+                response.headers.get("x-request-id")
+                or response.headers.get("request-id")
+                or response.headers.get("x-fireworks-request-id")
+                or None
+            )
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Fireworks decision HTTP {response.status_code}: {response.text[:200]}"
+                )
+            payload = response.json()
+            raw_usage = self._extract_openai_usage(payload) or {}
+            choices = payload.get("choices") if isinstance(payload, dict) else None
+            message: dict[str, Any] = {}
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                raw_message = choices[0].get("message")
+                if isinstance(raw_message, dict):
+                    message = raw_message
+            content = str(message.get("content") or "")
+            parsed = self._extract_json_object(content)
+        except Exception:
+            await self._record_internal_usage_event(
+                metered_call=metered_call,
+                model_key=build_model_key("fireworks", model),
+                usage_context=usage_context,
+                provider_request_id=provider_request_id,
+                raw_usage=raw_usage,
+                success=False,
+                error_code="decision_failed",
+                metadata_json={"streaming": False},
+            )
+            logger.warning(
+                "orchestrator.decision_call_failed operation=%s", operation, exc_info=True
+            )
+            return None
+        await self._record_internal_usage_event(
+            metered_call=metered_call,
+            model_key=build_model_key("fireworks", model),
+            usage_context=usage_context,
+            provider_request_id=provider_request_id,
+            raw_usage=raw_usage,
+            success=True,
+            error_code=None,
+            metadata_json={"streaming": False},
+        )
+        return parsed if isinstance(parsed, dict) else None
+
     async def _answer_interrupt_with_model(
         self,
         *,
@@ -3555,9 +3653,6 @@ class OrchestratorRuntime:
         page_url: str | None,
         rows: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
-        model = self._interrupt_resolver_model()
-        if not model:
-            return None
         facts: list[str] = []
         for row in rows[: self._INTERRUPT_RESOLVER_MAX_CONTEXT_ROWS]:
             prior_question = str(row.get("question") or "").strip()
@@ -3590,77 +3685,11 @@ class OrchestratorRuntime:
             + f"\n\nSPECIALIST QUESTION: {question}"
             + f"\nPAGE URL: {page_url or 'unknown'}"
         )
-        body: dict[str, Any] = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "stream": False,
-            "temperature": 0,
-        }
-        if "glm" in model.lower():
-            body["reasoning_effort"] = "low"
-        headers = {
-            "Authorization": f"Bearer {self.config.fireworks_api_key}",
-            "Content-Type": "application/json",
-        }
-        usage_context = {
-            "operation": "browser.interrupt_resolve",
-            "session_id": session_id,
-        }
-        metered_call = begin_metered_call(prefix="call")
-        provider_request_id: str | None = None
-        raw_usage: dict[str, Any] = {}
-        try:
-            response = await self._client.post(
-                f"{self.config.fireworks_base_url.rstrip('/')}/chat/completions",
-                headers=headers,
-                json=body,
-                timeout=self._INTERRUPT_RESOLVER_TIMEOUT_SEC,
-            )
-            provider_request_id = (
-                response.headers.get("x-request-id")
-                or response.headers.get("request-id")
-                or response.headers.get("x-fireworks-request-id")
-                or None
-            )
-            if response.status_code >= 400:
-                raise RuntimeError(
-                    f"Fireworks resolver HTTP {response.status_code}: {response.text[:200]}"
-                )
-            payload = response.json()
-            raw_usage = self._extract_openai_usage(payload) or {}
-            choices = payload.get("choices") if isinstance(payload, dict) else None
-            message = {}
-            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-                message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
-            content = str(message.get("content") or "")
-            parsed = self._extract_json_object(content)
-        except Exception:
-            await self._record_internal_usage_event(
-                metered_call=metered_call,
-                model_key=build_model_key("fireworks", model),
-                usage_context=usage_context,
-                provider_request_id=provider_request_id,
-                raw_usage=raw_usage,
-                success=False,
-                error_code="resolver_failed",
-                metadata_json={"streaming": False},
-            )
-            logger.warning(
-                "orchestrator.browser_interrupt_decider_failed model=%s", model, exc_info=True
-            )
-            return None
-        await self._record_internal_usage_event(
-            metered_call=metered_call,
-            model_key=build_model_key("fireworks", model),
-            usage_context=usage_context,
-            provider_request_id=provider_request_id,
-            raw_usage=raw_usage,
-            success=True,
-            error_code=None,
-            metadata_json={"streaming": False},
+        parsed = await self._fireworks_json_decision(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            session_id=session_id,
+            operation="browser.interrupt_resolve",
         )
         if not isinstance(parsed, dict):
             return None
@@ -3678,6 +3707,179 @@ class OrchestratorRuntime:
             "confidence": confidence,
             "reason": str(parsed.get("reason") or "")[:200],
         }
+
+    # Commit authorizations the user already granted, per task + action class.
+    # "Approve all for this task" lands here and covers the rest of the batch
+    # (apply to 50 jobs → one confirmation, not fifty).
+    _COMMIT_GRANT_TTL_SEC = 2 * 60 * 60
+
+    def _user_instruction_for_task(self, task_id: str | None) -> str:
+        """Nearest ancestor instruction actually written by the user.
+
+        The user's own words are the only thing that can pre-authorize a
+        commit; a specialist's goal (written by the orchestrator) never can.
+        Heartbeat/cron prompts are skipped.
+        """
+        record = self.task_ledger.get_task(str(task_id or "").strip()) if task_id else None
+        visited: set[str] = set()
+        for _ in range(6):
+            if not isinstance(record, dict):
+                break
+            current_id = str(record.get("task_id") or "").strip()
+            if not current_id or current_id in visited:
+                break
+            visited.add(current_id)
+            query = str(record.get("query") or "").strip()
+            if query and not query.lower().startswith("you are cosmic's heartbeat"):
+                return query[:1500]
+            parent = str(record.get("parent_task_id") or "").strip()
+            record = self.task_ledger.get_task(parent) if parent else None
+        return ""
+
+    def _task_commit_context(self, task_id: str | None) -> tuple[str, str]:
+        """(user_instruction, task_goal) for a browser task id."""
+        instruction = self._user_instruction_for_task(task_id)
+        goal = ""
+        record = self.task_ledger.get_task(str(task_id or "").strip()) if task_id else None
+        if isinstance(record, dict):
+            envelope = record.get("envelope_json")
+            if isinstance(envelope, dict):
+                raw_input = envelope.get("input")
+                if isinstance(raw_input, dict):
+                    goal = str(raw_input.get("goal") or "").strip()[:1500]
+        return instruction, goal
+
+    async def _authorize_commit_with_model(
+        self,
+        *,
+        session_id: str | None,
+        instruction: str,
+        goal: str,
+        question: str,
+        commit: dict[str, Any],
+        page_url: str | None,
+    ) -> dict[str, Any] | None:
+        fields = commit.get("fields") if isinstance(commit.get("fields"), list) else []
+        field_lines = [
+            f"  - {str(item.get('label') or '')[:60]}: {str(item.get('value') or '')[:120]}"
+            for item in fields[:12]
+            if isinstance(item, dict)
+        ]
+        system_prompt = (
+            "You are COSMIC deciding whether a specialist agent may perform a COMMIT "
+            "action on Praveen's behalf. A commit persists, submits, sends, deletes, "
+            "orders, or pays. USER INSTRUCTION is what Praveen actually asked for; "
+            "TASK GOAL is the specialist's briefing and is NOT authorization by "
+            "itself. Authorize ONLY when the user's own words explicitly ask for this "
+            "commit or for exactly this kind of action (for example: 'apply to 50 "
+            "jobs' covers each application submit; 'submit the form' covers that "
+            "form's submit; 'delete X' covers deleting X). If the instruction is "
+            "general, silent, or the commit goes beyond what was asked, choose "
+            "confirm. When in doubt, confirm — a wrong commit changes the real world.\n"
+            'Return STRICT JSON only: {"decision":"authorize"|"confirm","reason":"..."}.'
+        )
+        user_prompt = (
+            f"USER INSTRUCTION: {instruction or '(none found)'}\n"
+            f"TASK GOAL: {goal or '(none)'}\n"
+            f"COMMIT: {commit_summary(commit)}\n"
+            f"COMMIT FIELDS:\n{chr(10).join(field_lines) if field_lines else '  (none)'}\n"
+            f"SPECIALIST QUESTION: {question}\n"
+            f"PAGE URL: {page_url or commit.get('url') or 'unknown'}"
+        )
+        return await self._fireworks_json_decision(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            session_id=session_id,
+            operation="browser.commit_authorize",
+        )
+
+    async def authorize_browser_commit(
+        self,
+        *,
+        session_id: str | None,
+        task_id: str | None,
+        question: str,
+        commit: dict[str, Any] | None,
+        page_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Decide whether a browser commit may proceed without asking the user.
+
+        Default is confirm. The orchestrator authorizes on its own only when
+        the user's own instruction explicitly asked for the action, or when the
+        user already approved this class for this task ("Approve all"). Any
+        doubt, missing context, or model failure resolves to confirm — never to
+        a silent commit.
+        """
+        normalized_commit = commit if isinstance(commit, dict) else {}
+        action_class = commit_action_class(normalized_commit)
+        normalized_task_id = str(task_id or "").strip()
+        grant_key = f"{normalized_task_id}|{action_class}"
+        expires_at = self._commit_grants.get(grant_key)
+        if expires_at and expires_at > time.time():
+            return {
+                "status": "authorize",
+                "source": "grant",
+                "action_class": action_class,
+                "reason": "previously approved for this task",
+            }
+        instruction, goal = self._task_commit_context(normalized_task_id)
+        if not instruction and not goal:
+            return {
+                "status": "confirm",
+                "source": "no_context",
+                "action_class": action_class,
+                "reason": "no explicit instruction to rely on",
+            }
+        decision = await self._authorize_commit_with_model(
+            session_id=session_id,
+            instruction=instruction,
+            goal=goal,
+            question=question,
+            commit=normalized_commit,
+            page_url=page_url,
+        )
+        if isinstance(decision, dict) and str(decision.get("decision") or "").strip().lower() == "authorize":
+            logger.info(
+                "orchestrator.browser_commit_authorized source=model task_id=%s action=%s target=%s",
+                normalized_task_id,
+                action_class,
+                commit_summary(normalized_commit)[:160],
+            )
+            return {
+                "status": "authorize",
+                "source": "model",
+                "action_class": action_class,
+                "reason": str(decision.get("reason") or "")[:200],
+            }
+        return {
+            "status": "confirm",
+            "source": "model" if isinstance(decision, dict) else "model_unavailable",
+            "action_class": action_class,
+            "reason": str((decision or {}).get("reason") or "needs the user's confirmation")[:200],
+        }
+
+    def record_browser_commit_grant(
+        self,
+        *,
+        task_id: str | None,
+        action_class: str | None = None,
+        ttl_sec: float | None = None,
+    ) -> dict[str, Any]:
+        """Remember "Approve all for this task" for a task + commit class."""
+        normalized_task_id = str(task_id or "").strip()
+        normalized_class = str(action_class or "submit").strip().lower() or "submit"
+        if not normalized_task_id:
+            return {"ok": False, "reason": "task_id is required"}
+        self._commit_grants[f"{normalized_task_id}|{normalized_class}"] = time.time() + float(
+            ttl_sec or self._COMMIT_GRANT_TTL_SEC
+        )
+        logger.info(
+            "orchestrator.browser_commit_grant_recorded task_id=%s action=%s",
+            normalized_task_id,
+            normalized_class,
+        )
+        return {"ok": True, "task_id": normalized_task_id, "action_class": normalized_class}
+
 
     async def accept_reverse_task(self, task: TaskEnvelope) -> dict[str, Any]:
         if task.recipient != self.config.orchestrator_agent_id:

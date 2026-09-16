@@ -137,6 +137,34 @@ def test_wait_carries_the_page_url_for_vault_routing():
     asyncio.run(scenario())
 
 
+def test_wait_carries_the_commit_payload_for_the_card():
+    manager = BrowserInterruptManager()
+
+    async def scenario():
+        wait_task = asyncio.create_task(
+            manager.create_and_wait(
+                request_id="bwc_1",
+                question="Confirm: Submit application",
+                kind="commit",
+                task_id="t1",
+                session_id="s1",
+                channel=None,
+                page_url="https://jobs.example.com/apply/42",
+                commit={"target": "Submit application", "control": {"matched": ["submit", "apply"]}},
+                timeout_sec=30,
+            )
+        )
+        await asyncio.sleep(0.05)
+        pending = manager.get("bwc_1")
+        assert pending is not None
+        assert pending.kind == "commit"
+        assert pending.commit["target"] == "Submit application"
+        manager.skip("bwc_1")
+        await asyncio.wait_for(wait_task, timeout=2)
+
+    asyncio.run(scenario())
+
+
 def test_blank_request_id_is_rejected_without_hanging():
     manager = BrowserInterruptManager()
     result = asyncio.run(

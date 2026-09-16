@@ -17,6 +17,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from orchestrator.commit_policy import commit_action_class
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["browser"])
@@ -35,6 +37,7 @@ class AskUserRequest(BaseModel):
     session_id: str | None = None
     channel: str | None = None
     page_url: str | None = None
+    commit: dict[str, Any] | None = None
     timeout_sec: float = 240.0
 
 
@@ -104,6 +107,48 @@ async def internal_ask_user(body: AskUserRequest, request: Request) -> dict[str,
     runtime = request.app.state.gateway_runtime
     timeout_sec = min(max(float(body.timeout_sec or 240.0), _MIN_WAIT_SEC), _MAX_WAIT_SEC)
     kind = str(body.kind or "generic").strip().lower()
+    commit = body.commit if isinstance(body.commit, dict) else {}
+    # Commits (submit/apply/save/delete/pay...) are authorized first, always:
+    # the orchestrator may authorize on the user's explicit instruction or
+    # escalate; the default is a confirmation card showing what will happen.
+    if kind == "commit":
+        auth_budget = min(25.0, max(5.0, timeout_sec - 15.0))
+        try:
+            decision = await runtime.orchestrator.authorize_browser_commit(
+                session_id=body.session_id,
+                task_id=body.task_id,
+                question=question,
+                commit=commit,
+                page_url=body.page_url,
+                timeout_sec=auth_budget,
+            )
+        except Exception:
+            decision = None
+            logger.warning("browser.commit_authorizer_failed", exc_info=True)
+        if isinstance(decision, dict):
+            status = str(decision.get("status") or "").strip().lower()
+            if status == "authorize":
+                logger.info(
+                    "browser.commit_authorized task_id=%s source=%s",
+                    body.task_id,
+                    decision.get("source"),
+                )
+                return {
+                    "request_id": str(body.request_id or "").strip(),
+                    "status": "answered",
+                    "answer": "approve",
+                    "source": str(decision.get("source") or "orchestrator_authority"),
+                    "reason": str(decision.get("reason") or "")[:200],
+                }
+            if status == "deny":
+                return {
+                    "request_id": str(body.request_id or "").strip(),
+                    "status": "answered",
+                    "answer": "deny",
+                    "source": "orchestrator",
+                    "reason": str(decision.get("reason") or "")[:200],
+                }
+        # confirm (or anything unexpected): the human card below decides.
     # Context questions (address, phone, which option) get one deterministic
     # check against what the user already told the orchestrator this session
     # before a human is bothered at all. Secrets and physical actions skip
@@ -157,6 +202,7 @@ async def internal_ask_user(body: AskUserRequest, request: Request) -> dict[str,
         session_id=body.session_id,
         channel=body.channel,
         page_url=body.page_url,
+        commit=commit,
         timeout_sec=timeout_sec,
     )
     return result
@@ -231,6 +277,22 @@ async def respond_interrupt(request_id: str, body: RespondInterruptRequest, requ
         # here, so saving it never requires the plaintext to pass through the
         # orchestrator's context (the route that leaked last time).
         await _offer_password_to_vault(runtime, interrupt, answer)
+    elif interrupt.kind == "commit" and str(answer).strip().lower() in {
+        "approve_all",
+        "approve-all",
+        "approveall",
+    }:
+        # "Approve all for this task": the rest of the batch (apply to 50 jobs)
+        # skips the card entirely, scoped to this task + action class.
+        try:
+            await runtime.orchestrator.record_browser_commit_grant(
+                task_id=str(getattr(interrupt, "task_id", "") or ""),
+                action_class=commit_action_class(
+                    interrupt.commit if isinstance(interrupt.commit, dict) else {}
+                ),
+            )
+        except Exception:
+            logger.warning("browser.commit_grant_record_failed", exc_info=True)
     return {"status": "answered", "request_id": interrupt.request_id}
 
 
