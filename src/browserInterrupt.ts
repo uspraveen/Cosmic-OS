@@ -5,7 +5,20 @@
  * and an optional account, and keep the rest behind a fold.
  */
 
-export type BrowserInterruptKind = 'password' | 'verification_code' | 'confirm' | 'blocked' | 'generic'
+export type BrowserInterruptKind = 'password' | 'verification_code' | 'confirm' | 'blocked' | 'generic' | 'commit'
+
+export interface BrowserInterruptCommitField {
+  label: string
+  value: string
+}
+
+export interface BrowserInterruptCommit {
+  target: string
+  url: string
+  irreversible: boolean
+  actionClass: string
+  fields: BrowserInterruptCommitField[]
+}
 
 export interface BrowserInterruptPresentation {
   kicker: string
@@ -28,6 +41,7 @@ const KICKER: Record<BrowserInterruptKind, string> = {
   confirm: 'Waiting on you',
   blocked: 'Stuck — needs help',
   generic: 'Needs your input',
+  commit: 'Confirm before it happens',
 }
 
 const TITLE: Record<BrowserInterruptKind, string> = {
@@ -36,6 +50,7 @@ const TITLE: Record<BrowserInterruptKind, string> = {
   confirm: 'Your turn',
   blocked: 'This page is stuck',
   generic: 'The browser needs an answer',
+  commit: 'Confirm this action',
 }
 
 const clip = (value: string, limit: number) => {
@@ -60,6 +75,42 @@ export const normalizeInterruptOptions = (raw: unknown): string[] => {
     if (options.length >= 6) break
   }
   return options
+}
+
+/** Normalize the commit payload a browser gate attaches to its card. */
+export const normalizeInterruptCommit = (raw: unknown): BrowserInterruptCommit | null => {
+  if (!raw || typeof raw !== 'object') return null
+  const record = raw as Record<string, unknown>
+  const control = record.control && typeof record.control === 'object'
+    ? (record.control as Record<string, unknown>)
+    : {}
+  const target = typeof record.target === 'string'
+    ? record.target.trim().slice(0, 200)
+    : typeof control.name === 'string'
+      ? control.name.trim().slice(0, 200)
+      : ''
+  const url = typeof record.url === 'string' ? record.url.trim().slice(0, 500) : ''
+  const actionClass = typeof record.action_class === 'string' && record.action_class.trim()
+    ? record.action_class.trim().slice(0, 40)
+    : 'submit'
+  const fields: BrowserInterruptCommitField[] = []
+  const rawFields = Array.isArray(record.fields) ? record.fields : []
+  for (const item of rawFields) {
+    if (!item || typeof item !== 'object') continue
+    const entry = item as Record<string, unknown>
+    const label = typeof entry.label === 'string' ? entry.label.trim().slice(0, 80) : ''
+    const value = typeof entry.value === 'string' ? entry.value.trim().slice(0, 200) : ''
+    if (!label && !value) continue
+    fields.push({ label, value })
+    if (fields.length >= 20) break
+  }
+  return {
+    target: target || 'this action',
+    url,
+    irreversible: record.irreversible === true,
+    actionClass,
+    fields,
+  }
 }
 
 const hostnameOf = (value: string | null | undefined): string | null => {
@@ -135,8 +186,22 @@ export const presentBrowserInterrupt = (
     username,
     summary: keepEssay ? summary : null,
     leftover: compactLeftover || null,
-    fieldLabel: kind === 'password' ? 'Password' : kind === 'verification_code' ? 'Code' : 'Your answer',
-    primaryAction: kind === 'password' || kind === 'verification_code' || kind === 'confirm' ? 'Continue' : 'Send',
-    placeholder: kind === 'password' ? '' : kind === 'verification_code' ? '6-digit code' : 'Your answer',
+    fieldLabel: kind === 'password'
+      ? 'Password'
+      : kind === 'verification_code'
+        ? 'Code'
+        : kind === 'commit'
+          ? 'Decision'
+          : 'Your answer',
+    primaryAction: kind === 'password' || kind === 'verification_code' || kind === 'confirm' || kind === 'commit'
+      ? 'Continue'
+      : 'Send',
+    placeholder: kind === 'password'
+      ? ''
+      : kind === 'verification_code'
+        ? '6-digit code'
+        : kind === 'commit'
+          ? ''
+          : 'Your answer',
   }
 }

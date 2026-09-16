@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
+import {
+  normalizeInterruptCommit,
+  normalizeInterruptOptions,
+  presentBrowserInterrupt,
+} from './browserInterrupt'
 
 const ESSAY = (
   "I've reached a sign-in page (https://thewatersatchenal.petscreening.com/welcome/check_email?"
@@ -60,5 +64,46 @@ describe('normalizeInterruptOptions', () => {
 
   it('drops options long enough to be an essay', () => {
     expect(normalizeInterruptOptions(['x'.repeat(300)])).toEqual([])
+  })
+})
+
+describe('normalizeInterruptCommit', () => {
+  it('keeps the target, fields, and the irreversible flag', () => {
+    const commit = normalizeInterruptCommit({
+      target: 'Delete account',
+      url: 'https://example.com/settings',
+      irreversible: true,
+      action_class: 'delete',
+      control: { matched: ['delete'] },
+      fields: [
+        { label: 'Account', value: 'uspraveenraj@gmail.com' },
+        { label: 'Reason', value: 'moving out' },
+      ],
+    })
+    expect(commit).not.toBeNull()
+    expect(commit?.target).toBe('Delete account')
+    expect(commit?.irreversible).toBe(true)
+    expect(commit?.actionClass).toBe('delete')
+    expect(commit?.fields).toEqual([
+      { label: 'Account', value: 'uspraveenraj@gmail.com' },
+      { label: 'Reason', value: 'moving out' },
+    ])
+  })
+
+  it('falls back to the control name and defaults the class', () => {
+    const commit = normalizeInterruptCommit({ control: { name: 'Submit application' } })
+    expect(commit?.target).toBe('Submit application')
+    expect(commit?.actionClass).toBe('submit')
+    expect(commit?.fields).toEqual([])
+  })
+
+  it('returns null for junk and caps field lists', () => {
+    expect(normalizeInterruptCommit(null)).toBeNull()
+    expect(normalizeInterruptCommit('nope')).toBeNull()
+    const many = Array.from({ length: 40 }, (_, index) => ({
+      label: `Field ${index}`,
+      value: `Value ${index}`,
+    }))
+    expect(normalizeInterruptCommit({ target: 'x', fields: many })?.fields).toHaveLength(20)
   })
 })

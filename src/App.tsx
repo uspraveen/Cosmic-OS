@@ -35,7 +35,7 @@ import { ContentCardStack, normalizeContentCard, type ContentCardBlock } from '.
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
-import { normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
+import { normalizeInterruptCommit, normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
 import { groupAssistantFlowEntries } from './assistantFlow'
 import { mergeSheetRunProgress, normalizeSheetProgress, sheetRunVisibleWindow, type SheetProgressState } from './sheetRunPreview'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
@@ -448,10 +448,12 @@ interface BrowserProgressScreenshot {
 interface BrowserProgressInterrupt {
   requestId: string
   question: string
-  kind: 'password' | 'verification_code' | 'confirm' | 'blocked' | 'generic'
+  kind: 'password' | 'verification_code' | 'confirm' | 'blocked' | 'generic' | 'commit'
   status: 'pending' | 'answered' | 'skipped'
   /** One-click answers the orchestrator suggested from what it remembers. */
   options: string[]
+  /** What a commit card is about to submit/apply/delete/pay. */
+  commit: import('./browserInterrupt').BrowserInterruptCommit | null
 }
 
 interface BrowserProgressState {
@@ -1895,12 +1897,14 @@ const normalizeBrowserProgress = (value: unknown): BrowserProgressState | undefi
           || interruptRaw?.kind === 'verification_code'
           || interruptRaw?.kind === 'confirm'
           || interruptRaw?.kind === 'blocked'
+          || interruptRaw?.kind === 'commit'
           ? interruptRaw.kind
           : 'generic',
         status: interruptRaw?.status === 'answered' || interruptRaw?.status === 'skipped'
           ? interruptRaw.status
           : 'pending',
         options: normalizeInterruptOptions(interruptRaw?.options),
+        commit: normalizeInterruptCommit(interruptRaw?.commit),
       }
     : null
   return {
@@ -2851,7 +2855,7 @@ const BrowserRunCard = ({
               <p className="browser-run-ask-note">{interruptView.summary}</p>
             )}
           </div>
-          {interrupt.kind !== 'confirm' && interrupt.options.length > 0 && (
+          {interrupt.kind !== 'confirm' && interrupt.kind !== 'commit' && interrupt.options.length > 0 && (
             <div className="browser-run-ask-options" role="list">
               {interrupt.options.map((option) => (
                 <button
@@ -2867,7 +2871,52 @@ const BrowserRunCard = ({
               ))}
             </div>
           )}
-          {interrupt.kind === 'confirm' ? (
+          {interrupt.kind === 'commit' && interrupt.commit ? (
+            <div className="browser-run-ask-commit">
+              <div className="browser-run-ask-commit-head">
+                <span className="browser-run-ask-commit-target">{interrupt.commit.target}</span>
+                {interrupt.commit.irreversible && (
+                  <span className="browser-run-ask-commit-flag">irreversible</span>
+                )}
+              </div>
+              {interrupt.commit.fields.length > 0 && (
+                <dl className="browser-run-ask-commit-fields">
+                  {interrupt.commit.fields.map((field, index) => (
+                    <div key={`${field.label}-${index}`}>
+                      <dt>{field.label || 'Field'}</dt>
+                      <dd>{field.value || '—'}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+              <div className="browser-run-ask-compose is-confirm">
+                <button
+                  type="button"
+                  className="browser-run-ask-skip"
+                  disabled={Boolean(busy)}
+                  onClick={() => void submitAnswer('deny')}
+                >
+                  {busy === 'answer' ? 'Sending…' : 'Deny'}
+                </button>
+                <button
+                  type="button"
+                  className="browser-run-ask-option"
+                  disabled={Boolean(busy)}
+                  onClick={() => void submitAnswer('approve_all')}
+                >
+                  Approve all for this task
+                </button>
+                <button
+                  type="button"
+                  className="browser-run-ask-go"
+                  disabled={Boolean(busy)}
+                  onClick={() => void submitAnswer('approve')}
+                >
+                  {busy === 'answer' ? 'Approving…' : 'Approve'}
+                </button>
+              </div>
+            </div>
+          ) : interrupt.kind === 'confirm' ? (
             <div className="browser-run-ask-compose is-confirm">
               <button type="button" className="browser-run-ask-skip" disabled={Boolean(busy)} onClick={() => void skip()}>
                 {busy === 'skip' ? 'Skipping…' : 'Skip'}
