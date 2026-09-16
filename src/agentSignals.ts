@@ -17,10 +17,8 @@ export type GlyphId =
   | 'x'
   | 'youtube'
   | 'gmail'
-  | 'firecrawl'
-  // Tinted functional marks -- drawn as their own glyph rather than a logo we
-  // would only approximate. Calendar and schedule stay neutral monoline marks.
   | 'calendar'
+  | 'firecrawl'
   | 'gdocs'
   | 'gsheets'
   // Neutral functional marks.
@@ -76,6 +74,7 @@ const BRAND = {
   x: '#FFFFFF',
   youtube: '#FF0033',
   gmail: '#EA4335',
+  calendar: '#1A73E8',
   firecrawl: '#FF6A1F',
   gdocs: '#4285F4',
   gsheets: '#34A853',

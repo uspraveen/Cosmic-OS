@@ -81,10 +81,10 @@ describe('resolveAgentSignal', () => {
     expect(resolveAgentSignal({ label: 'Creating reminder: Portfolio new visitor check' }).brand).toBeUndefined()
   })
 
-  it('keeps Google Calendar on the calendar mark without a product tint', () => {
+  it('gives Google Calendar its real mark, in Google blue like Gmail', () => {
     const result = resolveAgentSignal({ intent: 'calendar.create_event', label: 'made an event' })
     expect(result.glyph).toBe('calendar')
-    expect(result.brand).toBeUndefined()
+    expect(result.brand).toBe('#1A73E8')
   })
 
   it('maps an explicit thinking kind to the brain mark, and prose to the ball', () => {
