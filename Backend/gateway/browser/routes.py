@@ -50,6 +50,14 @@ class RespondInterruptRequest(BaseModel):
     answer: str = ""
 
 
+class CommitMissRequest(BaseModel):
+    label: str
+    url: str | None = None
+    task_id: str | None = None
+    session_id: str | None = None
+    action_class: str | None = None
+
+
 class TakeoverControlRequest(BaseModel):
     """Pause/resume for a live browser run.
 
@@ -294,6 +302,41 @@ async def respond_interrupt(request_id: str, body: RespondInterruptRequest, requ
         except Exception:
             logger.warning("browser.commit_grant_record_failed", exc_info=True)
     return {"status": "answered", "request_id": interrupt.request_id}
+
+
+@router.post("/internal/browser/commit-miss")
+async def internal_commit_miss(body: CommitMissRequest, request: Request) -> dict[str, Any]:
+    """Record a commit label the deterministic classifier did not flag.
+
+    The browser model declared it a commit (RequestCommitAuthorization); the
+    label feeds the next expansion of the deterministic verb list. Append-only
+    and best-effort — this must never block an authorization flow.
+    """
+    _check_internal_token(request)
+    runtime = request.app.state.gateway_runtime
+    label = str(body.label or "").strip()[:200]
+    if not label:
+        return {"status": "ignored"}
+    from ..commit_miss import commit_miss_path, record_commit_miss
+
+    path = commit_miss_path(runtime.config.sessions_db_path)
+    recorded = record_commit_miss(
+        path,
+        {
+            "label": label,
+            "url": str(body.url or "")[:500],
+            "task_id": str(body.task_id or ""),
+            "session_id": str(body.session_id or ""),
+            "action_class": str(body.action_class or ""),
+        },
+    )
+    logger.info(
+        "browser.commit_miss label=%s task_id=%s recorded=%s",
+        label,
+        body.task_id,
+        recorded,
+    )
+    return {"status": "recorded" if recorded else "failed", "path": str(path)}
 
 
 @router.post("/channels/browser/interrupts/{request_id}/skip")

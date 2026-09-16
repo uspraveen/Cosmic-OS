@@ -236,6 +236,131 @@ def test_ask_user_bridge_logs_skip_and_timeout(browser_agent):
     assert interrupt_log[-1]["status"] == "timeout"
 
 
+class _FakeCommitClient:
+    """Routes by URL: ask-user responses are scripted, commit-miss posts are
+    recorded."""
+
+    def __init__(self, frames):
+        self._frames = list(frames)
+        self.ask_requests: list[dict] = []
+        self.miss_requests: list[dict] = []
+
+    async def post(self, url: str, *, json: dict, headers: dict, timeout: float):
+        if str(url).endswith("/internal/browser/commit-miss"):
+            self.miss_requests.append(json)
+            return _FakeAskUserResponse({"status": "recorded"})
+        self.ask_requests.append(json)
+        payload = self._frames.pop(0) if self._frames else {"status": "timeout"}
+        return _FakeAskUserResponse(payload)
+
+
+_COMMIT_PAYLOAD = {
+    "action": "click",
+    "target": "Submit application",
+    "control": {"name": "Submit application", "is_submit_control": True, "matched": ["submit", "apply"]},
+    "irreversible": False,
+    "fields": [],
+    "url": "https://jobs.example.com/apply/42",
+}
+
+
+def _gate_state() -> dict:
+    return {"scopes": set(), "once": {}}
+
+
+def test_commit_gate_bridge_allows_and_remembers_one_approval(browser_agent):
+    client = _FakeCommitClient([{"status": "answered", "answer": "approve"}])
+    browser_agent._http_client = client
+    state = _gate_state()
+    log: list = []
+
+    decision = __import__("asyncio").run(
+        browser_agent._commit_gate_bridge(_task({"goal": "g"}), _COMMIT_PAYLOAD, {}, log, state)
+    )
+    assert decision["allowed"] is True
+    assert len(client.ask_requests) == 1
+    assert client.ask_requests[0]["kind"] == "commit"
+
+    # The automatic gate fires on the click that follows; it must not re-ask.
+    again = __import__("asyncio").run(
+        browser_agent._commit_gate_bridge(_task({"goal": "g"}), _COMMIT_PAYLOAD, {}, log, state)
+    )
+    assert again["allowed"] is True
+    assert len(client.ask_requests) == 1
+    assert log[-1]["kind"] == "commit"
+    assert log[-1]["status"] == "allowed"
+
+
+def test_commit_gate_bridge_approve_all_covers_the_batch(browser_agent):
+    client = _FakeCommitClient([{"status": "answered", "answer": "approve_all"}])
+    browser_agent._http_client = client
+    state = _gate_state()
+    log: list = []
+
+    first = __import__("asyncio").run(
+        browser_agent._commit_gate_bridge(_task({"goal": "g"}), _COMMIT_PAYLOAD, {}, log, state)
+    )
+    assert first["allowed"] is True
+
+    other = {
+        **_COMMIT_PAYLOAD,
+        "target": "Submit application number two",
+        "control": {"name": "Submit application number two", "matched": ["submit"]},
+    }
+    second = __import__("asyncio").run(
+        browser_agent._commit_gate_bridge(_task({"goal": "g"}), other, {}, log, state)
+    )
+    assert second["allowed"] is True
+    assert "approved for this task" in second["reason"]
+    assert len(client.ask_requests) == 1
+
+
+def test_commit_gate_bridge_denied_is_recorded_as_denied(browser_agent):
+    client = _FakeCommitClient([{"status": "answered", "answer": "deny"}])
+    browser_agent._http_client = client
+    log: list = []
+
+    decision = __import__("asyncio").run(
+        browser_agent._commit_gate_bridge(_task({"goal": "g"}), _COMMIT_PAYLOAD, {}, log, _gate_state())
+    )
+    assert decision["allowed"] is False
+    assert log[-1]["status"] == "denied"
+
+
+def test_model_declared_miss_is_harvested(browser_agent):
+    client = _FakeCommitClient([{"status": "answered", "answer": "approve"}])
+    browser_agent._http_client = client
+    log: list = []
+    payload = {
+        **_COMMIT_PAYLOAD,
+        "source": "model_request",
+        "model_declared": True,
+        "classifier_miss": True,
+        "target": "File return",
+    }
+
+    decision = __import__("asyncio").run(
+        browser_agent._commit_gate_bridge(_task({"goal": "g"}), payload, {}, log, _gate_state())
+    )
+    assert decision["allowed"] is True
+    assert client.miss_requests
+    assert client.miss_requests[0]["label"] == "File return"
+    assert client.miss_requests[0]["action_class"] == "submit"
+    assert any(entry.get("classifier_miss") for entry in log)
+
+
+def test_commit_once_cache_matches_role_prefixed_targets(browser_agent):
+    state = _gate_state()
+    browser_agent._remember_commit_once(state, "jobs.example.com|submit", "Submit application")
+    assert (
+        browser_agent._commit_once_hit(state, "jobs.example.com|submit", "button 'Submit application'")
+        is True
+    )
+    # Consumed once, and never across sites.
+    browser_agent._remember_commit_once(state, "jobs.example.com|submit", "Submit application")
+    assert browser_agent._commit_once_hit(state, "other.example.com|submit", "Submit application") is False
+
+
 def test_attach_progress_screenshot_copies_and_stamps_artifact(browser_agent, tmp_path):
     from shared.contracts import TaskEnvelope
 

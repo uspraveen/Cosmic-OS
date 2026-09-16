@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -244,13 +245,14 @@ class BrowserAgent(AgentRuntime):
         async def ask_user_handler(question: str, model_kind: str) -> str:
             return await self._ask_user_bridge(task, question, model_kind, live_state, interrupt_log)
 
-        # Sites + commit classes this run already got an "approve all" for.
-        # "Apply to 50 jobs" confirms once, then each submit flows through.
-        approved_commit_scopes: set[str] = set()
+        # Commit gate state for this run: site+class grants from "Approve all
+        # for this task", plus short-lived single approvals so a model-declared
+        # hold followed by the automatic gate on the same control asks once.
+        commit_gate_state: dict[str, Any] = {"scopes": set(), "once": {}}
 
         async def commit_gate_handler(payload: dict[str, Any]) -> dict[str, Any]:
             return await self._commit_gate_bridge(
-                task, payload, live_state, interrupt_log, approved_commit_scopes
+                task, payload, live_state, interrupt_log, commit_gate_state
             )
 
         live_frame_last_sent = {"at": 0.0, "interval": _LIVE_FRAME_MIN_INTERVAL_SEC}
@@ -1282,13 +1284,72 @@ class BrowserAgent(AgentRuntime):
             host = ""
         return f"{host}|{str(action_class or 'submit').strip().lower() or 'submit'}"
 
+    @staticmethod
+    def _normalize_commit_target(target: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(target or "").lower())[:80]
+
+    def _commit_once_hit(self, gate_state: dict[str, Any], scope_key: str, target: str) -> bool:
+        """A just-approved single commit covers the automatic gate that follows.
+
+        The model may pre-authorize a control, then click it — the click hits
+        the automatic gate for the same control moments later. Matching the
+        normalized target inside the same site+class window means one card,
+        not two.
+        """
+        now = time.time()
+        once: dict[tuple[str, str, float], bool] = gate_state.setdefault("once", {})
+        for key in list(once.keys()):
+            if key[2] < now:
+                once.pop(key, None)
+        wanted = self._normalize_commit_target(target)
+        if not wanted:
+            return False
+        for key in list(once.keys()):
+            if key[0] != scope_key:
+                continue
+            known = key[1]
+            if known and (known in wanted or wanted in known):
+                once.pop(key, None)
+                return True
+        return False
+
+    def _remember_commit_once(self, gate_state: dict[str, Any], scope_key: str, target: str) -> None:
+        normalized = self._normalize_commit_target(target)
+        if normalized:
+            once: dict[tuple[str, str, float], bool] = gate_state.setdefault("once", {})
+            once[(scope_key, normalized, time.time() + 120.0)] = True
+
+    async def _record_commit_miss(
+        self,
+        task: TaskEnvelope,
+        target: str,
+        page_url: str,
+        action_class: str,
+    ) -> None:
+        """Best-effort: the model declared a commit the classifier did not flag."""
+        try:
+            await self._http_client.post(
+                f"{self.gateway_url.rstrip('/')}/internal/browser/commit-miss",
+                json={
+                    "label": str(target or "")[:200],
+                    "url": str(page_url or "")[:500],
+                    "task_id": task.task_id,
+                    "session_id": task.session_id,
+                    "action_class": action_class,
+                },
+                headers={"X-Internal-Token": self.gateway_internal_token},
+                timeout=5.0,
+            )
+        except Exception:
+            logger.debug("browser_agent.commit_miss_record_failed", exc_info=True)
+
     async def _commit_gate_bridge(
         self,
         task: TaskEnvelope,
         payload: dict[str, Any],
         live_state: dict[str, Any],
         interrupt_log: list[dict[str, Any]],
-        approved_scopes: set[str],
+        gate_state: dict[str, Any],
     ) -> dict[str, Any]:
         """Hold a browser commit until the orchestrator/user authorizes it.
 
@@ -1297,17 +1358,24 @@ class BrowserAgent(AgentRuntime):
         authorization. The orchestrator may authorize on the user's explicit
         instruction; otherwise the card asks. "Approve all for this task" is
         cached per site + action class for the rest of the run, so a batch of
-        applications asks once, not fifty times.
+        applications asks once, not fifty times. Model-declared holds for
+        controls the classifier missed are recorded for list harvesting.
         """
         commit = payload if isinstance(payload, dict) else {}
         page_url = str(commit.get("url") or live_state.get("url") or "").strip()
         action_class = commit_action_class(commit)
         scope_key = self._commit_scope_key(page_url, action_class)
-        if scope_key in approved_scopes:
+        if scope_key in gate_state.get("scopes", set()):
             return {"allowed": True, "reason": "approved for this task"}
 
         control = commit.get("control") if isinstance(commit.get("control"), dict) else {}
         target = str(commit.get("target") or control.get("name") or "this action").strip()[:160]
+        if self._commit_once_hit(gate_state, scope_key, target):
+            return {"allowed": True, "reason": "just approved for this control"}
+
+        is_model_declared_miss = bool(commit.get("classifier_miss")) and str(
+            commit.get("source") or ""
+        ) == "model_request"
         request_id = f"bwc_{uuid4().hex[:12]}"
         timeout_sec = max(5.0, float(self.config.ask_user_wait_sec))
         question = f"Confirm: {target}"
@@ -1333,6 +1401,9 @@ class BrowserAgent(AgentRuntime):
             "action_class": action_class,
             "target": target,
         }
+        if is_model_declared_miss:
+            log_entry["model_declared"] = True
+            log_entry["classifier_miss"] = True
         try:
             response = await self._http_client.post(
                 f"{self.gateway_url.rstrip('/')}/internal/browser/ask-user",
@@ -1361,7 +1432,7 @@ class BrowserAgent(AgentRuntime):
         await _clear_interrupt()
         answer = str(result.get("answer") or "").strip().lower()
         if answer in {"approve_all", "approve-all", "approveall"}:
-            approved_scopes.add(scope_key)
+            gate_state.setdefault("scopes", set()).add(scope_key)
         allowed = answer in {
             "approve",
             "approve_all",
@@ -1370,7 +1441,18 @@ class BrowserAgent(AgentRuntime):
             "allowed",
             "yes",
         }
-        log_entry["status"] = "allowed" if allowed else str(result.get("status") or "denied")
+        if allowed and answer not in {"approve_all", "approve-all", "approveall"}:
+            self._remember_commit_once(gate_state, scope_key, target)
+        if is_model_declared_miss:
+            # Harvest the label for the deterministic list. Best-effort and
+            # outside the decision path: it can never change the outcome.
+            await self._record_commit_miss(task, target, page_url, action_class)
+        if allowed:
+            log_entry["status"] = "allowed"
+        elif answer in {"deny", "denied", "no", "reject", "rejected"}:
+            log_entry["status"] = "denied"
+        else:
+            log_entry["status"] = str(result.get("status") or "denied")
         if result.get("reason"):
             log_entry["reason"] = str(result.get("reason"))[:200]
         interrupt_log.append(log_entry)

@@ -9,6 +9,7 @@ a silent commit.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -231,3 +232,20 @@ def test_non_fireworks_provider_never_calls_a_model(tmp_path):
     )
     assert decision["status"] == "confirm"
     assert calls == []
+
+
+def test_commit_miss_labels_are_appended_for_harvesting(tmp_path):
+    from gateway.commit_miss import commit_miss_path, record_commit_miss
+
+    path = commit_miss_path(tmp_path / "gateway" / "sessions.db")
+    assert path.name == "browser_commit_misses.jsonl"
+
+    assert record_commit_miss(path, {"label": "File return", "task_id": "t1"}) is True
+    assert record_commit_miss(path, {"label": "Transmit"}) is True
+
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    first = json.loads(lines[0])
+    assert first["label"] == "File return"
+    assert first["task_id"] == "t1"
+    assert "at" in first
