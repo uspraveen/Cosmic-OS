@@ -9657,6 +9657,38 @@ export default function App() {
     }
   }
 
+  /* SpacesControlCenter is memoized because one render pass over it costs
+   * 100ms+, so the handlers it receives must keep stable identities across
+   * App re-renders. Each bridge forwards to the freshest closure (these
+   * handlers read refs and setState only, but their transitive dependencies
+   * — e.g. handleSubmit — churn on every keystroke), which keeps behavior
+   * identical to passing the plain functions while memo can actually skip. */
+  const spacesHandlersRef = useRef({
+    showChatComposer,
+    openChatWithPrompt,
+    handleShowLauncherTray,
+    hideHoverTooltip,
+    showHoverTooltipForElement,
+  })
+  spacesHandlersRef.current = {
+    showChatComposer,
+    openChatWithPrompt,
+    handleShowLauncherTray,
+    hideHoverTooltip,
+    showHoverTooltipForElement,
+  }
+  const spacesOnBackToChat = useCallback(() => spacesHandlersRef.current.showChatComposer(), [])
+  const spacesOnPromptChat = useCallback((prompt: string) => spacesHandlersRef.current.openChatWithPrompt(prompt), [])
+  const spacesOnMinimize = useCallback(() => spacesHandlersRef.current.handleShowLauncherTray(), [])
+  const spacesOnHideTooltip = useCallback(() => spacesHandlersRef.current.hideHoverTooltip(), [])
+  const spacesOnShowTooltip = useCallback(
+    (label: string, element: HTMLElement) => spacesHandlersRef.current.showHoverTooltipForElement(label, element, 'launcher'),
+    [],
+  )
+  const spacesOnClose = useCallback(() => {
+    window.cosmic?.hide()
+  }, [])
+
   const handleLauncherTileClick = (tile: LauncherTileId, event: React.MouseEvent<HTMLButtonElement>) => {
     hideHoverTooltip()
     const rect = event.currentTarget.getBoundingClientRect()
@@ -10024,12 +10056,12 @@ export default function App() {
     } as React.CSSProperties)
     : undefined
   const spacesLaunchClass = surfaceLaunch?.target === 'spaces' ? 'launcher-expand' : ''
-  const spacesLaunchStyle = surfaceLaunch?.target === 'spaces'
+  const spacesLaunchStyle = useMemo(() => (surfaceLaunch?.target === 'spaces'
     ? ({
       ['--launch-offset-x' as string]: `${surfaceLaunch.spacesOffsetX}px`,
       ['--launch-offset-y' as string]: `${surfaceLaunch.spacesOffsetY}px`,
     } as React.CSSProperties)
-    : undefined
+    : undefined), [surfaceLaunch])
   const overlayStyle = {
     pointerEvents: searchState === 'visible' ? 'auto' : 'none',
     ['--task-rail-reserve' as string]: taskRailLayout ? `${taskRailLayout.reserve}px` : '0px',
@@ -10315,12 +10347,12 @@ export default function App() {
           pendingTaskCount={pendingTaskCount}
           pendingCronCount={orderedCronResultNotifications.length}
           selectedModelLabel={MODEL_OPTIONS.find((item) => item.id === selectedModel)?.label || 'Cosmic'}
-          onBackToChat={showChatComposer}
-          onPromptChat={openChatWithPrompt}
-          onMinimize={handleShowLauncherTray}
-          onClose={() => window.cosmic?.hide()}
-          onShowTooltip={(label, el) => showHoverTooltipForElement(label, el, 'launcher')}
-          onHideTooltip={hideHoverTooltip}
+          onBackToChat={spacesOnBackToChat}
+          onPromptChat={spacesOnPromptChat}
+          onMinimize={spacesOnMinimize}
+          onClose={spacesOnClose}
+          onShowTooltip={spacesOnShowTooltip}
+          onHideTooltip={spacesOnHideTooltip}
           containerRef={spacesSurfaceRef}
           containerClassName={spacesLaunchClass}
           containerStyle={spacesLaunchStyle}

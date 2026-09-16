@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentPropsWithoutRef, CSSProperties, MouseEvent as ReactMouseEvent, RefObject } from 'react'
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -1485,7 +1485,11 @@ const SESSION_MARKDOWN_REHYPE = [rehypeKatex]
 type MarkdownElementProps<Tag extends keyof HTMLElementTagNameMap> = ComponentPropsWithoutRef<Tag> & { node?: unknown }
 type MarkdownCodeProps = MarkdownElementProps<'code'> & { inline?: boolean }
 
-function SessionMessageMarkdown({ source }: { source: string }) {
+/* Memoized on `source`: a session transcript re-renders whenever the spaces
+ * tree does (clock ticks, list refreshes, page switches), and re-running the
+ * remark/rehype pipeline for every unchanged message on each of those passes
+ * is what made the sessions page janky. Same source string → same output. */
+const SessionMessageMarkdown = memo(function SessionMessageMarkdown({ source }: { source: string }) {
   const text = String(source ?? '').trim()
   return (
     <div className="response-content spaces-sessions-msg-markdown-host">
@@ -1538,7 +1542,7 @@ function SessionMessageMarkdown({ source }: { source: string }) {
       </ReactMarkdown>
     </div>
   )
-}
+})
 
 function sessionRoleLabel(role: string): string {
   const normalized = String(role || '').trim().toLowerCase()
@@ -2272,7 +2276,7 @@ function SpacesActionIcon({ kind }: { kind: 'chat' | 'minimize' | 'close' }) {
   )
 }
 
-export default function SpacesControlCenter({
+function SpacesControlCenter({
   active,
   gatewayState,
   gatewayConnected,
@@ -2561,9 +2565,11 @@ export default function SpacesControlCenter({
   }, [manageMetrics])
 
   useEffect(() => {
+    if (!active) return
+    setNow(new Date())
     const timer = setInterval(() => setNow(new Date()), 60000)
     return () => clearInterval(timer)
-  }, [])
+  }, [active])
   const calendarRefreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const calendarGeneratedAtRef = useRef(0)
 
@@ -9062,3 +9068,12 @@ export default function SpacesControlCenter({
     </div>
   )
 }
+
+/* Memoized at the boundary: this surface is permanently mounted inside the
+ * overlay (the open/close transition is CSS-driven), and one pass through its
+ * render function costs well over 100ms. Without memo, every App state change
+ * — each gateway event, stream chunk, hover tooltip — re-rendered the whole
+ * control center, which is what saturated the main thread and made the spaces
+ * screen (and ctrl+shift+space) feel hung whenever an agent was active. The
+ * handlers App passes it must therefore keep stable identities. */
+export default memo(SpacesControlCenter)
