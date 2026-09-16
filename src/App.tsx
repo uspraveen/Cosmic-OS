@@ -2468,6 +2468,11 @@ const BrowserRunCard = ({
   // Commit card inline corrections, keyed by field index. Only edited values
   // (different from what the card received) travel with the approval.
   const [commitEdits, setCommitEdits] = useState<Record<number, string>>({})
+  // "Say something in addition": an instruction that rides with whichever
+  // action the user takes (approve, deny, an option chip). Offered on every
+  // card except the secret ones — a password answer is consumed verbatim.
+  const [note, setNote] = useState('')
+  const [noteOpen, setNoteOpen] = useState(false)
   const [busy, setBusy] = useState<'answer' | 'skip' | null>(null)
   const [error, setError] = useState('')
   const [localStatus, setLocalStatus] = useState<'pending' | 'answered' | 'skipped'>(
@@ -2482,6 +2487,8 @@ const BrowserRunCard = ({
   useEffect(() => {
     setAnswer('')
     setCommitEdits({})
+    setNote('')
+    setNoteOpen(false)
     setError('')
     setBusy(null)
     setLocalStatus(interrupt?.status || 'pending')
@@ -2719,10 +2726,11 @@ const BrowserRunCard = ({
     }
     setBusy('answer')
     setError('')
+    const userNote = note.trim() !== '' ? note.trim().slice(0, 500) : undefined
     try {
       const bridge = window.cosmic?.browserRespondInterrupt
       if (!bridge) throw new Error('Browser answer action is unavailable.')
-      const result = await bridge(requestId, value, fieldEdits)
+      const result = await bridge(requestId, value, fieldEdits, userNote)
       if (String(result?.status || '').trim() === 'ignored') {
         throw new Error('This question was already answered or timed out.')
       }
@@ -2759,10 +2767,11 @@ const BrowserRunCard = ({
     if (!requestId || busy) return
     setBusy('answer')
     setError('')
+    const userNote = note.trim() !== '' ? note.trim().slice(0, 500) : undefined
     try {
       const bridge = window.cosmic?.browserRespondInterrupt
       if (!bridge) throw new Error('Browser answer action is unavailable.')
-      const result = await bridge(requestId, 'Done')
+      const result = await bridge(requestId, 'Done', undefined, userNote)
       if (String(result?.status || '').trim() === 'ignored') {
         throw new Error('This question was already answered or timed out.')
       }
@@ -2990,6 +2999,42 @@ const BrowserRunCard = ({
               <button type="button" className="browser-run-ask-go" disabled={Boolean(busy)} onClick={() => void submitAnswer()}>
                 {busy === 'answer' ? 'Continuing…' : interruptView.primaryAction}
               </button>
+            </div>
+          )}
+          {interrupt.kind !== 'password' && interrupt.kind !== 'verification_code' && !runEnded && (
+            <div className="browser-run-ask-note">
+              {noteOpen ? (
+                <>
+                  <textarea
+                    className="browser-run-ask-note-field"
+                    value={note}
+                    rows={2}
+                    autoComplete="off"
+                    spellCheck={false}
+                    aria-label="Say something in addition"
+                    placeholder="e.g. approve, but uncheck the newsletter box · use my other email next time"
+                    onChange={(event) => setNote(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                        event.preventDefault()
+                        void submitAnswer()
+                      }
+                    }}
+                  />
+                  <div className="browser-run-ask-note-hint">
+                    Sent with whichever action you take on this card — the agent reads it as an instruction.
+                  </div>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="browser-run-ask-note-toggle"
+                  disabled={Boolean(busy)}
+                  onClick={() => setNoteOpen(true)}
+                >
+                  + Say something in addition
+                </button>
+              )}
             </div>
           )}
           {error && <div className="browser-run-ask-error">{error}</div>}

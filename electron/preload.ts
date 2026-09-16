@@ -213,7 +213,7 @@ contextBridge.exposeInMainWorld('cosmic', {
     ipcRenderer.invoke('vault:approve-pending', requestId, payload || { grant: 'once' }),
   vaultRejectPending: (requestId: string) => ipcRenderer.invoke('vault:reject-pending', requestId),
   vaultProvidePending: (requestId: string, payload: any) => ipcRenderer.invoke('vault:provide-pending', requestId, payload),
-  browserRespondInterrupt: (requestId: string, answer: string, fieldEdits?: Array<{ label: string; value: string }>) => ipcRenderer.invoke('browser:respond-interrupt', requestId, answer, fieldEdits || []),
+  browserRespondInterrupt: (requestId: string, answer: string, fieldEdits?: Array<{ label: string; value: string }>, note?: string) => ipcRenderer.invoke('browser:respond-interrupt', requestId, answer, fieldEdits || [], note || ''),
   browserSkipInterrupt: (requestId: string) => ipcRenderer.invoke('browser:skip-interrupt', requestId),
   browserPauseRun: (taskId: string) => ipcRenderer.invoke('browser:pause-run', taskId),
   browserResumeRun: (taskId: string, note: string) => ipcRenderer.invoke('browser:resume-run', taskId, note),

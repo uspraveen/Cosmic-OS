@@ -2765,7 +2765,7 @@ app.whenReady().then(() => {
     })
   })
 
-  ipcMain.handle('browser:respond-interrupt', async (_, requestId: string, answer: string, fieldEdits?: Array<{ label: string; value: string }>) => {
+  ipcMain.handle('browser:respond-interrupt', async (_, requestId: string, answer: string, fieldEdits?: Array<{ label: string; value: string }>, note?: string) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {
       throw new Error('Gateway connection is not configured.')
@@ -2783,9 +2783,12 @@ app.whenReady().then(() => {
         .slice(0, 20)
         .map((edit) => ({ label: edit.label.slice(0, 80), value: edit.value.slice(0, 200) }))
       : []
+    // Any card: "say something in addition" — an instruction that rides with
+    // the action the user took.
+    const userNote = typeof note === 'string' ? note.trim().slice(0, 500) : ''
     return callGatewayJson(config, `/channels/browser/interrupts/${encodeURIComponent(String(requestId || '').trim())}/respond`, {
       method: 'POST',
-      body: { answer: String(answer || ''), field_edits: edits },
+      body: { answer: String(answer || ''), field_edits: edits, note: userNote },
     })
   })
 

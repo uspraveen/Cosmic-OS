@@ -43,6 +43,10 @@ class BrowserInterrupt:
     # for fields the card actually showed — the engine writes them into the
     # form just before the authorized commit fires.
     field_edits: list[dict[str, str]] = field(default_factory=list)
+    # "Say something in addition": free-text instruction the user attached to
+    # whatever action they took (approve, deny, an option chip). Distinct from
+    # the answer itself — it rides alongside, for the agent to act on.
+    note: str = ""
     created_at: float = field(default_factory=time.time)
     status: str = "pending"  # pending | answered | skipped | timeout
     answer: str = ""
@@ -93,6 +97,7 @@ class BrowserInterruptManager:
                 "status": interrupt.status,
                 "answer": interrupt.answer,
                 "field_edits": list(interrupt.field_edits),
+                "note": interrupt.note,
             }
         finally:
             self._pending.pop(request_id, None)
@@ -102,6 +107,7 @@ class BrowserInterruptManager:
         request_id: str,
         answer: str,
         field_edits: list[dict[str, str]] | None = None,
+        note: str = "",
     ) -> BrowserInterrupt | None:
         interrupt = self._pending.get((request_id or "").strip())
         if interrupt is None or interrupt.status != "pending":
@@ -115,6 +121,7 @@ class BrowserInterruptManager:
             for value in [str(edit.get("value") or "").strip()[:200]]
             if label and value
         ]
+        interrupt.note = str(note or "").strip()[:500]
         interrupt.status = "answered"
         interrupt.event.set()
         return interrupt

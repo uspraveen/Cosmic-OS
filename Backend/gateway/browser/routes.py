@@ -50,6 +50,10 @@ class RespondInterruptRequest(BaseModel):
     answer: str = ""
     # Commit cards only: values the user corrected inline before approving.
     field_edits: list[dict[str, Any]] | None = None
+    # Any card: "say something in addition" — an instruction attached to
+    # whichever action the user took. Distinct from the answer; the agent
+    # acts on it (e.g. "approve, but uncheck the newsletter box").
+    note: str = ""
 
 
 _APPROVING_ANSWERS = {"approve", "approve_all", "approve-all", "approveall", "allowed", "yes"}
@@ -306,6 +310,7 @@ async def respond_interrupt(request_id: str, body: RespondInterruptRequest, requ
         request_id,
         answer,
         field_edits=_sanitize_field_edits(body.field_edits) if answer.lower() in _APPROVING_ANSWERS else None,
+        note=str(body.note or "").strip()[:500],
     )
     if interrupt is None:
         raise HTTPException(

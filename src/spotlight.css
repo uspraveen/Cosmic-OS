@@ -6356,6 +6356,52 @@ kbd {
   font-size: 11.5px;
 }
 
+/* "Say something in addition": an instruction that rides with whichever
+   action the user takes. Collapsed to one quiet line until wanted. */
+.browser-run-ask-note {
+  margin-top: 8px;
+}
+
+.browser-run-ask-note-toggle {
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.browser-run-ask-note-toggle:hover:not(:disabled) {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.browser-run-ask-note-field {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  outline: none;
+  background: rgba(0, 0, 0, 0.35);
+  color: rgba(255, 255, 255, 0.94);
+  font: inherit;
+  font-size: 12.5px;
+  resize: vertical;
+}
+
+.browser-run-ask-note-field:focus {
+  border-color: rgba(120, 190, 255, 0.55);
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.browser-run-ask-note-hint {
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 11px;
+}
+
 .browser-run-ask-commit .browser-run-ask-compose {
   margin-top: 10px;
 }

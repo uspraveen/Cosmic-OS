@@ -1257,6 +1257,13 @@ class BrowserAgent(AgentRuntime):
             if answer:
                 log_entry["status"] = "answered"
                 log_entry["answer_length"] = len(answer)
+                # "Say something in addition". Only appended on prose kinds —
+                # a password/code answer is consumed as the secret itself and
+                # must stay verbatim; those cards never offer the note field.
+                note = str(result.get("note") or "").strip()
+                if note and kind in {"generic", "confirm", "blocked"}:
+                    log_entry["note"] = note[:200]
+                    answer = f"{answer}\n\nUser note: {note[:500]}"
                 interrupt_log.append(log_entry)
                 return answer
             log_entry["status"] = "empty_answer"
@@ -1454,6 +1461,13 @@ class BrowserAgent(AgentRuntime):
             log_entry["status"] = str(result.get("status") or "denied")
         if result.get("reason"):
             log_entry["reason"] = str(result.get("reason"))[:200]
+        # "Say something in addition": the user's instruction travels with
+        # whichever way they decided, so the engine can surface it to the
+        # model — on a deny it lands in the block reason the model reads;
+        # on an approval it becomes a note for the next step.
+        user_note = str(result.get("note") or "").strip()[:500]
+        if user_note:
+            log_entry["note"] = user_note
         interrupt_log.append(log_entry)
         decision: dict[str, Any] = {
             "allowed": allowed,
@@ -1462,6 +1476,8 @@ class BrowserAgent(AgentRuntime):
                 or ("approved" if allowed else "the user did not authorize this action")
             )[:200],
         }
+        if user_note:
+            decision["user_note"] = user_note
         # Card-edited values ride the approval back to the engine, which
         # writes them into the form before the authorized commit fires. The
         # gateway already sanitized them; a deny never carries edits.

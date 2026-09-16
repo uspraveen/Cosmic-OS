@@ -37,7 +37,7 @@ def test_resolve_wakes_a_pending_wait():
         return result
 
     result = asyncio.run(scenario())
-    assert result == {"request_id": "bwi_1", "status": "answered", "answer": "482913", "field_edits": []}
+    assert result == {"request_id": "bwi_1", "status": "answered", "answer": "482913", "field_edits": [], "note": ""}
     # The pending entry is cleaned up once resolved.
     assert manager.get("bwi_1") is None
 
@@ -64,7 +64,7 @@ def test_skip_wakes_a_pending_wait():
         return await asyncio.wait_for(wait_task, timeout=2)
 
     result = asyncio.run(scenario())
-    assert result == {"request_id": "bwi_2", "status": "skipped", "answer": "", "field_edits": []}
+    assert result == {"request_id": "bwi_2", "status": "skipped", "answer": "", "field_edits": [], "note": ""}
 
 
 def test_wait_times_out_when_nobody_answers():
@@ -80,7 +80,7 @@ def test_wait_times_out_when_nobody_answers():
             timeout_sec=1,
         )
     )
-    assert result == {"request_id": "bwi_3", "status": "timeout", "answer": "", "field_edits": []}
+    assert result == {"request_id": "bwi_3", "status": "timeout", "answer": "", "field_edits": [], "note": ""}
 
 
 def test_resolve_unknown_or_already_resolved_returns_none():
@@ -196,6 +196,37 @@ def test_card_edits_ride_the_approval_back_to_the_browser_agent():
     assert result["status"] == "answered"
     assert result["answer"] == "approve"
     assert result["field_edits"] == [{"label": "Full name", "value": "Praveen Raj U S"}]
+
+
+def test_note_rides_whichever_action_the_user_takes():
+    manager = BrowserInterruptManager()
+
+    async def scenario():
+        wait_task = asyncio.create_task(
+            manager.create_and_wait(
+                request_id="bwc_3",
+                question="Confirm: Submit application",
+                kind="commit",
+                task_id="t1",
+                session_id="s1",
+                channel=None,
+                commit={"target": "Submit application"},
+                timeout_sec=30,
+            )
+        )
+        await asyncio.sleep(0.05)
+        interrupt = manager.resolve(
+            "bwc_3",
+            "deny",
+            note="  no — use the other resume and skip the cover letter  ",
+        )
+        assert interrupt is not None
+        assert interrupt.note == "no — use the other resume and skip the cover letter"
+        return await asyncio.wait_for(wait_task, timeout=2)
+
+    result = asyncio.run(scenario())
+    assert result["answer"] == "deny"
+    assert result["note"] == "no — use the other resume and skip the cover letter"
 
 
 def test_blank_request_id_is_rejected_without_hanging():
