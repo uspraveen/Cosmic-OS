@@ -17,10 +17,10 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from orchestrator.commit_policy import commit_action_class, commit_summary
+from shared import TaskEnvelope, utcnow
+from shared.commit_policy import commit_action_class, commit_summary
 from orchestrator.config import OrchestratorConfig
 from orchestrator.runtime import OrchestratorRuntime
-from shared import TaskEnvelope, utcnow
 
 
 ADDRESS_REQUEST = {

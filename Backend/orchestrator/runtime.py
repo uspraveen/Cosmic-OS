@@ -70,7 +70,8 @@ from shared import (
     channel_supports_trusted_ui,
 )
 
-from .commit_policy import commit_action_class, commit_summary
+from shared.commit_policy import commit_action_class, commit_summary
+
 from .config import BACKEND_ROOT, OrchestratorConfig
 from .interrupt_memory import select_reused_answer
 from .prompts import build_agentic_system_prompt

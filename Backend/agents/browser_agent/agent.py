@@ -27,10 +27,9 @@ from typing import Any
 from uuid import uuid4
 
 from shared.agent_runtime import AgentResult, AgentRuntime, TaskEnvelope
+from shared.commit_policy import commit_action_class
 from shared.contracts import AgentError, ArtifactManifest
 from shared.sqlite_client import connect_sync
-
-from orchestrator.commit_policy import commit_action_class
 
 from .config import AGENT_ROOT, BrowserAgentConfig
 

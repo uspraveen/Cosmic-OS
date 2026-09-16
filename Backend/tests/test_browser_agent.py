@@ -63,6 +63,33 @@ def test_agent_card_loads(browser_agent):
     assert browser_agent.stream_key == "streams:cosmic/browser-agent:1.0.0"
 
 
+def test_browser_agent_import_does_not_shadow_the_engine_orchestrator_module():
+    """The browser-agent process later imports the engine's own `orchestrator`
+    module (`main.py`: `from orchestrator import Orchestrator`). Importing the
+    agent must not cache the Cosmic-OS `orchestrator` package first, or that
+    engine import dies with "cannot import name 'Orchestrator' from
+    'orchestrator'" — the production brown-out this test pins."""
+    import subprocess
+
+    code = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(BACKEND_ROOT)!r})\n"
+        "import agents.browser_agent.agent\n"
+        "assert 'orchestrator' not in sys.modules, (\n"
+        "    'agents.browser_agent.agent imported the OS orchestrator package; it '\n"
+        "    'shadows the browser engine orchestrator module in the same process'\n"
+        ")\n"
+        "print('ok')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode == 0, (proc.stderr or "") + (proc.stdout or "")
+
+
 def test_missing_goal_fails_cleanly(browser_agent):
     result = __import__("asyncio").run(browser_agent.handle_browser_run(_task({})))
     assert result.status == "failed"

@@ -17,7 +17,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from orchestrator.commit_policy import commit_action_class
+from shared.commit_policy import commit_action_class
 
 logger = logging.getLogger(__name__)
 
