@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from gateway.adapters.haiku import HaikuAdapter
-from gateway.adapters.response_processor import DirectRouteHandoff, HANDOFF_OPUS_TAG
+from gateway.adapters.response_processor import DirectRouteHandoff, HANDOFF_TAG, LEGACY_HANDOFF_OPUS_TAG
 
 
 class SSEByteStream(httpx.AsyncByteStream):
@@ -131,7 +131,7 @@ async def test_haiku_adapter_streams_thinking_and_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_haiku_adapter_handoff_to_opus_suppresses_direct_output() -> None:
+async def test_haiku_adapter_handoff_to_orchestrator_suppresses_direct_output() -> None:
     events = [
         b'event: message_start\n'
         b'data: {"type":"message_start","message":{"usage":{"input_tokens":24}}}\n\n',
@@ -147,7 +147,7 @@ async def test_haiku_adapter_handoff_to_opus_suppresses_direct_output() -> None:
 
     async def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))
-        assert HANDOFF_OPUS_TAG in payload["system"]
+        assert HANDOFF_TAG in payload["system"]
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
@@ -195,6 +195,8 @@ async def test_haiku_adapter_handoff_to_opus_suppresses_direct_output() -> None:
     finally:
         await adapter.close()
 
-    assert exc_info.value.route == "opus"
+    # The stream uses the legacy tag; the handoff still resolves to the
+    # canonical orchestrator route.
+    assert exc_info.value.route == "orchestrator"
     assert sent_events == []
     assert stored_messages == []

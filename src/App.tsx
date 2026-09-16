@@ -57,7 +57,9 @@ import { VAULT_ALLOW_WINDOW_SECONDS, vaultIslandAllowWindowLabel } from './vault
 
 export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'task' | 'meeting' | 'spaces'
-export type GatewayModelSelection = 'cosmic' | 'haiku' | 'opus' | 'perplexity'
+// The orchestrator route is the task/delegation path; the model behind it is
+// a separate preference. 'opus' persists in old saved settings and maps over.
+export type GatewayModelSelection = 'cosmic' | 'haiku' | 'orchestrator' | 'perplexity'
 type LauncherTileId = 'chat' | 'meeting' | 'task' | 'spaces'
 
 interface Message {
@@ -5558,8 +5560,12 @@ const AssistantAlphaStreamBody = ({
 
 const normalizeGatewayModelSelection = (value: unknown): GatewayModelSelection => {
   const normalized = String(value || '').trim().toLowerCase()
-  if (normalized === 'haiku' || normalized === 'opus' || normalized === 'perplexity') {
+  if (normalized === 'haiku' || normalized === 'perplexity') {
     return normalized
+  }
+  // 'opus' is the legacy token for the orchestrator selection.
+  if (normalized === 'orchestrator' || normalized === 'opus') {
+    return 'orchestrator'
   }
   return 'cosmic'
 }
@@ -5567,7 +5573,7 @@ const normalizeGatewayModelSelection = (value: unknown): GatewayModelSelection =
 const MODEL_OPTIONS: Array<{ id: GatewayModelSelection; label: string; shortLabel: string }> = [
   { id: 'cosmic', label: 'Cosmic', shortLabel: 'COSMIC' },
   { id: 'haiku', label: 'Haiku', shortLabel: 'HAIKU' },
-  { id: 'opus', label: 'Opus', shortLabel: 'OPUS' },
+  { id: 'orchestrator', label: 'Orchestrator', shortLabel: 'ORCH' },
   { id: 'perplexity', label: 'Perplexity', shortLabel: 'PPLX' },
 ]
 
@@ -8858,7 +8864,7 @@ export default function App() {
         if (event.task_id) {
           removePendingTaskInputsForTask(String(event.task_id))
         }
-        const message = String(event?.error?.message || event?.message || 'Opus task failed.')
+        const message = String(event?.error?.message || event?.message || 'Orchestrator task failed.')
         setMessages((prev) => {
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
           return nextMessages.map((item) => {
@@ -9234,7 +9240,7 @@ export default function App() {
 
     const effectiveRouteOverride =
       mode === 'task'
-        ? 'opus'
+        ? 'orchestrator'
         : selectedModel === 'cosmic'
           ? undefined
           : selectedModel
@@ -10228,7 +10234,7 @@ export default function App() {
                         {visibleTaskInterrupts.length > 1 && (
                           <div className="task-interrupt-chip count">{visibleTaskInterrupts.length} waiting</div>
                         )}
-                        <div className="task-interrupt-chip">Opus task</div>
+                        <div className="task-interrupt-chip">Orchestrator task</div>
                       </div>
                     </div>
                     <div className="task-interrupt-preview">{taskInput.question}</div>
@@ -10663,7 +10669,7 @@ export default function App() {
                           <div className="task-empty-icon">◌</div>
                           <div className="task-empty-title">Tasks will collect here when they need you.</div>
                           <div className="task-empty-copy">
-                            Long-running Opus work can pause for clarification or keep streaming in the background without interrupting your active chat screen.
+                            Long-running orchestrator work can pause for clarification or keep streaming in the background without interrupting your active chat screen.
                           </div>
                         </div>
                       )}
@@ -11143,9 +11149,9 @@ export default function App() {
                           : 'No task is waiting right now'}
                       </div>
                     </div>
-                    <div className="task-mode-pill" aria-label="Task mode uses Opus">
+                    <div className="task-mode-pill" aria-label="Task mode uses the orchestrator">
                       <span className="task-mode-pill-kicker">Task</span>
-                      <span className="task-mode-pill-model">OPUS</span>
+                      <span className="task-mode-pill-model">ORCH</span>
                     </div>
                     <button
                       className="task-toolbar-chat-btn"

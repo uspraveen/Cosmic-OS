@@ -6,8 +6,12 @@ from typing import AsyncIterator, Awaitable, Callable
 
 
 AWAITING_REPLY_TAG = "<awaiting_reply/>"
-HANDOFF_OPUS_TAG = "<handoff_opus/>"
-_MAX_CONTROL_TAG_LEN = max(len(AWAITING_REPLY_TAG), len(HANDOFF_OPUS_TAG))
+HANDOFF_TAG = "<handoff_orchestrator/>"
+# Older prompts asked direct models for this token; keep accepting it so a
+# model that echoes the old instruction still hands off correctly.
+LEGACY_HANDOFF_OPUS_TAG = "<handoff_opus/>"
+_HANDOFF_TAGS = (HANDOFF_TAG, LEGACY_HANDOFF_OPUS_TAG)
+_MAX_CONTROL_TAG_LEN = max(len(AWAITING_REPLY_TAG), *(len(tag) for tag in _HANDOFF_TAGS))
 
 SendCallback = Callable[[dict], Awaitable[None]]
 VisibleChunkCallback = Callable[[], Awaitable[None]]
@@ -89,11 +93,14 @@ class LLMStreamProcessor:
         stripped_tail = tail_buffer.rstrip()
         handoff_route: str | None = None
         awaiting_reply = stripped_tail.endswith(AWAITING_REPLY_TAG)
-        handoff_requested = stripped_tail.endswith(HANDOFF_OPUS_TAG)
-        if handoff_requested:
-            remainder_without_tag = stripped_tail.removesuffix(HANDOFF_OPUS_TAG)
+        matched_handoff_tag = next(
+            (tag for tag in _HANDOFF_TAGS if stripped_tail.endswith(tag)),
+            None,
+        )
+        if matched_handoff_tag is not None:
+            remainder_without_tag = stripped_tail.removesuffix(matched_handoff_tag)
             if not visible_text_emitted and not (pending_leading + remainder_without_tag).strip():
-                handoff_route = "opus"
+                handoff_route = "orchestrator"
                 remainder = ""
                 pending_leading = ""
             else:
@@ -110,8 +117,10 @@ class LLMStreamProcessor:
             await emit_response_chunk(remainder)
 
         display_text = full_response.rstrip()
-        if display_text.endswith(HANDOFF_OPUS_TAG):
-            display_text = display_text.removesuffix(HANDOFF_OPUS_TAG).rstrip()
+        for tag in _HANDOFF_TAGS:
+            if display_text.endswith(tag):
+                display_text = display_text.removesuffix(tag).rstrip()
+                break
         if display_text.endswith(AWAITING_REPLY_TAG):
             display_text = display_text.removesuffix(AWAITING_REPLY_TAG).rstrip()
 

@@ -11,6 +11,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from shared import estimate_text_tokens
+from shared.routes import normalize_route
 
 
 def utcnow_iso() -> str:
@@ -1421,7 +1422,7 @@ class SessionStore:
                     session_id,
                     self._normalize_optional_text(entry.get("task_id")),
                     self._normalize_optional_text(entry.get("channel")) or "",
-                    self._normalize_optional_text(entry.get("route")) or "opus",
+                    normalize_route(entry.get("route")),
                     created_at,
                     self._normalize_optional_text(entry.get("completed_at")) or now,
                     self._normalize_optional_text(entry.get("user_message_id")),

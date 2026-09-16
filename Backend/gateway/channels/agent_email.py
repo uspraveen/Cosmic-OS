@@ -275,7 +275,7 @@ class AgentEmailAdapter(ChannelAdapter):
                 thread_id=thread_id,
             ),
             "channel": f"agent-email:{mailbox_address or mailbox_id or 'default'}",
-            "route_override": "opus",
+            "route_override": "orchestrator",
             "metadata": {
                 "platform": "agent-email",
                 "message_id": message_id,

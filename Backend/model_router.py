@@ -5,7 +5,8 @@ COSMIC model router classifier service.
 Production runtime:
 - Standalone FastAPI microservice behind the Gateway
 - Internal-only HTTP surface: /health, /health/ready, /classify
-- Three possible routes only: opus, haiku, perplexity
+- Three possible routes only: orchestrator, haiku, perplexity
+  (the legacy token "opus" is still accepted and normalized to "orchestrator")
 
 Developer utilities remain available for local validation:
 - Single query:
@@ -38,6 +39,7 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from shared import begin_metered_call, lookup_model_spec
+from shared.routes import ORCHESTRATOR_ROUTE, canonical_route
 
 load_dotenv(Path(__file__).with_name("model_router.env"))
 load_dotenv()
@@ -94,7 +96,9 @@ DEFAULT_MAX_COMPLETION_TOKENS = max(1, env_int("MODEL_ROUTER_DEFAULT_MAX_COMPLET
 LOW_CONFIDENCE_THRESHOLD = min(1.0, max(0.0, env_float("MODEL_ROUTER_LOW_CONFIDENCE_THRESHOLD", 0.5)))
 LOG_LEVEL = os.getenv("MODEL_ROUTER_LOG_LEVEL", "INFO").upper()
 
-ALLOWED_ROUTES = {"opus", "haiku", "perplexity"}
+ALLOWED_ROUTES = {"orchestrator", "haiku", "perplexity"}
+# The classifier or stored context may still produce the legacy token.
+ACCEPTED_ROUTE_ALIASES = {"opus": ORCHESTRATOR_ROUTE, "gemini": "haiku"}
 ALLOWED_CONTEXT_ROLES = {"user", "assistant"}
 
 logging.basicConfig(
@@ -172,18 +176,14 @@ def extract_json_object(raw: str) -> Optional[Dict[str, Any]]:
 def normalize_route(route: Any) -> str:
     if not isinstance(route, str):
         return "haiku"
-    normalized = route.strip().lower()
-    if normalized == "gemini":
-        return "haiku"
+    normalized = ACCEPTED_ROUTE_ALIASES.get(route.strip().lower(), route.strip().lower())
     return normalized if normalized in ALLOWED_ROUTES else "haiku"
 
 
 def optional_route(route: Any) -> Optional[str]:
     if not isinstance(route, str):
         return None
-    normalized = route.strip().lower()
-    if normalized == "gemini":
-        return "haiku"
+    normalized = ACCEPTED_ROUTE_ALIASES.get(route.strip().lower(), route.strip().lower())
     return normalized if normalized in ALLOWED_ROUTES else None
 
 
@@ -269,12 +269,12 @@ def build_messages(
         "You are a STRICT JSON-only classifier for the COSMIC model router.\n"
         "Return exactly one JSON object and nothing else.\n\n"
         "Decide which backend should answer:\n"
-        '  - "opus": tasks, continuations, ambiguous inputs, tool-use, coding, drafting, execution, workflow help.\n'
+        '  - "orchestrator": tasks, continuations, ambiguous inputs, tool-use, coding, drafting, execution, workflow help.\n'
         '  - "perplexity": time-sensitive or verification-heavy questions that need current information or citations.\n'
         '  - "haiku": timeless/general explanations, brainstorming, concepts, theory, non-time-sensitive knowledge.\n\n'
         "Output schema (keys must match):\n"
         "{\n"
-        '  "route": "opus|perplexity|haiku",\n'
+        '  "route": "orchestrator|perplexity|haiku",\n'
         '  "needs_latest": true|false,\n'
         '  "needs_citations": true|false,\n'
         '  "is_task": true|false,\n'
@@ -287,16 +287,16 @@ def build_messages(
         "- is_continuation=true for ambiguous follow-ups or conversation carry-ons such as 'go on', 'why?', 'ok', 'continue', progress checks, or replies that clearly depend on prior context.\n"
         "- needs_latest=true if the answer could change over time: current events, news, releases, prices, laws, schedules, product support, office holders, or anything 'latest/current/today/this week'.\n"
         "- needs_citations=true when the user likely expects source-grounded verification. Time-sensitive questions usually imply this.\n"
-        "- Add signal 'x_platform_search' when the user wants search, discussion, sentiment, or recent posts specifically from X/Twitter. X-platform search should go to opus so it can use the X specialist.\n"
-        "- Add signal 'file_artifact_work' when the request depends on uploaded files, parsed documents, spreadsheets, images, prior produced files, or other session artifacts. File- and artifact-centric work should go to opus.\n"
+        "- Add signal 'x_platform_search' when the user wants search, discussion, sentiment, or recent posts specifically from X/Twitter. X-platform search should go to orchestrator so it can use the X specialist.\n"
+        "- Add signal 'file_artifact_work' when the request depends on uploaded files, parsed documents, spreadsheets, images, prior produced files, or other session artifacts. File- and artifact-centric work should go to orchestrator.\n"
         "- If prior assistant messages are annotated with [assistant_route=...], use that as context when deciding whether the new input is a continuation.\n\n"
         "Hard routing rules (must follow):\n"
-        "- If is_task is true, route MUST be opus.\n"
-        "- Else if is_continuation is true, route MUST be opus.\n"
-        "- Else if signal 'x_platform_search' is present, route MUST be opus.\n"
-        "- Else if signal 'file_artifact_work' is present, route MUST be opus.\n"
+        "- If is_task is true, route MUST be orchestrator.\n"
+        "- Else if is_continuation is true, route MUST be orchestrator.\n"
+        "- Else if signal 'x_platform_search' is present, route MUST be orchestrator.\n"
+        "- Else if signal 'file_artifact_work' is present, route MUST be orchestrator.\n"
         "- Else if needs_latest OR needs_citations is true, route MUST be perplexity.\n"
-        f"- Else if confidence < {LOW_CONFIDENCE_THRESHOLD:.2f}, route MUST be opus.\n"
+        f"- Else if confidence < {LOW_CONFIDENCE_THRESHOLD:.2f}, route MUST be orchestrator.\n"
         "- Else route MUST be haiku.\n"
         "- There is NO unknown route.\n"
     )
@@ -342,17 +342,17 @@ def enforce_rules(parsed: Dict[str, Any]) -> Dict[str, Any]:
         out["needs_citations"] = True
 
     if out["is_task"]:
-        out["route"] = "opus"
+        out["route"] = ORCHESTRATOR_ROUTE
     elif out["is_continuation"]:
-        out["route"] = "opus"
+        out["route"] = ORCHESTRATOR_ROUTE
     elif "x_platform_search" in out["signals"]:
-        out["route"] = "opus"
+        out["route"] = ORCHESTRATOR_ROUTE
     elif "file_artifact_work" in out["signals"]:
-        out["route"] = "opus"
+        out["route"] = ORCHESTRATOR_ROUTE
     elif out["needs_latest"] or out["needs_citations"]:
         out["route"] = "perplexity"
     elif out["confidence"] < LOW_CONFIDENCE_THRESHOLD:
-        out["route"] = "opus"
+        out["route"] = ORCHESTRATOR_ROUTE
     else:
         out["route"] = "haiku"
 

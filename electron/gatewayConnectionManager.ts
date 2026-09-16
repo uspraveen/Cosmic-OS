@@ -1438,7 +1438,7 @@ export class GatewayConnectionManager {
           ? payload.error.message.trim()
           : typeof payload.message === 'string' && payload.message.trim()
             ? payload.message.trim()
-            : 'Opus task failed.'
+            : 'Orchestrator task failed.'
       const existingContent = typeof existing?.content === 'string' ? existing.content.trim() : ''
       this.upsertForegroundStream(payload, {
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,

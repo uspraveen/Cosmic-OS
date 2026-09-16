@@ -73,8 +73,8 @@ For standalone image uploads:
 - **All accepted images are still staged as artifacts** under the request ingest scope.
 - **Only the first 10 images are sent inline to Opus as direct visual input.**
 - **Any additional staged images remain in the attachment manifest** and are explicitly marked as omitted from inline visual input because of the per-turn image cap.
-- **Gateway serves a Claude-optimized image variant for direct model fetches** instead of blindly sending the raw original when the source is oversized.
-- **Claude fetch sizing policy:** resize large JPEG/PNG/WEBP inputs to approximately Anthropic's recommended envelope:
+- **Gateway serves a model-optimized image variant for direct model fetches** instead of blindly sending the raw original when the source is oversized.
+- **Model fetch sizing policy:** resize large JPEG/PNG/WEBP inputs to approximately Anthropic's recommended envelope:
   - maximum edge: **1568 px**
   - maximum pixel area: **~1.15 MP**
 - **Original bytes remain preserved in artifact storage.** The resized image is a cached model-input variant, not the canonical artifact.
@@ -694,7 +694,7 @@ sequenceDiagram
         D->>G: Return bundle refs + document indexes + visual_enrichment summary
     end
     alt Standalone images present
-        G->>A: Cache Claude-sized image variants for oversized images on demand
+        G->>A: Cache model-input-sized image variants for oversized images on demand
         G->>O: Send first 10 images as native inline image blocks via signed URLs
         G->>O: Include all staged images in attachment manifest metadata
     end
@@ -713,7 +713,7 @@ flowchart TD
         A1[original/safe_filename]
         A2[attachment metadata]
         A3[manifest.json]
-        A4[llm_input/*.claude-input.<ext><br/>optional cached model-input image variant]
+        A4[llm_input/*.llm-input.<ext><br/>optional cached model-input image variant]
     end
 
     subgraph ParseTask["runs/artifacts/<docs_parse_task_id>/parsed/<artifact_id>/"]
@@ -962,7 +962,7 @@ Useful event types:
 
 ### Should standalone uploaded images also go into artifacts?
 
-**Yes.** They should be staged exactly like other typed input artifacts, with the original preserved and an optional cached Claude-sized fetch variant for direct model input.
+**Yes.** They should be staged exactly like other typed input artifacts, with the original preserved and an optional cached model-input-sized fetch variant for direct model input.
 
 ### Should Opus just be told file locations?
 
@@ -1012,7 +1012,7 @@ The finalized production plan is:
 - **task-driven docs parsing**
 - **Docling-first parsing**
 - **OCR fallback**
-- **Claude-sized cached image variants for oversized direct model fetches**
+- **model-input-sized cached image variants for oversized direct model fetches**
 - **one canonical parsed bundle per document**
 - **`document.json` as truth**
 - **`document.md` as model-facing read surface**

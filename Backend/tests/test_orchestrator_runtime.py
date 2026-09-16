@@ -223,6 +223,7 @@ async def test_prophet_cron_forces_publish_after_end_turn_dump(tmp_path) -> None
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         max_tool_iterations=25,
         task_ledger_db_path=tmp_path / "task_ledger_prophet_publish.db",
@@ -445,6 +446,7 @@ async def test_orchestrator_runtime_streams_thinking_and_text(tmp_path) -> None:
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger.db",
     )
@@ -500,6 +502,7 @@ async def test_orchestrator_runtime_streams_fireworks_kimi_path() -> None:
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="",
+        orchestrator_default_provider="fireworks_glm",
         fireworks_api_key="fireworks-key",
         task_ledger_db_path=runtime_root / "task_ledger_kimi.db",
     )
@@ -565,6 +568,7 @@ async def test_orchestrator_runtime_streams_fireworks_glm_text_path() -> None:
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="",
+        orchestrator_default_provider="fireworks_glm",
         fireworks_api_key="fireworks-key",
         task_ledger_db_path=runtime_root / "task_ledger_glm.db",
     )
@@ -661,6 +665,7 @@ async def test_orchestrator_runtime_forces_final_text_when_tool_budget_exhausted
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="",
+        orchestrator_default_provider="fireworks_glm",
         fireworks_api_key="fireworks-key",
         max_tool_iterations=1,
         task_ledger_db_path=runtime_root / "task_ledger_glm_budget.db",
@@ -741,6 +746,7 @@ async def test_orchestrator_runtime_falls_back_from_glm_to_kimi_for_images() -> 
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="",
+        orchestrator_default_provider="fireworks_glm",
         fireworks_api_key="fireworks-key",
         task_ledger_db_path=runtime_root / "task_ledger_glm_image.db",
     )
@@ -815,6 +821,7 @@ async def test_orchestrator_runtime_separates_fireworks_inline_thinking() -> Non
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="",
+        orchestrator_default_provider="fireworks_glm",
         fireworks_api_key="fireworks-key",
         task_ledger_db_path=runtime_root / "task_ledger_kimi.db",
     )
@@ -855,6 +862,7 @@ def test_collect_specialist_artifacts_only_keeps_deliverables(tmp_path) -> None:
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger.db",
     )
@@ -986,6 +994,7 @@ async def test_orchestrator_runtime_promotes_anthropic_generated_files_to_produc
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         anthropic_files_api_beta="files-api-2025-04-14",
         task_ledger_db_path=tmp_path / "task_ledger.db",
@@ -1096,6 +1105,7 @@ async def test_orchestrator_runtime_can_enable_anthropic_prompt_cache(tmp_path) 
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         anthropic_prompt_cache_enabled=True,
         task_ledger_db_path=tmp_path / "task_ledger_prompt_cache.db",
@@ -1220,6 +1230,7 @@ async def test_orchestrator_runtime_reuses_container_without_inlining_system_pro
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_loop_reuse.db",
     )
@@ -1271,6 +1282,7 @@ async def test_orchestrator_runtime_can_cancel_active_task(tmp_path) -> None:
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_cancel.db",
     )
@@ -1331,6 +1343,7 @@ async def test_orchestrator_runtime_emits_progress_for_memory_fetch_tool(tmp_pat
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_memory_fetch.db",
     )
@@ -1411,6 +1424,7 @@ async def test_orchestrator_runtime_summarizes_parallel_local_tool_work_with_det
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_parallel_tools.db",
     )
@@ -1782,6 +1796,7 @@ async def test_orchestrator_runtime_summarizes_server_side_web_search_results(tm
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_native_web.db",
     )
@@ -1892,6 +1907,7 @@ async def test_orchestrator_runtime_replays_bash_code_execution_result_blocks(tm
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_bash_pause.db",
     )
@@ -1985,6 +2001,7 @@ async def test_orchestrator_runtime_replays_code_execution_result_blocks(tmp_pat
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_code_exec_pause.db",
     )
@@ -2074,6 +2091,7 @@ async def test_orchestrator_runtime_skips_unmatched_server_tool_use_blocks_on_pa
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_code_exec_unmatched.db",
     )
@@ -2149,6 +2167,7 @@ async def test_orchestrator_runtime_skips_incomplete_code_execution_result_block
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_code_exec_incomplete.db",
     )
@@ -2236,6 +2255,7 @@ async def test_orchestrator_runtime_sanitizes_incomplete_server_tool_blocks_befo
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_code_exec_incomplete_local_tool.db",
     )
@@ -2356,6 +2376,7 @@ async def test_orchestrator_runtime_sanitizes_prior_assistant_server_tool_blocks
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_prior_replay_sanitized.db",
     )
@@ -2435,6 +2456,7 @@ async def test_orchestrator_runtime_recovers_from_provider_server_tool_replay_er
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_server_tool_replay_recovery.db",
     )
@@ -2534,6 +2556,7 @@ async def test_orchestrator_runtime_recovers_from_modified_thinking_replay_error
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_thinking_replay_recovery.db",
     )
@@ -2674,6 +2697,7 @@ async def test_orchestrator_runtime_emits_local_research_provenance_for_perplexi
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_local_research.db",
     )
@@ -2775,6 +2799,7 @@ async def test_orchestrator_runtime_emits_x_search_sources_as_research_provenanc
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_x_search_research.db",
     )
@@ -2881,6 +2906,7 @@ async def test_orchestrator_runtime_keeps_heartbeat_tool_artifacts_internal(tmp_
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_heartbeat_artifacts.db",
     )
@@ -2969,6 +2995,7 @@ async def test_orchestrator_runtime_inherits_x_search_provenance_from_delegate_t
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_delegate_x_research.db",
     )
@@ -3079,6 +3106,7 @@ async def test_orchestrator_runtime_summarizes_generic_specialist_tool_work(tmp_
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_specialist_summary.db",
     )
@@ -3129,6 +3157,7 @@ def test_orchestrator_build_messages_includes_attachment_manifest(tmp_path) -> N
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_artifacts.db",
     )
@@ -3164,6 +3193,7 @@ async def test_collect_specialist_receipt_captures_provider_model_and_fallback(t
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_specialist_provider.db",
     )
@@ -3288,6 +3318,7 @@ async def test_search_agent_catalog_returns_usage_hints(tmp_path) -> None:
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_usage_hints.db",
         agent_registry_db_path=tmp_path / "registry.db",
@@ -3332,6 +3363,7 @@ def test_orchestrator_build_messages_embeds_provider_fetchable_images(tmp_path) 
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_images.db",
     )
@@ -3374,6 +3406,7 @@ def test_orchestrator_build_messages_omits_images_past_cap(tmp_path) -> None:
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         anthropic_max_input_images=1,
         task_ledger_db_path=tmp_path / "task_ledger_images_cap.db",
@@ -3434,6 +3467,7 @@ async def test_orchestrator_attaches_initial_input_artifacts_as_container_upload
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_input_uploads.db",
     )
@@ -3493,6 +3527,7 @@ async def test_orchestrator_build_tool_result_followup_blocks_attach_image_and_c
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_tool_followups.db",
     )
@@ -3535,6 +3570,7 @@ async def test_request_user_input_publishes_request_and_resumes_on_reply(tmp_pat
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         task_ledger_db_path=tmp_path / "task_ledger_input.db",
     )
@@ -3603,6 +3639,7 @@ async def test_orchestrator_runtime_retries_transient_overload_before_response_t
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         anthropic_overload_retry_attempts=1,
         anthropic_overload_initial_backoff_sec=0.01,
@@ -3674,7 +3711,7 @@ async def test_orchestrator_runtime_retries_transient_overload_before_response_t
             "type": "task.progress",
             "status": "retrying",
             "iteration": 1,
-            "message": "Opus hit temporary capacity. Retrying automatically...",
+            "message": "The model hit temporary capacity. Retrying automatically...",
         }
     ]
     complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
@@ -3689,6 +3726,7 @@ async def test_orchestrator_runtime_surfaces_friendly_overload_failure_after_ret
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         anthropic_overload_retry_attempts=1,
         anthropic_overload_initial_backoff_sec=0.01,
@@ -3719,7 +3757,7 @@ async def test_orchestrator_runtime_surfaces_friendly_overload_failure_after_ret
     failed_event = next(event for event in streamed_events if event["type"] == "task.failed")
     assert failed_event["error"] == {
         "code": "OPUS_TEMPORARILY_OVERLOADED",
-        "message": "Opus is temporarily overloaded right now. Please try again in a moment.",
+        "message": "The model is temporarily overloaded right now. Please try again in a moment.",
         "retryable": True,
     }
 
@@ -3731,6 +3769,7 @@ async def test_orchestrator_runtime_can_retry_with_fallback_model_after_overload
         internal_token="internal-token",
         signing_secret="signing-secret",
         anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
         anthropic_model="claude-opus-4-6",
         anthropic_overload_retry_attempts=0,
         anthropic_overload_initial_backoff_sec=0.01,
@@ -3777,7 +3816,7 @@ async def test_orchestrator_runtime_can_retry_with_fallback_model_after_overload
     retry_event = next(
         event for event in streamed_events if event["type"] == "task.progress" and event.get("status") == "retrying"
     )
-    assert retry_event["message"] == "Opus hit temporary capacity. Retrying with a standby model..."
+    assert retry_event["message"] == "The model hit temporary capacity. Retrying with a standby model..."
     complete_event = next(event for event in streamed_events if event["type"] == "response.complete")
     assert complete_event["content"] == "Fallback model completed the turn."
 
@@ -3790,6 +3829,7 @@ async def test_collect_specialist_receipt_captures_calendar_event(tmp_path) -> N
             internal_token="internal-token",
             signing_secret="signing-secret",
             anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
             anthropic_model="claude-opus-4-6",
             task_ledger_db_path=tmp_path / "task_ledger_calendar_receipt.db",
         ),
@@ -3841,6 +3881,7 @@ async def test_collect_specialist_receipt_captures_direct_alpha_project(tmp_path
             internal_token="internal-token",
             signing_secret="signing-secret",
             anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
             anthropic_model="claude-opus-4-6",
             task_ledger_db_path=tmp_path / "task_ledger_alpha_receipt.db",
         ),
@@ -3888,6 +3929,7 @@ async def test_collect_specialist_receipt_captures_real_gmail_draft_reply_shape(
             internal_token="internal-token",
             signing_secret="signing-secret",
             anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
             anthropic_model="claude-opus-4-6",
             task_ledger_db_path=tmp_path / "task_ledger_gmail_receipt.db",
         ),

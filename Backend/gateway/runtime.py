@@ -1823,7 +1823,7 @@ class GatewayRuntime:
     def _should_preprocess_email_inbound(self, request_record: dict[str, Any]) -> bool:
         if self._redis is None or not self._agent_email_effectively_enabled():
             return False
-        if self._safe_text(request_record.get("route")) != "opus":
+        if not self._is_orchestrator_route(request_record.get("route")):
             return False
         channel = self._safe_text(request_record.get("channel")) or ""
         if self._channel_platform(channel) != "agent-email":
@@ -4854,7 +4854,7 @@ class GatewayRuntime:
                     "channel": channel,
                     "session_id": session_id,
                     "request_id": uuid4().hex,
-                    "route_override": "opus",
+                    "route_override": "orchestrator",
                     "metadata": {
                         "platform": "desktop",
                         "message_type": "slide_workflow_choice",
@@ -5209,10 +5209,10 @@ class GatewayRuntime:
             "source": "user",
             "source_id": f"sandbox_continuation:{permission_id}",
             "channel": channel,
-            "route": "opus",
+            "route": "orchestrator",
             "dispatch_target": "orchestrator",
             "classification": {
-                "route": "opus",
+                "route": "orchestrator",
                 "is_task": True,
                 "is_continuation": True,
                 "signals": ["sandbox_continuation"],
@@ -5701,10 +5701,10 @@ class GatewayRuntime:
             "source": "user",
             "source_id": f"vault_continuation:{request_id}",
             "channel": channel,
-            "route": "opus",
+            "route": "orchestrator",
             "dispatch_target": "orchestrator",
             "classification": {
-                "route": "opus",
+                "route": "orchestrator",
                 "is_task": True,
                 "is_continuation": True,
                 "signals": ["vault_continuation"],
@@ -6917,10 +6917,10 @@ class GatewayRuntime:
             "source": GMAIL_SURFACE_DECISION_SOURCE,
             "source_id": source_id,
             "channel": channel,
-            "route": "opus",
+            "route": "orchestrator",
             "dispatch_target": "orchestrator",
             "classification": {
-                "route": "opus",
+                "route": "orchestrator",
                 "needs_latest": False,
                 "needs_citations": False,
                 "is_task": True,
@@ -6984,8 +6984,8 @@ class GatewayRuntime:
             route_override=None,
             sticky_hit=False,
             decision_source="gmail_surface_decision",
-            classifier_route="opus",
-            final_route="opus",
+            classifier_route="orchestrator",
+            final_route="orchestrator",
             dispatch_target="orchestrator",
             confidence=1.0,
             signals=[
@@ -7586,10 +7586,10 @@ class GatewayRuntime:
             "source": "webhook",
             "source_id": f"event_automation:{automation_id}",
             "channel": "desktop",
-            "route": "opus",
+            "route": "orchestrator",
             "dispatch_target": "orchestrator",
             "classification": {
-                "route": "opus",
+                "route": "orchestrator",
                 "needs_latest": False,
                 "needs_citations": False,
                 "is_task": True,
@@ -7649,8 +7649,8 @@ class GatewayRuntime:
             route_override=None,
             sticky_hit=False,
             decision_source="event_automation",
-            classifier_route="opus",
-            final_route="opus",
+            classifier_route="orchestrator",
+            final_route="orchestrator",
             dispatch_target="orchestrator",
             confidence=1.0,
             signals=["event_automation", "gmail.inbound"],
@@ -8962,10 +8962,10 @@ class GatewayRuntime:
             "source": "heartbeat",
             "source_id": HEARTBEAT_SOURCE_ID,
             "channel": channel,
-            "route": "opus",
+            "route": "orchestrator",
             "dispatch_target": "orchestrator",
             "classification": {
-                "route": "opus",
+                "route": "orchestrator",
                 "needs_latest": False,
                 "needs_citations": False,
                 "is_task": True,
@@ -9024,8 +9024,8 @@ class GatewayRuntime:
             route_override=None,
             sticky_hit=False,
             decision_source="scheduler_heartbeat",
-            classifier_route="opus",
-            final_route="opus",
+            classifier_route="orchestrator",
+            final_route="orchestrator",
             dispatch_target="orchestrator",
             confidence=1.0,
             signals=["scheduler_heartbeat"],
@@ -9328,10 +9328,10 @@ class GatewayRuntime:
             "source": "cron",
             "source_id": cron_id,
             "channel": channel,
-            "route": "opus",
+            "route": "orchestrator",
             "dispatch_target": "orchestrator",
             "classification": {
-                "route": "opus",
+                "route": "orchestrator",
                 "needs_latest": False,
                 "needs_citations": False,
                 "is_task": True,
@@ -9398,8 +9398,8 @@ class GatewayRuntime:
             route_override=None,
             sticky_hit=False,
             decision_source="scheduler",
-            classifier_route="opus",
-            final_route="opus",
+            classifier_route="orchestrator",
+            final_route="orchestrator",
             dispatch_target="orchestrator",
             confidence=1.0,
             signals=["scheduler_cron"],
@@ -10269,7 +10269,9 @@ class GatewayRuntime:
         decision_latency_ms = (time.perf_counter() - decision_started_at) * 1000.0
         classification = routing_decision.classification
         dispatch_target = (
-            "orchestrator" if classification["route"] == "opus" else "gateway"
+            "orchestrator"
+            if self._is_orchestrator_route(classification.get("route"))
+            else "gateway"
         )
         input_artifacts = await self._persist_inbound_artifacts(
             request_id=request_id,
@@ -10375,7 +10377,7 @@ class GatewayRuntime:
             self._record_classifier_usage(
                 request_id=request_id,
                 session_id=session_id,
-                route=self._safe_text(classification.get("route")) or "opus",
+                route=self._safe_text(classification.get("route")) or "orchestrator",
                 router_response=routing_decision.classifier_payload,
             )
         self.request_records[request_id] = result
@@ -10390,7 +10392,7 @@ class GatewayRuntime:
             sticky_hit=routing_decision.sticky_hit,
             decision_source=routing_decision.decision_source,
             classifier_route=self._safe_text(classification.get("route")),
-            final_route=self._safe_text(classification.get("route")) or "opus",
+            final_route=self._safe_text(classification.get("route")) or "orchestrator",
             dispatch_target=dispatch_target,
             confidence=self._coerce_float(classification.get("confidence"), 0.0),
             signals=classification.get("signals")
@@ -10407,7 +10409,7 @@ class GatewayRuntime:
         return result
 
     async def fulfill_processed_message(self, request_record: dict[str, Any]) -> None:
-        route = self._safe_text(request_record.get("route")) or "opus"
+        route = self._safe_text(request_record.get("route")) or "orchestrator"
         channel = self._safe_text(request_record.get("channel"))
         request_id = self._safe_text(request_record.get("request_id"))
         session_id = self._safe_text(request_record.get("session_id"))
@@ -10602,11 +10604,11 @@ class GatewayRuntime:
                 return
         except DirectRouteHandoff as handoff:
             handoff_route = self._normalize_route(handoff.route)
-            if handoff_route != "opus":
+            if not self._is_orchestrator_route(handoff_route):
                 raise RuntimeError(
                     f"Unsupported direct-model handoff route: {handoff.route}"
                 )
-            await self._handle_direct_model_handoff_to_opus(
+            await self._handle_direct_model_handoff_to_orchestrator(
                 request_record=request_record,
                 request_id=request_id,
                 session_id=session_id,
@@ -10626,7 +10628,7 @@ class GatewayRuntime:
             store_assistant_message=store_assistant_message,
         )
 
-    async def _handle_direct_model_handoff_to_opus(
+    async def _handle_direct_model_handoff_to_orchestrator(
         self,
         *,
         request_record: dict[str, Any],
@@ -10640,7 +10642,7 @@ class GatewayRuntime:
         normalized_prior_route = self._normalize_route(prior_route)
         if active_request is not None and active_request.partial_content.strip():
             raise RuntimeError(
-                f"{normalized_prior_route} requested Opus handoff after a direct response had already started."
+                f"{normalized_prior_route} requested orchestrator handoff after a direct response had already started."
             )
 
         handoff_count = (
@@ -10648,7 +10650,7 @@ class GatewayRuntime:
         )
         if handoff_count >= 1:
             raise RuntimeError(
-                "Direct model requested more than one Opus handoff for the same request."
+                "Direct model requested more than one orchestrator handoff for the same request."
             )
 
         original_decision_source = (
@@ -10670,19 +10672,21 @@ class GatewayRuntime:
             if isinstance(classification.get("signals"), list)
             else []
         )
-        handoff_signal = f"direct_model_handoff:{normalized_prior_route}->opus"
+        handoff_signal = (
+            f"direct_model_handoff:{normalized_prior_route}->orchestrator"
+        )
         if handoff_signal not in signals:
             signals.append(handoff_signal)
         classification.update(
             {
-                "route": "opus",
+                "route": "orchestrator",
                 "is_task": True,
                 "is_continuation": True,
                 "signals": signals,
             }
         )
 
-        request_record["route"] = "opus"
+        request_record["route"] = "orchestrator"
         request_record["dispatch_target"] = "orchestrator"
         request_record["classification"] = classification
         request_record["routing_decision_source"] = "direct_model_handoff"
@@ -10693,18 +10697,21 @@ class GatewayRuntime:
             request_id=request_id,
             session_id=session_id,
             channel=channel,
-            route="opus",
+            route="orchestrator",
             event_type="request.direct_model_handoff",
             stage="routing",
             status="active",
-            title="Direct model handed off to Opus",
-            detail=f"{normalized_prior_route} -> opus",
+            title="Direct model handed off to the orchestrator",
+            detail=f"{normalized_prior_route} -> orchestrator",
             task_id=active_request.task_id if active_request is not None else None,
-            metadata={"from_route": normalized_prior_route, "to_route": "opus"},
+            metadata={
+                "from_route": normalized_prior_route,
+                "to_route": "orchestrator",
+            },
         )
 
         if active_request is not None:
-            active_request.route = "opus"
+            active_request.route = "orchestrator"
 
         message = (
             request_record.get("message")
@@ -10732,7 +10739,7 @@ class GatewayRuntime:
             sticky_hit=sticky_hit,
             decision_source="direct_model_handoff",
             classifier_route=normalized_prior_route,
-            final_route="opus",
+            final_route="orchestrator",
             dispatch_target="orchestrator",
             confidence=self._coerce_float(classification.get("confidence"), 0.0),
             signals=signals,
@@ -10752,9 +10759,9 @@ class GatewayRuntime:
                     "request_id": request_id,
                     "session_id": session_id,
                     "channel": channel,
-                    "route": "opus",
+                    "route": "orchestrator",
                     "status": "escalating",
-                    "message": "Escalating to Opus for deeper handling.",
+                    "message": "Escalating to the orchestrator for deeper handling.",
                     "escalated_from": normalized_prior_route,
                 }
             )
@@ -10780,7 +10787,7 @@ class GatewayRuntime:
         )
         self.active_task_channels[task.task_id] = channel
         if active_request is not None:
-            active_request.route = "opus"
+            active_request.route = "orchestrator"
             active_request.task_id = task.task_id
             self.active_requests_by_task[task.task_id] = request_id
 
@@ -10825,7 +10832,7 @@ class GatewayRuntime:
         request_id = self._safe_text(request_record.get("request_id"))
         session_id = self._safe_text(request_record.get("session_id"))
         channel = self._safe_text(request_record.get("channel"))
-        route = self._safe_text(request_record.get("route")) or "opus"
+        route = self._safe_text(request_record.get("route")) or "orchestrator"
         if not request_id or not session_id or not channel:
             raise ValueError(
                 "Request record is missing channel, request_id, or session_id"
@@ -11004,7 +11011,7 @@ class GatewayRuntime:
         request_id = self._safe_text(request_record.get("request_id"))
         session_id = self._safe_text(request_record.get("session_id"))
         channel = self._safe_text(request_record.get("channel"))
-        route = self._safe_text(request_record.get("route")) or "opus"
+        route = self._safe_text(request_record.get("route")) or "orchestrator"
         if not request_id or not session_id or not channel:
             raise ValueError(
                 "Autonomous request record is missing channel, request_id, or session_id"
@@ -11114,7 +11121,7 @@ class GatewayRuntime:
                         "task_id": normalized_task_id,
                         "request_id": normalized_request_id,
                         "channel": normalized_channel,
-                        "route": "opus",
+                        "route": "orchestrator",
                         "status": "cancelled",
                         "message": "Response stopped.",
                     }
@@ -11123,7 +11130,7 @@ class GatewayRuntime:
             return False
 
         state.cancel_requested = True
-        if state.route == "opus" and state.task_id:
+        if self._is_orchestrator_route(state.route) and state.task_id:
             await self.orchestrator.cancel_task(state.task_id)
 
         worker = state.worker
@@ -12347,7 +12354,7 @@ class GatewayRuntime:
             return RoutingDecision(
                 classification={
                     "route": self._normalize_route(
-                        self._safe_text(sticky_message.get("route")) or "opus"
+                        self._safe_text(sticky_message.get("route")) or "orchestrator"
                     ),
                     "needs_latest": False,
                     "needs_citations": False,
@@ -12361,10 +12368,10 @@ class GatewayRuntime:
             )
 
         attachments = metadata.get("attachments")
-        if self._contains_opus_media_attachments(attachments):
+        if self._contains_orchestrator_media_attachments(attachments):
             return RoutingDecision(
                 classification={
-                    "route": "opus",
+                    "route": "orchestrator",
                     "needs_latest": False,
                     "needs_citations": False,
                     "is_task": False,
@@ -12381,7 +12388,7 @@ class GatewayRuntime:
         ):
             return RoutingDecision(
                 classification={
-                    "route": "opus",
+                    "route": "orchestrator",
                     "needs_latest": False,
                     "needs_citations": False,
                     "is_task": False,
@@ -12403,7 +12410,7 @@ class GatewayRuntime:
         ) as exc:  # pragma: no cover - depends on external service availability
             return RoutingDecision(
                 classification={
-                    "route": "opus",
+                    "route": "orchestrator",
                     "needs_latest": False,
                     "needs_citations": False,
                     "is_task": False,
@@ -12424,7 +12431,7 @@ class GatewayRuntime:
 
         normalized_classification = {
             "route": self._normalize_route(
-                self._safe_text(classification.get("route")) or "opus"
+                self._safe_text(classification.get("route")) or "orchestrator"
             ),
             "needs_latest": bool(classification.get("needs_latest")),
             "needs_citations": bool(classification.get("needs_citations")),
@@ -13387,7 +13394,7 @@ class GatewayRuntime:
 
         assistant_meta = {
             "request_id": request_id,
-            "route": self._safe_text(event.get("route")) or "opus",
+            "route": self._safe_text(event.get("route")) or "orchestrator",
             "awaiting_reply": bool(event.get("awaiting_reply")),
             "thinking_text": self._safe_text(event.get("thinking_text")),
             "metrics": event.get("metrics"),
@@ -13465,7 +13472,7 @@ class GatewayRuntime:
             return
         if (self._safe_text(event.get("source")) or "user") != "user":
             return
-        if (self._safe_text(event.get("route")) or "").strip().lower() != "opus":
+        if not self._is_orchestrator_route(event.get("route")):
             return
 
         request_id = self._safe_text(event.get("request_id"))
@@ -13965,7 +13972,7 @@ class GatewayRuntime:
                 if isinstance(assistant_message, dict)
                 else None
             )
-            or "opus"
+            or "orchestrator"
         )
         assistant_excerpt = self._bounded_excerpt(
             assistant_message.get("content")
@@ -15850,7 +15857,7 @@ class GatewayRuntime:
                     "task_id": self._safe_text(snapshot.get("task_id")) or None,
                     "session_id": session_id,
                     "channel": channel,
-                    "route": self._safe_text(snapshot.get("route")) or "opus",
+                    "route": self._safe_text(snapshot.get("route")) or "orchestrator",
                     "content": self._safe_text(snapshot.get("content")) or "",
                     "thinking_text": self._safe_text(snapshot.get("thinking_text")) or "",
                     "response_blocks": [
@@ -16791,7 +16798,7 @@ class GatewayRuntime:
         )
         forwarded = {
             "type": "task.progress",
-            "route": "opus",
+            "route": "orchestrator",
             "request_id": context["request_id"],
             "session_id": context["session_id"],
             "task_id": context["root_task_id"],
@@ -17238,7 +17245,7 @@ class GatewayRuntime:
         updated["interrupt"] = {**interrupt, "options": normalized_options[:6]}
         forwarded = {
             "type": "task.progress",
-            "route": "opus",
+            "route": "orchestrator",
             "request_id": request_id,
             "session_id": context.get("session_id"),
             "task_id": context.get("root_task_id"),
@@ -17880,7 +17887,7 @@ class GatewayRuntime:
             or self._safe_text(payload.get("routing_route"))
             or self._safe_text(payload.get("route"))
             or self._safe_text(route)
-            or "opus"
+            or "orchestrator"
         )
         dispatch_target = (
             self._safe_text(payload.get("dispatch_target"))
@@ -17948,7 +17955,7 @@ class GatewayRuntime:
                 request_id=normalized_request_id,
                 session_id=normalized_session_id,
                 channel=normalized_channel,
-                route=self._safe_text(route) or "opus",
+                route=self._safe_text(route) or "orchestrator",
                 dispatch_target=dispatch_identity.get("dispatch_target"),
                 model_provider=dispatch_identity.get("model_provider"),
                 model=dispatch_identity.get("model"),
@@ -18964,7 +18971,7 @@ class GatewayRuntime:
         request_id = self._safe_text(request_record.get("request_id"))
         session_id = self._safe_text(request_record.get("session_id"))
         channel = self._safe_text(request_record.get("channel"))
-        route = self._safe_text(request_record.get("route")) or "opus"
+        route = self._safe_text(request_record.get("route")) or "orchestrator"
         self._trace_request_event(
             request_id=request_id,
             session_id=session_id,
@@ -19558,7 +19565,8 @@ class GatewayRuntime:
         return (
             artifact_path.parent.parent
             / LLM_IMAGE_VARIANT_DIR_NAME
-            / f"{stem}.claude-input{suffix}"
+            # Sized for whichever model fetches it (historically ".claude-input").
+            / f"{stem}.llm-input{suffix}"
         )
 
     def _maybe_build_llm_image_variant(
@@ -20245,7 +20253,7 @@ class GatewayRuntime:
     ) -> None:
         if self._redis is None:
             return
-        if self._safe_text(request_record.get("route")) != "opus":
+        if not self._is_orchestrator_route(request_record.get("route")):
             return
         if (
             not self.config.docs_auto_parse_enabled
@@ -21004,7 +21012,7 @@ class GatewayRuntime:
             "source": self._safe_text(request_record.get("source")) or "user",
             "source_id": self._safe_text(request_record.get("source_id")) or None,
             "task_id": task_id,
-            "route": "opus",
+            "route": "orchestrator",
             "status": status,
             "message": message,
             "docs_progress": docs_progress,
@@ -21027,7 +21035,7 @@ class GatewayRuntime:
             "source": self._safe_text(request_record.get("source")) or "user",
             "source_id": self._safe_text(request_record.get("source_id")) or None,
             "task_id": task_id,
-            "route": "opus",
+            "route": "orchestrator",
             "status": status,
             "message": message,
             "tabular_progress": tabular_progress,
@@ -21208,7 +21216,7 @@ class GatewayRuntime:
                     request_id=request_id,
                     session_id=session_id,
                     channel=self._safe_text(event.get("channel")),
-                    route=self._safe_text(event.get("route")) or "opus",
+                    route=self._safe_text(event.get("route")) or "orchestrator",
                     event_type=event_type,
                     stage="terminal",
                     status=status,
@@ -21250,7 +21258,7 @@ class GatewayRuntime:
                     request_id=request_id,
                     session_id=session_id,
                     channel=self._safe_text(event.get("channel")),
-                    route=self._safe_text(event.get("route")) or "opus",
+                    route=self._safe_text(event.get("route")) or "orchestrator",
                     event_type=event_type,
                     stage="terminal",
                     status=status,
@@ -21288,7 +21296,7 @@ class GatewayRuntime:
                     request_id=request_id,
                     session_id=session_id,
                     channel=self._safe_text(event.get("channel")),
-                    route=self._safe_text(event.get("route")) or "opus",
+                    route=self._safe_text(event.get("route")) or "orchestrator",
                     event_type=event_type,
                     stage="terminal",
                     status=status,
@@ -21318,7 +21326,7 @@ class GatewayRuntime:
                     request_id=request_id,
                     session_id=session_id,
                     channel=self._safe_text(event.get("channel")),
-                    route=self._safe_text(event.get("route")) or "opus",
+                    route=self._safe_text(event.get("route")) or "orchestrator",
                     event_type=event_type,
                     stage="terminal",
                     status=status,
@@ -21345,7 +21353,7 @@ class GatewayRuntime:
                     request_id=request_id,
                     session_id=session_id,
                     channel=self._safe_text(event.get("channel")),
-                    route=self._safe_text(event.get("route")) or "opus",
+                    route=self._safe_text(event.get("route")) or "orchestrator",
                     event_type="task.bound",
                     stage="execution",
                     status="active",
@@ -21418,7 +21426,7 @@ class GatewayRuntime:
                     request_id=request_id,
                     session_id=session_id,
                     channel=event_channel,
-                    route=self._safe_text(event.get("route")) or "opus",
+                    route=self._safe_text(event.get("route")) or "orchestrator",
                     event_type="response.complete",
                     stage="response",
                     status="suppressed",
@@ -21452,7 +21460,7 @@ class GatewayRuntime:
                         request_id=request_id,
                         session_id=session_id,
                         channel=event_channel,
-                        route=self._safe_text(event.get("route")) or "opus",
+                        route=self._safe_text(event.get("route")) or "orchestrator",
                         event_type="response.complete",
                         stage="response",
                         status="suppressed",
@@ -21470,7 +21478,7 @@ class GatewayRuntime:
                     request_id=request_id,
                     session_id=session_id,
                     channel=event_channel,
-                    route=self._safe_text(event.get("route")) or "opus",
+                    route=self._safe_text(event.get("route")) or "orchestrator",
                     event_type="response.complete",
                     stage="response",
                     status="suppressed",
@@ -21509,7 +21517,7 @@ class GatewayRuntime:
                     request_id=request_id,
                     session_id=session_id,
                     channel=event_channel,
-                    route=self._safe_text(event.get("route")) or "opus",
+                    route=self._safe_text(event.get("route")) or "orchestrator",
                     event_type="response.complete",
                     stage="response",
                     status="suppressed",
@@ -21534,7 +21542,7 @@ class GatewayRuntime:
                         request_id=request_id,
                         session_id=session_id,
                         channel=event_channel,
-                        route=self._safe_text(event.get("route")) or "opus",
+                        route=self._safe_text(event.get("route")) or "orchestrator",
                         event_type="response.complete",
                         stage="response",
                         status="active",
@@ -21561,7 +21569,7 @@ class GatewayRuntime:
                     request_id=request_id,
                     session_id=session_id,
                     channel=event_channel,
-                    route=self._safe_text(event.get("route")) or "opus",
+                    route=self._safe_text(event.get("route")) or "orchestrator",
                     event_type="response.complete",
                     stage="response",
                     status="suppressed",
@@ -21603,7 +21611,7 @@ class GatewayRuntime:
                         request_id=request_id,
                         session_id=session_id,
                         channel=event_channel,
-                        route=self._safe_text(event.get("route")) or "opus",
+                        route=self._safe_text(event.get("route")) or "orchestrator",
                         event_type="response.complete",
                         stage="response",
                         status="suppressed",
@@ -21781,7 +21789,7 @@ class GatewayRuntime:
                     "metrics": event.get("metrics"),
                     **self._dispatch_identity_from_event(
                         event,
-                        route=self._safe_text(event.get("route")) or "opus",
+                        route=self._safe_text(event.get("route")) or "orchestrator",
                     ),
                     "thinking_text": self._safe_text(event.get("thinking_text")),
                     "source": self._safe_text(event.get("source")),
@@ -21812,7 +21820,7 @@ class GatewayRuntime:
                     "sheets_progress": sheets_progress,
                 },
                 channel=event_channel,
-                route="opus",
+                route="orchestrator",
             )
             if (
                 assistant_message_id
@@ -21926,7 +21934,7 @@ class GatewayRuntime:
                 request_id=request_id,
                 session_id=session_id,
                 channel=event_channel,
-                route=self._safe_text(event.get("route")) or "opus",
+                route=self._safe_text(event.get("route")) or "orchestrator",
                 event_type="response.complete",
                 stage="response",
                 status="completed",
@@ -21952,7 +21960,7 @@ class GatewayRuntime:
                         role="assistant",
                         content=str(event.get("content") or ""),
                         channel=event_channel,
-                        route="opus",
+                        route="orchestrator",
                         sources=event.get("sources")
                         if isinstance(event.get("sources"), list)
                         else None,
@@ -22004,7 +22012,7 @@ class GatewayRuntime:
                 request_id=request_id,
                 session_id=session_id,
                 channel=self._safe_text(event.get("channel")),
-                route=self._safe_text(event.get("route")) or "opus",
+                route=self._safe_text(event.get("route")) or "orchestrator",
                 event_type=event_type,
                 stage="terminal"
                 if event_type in {"task.failed", "task.cancelled"}
@@ -22562,7 +22570,7 @@ class GatewayRuntime:
             for item in attachments
         )
 
-    def _contains_opus_media_attachments(self, attachments: Any) -> bool:
+    def _contains_orchestrator_media_attachments(self, attachments: Any) -> bool:
         return self._contains_document_attachments(
             attachments
         ) or self._contains_image_attachments(attachments)
@@ -25203,7 +25211,7 @@ class GatewayRuntime:
             return None
         receipt: dict[str, Any] = {
             "request_id": self._safe_text(turn.get("request_id")),
-            "route": self._safe_text(turn.get("route")) or "opus",
+            "route": self._safe_text(turn.get("route")) or "orchestrator",
             "question": self._bounded_excerpt(
                 turn.get("user_message_excerpt"), limit=96
             ),
@@ -25428,7 +25436,7 @@ class GatewayRuntime:
         question = self._safe_text(turn.get("user_message_excerpt"))
         completed_at = self._safe_text(turn.get("completed_at"))
         request_id = self._safe_text(turn.get("request_id"))
-        route = self._safe_text(turn.get("route")) or "opus"
+        route = self._safe_text(turn.get("route")) or "orchestrator"
         for item in stored:
             receipt = dict(item)
             if request_id:
@@ -25463,12 +25471,23 @@ class GatewayRuntime:
             return None
 
     def _normalize_route(self, route: str) -> str:
-        normalized = route.strip().lower()
+        normalized = str(route or "").strip().lower()
         if normalized == "gemini":
             return "haiku"
-        if normalized in {"opus", "haiku", "perplexity"}:
+        # "opus" is the legacy token for the orchestrator route, named after
+        # the model that originally powered it.
+        if normalized == "opus":
+            return "orchestrator"
+        if normalized in {"orchestrator", "haiku", "perplexity"}:
             return normalized
-        return "opus"
+        return "orchestrator"
+
+    @staticmethod
+    def _is_orchestrator_route(value: Any) -> bool:
+        """Route check that, unlike _normalize_route, never defaults an empty
+        or unknown value to the orchestrator route."""
+        normalized = str(value or "").strip().lower()
+        return normalized in {"orchestrator", "opus"}
 
     def _normalize_route_override(self, route_override: Any) -> str | None:
         route = self._safe_text(route_override)
@@ -25479,7 +25498,9 @@ class GatewayRuntime:
             return None
         if normalized == "gemini":
             return "haiku"
-        if normalized in {"opus", "haiku", "perplexity"}:
+        if normalized == "opus":
+            return "orchestrator"
+        if normalized in {"orchestrator", "haiku", "perplexity"}:
             return normalized
         return None
 
@@ -25749,7 +25770,7 @@ class GatewayRuntime:
                 self._safe_text((event.get("error") or {}).get("message"))
                 if isinstance(event.get("error"), dict)
                 else None
-            ) or self._safe_text(event.get("message")) or "Opus task failed."
+            ) or self._safe_text(event.get("message")) or "Orchestrator task failed."
             state.error_message = error_message
             state.activity = error_message or state.activity
 
@@ -26281,7 +26302,7 @@ class GatewayRuntime:
     ) -> dict[str, Any]:
         user_content = self._safe_text(user_message.get("content")) or "[empty message]"
         assistant_content = self._safe_text(event.get("content")) or "[empty response]"
-        route = self._safe_text(event.get("route")) or "opus"
+        route = self._safe_text(event.get("route")) or "orchestrator"
         metrics = (
             event.get("metrics") if isinstance(event.get("metrics"), dict) else None
         )

@@ -1281,8 +1281,8 @@ function normalizeGatewayRequestTracePayload(raw: unknown): { sessionId: string 
       request_id: requestId,
       session_id: typeof row.session_id === 'string' && row.session_id.trim() ? row.session_id.trim() : sessionId || '',
       channel: String(row.channel || '').trim() || 'unknown',
-      route: String(row.route || '').trim() || 'opus',
-      legacy_route: String(row.legacy_route || row.routing_route || row.route || '').trim() || 'opus',
+      route: String(row.route || '').trim() || 'orchestrator',
+      legacy_route: String(row.legacy_route || row.routing_route || row.route || '').trim() || 'orchestrator',
       dispatch_target: typeof row.dispatch_target === 'string' && row.dispatch_target.trim()
         ? row.dispatch_target.trim()
         : typeof row.execution_route === 'string' && row.execution_route.trim()
@@ -3359,7 +3359,7 @@ export default function SpacesControlCenter({
     },
     {
       title: 'YC watchlist diff',
-      owner: 'Opus',
+      owner: 'Orchestrator',
       status: pendingTaskCount > 0 ? `${pendingTaskCount} inputs waiting` : 'Waiting on you',
       channel: 'Desktop',
       note: 'Source review and send-path confirmation before the morning delivery runs.',
@@ -3367,7 +3367,7 @@ export default function SpacesControlCenter({
     },
     {
       title: 'DeepAgents eval loop',
-      owner: 'Opus',
+      owner: 'Orchestrator',
       status: 'Parked',
       channel: 'Desktop',
       note: 'Needs a call on the reward signal and acceptance gate before execution restarts.',
@@ -3460,7 +3460,7 @@ export default function SpacesControlCenter({
 
   const providerCards: ObservatoryCard[] = [
     {
-      label: 'Anthropic / Opus',
+      label: 'Anthropic / Claude',
       value: 'Task orchestration',
       detail: 'Primary planner, reminder author, and high-agency tool user.',
       accent: 'azure',

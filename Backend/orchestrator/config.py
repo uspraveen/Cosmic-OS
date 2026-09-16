@@ -336,7 +336,12 @@ class OrchestratorConfig:
                 1024,
                 _env_int("ORCHESTRATOR_CODE_SANDBOX_MAX_FILE_BYTES", 25 * 1024 * 1024),
             ),
-            max_tokens=max(256, _env_int("OPUS_MAX_TOKENS", 16000)),
+            # ORCHESTRATOR_MAX_TOKENS is canonical; OPUS_MAX_TOKENS is the
+            # legacy env name from when the brain was always Claude Opus.
+            max_tokens=max(
+                256,
+                _env_int("ORCHESTRATOR_MAX_TOKENS", _env_int("OPUS_MAX_TOKENS", 16000)),
+            ),
             request_timeout_sec=max(30.0, _env_float("ORCHESTRATOR_REQUEST_TIMEOUT_SEC", 300.0)),
             redis_url=os.getenv("REDIS_URL", "").strip(),
             agent_registry_db_path=Path(

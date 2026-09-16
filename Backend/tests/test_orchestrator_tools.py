@@ -924,7 +924,7 @@ async def test_tool_executor_capability_wishlist_capture_uses_gateway_internal_r
             "request_id": "req_parent",
             "session_id": "sess_parent",
             "task_id": "tsk_parent",
-            "route": "opus",
+            "route": "orchestrator",
             "created_by": "cosmic/orchestrator:1.0.0",
             "metadata": {"task_source": "user", "channel": "desktop:test"},
         }

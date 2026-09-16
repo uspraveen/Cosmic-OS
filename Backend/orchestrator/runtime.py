@@ -1,7 +1,9 @@
 """COSMIC Orchestrator Runtime — Full Agentic Loop.
 
 Implements the core agentic cycle:
-  1. Send user query + conversation context + tools to Claude Opus
+  1. Send user query + conversation context + tools to the selected brain
+     (Fireworks GLM, Fireworks Kimi, or Anthropic Claude — whichever the
+     saved preference or config default resolves to)
   2. Stream the response (thinking + text + tool_use blocks)
   3. If stop_reason == "tool_use": execute tools, append results, loop back to 1
   4. If stop_reason == "end_turn": emit final response, done
@@ -584,9 +586,10 @@ class OrchestratorRuntime:
             "channel": channel,
             "source": task.source,
             "source_id": task.source_id,
-            # route is a legacy compatibility token, not an execution lane or model.
-            "route": "opus",
-            "legacy_route": "opus",
+            # route names the answering surface, never the model — the
+            # orchestrator route is served by whichever brain is configured.
+            "route": "orchestrator",
+            "legacy_route": "orchestrator",
             "dispatch_target": "orchestrator",
             "model_provider": orchestrator_provider,
             "model": model_selection.effective_model,
@@ -597,7 +600,7 @@ class OrchestratorRuntime:
         created_event = {
             **ev,
             "type": "task.created",
-            "route": "opus",
+            "route": "orchestrator",
             "status": "running",
             "model_provider": orchestrator_provider,
             "model": model_selection.effective_model,
@@ -768,10 +771,10 @@ class OrchestratorRuntime:
                             "task_id": task.task_id,
                             "request_id": request_id,
                             "session_id": session_id,
-                            "route": "opus",
+                            "route": "orchestrator",
                             "operation": usage_operation,
                             "metadata_json": {
-                                "legacy_route": "opus",
+                                "legacy_route": "orchestrator",
                                 "dispatch_target": "orchestrator",
                                 "provider": orchestrator_provider,
                                 "model": effective_anthropic_model,
@@ -873,7 +876,7 @@ class OrchestratorRuntime:
                                     block.thinking_text += chunk
                                     if not reasoning_announced:
                                         reasoning_announced = True
-                                        yield {**ev, "type": "task.progress", "status": "thinking", "message": "Opus is reasoning through the request."}
+                                        yield {**ev, "type": "task.progress", "status": "thinking", "message": "Cosmic is reasoning through the request."}
                                     if iteration == 1:
                                         yield {**ev, "type": "response.thinking.chunk", "content": chunk, "done": False}
 
@@ -888,7 +891,7 @@ class OrchestratorRuntime:
                                     block.text += chunk
                                     if not responding_announced:
                                         responding_announced = True
-                                        yield {**ev, "type": "task.progress", "status": "responding", "message": "Opus is writing the response."}
+                                        yield {**ev, "type": "task.progress", "status": "responding", "message": "Cosmic is writing the response."}
                                     chunk, turn_stream_boundary_emitted = self._stream_turn_chunk_delta(
                                         full_response_text,
                                         chunk,
@@ -1350,7 +1353,7 @@ class OrchestratorRuntime:
                 **ev,
                 "type": "response.complete",
                 "content": display_text,
-                "route": "opus",
+                "route": "orchestrator",
                 "result_type": result_type,
                 "awaiting_reply": awaiting_reply,
                 "thinking_text": full_reasoning_text,
@@ -1393,7 +1396,7 @@ class OrchestratorRuntime:
             yield {
                 **ev,
                 "type": "task.completed",
-                "route": "opus",
+                "route": "orchestrator",
                 "status": "completed",
                 "model_provider": orchestrator_provider,
                 "model": effective_anthropic_model,
@@ -1409,7 +1412,7 @@ class OrchestratorRuntime:
                 yield {
                     **ev,
                     "type": "task.cancelled",
-                    "route": "opus",
+                    "route": "orchestrator",
                     "status": "cancelled",
                     "message": message,
                     "model_provider": orchestrator_provider,
@@ -1438,7 +1441,7 @@ class OrchestratorRuntime:
                 retryable = False
             self.task_ledger.mark_failed(task.task_id, code=code, message=message)
             yield {
-                **ev, "type": "task.failed", "route": "opus", "status": "failed",
+                **ev, "type": "task.failed", "route": "orchestrator", "status": "failed",
                 "model_provider": orchestrator_provider,
                 "model": locals().get(
                     "effective_anthropic_model",
@@ -1722,10 +1725,10 @@ class OrchestratorRuntime:
                         "task_id": task.task_id,
                         "request_id": request_id,
                         "session_id": session_id,
-                        "route": "opus",
+                        "route": "orchestrator",
                         "operation": usage_operation,
                         "metadata_json": {
-                            "legacy_route": "opus",
+                            "legacy_route": "orchestrator",
                             "dispatch_target": "orchestrator",
                             "provider": effective_provider,
                             "model": effective_model,
@@ -2066,10 +2069,10 @@ class OrchestratorRuntime:
                             "task_id": task.task_id,
                             "request_id": request_id,
                             "session_id": session_id,
-                            "route": "opus",
+                            "route": "orchestrator",
                             "operation": usage_operation,
                             "metadata_json": {
-                                "legacy_route": "opus",
+                                "legacy_route": "orchestrator",
                                 "dispatch_target": "orchestrator",
                                 "provider": effective_provider,
                                 "model": effective_model,
@@ -2190,7 +2193,7 @@ class OrchestratorRuntime:
                 **ev,
                 "type": "response.complete",
                 "content": display_text,
-                "route": "opus",
+                "route": "orchestrator",
                 "result_type": result_type,
                 "awaiting_reply": awaiting_reply,
                 "thinking_text": full_reasoning_text,
@@ -2249,7 +2252,7 @@ class OrchestratorRuntime:
             yield {
                 **ev,
                 "type": "task.completed",
-                "route": "opus",
+                "route": "orchestrator",
                 "status": "completed",
                 "model_provider": effective_provider,
                 "model": effective_model,
@@ -2265,7 +2268,7 @@ class OrchestratorRuntime:
                 yield {
                     **ev,
                     "type": "task.cancelled",
-                    "route": "opus",
+                    "route": "orchestrator",
                     "status": "cancelled",
                     "message": message,
                     "model_provider": effective_provider,
@@ -2287,7 +2290,7 @@ class OrchestratorRuntime:
             yield {
                 **ev,
                 "type": "task.failed",
-                "route": "opus",
+                "route": "orchestrator",
                 "status": "failed",
                 "model_provider": effective_provider,
                 "model": effective_model,
@@ -2401,7 +2404,7 @@ class OrchestratorRuntime:
             if provider:
                 model = str(raw_preference.get("model") or "").strip()
                 return provider, model or self._default_model_for_orchestrator_provider(provider)
-        provider = self._normalize_orchestrator_provider(self.config.orchestrator_default_provider) or "anthropic"
+        provider = self._normalize_orchestrator_provider(self.config.orchestrator_default_provider) or "fireworks_glm"
         return provider, self._default_model_for_orchestrator_provider(provider)
 
     def _default_model_for_orchestrator_provider(self, provider: str) -> str:
@@ -2529,7 +2532,9 @@ class OrchestratorRuntime:
             return "fireworks_glm"
         if normalized in {"anthropic", "claude", "opus", "sonnet"}:
             return "anthropic"
-        return "anthropic"
+        # Unknown provider tags fall through to the configured default brain
+        # rather than hardwiring any single provider.
+        return None
 
     @staticmethod
     def _with_fireworks_runtime_note(system_prompt: str) -> str:
@@ -5923,13 +5928,13 @@ class OrchestratorRuntime:
             return None
         if retry_count < self.config.anthropic_overload_retry_attempts:
             return AnthropicRetryPlan(
-                message="Opus hit temporary capacity. Retrying automatically...",
+                message="The model hit temporary capacity. Retrying automatically...",
                 backoff_sec=self._anthropic_overload_backoff_sec(retry_count),
             )
         fallback_model = str(self.config.anthropic_overload_fallback_model or "").strip()
         if fallback_model and not fallback_used and fallback_model != active_model:
             return AnthropicRetryPlan(
-                message="Opus hit temporary capacity. Retrying with a standby model...",
+                message="The model hit temporary capacity. Retrying with a standby model...",
                 backoff_sec=self._anthropic_overload_backoff_sec(retry_count),
                 model_override=fallback_model,
             )
@@ -5940,7 +5945,7 @@ class OrchestratorRuntime:
             return exc
         if self._is_transient_anthropic_overload(exc):
             return OrchestratorTaskError(
-                "Opus is temporarily overloaded right now. Please try again in a moment.",
+                "The model is temporarily overloaded right now. Please try again in a moment.",
                 code="OPUS_TEMPORARILY_OVERLOADED",
                 retryable=True,
             )

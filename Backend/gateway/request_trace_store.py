@@ -166,7 +166,10 @@ class RequestTraceStore:
         normalized_request_id = str(request_id or "").strip()
         normalized_session_id = str(session_id or "").strip()
         normalized_channel = str(channel or "").strip()
-        normalized_route = str(route or "").strip() or "opus"
+        normalized_route = str(route or "").strip()
+        if normalized_route.lower() == "opus":
+            # Legacy token for the orchestrator route.
+            normalized_route = "orchestrator"
         normalized_dispatch_target = (
             str(dispatch_target or "").strip()
             or str(execution_route or "").strip()

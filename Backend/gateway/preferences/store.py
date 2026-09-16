@@ -16,6 +16,10 @@ _COSMIC_HEARTBEAT_KEY = "cosmic_heartbeat"
 _FIREWORKS_KIMI_MODEL = "accounts/fireworks/models/kimi-k2p6"
 _FIREWORKS_GLM_MODEL = "accounts/fireworks/models/glm-5p3"
 _FIREWORKS_GLM_FLASH_MODEL = "accounts/fireworks/models/glm-5p3-flash"
+# The shipped default brain. Missing or unrecognized provider tags resolve
+# here rather than to any hardwired provider — the orchestrator is the
+# component; the model behind it can be anything.
+_DEFAULT_ORCHESTRATOR_PROVIDER = "fireworks_glm"
 # GLM 5.2 was removed from the catalog; a stored selection of it falls back to
 # the current default rather than routing to a model we no longer offer.
 _RETIRED_GLM_MODELS = {"accounts/fireworks/models/glm-5p2"}
@@ -519,7 +523,7 @@ class GatewayPreferenceStore:
         if not isinstance(value, dict):
             value = {}
         provider = self._normalize_cosmic_orchestrator_provider(
-            str(value.get("provider") or "anthropic")
+            str(value.get("provider") or _DEFAULT_ORCHESTRATOR_PROVIDER)
         )
         return {
             "provider": provider,
@@ -577,7 +581,11 @@ class GatewayPreferenceStore:
             "glm53",
         }:
             return "fireworks_glm"
-        return "anthropic"
+        if normalized in {"anthropic", "claude", "opus", "sonnet"}:
+            return "anthropic"
+        # Unknown tags resolve to the shipped default brain, not to any
+        # hardwired provider.
+        return _DEFAULT_ORCHESTRATOR_PROVIDER
 
     def _normalize_cosmic_orchestrator_model(
         self,

@@ -424,7 +424,7 @@ async def test_select_marks_the_choice_and_schedules_the_continuation_turn(tmp_p
     await scheduled[0]
     assert len(turns) == 1
     turn = turns[0]
-    assert turn["route_override"] == "opus"
+    assert turn["route_override"] == "orchestrator"
     assert turn["channel"] == "desktop:desk_test"
     assert turn["session_id"] == "sess_parent"
     assert turn["metadata"]["slide_workflow_choice_id"] == "slide_wf_abc123"

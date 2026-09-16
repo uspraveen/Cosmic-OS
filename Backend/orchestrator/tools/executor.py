@@ -262,7 +262,7 @@ class ToolExecutor:
                     source_id=self.usage_source_id,
                     task_id=context.task_id if context else None,
                     session_id=context.session_id if context else None,
-                    route="opus",
+                    route="orchestrator",
                     operation="orchestrator.perplexity_research",
                     model_key=build_model_key("perplexity", self.perplexity_model),
                     request_id=context.request_id if context else None,
@@ -291,7 +291,7 @@ class ToolExecutor:
                 source_id=self.usage_source_id,
                 task_id=context.task_id if context else None,
                 session_id=context.session_id if context else None,
-                route="opus",
+                route="orchestrator",
                 operation="orchestrator.perplexity_research",
                 model_key=build_model_key("perplexity", self.perplexity_model),
                 request_id=context.request_id if context else None,
@@ -1120,7 +1120,7 @@ class ToolExecutor:
             "request_id": context.request_id if context else None,
             "session_id": context.session_id if context else None,
             "task_id": context.task_id if context else None,
-            "route": "opus",
+            "route": "orchestrator",
             "created_by": "cosmic/orchestrator:1.0.0",
             "metadata": self._clean_mapping(
                 {

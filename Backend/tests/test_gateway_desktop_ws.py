@@ -155,7 +155,7 @@ class FakeOrchestratorClient:
             "task_id": task.task_id,
             "session_id": task.session_id,
             "channel": task.channel,
-            "route": "opus",
+            "route": "orchestrator",
             "status": "running",
         }
         yield {
@@ -183,7 +183,7 @@ class FakeOrchestratorClient:
             "session_id": task.session_id,
             "channel": task.channel,
             "content": "Thin Opus answer",
-            "route": "opus",
+            "route": "orchestrator",
             "awaiting_reply": True,
             "metrics": {"rtt_ms": 32},
         }
@@ -192,7 +192,7 @@ class FakeOrchestratorClient:
             "task_id": task.task_id,
             "session_id": task.session_id,
             "channel": task.channel,
-            "route": "opus",
+            "route": "orchestrator",
             "status": "completed",
         }
 
@@ -211,7 +211,7 @@ class FakeHeartbeatNoopOrchestratorClient(FakeOrchestratorClient):
             "task_id": task.task_id,
             "session_id": task.session_id,
             "channel": task.channel,
-            "route": "opus",
+            "route": "orchestrator",
             "status": "running",
         }
         yield {
@@ -230,7 +230,7 @@ class FakeHeartbeatNoopOrchestratorClient(FakeOrchestratorClient):
             "session_id": task.session_id,
             "channel": task.channel,
             "content": "heartbeat_ok",
-            "route": "opus",
+            "route": "orchestrator",
             "awaiting_reply": False,
             "produced_artifacts": [
                 {
@@ -249,7 +249,7 @@ class FakeHeartbeatNoopOrchestratorClient(FakeOrchestratorClient):
             "task_id": task.task_id,
             "session_id": task.session_id,
             "channel": task.channel,
-            "route": "opus",
+            "route": "orchestrator",
             "status": "completed",
         }
 
@@ -266,7 +266,7 @@ class FakeHeartbeatNoteOrchestratorClient(FakeOrchestratorClient):
             "task_id": task.task_id,
             "session_id": task.session_id,
             "channel": task.channel,
-            "route": "opus",
+            "route": "orchestrator",
             "status": "running",
         }
         yield {
@@ -275,7 +275,7 @@ class FakeHeartbeatNoteOrchestratorClient(FakeOrchestratorClient):
             "request_id": task.input.get("request_id"),
             "session_id": task.session_id,
             "channel": task.channel,
-            "route": "opus",
+            "route": "orchestrator",
             "status": "thinking",
             "message": "Checking heartbeat context.",
         }
@@ -293,7 +293,7 @@ class FakeHeartbeatNoteOrchestratorClient(FakeOrchestratorClient):
                     "confidence": 1.0,
                 }
             ),
-            "route": "opus",
+            "route": "orchestrator",
             "awaiting_reply": False,
             "metrics": {"rtt_ms": 24},
         }
@@ -302,7 +302,7 @@ class FakeHeartbeatNoteOrchestratorClient(FakeOrchestratorClient):
             "task_id": task.task_id,
             "session_id": task.session_id,
             "channel": task.channel,
-            "route": "opus",
+            "route": "orchestrator",
             "status": "completed",
         }
 
@@ -336,7 +336,7 @@ class FakeWeeklyMyToolsReviewOrchestratorClient(FakeOrchestratorClient):
             "task_id": task.task_id,
             "session_id": task.session_id,
             "channel": task.channel,
-            "route": "opus",
+            "route": "orchestrator",
             "status": "running",
         }
         yield {
@@ -367,7 +367,7 @@ class FakeWeeklyMyToolsReviewOrchestratorClient(FakeOrchestratorClient):
                 if self.include_raw_response_block
                 else {}
             ),
-            "route": "opus",
+            "route": "orchestrator",
             "awaiting_reply": False,
             "metrics": {"rtt_ms": 24},
         }
@@ -376,7 +376,7 @@ class FakeWeeklyMyToolsReviewOrchestratorClient(FakeOrchestratorClient):
             "task_id": task.task_id,
             "session_id": task.session_id,
             "channel": task.channel,
-            "route": "opus",
+            "route": "orchestrator",
             "status": "completed",
         }
 
@@ -407,7 +407,7 @@ class FakeResearchOrchestratorClient(FakeOrchestratorClient):
             "task_id": task.task_id,
             "session_id": task.session_id,
             "channel": task.channel,
-            "route": "opus",
+            "route": "orchestrator",
             "status": "running",
         }
         yield {
@@ -417,7 +417,7 @@ class FakeResearchOrchestratorClient(FakeOrchestratorClient):
             "session_id": task.session_id,
             "channel": task.channel,
             "content": "Here is the grounded answer.",
-            "route": "opus",
+            "route": "orchestrator",
             "awaiting_reply": False,
             "metrics": {"rtt_ms": 48},
             "research_provenance": {
@@ -465,7 +465,7 @@ class FakeResearchOrchestratorClient(FakeOrchestratorClient):
             "task_id": task.task_id,
             "session_id": task.session_id,
             "channel": task.channel,
-            "route": "opus",
+            "route": "orchestrator",
             "status": "completed",
         }
 
@@ -526,7 +526,7 @@ class FakeCancellableOrchestratorClient:
                 "request_id": task.input.get("request_id"),
                 "session_id": task.session_id,
                 "channel": task.channel,
-                "route": "opus",
+                "route": "orchestrator",
                 "status": "running",
             }
             await cancel_event.wait()
@@ -536,7 +536,7 @@ class FakeCancellableOrchestratorClient:
                 "request_id": task.input.get("request_id"),
                 "session_id": task.session_id,
                 "channel": task.channel,
-                "route": "opus",
+                "route": "orchestrator",
                 "status": "cancelled",
                 "message": "Response stopped.",
             }
@@ -1142,8 +1142,8 @@ def build_runtime(tmp_path, *, route: str = "haiku") -> GatewayRuntime:
             "route": route,
             "needs_latest": False,
             "needs_citations": False,
-            "is_task": route == "opus",
-            "is_continuation": route == "opus",
+            "is_task": route == "orchestrator",
+            "is_continuation": route == "orchestrator",
             "confidence": 0.91,
             "signals": ["test"],
         }
@@ -1573,7 +1573,7 @@ async def test_runtime_broadcasts_desktop_messages_to_mobile_clients(tmp_path) -
 
 
 @pytest.mark.asyncio
-async def test_non_text_inbound_persists_artifacts_and_passes_them_to_opus(tmp_path) -> None:
+async def test_non_text_inbound_persists_artifacts_and_passes_them_to_orchestrator(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
     runtime.config.public_base_url = "https://gateway.example.test"
 
@@ -1610,7 +1610,7 @@ async def test_non_text_inbound_persists_artifacts_and_passes_them_to_opus(tmp_p
             }
         )
 
-        assert result["route"] == "opus"
+        assert result["route"] == "orchestrator"
         assert len(result["input_artifacts"]) == 1
         assert result["input_artifacts"][0]["kind"] == "image"
         assert result["input_artifacts"][0]["bridge_media_ref"] == "wamid_img_1:att_1"
@@ -1770,7 +1770,7 @@ async def test_docs_autoparse_enriches_request_record_with_bundle_metadata(tmp_p
 
         runtime._redis = _StubRedis()  # type: ignore[assignment]
         request_record = {
-            "route": "opus",
+            "route": "orchestrator",
             "request_id": "req_docs_parse",
             "session_id": "sess_docs_parse",
             "channel": "desktop:desk_a",
@@ -2025,7 +2025,7 @@ async def test_docs_autoparse_emits_progress_for_desktop_documents(tmp_path) -> 
 
         runtime._redis = _StubRedis()  # type: ignore[assignment]
         request_record = {
-            "route": "opus",
+            "route": "orchestrator",
             "request_id": "req_docs_progress",
             "session_id": "sess_docs_progress",
             "channel": "desktop:desk_a",
@@ -2105,7 +2105,7 @@ async def test_docs_autoparse_timeout_marks_parse_pending_and_schedules_reconcil
 
         runtime._redis = _StubRedis()  # type: ignore[assignment]
         request_record = {
-            "route": "opus",
+            "route": "orchestrator",
             "request_id": "req_docs_pending",
             "session_id": "sess_docs_pending",
             "channel": "desktop:desk_a",
@@ -2185,7 +2185,7 @@ async def test_docs_autoparse_reconcile_marks_late_completion_as_parsed(tmp_path
     await runtime.start()
     try:
         request_record = {
-            "route": "opus",
+            "route": "orchestrator",
             "request_id": "req_docs_reconcile",
             "session_id": "sess_docs_reconcile",
             "channel": "desktop:desk_a",
@@ -2963,7 +2963,7 @@ def test_mobile_upload_route_rejects_session_mismatch_for_active_phone(test_clie
 
 
 @pytest.mark.asyncio
-async def test_document_attachments_force_opus_even_with_text_content(tmp_path) -> None:
+async def test_document_attachments_force_orchestrator_even_with_text_content(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="haiku")
     await runtime.start()
     try:
@@ -2990,12 +2990,12 @@ async def test_document_attachments_force_opus_even_with_text_content(tmp_path) 
     finally:
         await runtime.stop()
 
-    assert result["route"] == "opus"
+    assert result["route"] == "orchestrator"
     assert result["classification"]["signals"] == ["media_attachments"]
 
 
 @pytest.mark.asyncio
-async def test_mobile_image_attachments_stage_into_input_artifacts_and_force_opus(tmp_path) -> None:
+async def test_mobile_image_attachments_stage_into_input_artifacts_and_force_orchestrator(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="haiku")
     await runtime.start()
     try:
@@ -3023,7 +3023,7 @@ async def test_mobile_image_attachments_stage_into_input_artifacts_and_force_opu
     finally:
         await runtime.stop()
 
-    assert result["route"] == "opus"
+    assert result["route"] == "orchestrator"
     assert result["classification"]["signals"] == ["media_attachments"]
     assert len(result["input_artifacts"]) == 1
     assert result["input_artifacts"][0]["kind"] == "image"
@@ -4026,7 +4026,7 @@ def test_desktop_resume_includes_foreground_active_request(test_client: TestClie
     assert foreground_streams[0]["request_id"] == "req_running_resume"
     assert foreground_streams[0]["task_id"] == "task_running_resume"
     assert foreground_streams[0]["session_id"] == session_id
-    assert foreground_streams[0]["route"] == "opus"
+    assert foreground_streams[0]["route"] == "orchestrator"
     assert foreground_streams[0]["content"] == "Partial streamed answer"
     assert foreground_streams[0]["thinking_text"] == "Partial streamed thinking"
     assert foreground_streams[0]["channel"] == "desktop:desk_running_resume"
@@ -4129,7 +4129,7 @@ def test_desktop_resume_includes_recent_failed_foreground_stream(test_client: Te
     assert foreground_streams[0]["request_id"] == "req_failed_resume"
     assert foreground_streams[0]["task_id"] == "task_failed_resume"
     assert foreground_streams[0]["session_id"] == session_id
-    assert foreground_streams[0]["route"] == "opus"
+    assert foreground_streams[0]["route"] == "orchestrator"
     assert foreground_streams[0]["content"] == "Partial streamed answer"
     assert foreground_streams[0]["thinking_text"] == "Partial streamed thinking"
     assert foreground_streams[0]["channel"] == "desktop:desk_failed_resume"
@@ -6292,7 +6292,7 @@ def test_signed_artifact_content_route_serves_stored_output_artifact_preview_wit
     assert cached["source_message_id"] == message_id
 
 
-def test_desktop_websocket_streams_thin_opus_route(test_client: TestClient, tmp_path) -> None:
+def test_desktop_websocket_streams_thin_orchestrator_route(test_client: TestClient, tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
 
     @asynccontextmanager
@@ -6318,11 +6318,11 @@ def test_desktop_websocket_streams_thin_opus_route(test_client: TestClient, tmp_
             )
             route_result = websocket.receive_json()
             assert route_result["type"] == "route_result"
-            assert route_result["route"] == "opus"
+            assert route_result["route"] == "orchestrator"
 
             created = websocket.receive_json()
             assert created["type"] == "task.created"
-            assert created["route"] == "opus"
+            assert created["route"] == "orchestrator"
 
             thinking = websocket.receive_json()
             assert thinking["type"] == "response.thinking.chunk"
@@ -6334,14 +6334,14 @@ def test_desktop_websocket_streams_thin_opus_route(test_client: TestClient, tmp_
 
             complete = websocket.receive_json()
             assert complete["type"] == "response.complete"
-            assert complete["route"] == "opus"
+            assert complete["route"] == "orchestrator"
             assert complete["awaiting_reply"] is True
 
             completed = websocket.receive_json()
             assert completed["type"] == "task.completed"
 
 
-def test_desktop_websocket_hands_off_direct_route_to_opus_with_escalation_activity(tmp_path) -> None:
+def test_desktop_websocket_hands_off_direct_route_to_orchestrator_with_escalation_activity(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="perplexity")
     runtime.perplexity_adapter = FakeHandoffDirectAdapter("perplexity")
 
@@ -6373,14 +6373,14 @@ def test_desktop_websocket_hands_off_direct_route_to_opus_with_escalation_activi
             progress = websocket.receive_json()
             assert progress["type"] == "task.progress"
             assert progress["request_id"] == "req_handoff"
-            assert progress["route"] == "opus"
+            assert progress["route"] == "orchestrator"
             assert progress["status"] == "escalating"
-            assert progress["message"] == "Escalating to Opus for deeper handling."
+            assert progress["message"] == "Escalating to the orchestrator for deeper handling."
             assert progress["escalated_from"] == "perplexity"
 
             created = websocket.receive_json()
             assert created["type"] == "task.created"
-            assert created["route"] == "opus"
+            assert created["route"] == "orchestrator"
 
             thinking = websocket.receive_json()
             assert thinking["type"] == "response.thinking.chunk"
@@ -6392,7 +6392,7 @@ def test_desktop_websocket_hands_off_direct_route_to_opus_with_escalation_activi
 
             complete = websocket.receive_json()
             assert complete["type"] == "response.complete"
-            assert complete["route"] == "opus"
+            assert complete["route"] == "orchestrator"
             assert complete["content"] == "Thin Opus answer"
 
             completed = websocket.receive_json()
@@ -6400,7 +6400,7 @@ def test_desktop_websocket_hands_off_direct_route_to_opus_with_escalation_activi
 
         history = runtime.session_store.get_history(route_result["session_id"])
         assert history[-1]["role"] == "assistant"
-        assert history[-1]["route"] == "opus"
+        assert history[-1]["route"] == "orchestrator"
         assert history[-1]["content"] == "Thin Opus answer"
 
         response = client.get(
@@ -6413,14 +6413,14 @@ def test_desktop_websocket_hands_off_direct_route_to_opus_with_escalation_activi
         assert entries[0]["request_id"] == "req_handoff"
         assert entries[0]["decision_source"] == "direct_model_handoff"
         assert entries[0]["classifier_route"] == "perplexity"
-        assert entries[0]["final_route"] == "opus"
+        assert entries[0]["final_route"] == "orchestrator"
         assert entries[0]["dispatch_target"] == "orchestrator"
-        assert "direct_model_handoff:perplexity->opus" in entries[0]["signals"]
+        assert "direct_model_handoff:perplexity->orchestrator" in entries[0]["signals"]
         assert entries[1]["decision_source"] == "model_router"
         assert entries[1]["final_route"] == "perplexity"
 
 
-def test_opus_research_provenance_persists_into_history_turn_ledger_and_working_set(tmp_path) -> None:
+def test_orchestrator_research_provenance_persists_into_history_turn_ledger_and_working_set(tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
     runtime.orchestrator = FakeResearchOrchestratorClient()
 
@@ -6447,7 +6447,7 @@ def test_opus_research_provenance_persists_into_history_turn_ledger_and_working_
             )
             route_result = websocket.receive_json()
             assert route_result["type"] == "route_result"
-            assert route_result["route"] == "opus"
+            assert route_result["route"] == "orchestrator"
             session_id = route_result["session_id"]
 
             created = websocket.receive_json()
@@ -6519,7 +6519,7 @@ def test_opus_research_provenance_persists_into_history_turn_ledger_and_working_
                 ],
             }
         ]
-        assert turn_entry["tool_summary"] == ["opus", "native_web_search"]
+        assert turn_entry["tool_summary"] == ["orchestrator", "native_web_search"]
         assert turn_entry["metadata"]["research_provenance"]["source_domains"] == ["cursor.com", "techcrunch.com"]
         assert turn_entry["metadata"]["specialist_receipts"][0]["intent"] == "x.search"
 
@@ -6527,7 +6527,7 @@ def test_opus_research_provenance_persists_into_history_turn_ledger_and_working_
         assert active_working_set["recent_research_receipts"] == [
             {
                 "request_id": "req_research",
-                "route": "opus",
+                "route": "orchestrator",
                 "question": "How was Cursor Composer 2 made?",
                 "completed_at": turn_entry["completed_at"],
                 "paths": ["native_web_search"],
@@ -6564,7 +6564,7 @@ def test_opus_research_provenance_persists_into_history_turn_ledger_and_working_
                     }
                 ],
                 "request_id": "req_research",
-                "route": "opus",
+                "route": "orchestrator",
                 "question": "How was Cursor Composer 2 made?",
                 "completed_at": turn_entry["completed_at"],
             }
@@ -6671,7 +6671,7 @@ def test_desktop_websocket_cancel_stops_direct_stream(test_client: TestClient, t
             assert cancelled["route"] == "haiku"
 
 
-def test_desktop_websocket_cancel_stops_opus_stream(test_client: TestClient, tmp_path) -> None:
+def test_desktop_websocket_cancel_stops_orchestrator_stream(test_client: TestClient, tmp_path) -> None:
     runtime = build_runtime(tmp_path, route="opus")
     runtime.orchestrator = FakeCancellableOrchestratorClient()
 
@@ -6713,4 +6713,4 @@ def test_desktop_websocket_cancel_stops_opus_stream(test_client: TestClient, tmp
             assert cancelled["type"] == "task.cancelled"
             assert cancelled["task_id"] == created["task_id"]
             assert cancelled["request_id"] == "req_cancel_opus"
-            assert cancelled["route"] == "opus"
+            assert cancelled["route"] == "orchestrator"

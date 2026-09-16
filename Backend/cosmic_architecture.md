@@ -6,7 +6,7 @@
 |---|---|
 | Deployment Model | **Single-user-per-instance.** Each user gets their own VM/VPC with a dedicated backend. User isolation is infrastructure-level (VM boundary), not application-level. |
 | Transport | Redis Streams |
-| Routing | Model Router (Groq classifier) — three routes: opus, haiku, perplexity |
+| Routing | Model Router (Groq classifier) — three routes: orchestrator, haiku, perplexity (legacy token: `orchestrator`) |
 | Session & Memory | Session Manager (Gateway) + Qdrant local (hybrid: dense + sparse vectors) + .md file store |
 | Embeddings | Dense: Qwen3-embedding-8b via OpenRouter. Sparse: FastEmbed BM25 (local). |
 | Credentials | Gateway Credential Manager (OAuth PKCE, encrypted token store) |
@@ -94,7 +94,7 @@ Every design decision flows from one mental model. Keep these three layers stric
 │  Lightweight classifier (Groq). Decides which backend handles    │
 │  each query. Called by Gateway after context assembly.            │
 ├──────────────┬──────────────────┬────────────────────────────────┤
-│ opus         │ haiku            │ perplexity                     │
+│ orchestrator         │ haiku            │ perplexity                     │
 │ (task/cont.) │ (GK)             │ (search)                       │
 ├──────────────┼──────────────────┴────────────────────────────────┤
 │              │                                                    │
@@ -133,8 +133,8 @@ Every design decision flows from one mental model. Keep these three layers stric
 | **Scheduler / Cron Manager** | Gateway module that manages crons and heartbeats. Stores cron definitions, execution history, pause state, heartbeat notes/watchpoints, and the persisted user timezone snapshot in SQLite (`gateway/scheduler/scheduler.db`). Runs a polling loop that fires TaskEnvelopes to the orchestrator when jobs are due. Exposes an internal API for orchestrator CRUD plus a desktop-facing management surface for future observability/UI control (list, inspect, pause, resume, edit, delete). See §25. |
 | **Webhook Handler** | Gateway module that receives HTTP POST callbacks from external systems (Gmail, GitHub, Jira, Slack). Verifies provider-specific signatures, converts payloads into TaskEnvelopes tagged with `source='webhook'`, and dispatches to the orchestrator. See §26. |
 | **Hooks Engine** | Gateway module that fires TaskEnvelopes in response to internal state changes: gateway startup/shutdown, session reset, compaction, agent registration/deregistration. Configurable hook definitions stored alongside the Gateway. See §28. |
-| **Model Router** | Lightweight stateless classifier. Determines which backend handles a query: `opus` (orchestrator — tasks, continuations, ambiguous input), `haiku` (direct API), or `perplexity` (direct API). Called by Gateway after context assembly — unless `awaiting_reply` sticky routing triggers first (§3.7), which skips the classifier entirely. No `unknown` route — `opus` is the fallback. |
-| **Orchestrator** | Reads context, decomposes goals into subtasks via the Task Planner (§31), queries registry for capable healthy agents, resolves credentials via Gateway internal API when intents require provider access, dispatches via Redis, merges results. Classifies requests as simple (direct dispatch) or complex (structured plan with steps, dependencies, synthesis). Manages multiple concurrent plans. Propagates `source`, `source_id`, and `channel` from parent TaskEnvelope to all child tasks. Maintains a compact prompt-visible specialist shortlist derived from recent successful specialist usage in the registry; this shortlist is only a hint layer, while live agent discovery still flows through `agent_catalog_search` (§11, §32.6). Creates and manages cron jobs via the Gateway Scheduler internal API. Powered by Claude Opus. |
+| **Model Router** | Lightweight stateless classifier. Determines which backend handles a query: `orchestrator` (orchestrator — tasks, continuations, ambiguous input), `haiku` (direct API), or `perplexity` (direct API). Called by Gateway after context assembly — unless `awaiting_reply` sticky routing triggers first (§3.7), which skips the classifier entirely. No `unknown` route — `orchestrator` is the fallback. |
+| **Orchestrator** | Reads context, decomposes goals into subtasks via the Task Planner (§31), queries registry for capable healthy agents, resolves credentials via Gateway internal API when intents require provider access, dispatches via Redis, merges results. Classifies requests as simple (direct dispatch) or complex (structured plan with steps, dependencies, synthesis). Manages multiple concurrent plans. Propagates `source`, `source_id`, and `channel` from parent TaskEnvelope to all child tasks. Maintains a compact prompt-visible specialist shortlist derived from recent successful specialist usage in the registry; this shortlist is only a hint layer, while live agent discovery still flows through `agent_catalog_search` (§11, §32.6). Creates and manages cron jobs via the Gateway Scheduler internal API. Model-agnostic: powered by the configured brain — Fireworks GLM by default, with Fireworks Kimi and Anthropic Claude selectable in Settings. |
 | **Sub-Agent Worker** | Single-domain specialist. Consumes Task Envelopes from its Redis stream, emits Event Envelopes, writes artifacts, sends heartbeats. Has access to universal tools (StepPlan, MemoryRead, MemoryWrite — see §32) injected by the agent runtime. |
 | **Browser Agent** | Specialist agent for browser automation via Playwright. Navigates pages, fills forms, clicks elements, extracts content, takes screenshots. Runs in a sandboxed browser context. See §29. |
 | **System Agent** | Specialist agent for OS-level automation. File system operations, process management, clipboard access, app control, shell command execution. Sandboxed by declared tool policies. See §29. |
@@ -176,7 +176,7 @@ FIVE INPUT SOURCES
     │                         │
     │         ┌───────────────┼───────────────┐
     │         ▼               ▼               ▼
-    │     route=opus      route=haiku    route=perplexity
+    │     route=orchestrator      route=haiku    route=perplexity
     │         │               │               │
     │         ▼               ▼               ▼
     │    Orchestrator     Haiku API      Perplexity API
@@ -192,7 +192,7 @@ FIVE INPUT SOURCES
 
 **Source-to-priority mapping:** User messages dispatch at `high` priority. Webhooks dispatch at `normal`. Crons and heartbeats dispatch at `low` (configurable per-cron). This ensures user queries always process first under full-bandwidth operation, while the aging mechanism (§18) prevents background tasks from starving.
 
-**Why three paths?** A simple general knowledge question ("What is a knowledge graph?") does not need Claude Opus, agent decomposition, or Redis task envelopes. Routing it directly to Claude Haiku 4.5 saves cost and latency. Only genuine tasks ("Draft an email to my team"), continuations, and ambiguous inputs go through the orchestrator. There is no `unknown` route — the orchestrator handles anything the classifier can't confidently categorize. All three paths receive the same assembled session context (today's conversation + retrieved memories) from the Session Manager (see §23).
+**Why three paths?** A simple general knowledge question ("What is a knowledge graph?") does not need the orchestrator, agent decomposition, or Redis task envelopes. Routing it directly to Claude Haiku 4.5 saves cost and latency. Only genuine tasks ("Draft an email to my team"), continuations, and ambiguous inputs go through the orchestrator. There is no `unknown` route — the orchestrator handles anything the classifier can't confidently categorize. All three paths receive the same assembled session context (today's conversation + retrieved memories) from the Session Manager (see §23).
 
 **Why sticky routing before the classifier?** When a model asks the user a question (and emits `<awaiting_reply/>`), the user's response must go back to that same model — regardless of what the classifier would have chosen. A short reply like "B" has no context for the classifier to work with, and would be misrouted. Checking the `awaiting_reply` flag first is a zero-cost Gateway-level check that avoids an unnecessary Groq API call. See §3.7 and §3.8 for the full mechanism.
 
@@ -202,13 +202,13 @@ FIVE INPUT SOURCES
 
 ## 2. Model Router
 
-The Model Router is a lightweight classification service that determines which backend should handle a user query. Its purpose is cost optimization — avoiding the expensive Opus orchestrator for queries that don't need it.
+The Model Router is a lightweight classification service that determines which backend should handle a user query. Its purpose is cost optimization — avoiding the full orchestrator for queries that don't need it.
 
 ### 2.1 Classification Routes
 
 | Route | Backend | When | Cost |
 |---|---|---|---|
-| `opus` | Orchestrator (Claude Opus) | Tasks, continuations, ambiguous input, progress queries, anything referencing prior work | High |
+| `orchestrator` | Orchestrator (configurable brain: GLM / Kimi / Claude) | Tasks, continuations, ambiguous input, progress queries, anything referencing prior work | High |
 | `perplexity` | Perplexity API (direct) | Real-time info, citations, current events, verification | Medium |
 | `haiku` | Claude Haiku 4.5 API (direct) | General knowledge, explanations, theory, brainstorming | Low |
 
@@ -222,24 +222,24 @@ If the last stored assistant message has `awaiting_reply = true`, the Gateway sk
 
 **Layer 2 — Post-classification enforcement (non-negotiable):**
 
-1. If `is_task` is true → `opus` (always, regardless of other flags)
-2. If input is a continuation or ambiguous (`go on`, `ok`, `why?`, progress queries) → `opus` (the orchestrator is smart enough to handle these — it has full session context and task state)
+1. If `is_task` is true → `orchestrator` (always, regardless of other flags)
+2. If input is a continuation or ambiguous (`go on`, `ok`, `why?`, progress queries) → `orchestrator` (the orchestrator is smart enough to handle these — it has full session context and task state)
 3. Else if `needs_latest` OR `needs_citations` → `perplexity`
-4. Else if `confidence < 0.5` → `opus` (low confidence fallback)
+4. Else if `confidence < 0.5` → `orchestrator` (low confidence fallback)
 5. Else → `haiku`
 
 **Effective priority order (both layers combined):**
 
 ```
 1. awaiting_reply flag set    → last_route  (Gateway pre-check, skips classifier)
-2. is_task                    → opus        (post-classification)
-3. is_continuation            → opus        (post-classification)
+2. is_task                    → orchestrator        (post-classification)
+3. is_continuation            → orchestrator        (post-classification)
 4. needs_latest/citations     → perplexity  (post-classification)
-5. confidence < 0.5           → opus        (post-classification)
+5. confidence < 0.5           → orchestrator        (post-classification)
 6. default                    → haiku       (post-classification)
 ```
 
-**There is no `unknown` route.** A personal assistant should never bounce back "please clarify." The orchestrator (Opus) handles ambiguous inputs — it can respond conversationally, ask a specific clarifying question, or take action based on context. This is a UX decision: the smartest model handles the hardest-to-classify inputs.
+**There is no `unknown` route.** A personal assistant should never bounce back "please clarify." The orchestrator handles ambiguous inputs — it can respond conversationally, ask a specific clarifying question, or take action based on context. This is a UX decision: the orchestrator — with full session context and task state — handles the hardest-to-classify inputs.
 
 ```python
 def enforce_rules(parsed: dict) -> dict:
@@ -256,13 +256,13 @@ def enforce_rules(parsed: dict) -> dict:
     }
 
     if out['is_task']:
-        out['route'] = 'opus'
+        out['route'] = 'orchestrator'
     elif out['is_continuation']:
-        out['route'] = 'opus'
+        out['route'] = 'orchestrator'
     elif out['needs_latest'] or out['needs_citations']:
         out['route'] = 'perplexity'
     elif out['confidence'] < 0.5:
-        out['route'] = 'opus'       # low confidence → let Opus decide
+        out['route'] = 'orchestrator'       # low confidence → let Orchestrator decide
     else:
         out['route'] = 'haiku'
 
@@ -326,7 +326,7 @@ The Model Router runs as a standalone FastAPI microservice, called by the Gatewa
 
 The Model Router accepts optional conversation history for better classification. The Gateway attaches the last N messages from the session to the classification request, along with the route used for each message. The Model Router does not maintain any session state itself.
 
-With context, the classifier can distinguish between a continuation of a task discussion (`opus`) vs a follow-up to a knowledge question (`haiku`). Without context, ambiguous inputs like `"go on"` default to `opus` — the orchestrator has session state and task context to handle them intelligently.
+With context, the classifier can distinguish between a continuation of a task discussion (`orchestrator`) vs a follow-up to a knowledge question (`haiku`). Without context, ambiguous inputs like `"go on"` default to `orchestrator` — the orchestrator has session state and task context to handle them intelligently.
 
 **Note:** The `awaiting_reply` sticky routing check happens at the Gateway level BEFORE this classification call. If the last assistant message has `awaiting_reply = true`, the classifier is never called — the Gateway routes directly to `last_route`. The Model Router only sees queries that passed through the pre-check without triggering sticky routing. See §3.7.
 
@@ -334,7 +334,7 @@ With context, the classifier can distinguish between a continuation of a task di
 
 ### 2.6 Fallback & Error Handling
 
-If the Model Router is unreachable or returns an error, the Gateway falls back to `opus`. This is the safest default — the orchestrator can handle any query type, even if it's more expensive. The system degrades gracefully rather than failing.
+If the Model Router is unreachable or returns an error, the Gateway falls back to `orchestrator`. This is the safest default — the orchestrator can handle any query type, even if it's more expensive. The system degrades gracefully rather than failing.
 
 ```python
 # Gateway-side fallback
@@ -347,7 +347,7 @@ async def classify_query(query: str, context: list) -> dict:
         )
         return result.json()['classification']
     except Exception:
-        return {'route': 'opus', 'confidence': 0.0, 'signals': ['router_fallback']}
+        return {'route': 'orchestrator', 'confidence': 0.0, 'signals': ['router_fallback']}
 ```
 
 ### 2.6a Circuit Breaker: External LLM APIs
@@ -407,8 +407,8 @@ model_router_breaker = CircuitBreaker('model_router', failure_threshold=3, recov
 ```python
 async def stream_from_haiku(session_id, content, context, channel_adapter, **kwargs):
     if not haiku_breaker.should_allow():
-        # Haiku is down — reroute to opus (safe fallback, same as §2.6 logic)
-        logger.warning('Haiku circuit open — rerouting to opus')
+        # Haiku is down — reroute to orchestrator (safe fallback, same as §2.6 logic)
+        logger.warning('Haiku circuit open — rerouting to orchestrator')
         await dispatch_to_orchestrator(session_id, content, context, channel_adapter, **kwargs)
         return
     try:
@@ -416,7 +416,7 @@ async def stream_from_haiku(session_id, content, context, channel_adapter, **kwa
         haiku_breaker.record_success()
     except Exception:
         haiku_breaker.record_failure()
-        # Fallback to opus for this request
+        # Fallback to orchestrator for this request
         await dispatch_to_orchestrator(session_id, content, context, channel_adapter, **kwargs)
 ```
 
@@ -424,11 +424,11 @@ async def stream_from_haiku(session_id, content, context, channel_adapter, **kwa
 
 | API Down | Fallback Route | Rationale |
 |---|---|---|
-| Haiku | `opus` | Orchestrator (Opus) can handle any query, including general knowledge |
-| Perplexity | `opus` | Orchestrator can delegate to research agent for web search |
-| Model Router (Groq) | `opus` (already in §2.6) | Same existing fallback — orchestrator handles everything |
+| Haiku | `orchestrator` | Orchestrator (Orchestrator) can handle any query, including general knowledge |
+| Perplexity | `orchestrator` | Orchestrator can delegate to research agent for web search |
+| Model Router (Groq) | `orchestrator` (already in §2.6) | Same existing fallback — orchestrator handles everything |
 
-**Why `opus` is always the fallback:** The orchestrator is the most capable path — it can handle any query type, even if it's more expensive. When an API recovers (`half_open` → probe succeeds → `closed`), routing returns to normal automatically. The user never sees an error — they get a slightly more expensive but correct response.
+**Why `orchestrator` is always the fallback:** The orchestrator is the most capable path — it can handle any query type, even if it's more expensive. When an API recovers (`half_open` → probe succeeds → `closed`), routing returns to normal automatically. The user never sees an error — they get a slightly more expensive but correct response.
 
 ### 2.7 Configuration
 
@@ -447,7 +447,7 @@ KEEPALIVE_EXPIRY=30
 # Gateway references to Model Router
 MODEL_ROUTER_URL=http://localhost:8742
 MODEL_ROUTER_TIMEOUT_SEC=3
-MODEL_ROUTER_FALLBACK_ROUTE=opus           # also used when confidence < 0.5
+MODEL_ROUTER_FALLBACK_ROUTE=orchestrator           # also used when confidence < 0.5
 
 # Circuit breaker configuration
 CIRCUIT_BREAKER_FAILURE_THRESHOLD=3        # failures before opening circuit
@@ -485,7 +485,7 @@ The Gateway is the single entry point for all input sources. It handles authenti
 | Session & memory management | Owns the Session Manager: assembles context (today's conversation + retrieved memories) for every query before classification. Manages daily sessions, context window pruning, compaction, and memory retrieval via Qdrant hybrid search (dense + sparse vectors — see §23) |
 | Model routing | Checks `awaiting_reply` flag for sticky routing (skips classifier), otherwise calls Model Router to classify each query |
 | Reply routing | Sticky routing: if last assistant message has `awaiting_reply` flag, routes user's reply directly to the model that asked — no classifier call |
-| Task dispatch | For `opus` route: creates TaskEnvelope, dispatches to orchestrator via Redis |
+| Task dispatch | For `orchestrator` route: creates TaskEnvelope, dispatches to orchestrator via Redis |
 | Direct LLM proxy | For `haiku`/`perplexity` routes: calls LLM API directly, streams response, strips control tags |
 | Event streaming | Streams task progress events and task input requests to the originating channel adapter |
 | Task input relay | Consumes `user_input:requests` from orchestrator, surfaces to UI via the appropriate channel; collects user replies, publishes to `user_input:replies` |
@@ -593,7 +593,7 @@ The desktop app maintains one persistent WebSocket connection per desktop instal
 {
     "type": "route_result",
     "request_id": "req_001",
-    "route": "opus",
+    "route": "orchestrator",
     "classification": { ... }
 }
 
@@ -606,7 +606,7 @@ The desktop app maintains one persistent WebSocket connection per desktop instal
     "done": false
 }
 
-# Final response (haiku/perplexity/opus conversational complete)
+# Final response (haiku/perplexity/orchestrator conversational complete)
 {
     "type": "response.complete",
     "request_id": "req_001",
@@ -617,7 +617,7 @@ The desktop app maintains one persistent WebSocket connection per desktop instal
     "metrics": { "rtt_ms": 450 }
 }
 
-# Task created (opus route — orchestrator pipeline started)
+# Task created (orchestrator route — orchestrator pipeline started)
 {
     "type": "task.created",
     "request_id": "req_001",
@@ -693,7 +693,7 @@ The WebSocket is a **transport**, not the session. Reconnects do not create new 
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/query` | Submit query (returns task_id for opus, or streams response for haiku/perplexity) |
+| `POST` | `/query` | Submit query (returns task_id for orchestrator, or streams response for haiku/perplexity) |
 | `GET` | `/tasks/{task_id}` | Get task status and result |
 | `GET` | `/tasks/{task_id}/events` | SSE stream of task events |
 | `POST` | `/tasks/{task_id}/input-reply/{input_request_id}` | Reply to a task input request (alternative to WebSocket `task.input_reply`) |
@@ -789,7 +789,7 @@ CREATE TABLE usage_events (
     parent_task_id TEXT,
     session_id TEXT,
 
-    route TEXT,                             -- 'opus', 'haiku', 'perplexity', nullable
+    route TEXT,                             -- 'orchestrator', 'haiku', 'perplexity', nullable
     operation TEXT NOT NULL,                -- 'orchestrator.process', 'research.topic', 'model_router.classify'
     usage_kind TEXT NOT NULL,               -- 'chat_completion', 'classifier', 'embedding', 'rerank', 'other'
 
@@ -836,7 +836,7 @@ CREATE INDEX idx_usage_provider_model
 - The table is append-only. Never update token counts after insert; corrections are separate admin events.
 - `llm_call_placed_at` is the UTC timestamp when the outbound LLM/API call was initiated.
 - The Gateway logs direct Haiku/Perplexity usage itself.
-- The orchestrator logs its own Opus/task-planning usage via `/internal/usage/log`.
+- The orchestrator logs its own task-planning usage via `/internal/usage/log`.
 - Agents log their own model usage via `/internal/usage/log` when they call LLMs or embedding APIs.
 - The Model Router logs classifier usage via `/internal/usage/log`.
 - Session Manager memory/embed operations may also log usage rows when they consume metered APIs.
@@ -915,7 +915,7 @@ directly to one row in `usage_events`.
 
 ### 3.4b Routing Audit
 
-The Gateway owns a separate SQLite inspection store for routing decisions. This is distinct from `usage.db`: usage is billing/telemetry for outbound metered API calls, while routing audit records *why* a given inbound request was sent to `haiku`, `perplexity`, or `opus`.
+The Gateway owns a separate SQLite inspection store for routing decisions. This is distinct from `usage.db`: usage is billing/telemetry for outbound metered API calls, while routing audit records *why* a given inbound request was sent to `haiku`, `perplexity`, or `orchestrator`.
 
 **Database:** `gateway/routing_audit.db`
 
@@ -927,14 +927,14 @@ Each inbound request appends one row containing the Gateway's final decision con
 - routing outcome: `classifier_route`, `final_route`, `dispatch_target`, `confidence`, `signals`
 - classifier payload: an allowlisted subset of the Model Router response payload (`classification`, `metrics`, `classifier_model`, `raw_classifier_output`, `timestamp_unix_ms`). Future debug/reasoning fields are **not** persisted automatically; adding them requires an explicit schema/privacy review.
 - timing: classifier latency and total Gateway routing-decision latency
-- error details when the classifier is unavailable and the Gateway falls back to `opus`
+- error details when the classifier is unavailable and the Gateway falls back to `orchestrator`
 
 **Design rule:** this store is written by the Gateway, not the Model Router, because the final route may be changed by Gateway-local logic such as:
 
 - manual route override from the desktop model selector
 - sticky routing via `awaiting_reply`
-- non-text inbound coercion to `opus`
-- classifier failure fallback to `opus`
+- non-text inbound coercion to `orchestrator`
+- classifier failure fallback to `orchestrator`
 
 **Operational inspection route:** `GET /routing-audit?limit=N` returns the most recent rows from this store. It is protected by the desktop/local API token and is for debugging/inspection only; it is not part of the user message pipeline.
 
@@ -1431,7 +1431,7 @@ BEGIN
     ),
     'orchestrator_env', jsonb_build_object(
       'ANTHROPIC_API_KEY', v_anthropic,
-      'OPUS_MODEL', 'claude-opus-4-6'
+      'OPUS_MODEL', 'claude-orchestrator-4-6'
     ),
     'meeting_env', jsonb_build_object(
       'DEEPGRAM_API_KEY', coalesce(v_deepgram, ''),
@@ -1757,7 +1757,7 @@ async def handle_query(session_id: str, content: str, context: list,
     #    so the full provenance chain is preserved in all child tasks.
     #    Flag is cleared AFTER successful dispatch — if dispatch fails,
     #    the flag stays and the next message retries sticky routing.
-    if route == 'opus':
+    if route == 'orchestrator':
         await dispatch_to_orchestrator(
             session_id, content, assembled_context, channel_adapter,
             source=source, source_id=source_id, channel=channel,
@@ -1780,19 +1780,19 @@ async def handle_query(session_id: str, content: str, context: list,
 
 **Message storage ordering rationale:** The user's message is stored in `sessions.db` (step 6) **before** dispatch (step 7). This is a deliberate crash-safety choice. If the Gateway crashes between dispatch and storage, the session would permanently lose the message — the LLM received a task referencing context it can never reconstruct. Storing first makes the session always-consistent: if dispatch fails after storage, the user sees an error and retries; if the Gateway crashes after storage but before dispatch, the message is preserved for the next attempt. The cost is that a message might be stored for a dispatch that immediately fails — this is acceptable because the message reflects what the user actually said, regardless of dispatch success.
 
-**Sticky routing design rationale:** When a model (Opus, Haiku, or Perplexity) is in a conversational exchange and asks the user a question, the user's reply must go back to that same model. Without this, a short reply like "B" would be classified as low-confidence or continuation and routed to Opus, even if Haiku asked the question. The `awaiting_reply` flag is the model's own declaration that it expects a direct response — no heuristics, no guessing. See §3.8 for how the flag is detected from model output.
+**Sticky routing design rationale:** When a model (Orchestrator, Haiku, or Perplexity) is in a conversational exchange and asks the user a question, the user's reply must go back to that same model. Without this, a short reply like "B" would be classified as low-confidence or continuation and routed to the orchestrator, even if Haiku asked the question. The `awaiting_reply` flag is the model's own declaration that it expects a direct response — no heuristics, no guessing. See §3.8 for how the flag is detected from model output.
 
 **Channel entry-point rule:** `handle_query(...)` is the common post-normalization path for user-originated messages regardless of channel. The Desktop adapter reaches it from the WebSocket handler. A sidecar-backed adapter such as WhatsApp reaches it from an internal REST route after the Bridge payload has been authenticated and normalized by `gateway/channels/whatsapp.py`.
 
-**Routing nuance:** not every incoming user message becomes a Redis-dispatched orchestrator task. Only `route='opus'` results in TaskEnvelope creation and Redis dispatch to the orchestrator. `haiku` and `perplexity` remain on the Gateway's direct LLM proxy path.
+**Routing nuance:** not every incoming user message becomes a Redis-dispatched orchestrator task. Only `route='orchestrator'` results in TaskEnvelope creation and Redis dispatch to the orchestrator. `haiku` and `perplexity` remain on the Gateway's direct LLM proxy path.
 
 ### 3.8 Direct LLM Routing & Response Control Tags
 
-For `haiku` and `perplexity` routes, the Gateway acts as a streaming proxy. For conversational `opus` responses (non-task), the orchestrator streams through the same path. This avoids orchestrator overhead for simple questions while maintaining consistent response processing.
+For `haiku` and `perplexity` routes, the Gateway acts as a streaming proxy. For conversational `orchestrator` responses (non-task), the orchestrator streams through the same path. This avoids orchestrator overhead for simple questions while maintaining consistent response processing.
 
-**The `<awaiting_reply/>` control tag:** All three LLM backends (Opus, Haiku, Perplexity) receive a system prompt instruction to emit `<awaiting_reply/>` at the end of their response when they genuinely expect a direct user reply (e.g., they asked a question, presented options, or need confirmation before proceeding). The Gateway strips this tag before forwarding to the UI and sets a flag on the stored message.
+**The `<awaiting_reply/>` control tag:** All three LLM backends (Orchestrator, Haiku, Perplexity) receive a system prompt instruction to emit `<awaiting_reply/>` at the end of their response when they genuinely expect a direct user reply (e.g., they asked a question, presented options, or need confirmation before proceeding). The Gateway strips this tag before forwarding to the UI and sets a flag on the stored message.
 
-**Current implementation note:** the current direct-model runtime also supports a best-effort `<handoff_opus/>` control tag for Haiku and Perplexity. If a direct model determines that a request was misrouted and actually needs orchestrator-level handling, it may emit only that tag. The Gateway intercepts it before any user-visible text, redispatches the request to Opus, and emits a desktop `task.progress` status while the escalation happens. This is a safety net, not the primary routing decision.
+**Current implementation note:** the current direct-model runtime also supports a best-effort `<handoff_orchestrator/>` control tag (the legacy `<handoff_opus/>` tag is still accepted) for Haiku and Perplexity. If a direct model determines that a request was misrouted and actually needs orchestrator-level handling, it may emit only that tag. The Gateway intercepts it before any user-visible text, redispatches the request to Orchestrator, and emits a desktop `task.progress` status while the escalation happens. This is a safety net, not the primary routing decision.
 
 **System prompt instruction (included in all three model prompts):**
 
@@ -1899,7 +1899,7 @@ Each adapter inherits from `LLMStreamProcessor` which handles:
 
 ### 3.9 Orchestrator Dispatch Path
 
-For `opus` routes, the Gateway creates a TaskEnvelope and dispatches it to the orchestrator via Redis. It then consumes events from `streams:events` and forwards them to the originating channel in real time.
+For `orchestrator` routes, the Gateway creates a TaskEnvelope and dispatches it to the orchestrator via Redis. It then consumes events from `streams:events` and forwards them to the originating channel in real time.
 
 ```python
 async def dispatch_to_orchestrator(session_id, content, context,
@@ -2001,9 +2001,9 @@ CREATE TABLE messages (
     session_id TEXT,
     role TEXT,               -- 'user', 'assistant', 'system'
     content TEXT,
-    route TEXT,              -- 'opus', 'haiku', 'perplexity'
+    route TEXT,              -- 'orchestrator', 'haiku', 'perplexity'
     channel TEXT,            -- originating channel: 'desktop:desk_a1b2c3', 'whatsapp:+1234567890', 'telegram:chat_123', etc.
-    task_id TEXT,            -- null for non-opus messages
+    task_id TEXT,            -- null for non-orchestrator messages
     awaiting_reply BOOLEAN DEFAULT FALSE,  -- model expects direct reply (sticky routing)
     created_at TIMESTAMP,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
@@ -2911,9 +2911,9 @@ contracts; `shared/model_specs.json` declares runtime model metadata.
 {
   "version": 1,
   "models": {
-    "anthropic:claude-opus": {
+    "anthropic:claude-orchestrator": {
       "provider": "anthropic",
-      "model": "claude-opus",
+      "model": "claude-orchestrator",
       "sdk": "anthropic",
       "base_url": "https://api.anthropic.com/v1",
       "usage_kind": "chat_completion",
@@ -4022,7 +4022,7 @@ The runtime still uses the full live registry path for real work:
 
 - `agent_catalog_search` remains the authoritative discovery surface for exact intents
 - `delegate_to_agent` still resolves the actual healthy instance from SQLite + Redis
-- the prompt shortlist exists only to help Opus form better first-pass plans without dumping the whole registry into context
+- the prompt shortlist exists only to help the orchestrator form better first-pass plans without dumping the whole registry into context
 
 This is intentionally lightweight. It should be implemented as a small periodic refresh loop inside the orchestrator runtime or an equivalent same-VM scheduled job. A second LLM is **not required** for promotion/demotion; deterministic scoring from usage frequency and recency is the default.
 
@@ -4670,9 +4670,9 @@ GATEWAY (FastAPI :8080)
     │  Session Manager assembles context (conversation + memories)
     ↕  HTTP (internal)
 MODEL ROUTER (FastAPI :8742)
-    │  classifies → route (opus / haiku / perplexity)
+    │  classifies → route (orchestrator / haiku / perplexity)
     │
-    ├─ route=opus ──────────────────────────────────────┐
+    ├─ route=orchestrator ──────────────────────────────────────┐
     │  (tasks, continuations, ambiguous, fallback)      │
     ├─ route=haiku ──► Claude Haiku 4.5 API (direct)    │
     │  (response may contain <awaiting_reply/> tag)     │
@@ -4920,7 +4920,7 @@ All API keys and secrets **must** be externalized to environment variables. Neve
 | Secret | Owner | Environment Variable |
 |---|---|---|
 | Groq API key | Model Router | `GROQ_API_KEY` |
-| Anthropic API key | Gateway (Haiku adapter) + Orchestrator (Opus) | `ANTHROPIC_API_KEY` |
+| Anthropic API key | Gateway (Haiku adapter) + Orchestrator (Anthropic brain only) | `ANTHROPIC_API_KEY` |
 | Perplexity API key | Gateway (Perplexity adapter) | `PERPLEXITY_API_KEY` |
 | Gateway local API token | Gateway + Desktop App | `GATEWAY_LOCAL_API_TOKEN` |
 | Per-agent HMAC secrets | Orchestrator (all), Agents (own) | `AGENT_SECRET` / `AGENT_SECRETS` |
@@ -5804,7 +5804,7 @@ async def disconnect_account(account_id: str):
 User: "Add a conclusion to the Project Proposal doc"
     │
     ▼
-Desktop App → Gateway → Model Router → route=opus
+Desktop App → Gateway → Model Router → route=orchestrator
     │
     ▼
 Gateway → Orchestrator (TaskEnvelope: orchestrator.process)
@@ -5879,7 +5879,7 @@ The Gateway owns the authoritative list of repositories a GitHub App installatio
 
 The Session Manager is a module inside the Gateway that creates a perpetual conversational experience. It assembles context for every query by combining today's conversation with retrieved long-term memories, manages daily session lifecycles, and handles context window pruning and compaction.
 
-**Design principle:** Three separate memory layers with different lifecycles — today's conversation (short-term, compactable), retrieved memories (long-term, never compacted, retrieved fresh each turn), and task execution (isolated, retrievable on demand). All LLM backends (Opus, Haiku, Perplexity) receive the same assembled context — the user gets a consistent assistant regardless of which model answers. The entire memory store (SQLite, .md files, Qdrant) serves a single user per the deployment model — no user-scoped queries or tenant filtering needed.
+**Design principle:** Three separate memory layers with different lifecycles — today's conversation (short-term, compactable), retrieved memories (long-term, never compacted, retrieved fresh each turn), and task execution (isolated, retrievable on demand). All LLM backends (Orchestrator, Haiku, Perplexity) receive the same assembled context — the user gets a consistent assistant regardless of which model answers. The entire memory store (SQLite, .md files, Qdrant) serves a single user per the deployment model — no user-scoped queries or tenant filtering needed.
 
 ### 23.1 Architecture Overview
 
@@ -5911,7 +5911,7 @@ Session Manager: assemble_context()
 Model Router classifies (using assembled context)
     │
     ▼
-Route to Opus / Haiku / Perplexity
+Route to Orchestrator / Haiku / Perplexity
     (all receive the same assembled_context)
 ```
 
@@ -5962,7 +5962,7 @@ Two mechanisms keep the context window under control:
 **Compaction (triggered):** When context usage hits 70% of the target model's context window, compaction runs:
 
 1. Extract memories from the conversation before summarizing (important facts, decisions, outcomes are written to the memory store at full fidelity)
-2. Send the older conversation messages to a fast/cheap model (Claude Haiku 4.5 or Sonnet — not Opus) with a summarization prompt
+2. Send the older conversation messages to a fast/cheap model (a cheap, fast model — never the orchestrator brain) with a summarization prompt
 3. The summary replaces the older messages in the session context
 4. Conversation continues with: `[compacted summary] + [recent messages since compaction]`
 
@@ -5979,7 +5979,7 @@ async def check_and_compact(session_id: str, context_tokens: int,
     messages = await get_compactable_messages(session_id)
     await extract_and_store_memories(messages)
 
-    # Step 2: Summarize via cheap/fast model (NOT Opus)
+    # Step 2: Summarize via cheap/fast model (NOT the orchestrator brain)
     summary = await compaction_llm.summarize(
         messages=messages,
         instruction='Summarize this conversation preserving key decisions, '
@@ -6392,7 +6392,7 @@ status: finalized
 [2025-01-15T10:03:12Z] [channel=desktop:desk_a1b2c3] [role=user]
 Update the Project Proposal doc
 
-[2025-01-15T10:03:26Z] [route=opus] [role=assistant]
+[2025-01-15T10:03:26Z] [route=orchestrator] [role=assistant]
 Done — I added a conclusion section.
 ```
 
@@ -6462,7 +6462,7 @@ recall_task = TaskEnvelope(
 # Returns: structured edit history with doc_id, account, changes
 ```
 
-**Current implementation note:** the main session still keeps task/sub-agent chatter isolated, but the parent assistant turn now carries a compact `specialist_receipts` summary in its metadata when a specialist/sub-agent produced part of the answer. These receipts are intentionally small and can include the delegated `intent`, `agent_id`, a short activity summary, compact source domains/sample, and artifact counts. The Gateway surfaces only the most recent few receipts into the Active Working Set so Opus can preserve confidence/provenance continuity across follow-up turns without replaying full sub-agent transcripts into prompt history.
+**Current implementation note:** the main session still keeps task/sub-agent chatter isolated, but the parent assistant turn now carries a compact `specialist_receipts` summary in its metadata when a specialist/sub-agent produced part of the answer. These receipts are intentionally small and can include the delegated `intent`, `agent_id`, a short activity summary, compact source domains/sample, and artifact counts. The Gateway surfaces only the most recent few receipts into the Active Working Set so the orchestrator can preserve confidence/provenance continuity across follow-up turns without replaying full sub-agent transcripts into prompt history.
 
 **How task memories enter the retrieval store:**
 
@@ -6574,14 +6574,14 @@ cost estimation rather than maintaining a second copy of model metadata.
 
 ### 23.10 Hard Rules
 
-1. **All LLM backends receive the same assembled context.** Whether the query routes to Opus, Haiku, or Perplexity, the Session Manager provides identical context. The user gets a consistent assistant.
+1. **All LLM backends receive the same assembled context.** Whether the query routes to Orchestrator, Haiku, or Perplexity, the Session Manager provides identical context. The user gets a consistent assistant.
 2. **Memories are never compacted.** The memory block is stripped before compaction input. Memories persist at source fidelity and are re-retrieved each turn.
 3. **Each memory has a unique `memory_id`.** No memory is repeated within the same context window. The Session Manager tracks which IDs are in context.
 4. **Task execution is isolated from the main session.** Only final task results enter the main session as messages. Full task details are retrievable via recall intents and the memory store.
 5. **Agent notes have priority over user data** in memory ranking. Curated, task-proven facts outrank bulk external data.
 6. **.md files are the source of truth.** Qdrant is the index (dense + sparse vectors). If Qdrant is lost, `full_rebuild()` re-generates both vector types from `memory/` (see §23.5a). Startup consistency check detects and repairs drift automatically.
 7. **Daily full-session transcripts are derived archives.** `logs/sessions/*.md` is append-only, human-readable, and regenerated from SQLite if needed. It is not indexed in Qdrant and is not a second writable source of truth.
-8. **Compaction uses a cheap model.** Never use Opus for summarization. Claude Haiku 4.5 or Sonnet — fast, cheap, good enough.
+8. **Compaction uses a cheap model.** Never use an orchestrator-grade model for summarization. Claude Haiku 4.5 or Sonnet — fast, cheap, good enough.
 9. **Daily reset is transparent to the user.** Session boundaries at 4AM are invisible. The compacted summary becomes a retrievable memory. The user sees one perpetual conversation.
 10. **Conversational replies use sticky routing, task input uses queues.** Two separate mechanisms for two separate problems. `<awaiting_reply/>` tag + `last_route` for inline conversation (§3.7). `user_input:requests/replies` Redis streams for async background task input (§13.2). They never overlap.
 11. **`awaiting_reply` flag is cleared on first use.** Once the user replies and sticky routing fires, the flag is cleared. The next message goes through normal classification. No sticky routing chains.
@@ -6592,7 +6592,7 @@ cost estimation rather than maintaining a second copy of model metadata.
 
 COSMIC accepts five types of input. When combined, they create a system that acts proactively without any autonomous reasoning — it is purely reactive to events that the user has preconfigured. Every input source is normalized and tagged at the Gateway boundary with `source`, `source_id`, and `channel`, then enters the same processing pipeline through the Gateway.
 
-**Important nuance for message sources:** infrastructure-driven inputs (heartbeats, crons, hooks, webhooks) become TaskEnvelopes immediately. Human messages first enter the Gateway's session/routing path. Only the `opus` route is converted into a TaskEnvelope and dispatched to the orchestrator; `haiku` and `perplexity` are handled directly by the Gateway.
+**Important nuance for message sources:** infrastructure-driven inputs (heartbeats, crons, hooks, webhooks) become TaskEnvelopes immediately. Human messages first enter the Gateway's session/routing path. Only the `orchestrator` route is converted into a TaskEnvelope and dispatched to the orchestrator; `haiku` and `perplexity` are handled directly by the Gateway.
 
 ### 24.1 Input Source Overview
 
@@ -6618,7 +6618,7 @@ COSMIC accepts five types of input. When combined, they create a system that act
                                               Session Manager → sticky route / Model Router
                                                            │
                                                            ├── haiku/perplexity → direct Gateway LLM path
-                                                           └── opus → TaskEnvelope → orchestrator
+                                                           └── orchestrator → TaskEnvelope → orchestrator
 ```
 
 **The orchestrator doesn't care where the input came from.** It receives a TaskEnvelope, decomposes it, dispatches to agents. The `source`, `source_id`, and `channel` fields are metadata for observability and response routing — they do not affect orchestration logic.
@@ -7742,7 +7742,7 @@ Channel integrations have two distinct planes. They must not be conflated.
   - Message arrives
   - Adapter normalizes it to `{ content, session_id, channel, metadata }`
   - Gateway applies session assembly, sticky routing, and model routing
-  - `route='opus'` → TaskEnvelope → Redis → orchestrator
+  - `route='orchestrator'` → TaskEnvelope → Redis → orchestrator
   - `route='haiku'|'perplexity'` → direct Gateway LLM path
 
 **2. Channel management / control plane**
@@ -7790,7 +7790,7 @@ WhatsApp user message
                     └── WhatsApp adapter normalizes payload
                           └── handle_query(...)
                                 ├── haiku/perplexity → direct Gateway route
-                                └── opus → TaskEnvelope → Redis → orchestrator
+                                └── orchestrator → TaskEnvelope → Redis → orchestrator
 ```
 
 ### 27.6 Sidecar-Backed Adapters
@@ -8557,7 +8557,7 @@ async def log_cli_command(task_id: str, command: str, output: str,
 
 The Orchestrator Task Planner is the mechanism by which the orchestrator decomposes complex user requests into structured plans, tracks execution of each step, manages multiple concurrent plans, and provides observability into what the system is doing and why.
 
-**Design principle:** The orchestrator is an LLM-powered coordinator. When a task arrives (route=opus), the orchestrator doesn't just pick one agent and fire — it reasons about the request, breaks it into steps, identifies dependencies, and executes them in order. The Task Planner formalizes this process. Simple requests (single intent, one agent) skip planning entirely. Complex requests (multi-step, multi-agent) get a structured plan before any dispatch happens.
+**Design principle:** The orchestrator is an LLM-powered coordinator. When a task arrives (route=orchestrator), the orchestrator doesn't just pick one agent and fire — it reasons about the request, breaks it into steps, identifies dependencies, and executes them in order. The Task Planner formalizes this process. Simple requests (single intent, one agent) skip planning entirely. Complex requests (multi-step, multi-agent) get a structured plan before any dispatch happens.
 
 ### 31.1 Task Ledger Schema
 
@@ -8689,7 +8689,7 @@ async def classify_complexity(self, query: str, context: dict) -> dict:
     """Ask the LLM: is this a single-step or multi-step task?
     Returns: { complexity: 'simple'|'complex', intent: str|None }
 
-    Uses the same model router (Opus) — this is a lightweight
+    Uses the same model router — this is a lightweight
     classification, not a full planning call. Typical RTT: 1-2s.
 
     Fallback: if the LLM call fails, times out, or returns invalid JSON,
@@ -9444,7 +9444,7 @@ Not every request needs a plan. The orchestrator classifies complexity first.
 
 ```
 "Send this email"                    → simple: docs.edit, one agent
-"What time is it in Tokyo?"          → simple: not even opus — routes to haiku
+"What time is it in Tokyo?"          → simple: not even orchestrator — routes to haiku
 "Research X and then write a report" → complex: research.topic → docs.create
 "Check my email and calendar,        → complex: research (email) + research (calendar)
  then draft a summary"                          → docs.create (depends on both)

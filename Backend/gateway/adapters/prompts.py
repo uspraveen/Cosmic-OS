@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .response_processor import AWAITING_REPLY_TAG, HANDOFF_OPUS_TAG
+from .response_processor import AWAITING_REPLY_TAG, HANDOFF_TAG
 
 AWAITING_REPLY_INSTRUCTION = (
     "When you need the user to choose, confirm, or answer something before\n"
@@ -11,15 +11,15 @@ AWAITING_REPLY_INSTRUCTION = (
     "Only use it when you are genuinely blocked without the user's response."
 )
 
-HANDOFF_OPUS_INSTRUCTION = (
+HANDOFF_ORCHESTRATOR_INSTRUCTION = (
     "If the request actually needs COSMIC's deeper orchestration path instead\n"
     "of a direct answer, respond with exactly this tag and nothing else:\n"
-    f"{HANDOFF_OPUS_TAG}\n"
+    f"{HANDOFF_TAG}\n"
     "Make this control decision before you draft any answer text.\n"
     "Use it for multi-step work, planning or execution, code/file/system changes,\n"
     "workflow help, task continuations, requests to verify/rethink/research a prior answer,\n"
     "or anything that depends on prior task state.\n"
-    "If the user asks whether this should go to Opus/orchestrator, asks you to think deeper,\n"
+    "If the user asks whether this should go to the orchestrator, asks you to think deeper,\n"
     "or asks you to properly research or reconsider a non-trivial answer, use the tag.\n"
     "Do not use it for simple questions you can answer directly.\n"
     "If you use this tag, emit only the tag - no prose, no Markdown, no whitespace,\n"
@@ -32,7 +32,7 @@ DIRECT_ASSISTANT_SYSTEM_PROMPT = (
     "Stay practical and concise unless the user explicitly asks for depth.\n"
     "If the user asks for up-to-date information and your provider does not have it,\n"
     "say so plainly instead of pretending to know.\n\n"
-    f"{HANDOFF_OPUS_INSTRUCTION}\n\n"
+    f"{HANDOFF_ORCHESTRATOR_INSTRUCTION}\n\n"
     f"{AWAITING_REPLY_INSTRUCTION}"
 )
 

@@ -46,8 +46,8 @@ def test_request_trace_store_records_and_lists_session_traces(tmp_path: Path) ->
     assert len(traces) == 1
     trace = traces[0]
     assert trace["request_id"] == "req_123"
-    assert trace["route"] == "opus"
-    assert trace["legacy_route"] == "opus"
+    assert trace["route"] == "orchestrator"
+    assert trace["legacy_route"] == "orchestrator"
     assert trace["dispatch_target"] == "orchestrator"
     assert trace["model_provider"] == "fireworks_glm"
     assert trace["model"] == "accounts/fireworks/models/glm-5p3"
@@ -59,7 +59,7 @@ def test_request_trace_store_records_and_lists_session_traces(tmp_path: Path) ->
     assert len(trace["events"]) == 2
     assert trace["events"][0]["event_type"] == "request.accepted"
     assert trace["events"][1]["event_type"] == "response.complete"
-    assert trace["events"][1]["legacy_route"] == "opus"
+    assert trace["events"][1]["legacy_route"] == "orchestrator"
     assert trace["events"][1]["dispatch_target"] == "orchestrator"
     assert trace["events"][1]["model_provider"] == "fireworks_glm"
     assert trace["events"][1]["model"] == "accounts/fireworks/models/glm-5p3"
@@ -195,6 +195,8 @@ def test_request_trace_store_migrates_legacy_route_to_explicit_dispatch_target(
 
     trace = store.get_request_trace("req_legacy")
     assert trace is not None
+    # The legacy route column is preserved verbatim; only the migrated
+    # dispatch columns are backfilled to the canonical target.
     assert trace["route"] == "opus"
     assert trace["legacy_route"] == "opus"
     assert trace["dispatch_target"] == "orchestrator"

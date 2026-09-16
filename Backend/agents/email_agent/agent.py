@@ -2141,7 +2141,7 @@ class EmailAgent(AgentRuntime):
         }
 
     def _augment_thread_summary_with_attachments(self, *, summary: str, attachments: list[dict[str, Any]]) -> str:
-        attachment_brief = self._build_attachment_brief_for_opus(attachments=attachments)
+        attachment_brief = self._build_attachment_brief_for_orchestrator(attachments=attachments)
         if not attachment_brief:
             return summary
         base = self._safe_text(summary).strip()
@@ -2149,7 +2149,7 @@ class EmailAgent(AgentRuntime):
             return attachment_brief
         return f"{base}\n\n{attachment_brief}"
 
-    def _build_attachment_brief_for_opus(self, *, attachments: list[dict[str, Any]]) -> str:
+    def _build_attachment_brief_for_orchestrator(self, *, attachments: list[dict[str, Any]]) -> str:
         if not attachments:
             return ""
         parsed = [
