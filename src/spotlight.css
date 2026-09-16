@@ -6324,6 +6324,38 @@ kbd {
   white-space: pre-wrap;
 }
 
+/* Inline correction: the value box becomes an input the user can fix right
+   on the card; the corrected value rides the approval back to the form. */
+.browser-run-ask-commit-edit {
+  width: 100%;
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  outline: none;
+  background: rgba(0, 0, 0, 0.35);
+  color: rgba(255, 255, 255, 0.94);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.browser-run-ask-commit-edit:focus {
+  border-color: rgba(120, 190, 255, 0.55);
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.browser-run-ask-commit-empty {
+  margin-top: 8px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 11.5px;
+}
+
+.browser-run-ask-commit-hint {
+  margin-top: 6px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 11.5px;
+}
+
 .browser-run-ask-commit .browser-run-ask-compose {
   margin-top: 10px;
 }

@@ -37,7 +37,7 @@ def test_resolve_wakes_a_pending_wait():
         return result
 
     result = asyncio.run(scenario())
-    assert result == {"request_id": "bwi_1", "status": "answered", "answer": "482913"}
+    assert result == {"request_id": "bwi_1", "status": "answered", "answer": "482913", "field_edits": []}
     # The pending entry is cleaned up once resolved.
     assert manager.get("bwi_1") is None
 
@@ -64,7 +64,7 @@ def test_skip_wakes_a_pending_wait():
         return await asyncio.wait_for(wait_task, timeout=2)
 
     result = asyncio.run(scenario())
-    assert result == {"request_id": "bwi_2", "status": "skipped", "answer": ""}
+    assert result == {"request_id": "bwi_2", "status": "skipped", "answer": "", "field_edits": []}
 
 
 def test_wait_times_out_when_nobody_answers():
@@ -80,7 +80,7 @@ def test_wait_times_out_when_nobody_answers():
             timeout_sec=1,
         )
     )
-    assert result == {"request_id": "bwi_3", "status": "timeout", "answer": ""}
+    assert result == {"request_id": "bwi_3", "status": "timeout", "answer": "", "field_edits": []}
 
 
 def test_resolve_unknown_or_already_resolved_returns_none():
@@ -165,6 +165,39 @@ def test_wait_carries_the_commit_payload_for_the_card():
     asyncio.run(scenario())
 
 
+def test_card_edits_ride_the_approval_back_to_the_browser_agent():
+    manager = BrowserInterruptManager()
+
+    async def scenario():
+        wait_task = asyncio.create_task(
+            manager.create_and_wait(
+                request_id="bwc_2",
+                question="Confirm: Submit application",
+                kind="commit",
+                task_id="t1",
+                session_id="s1",
+                channel=None,
+                page_url="https://jobs.example.com/apply/42",
+                commit={"target": "Submit application"},
+                timeout_sec=30,
+            )
+        )
+        await asyncio.sleep(0.05)
+        interrupt = manager.resolve(
+            "bwc_2",
+            "approve",
+            field_edits=[{"label": "Full name", "value": "Praveen Raj U S"}, "junk", {"label": "", "value": "x"}],
+        )
+        assert interrupt is not None
+        assert interrupt.field_edits == [{"label": "Full name", "value": "Praveen Raj U S"}]
+        return await asyncio.wait_for(wait_task, timeout=2)
+
+    result = asyncio.run(scenario())
+    assert result["status"] == "answered"
+    assert result["answer"] == "approve"
+    assert result["field_edits"] == [{"label": "Full name", "value": "Praveen Raj U S"}]
+
+
 def test_blank_request_id_is_rejected_without_hanging():
     manager = BrowserInterruptManager()
     result = asyncio.run(
@@ -179,3 +212,24 @@ def test_blank_request_id_is_rejected_without_hanging():
         )
     )
     assert result == {"request_id": "", "status": "error", "answer": ""}
+
+
+def test_respond_route_sanitizes_card_edits():
+    from gateway.browser.routes import _sanitize_field_edits
+
+    edits = _sanitize_field_edits(
+        [
+            {"label": "Full name", "value": "  Praveen Raj U S  "},
+            {"label": "Password", "value": "********"},       # masked: never a real value
+            {"label": "Accept terms", "value": "checked"},     # checkbox state, not text
+            {"label": "", "value": "orphan"},                  # nothing to match against
+            {"label": "Ghost", "value": "   "},                # empty after trim
+            "junk",
+            {"label": "Plan", "value": "Pro"},
+        ]
+    )
+    assert edits == [
+        {"label": "Full name", "value": "Praveen Raj U S"},
+        {"label": "Plan", "value": "Pro"},
+    ]
+    assert _sanitize_field_edits(None) == []

@@ -1455,13 +1455,30 @@ class BrowserAgent(AgentRuntime):
         if result.get("reason"):
             log_entry["reason"] = str(result.get("reason"))[:200]
         interrupt_log.append(log_entry)
-        return {
+        decision: dict[str, Any] = {
             "allowed": allowed,
             "reason": str(
                 result.get("reason")
                 or ("approved" if allowed else "the user did not authorize this action")
             )[:200],
         }
+        # Card-edited values ride the approval back to the engine, which
+        # writes them into the form before the authorized commit fires. The
+        # gateway already sanitized them; a deny never carries edits.
+        if allowed and isinstance(result.get("field_edits"), list):
+            edits = [
+                {
+                    "label": str(e.get("label") or "").strip()[:80],
+                    "value": str(e.get("value") or "").strip()[:200],
+                }
+                for e in result["field_edits"]
+                if isinstance(e, dict)
+            ]
+            edits = [e for e in edits if e["label"] and e["value"]][:20]
+            if edits:
+                decision["field_edits"] = edits
+                log_entry["field_edits"] = [e["label"] for e in edits]
+        return decision
 
     @staticmethod
     def _safe_int(value: Any, default: int) -> int:

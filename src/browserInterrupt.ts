@@ -18,6 +18,7 @@ export interface BrowserInterruptCommit {
   irreversible: boolean
   actionClass: string
   fields: BrowserInterruptCommitField[]
+  emptyFieldCount: number
 }
 
 export interface BrowserInterruptPresentation {
@@ -104,14 +105,26 @@ export const normalizeInterruptCommit = (raw: unknown): BrowserInterruptCommit |
     fields.push({ label, value })
     if (fields.length >= 20) break
   }
+  const rawEmptyCount = typeof record.empty_field_count === 'number' ? record.empty_field_count : 0
+  const emptyFieldCount = Number.isFinite(rawEmptyCount) ? Math.max(0, Math.floor(rawEmptyCount)) : 0
   return {
     target: target || 'this action',
     url,
     irreversible: record.irreversible === true,
     actionClass,
     fields,
+    emptyFieldCount,
   }
 }
+
+/** Values the card offers for inline correction: real text, never secrets. */
+export const isEditableCommitField = (field: BrowserInterruptCommitField): boolean => (
+  Boolean(field.label)
+    && Boolean(field.value)
+    && field.value !== '********'
+    && field.value !== 'checked'
+    && field.value !== 'unchecked'
+)
 
 const hostnameOf = (value: string | null | undefined): string | null => {
   const raw = String(value || '').trim()

@@ -370,7 +370,7 @@ interface Window {
     ) => Promise<{ status: string; request?: any; entry_id?: string | null }>
     vaultRejectPending: (requestId: string) => Promise<{ status: string; request?: any }>
     vaultProvidePending: (requestId: string, payload: { username: string; password: string; totp_seed?: string; save_to_vault?: boolean }) => Promise<{ status: string; request?: any; entry_id?: string | null }>
-    browserRespondInterrupt: (requestId: string, answer: string) => Promise<{ status: string; request_id?: string }>
+    browserRespondInterrupt: (requestId: string, answer: string, fieldEdits?: Array<{ label: string; value: string }>) => Promise<{ status: string; request_id?: string }>
     browserSkipInterrupt: (requestId: string) => Promise<{ status: string; request_id?: string }>
     browserPauseRun: (taskId: string) => Promise<{ status: string; task_id?: string }>
     browserResumeRun: (taskId: string, note: string) => Promise<{ status: string; task_id?: string }>

@@ -2765,14 +2765,27 @@ app.whenReady().then(() => {
     })
   })
 
-  ipcMain.handle('browser:respond-interrupt', async (_, requestId: string, answer: string) => {
+  ipcMain.handle('browser:respond-interrupt', async (_, requestId: string, answer: string, fieldEdits?: Array<{ label: string; value: string }>) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {
       throw new Error('Gateway connection is not configured.')
     }
+    // Commit cards only: values the user corrected inline travel with the
+    // approval so the engine can write them into the form before it fires.
+    const edits = Array.isArray(fieldEdits)
+      ? fieldEdits
+        .filter((edit): edit is { label: string; value: string } => (
+          Boolean(edit)
+            && typeof edit.label === 'string'
+            && typeof edit.value === 'string'
+            && edit.label.trim() !== ''
+        ))
+        .slice(0, 20)
+        .map((edit) => ({ label: edit.label.slice(0, 80), value: edit.value.slice(0, 200) }))
+      : []
     return callGatewayJson(config, `/channels/browser/interrupts/${encodeURIComponent(String(requestId || '').trim())}/respond`, {
       method: 'POST',
-      body: { answer: String(answer || '') },
+      body: { answer: String(answer || ''), field_edits: edits },
     })
   })
 

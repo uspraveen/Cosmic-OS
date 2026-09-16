@@ -35,7 +35,7 @@ import { ContentCardStack, normalizeContentCard, type ContentCardBlock } from '.
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
-import { normalizeInterruptCommit, normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
+import { isEditableCommitField, normalizeInterruptCommit, normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
 import { groupAssistantFlowEntries } from './assistantFlow'
 import { mergeSheetRunProgress, normalizeSheetProgress, sheetRunVisibleWindow, type SheetProgressState } from './sheetRunPreview'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
@@ -2465,6 +2465,9 @@ const BrowserRunCard = ({
   const [expanded, setExpanded] = useState(false)
   const [frameFailed, setFrameFailed] = useState(false)
   const [answer, setAnswer] = useState('')
+  // Commit card inline corrections, keyed by field index. Only edited values
+  // (different from what the card received) travel with the approval.
+  const [commitEdits, setCommitEdits] = useState<Record<number, string>>({})
   const [busy, setBusy] = useState<'answer' | 'skip' | null>(null)
   const [error, setError] = useState('')
   const [localStatus, setLocalStatus] = useState<'pending' | 'answered' | 'skipped'>(
@@ -2478,6 +2481,7 @@ const BrowserRunCard = ({
 
   useEffect(() => {
     setAnswer('')
+    setCommitEdits({})
     setError('')
     setBusy(null)
     setLocalStatus(interrupt?.status || 'pending')
@@ -2696,12 +2700,29 @@ const BrowserRunCard = ({
       setError('An answer is required.')
       return
     }
+    // Approving a commit card can carry inline corrections: every field the
+    // user edited (and only those) goes back with the approval, so the form
+    // is fixed in the same breath that authorizes it. A deny sends nothing.
+    let fieldEdits: Array<{ label: string; value: string }> | undefined
+    if (interrupt?.kind === 'commit' && interrupt.commit) {
+      const approving = value === 'approve' || value === 'approve_all'
+      if (approving) {
+        const changed: Array<{ label: string; value: string }> = []
+        interrupt.commit.fields.forEach((field, index) => {
+          const edited = commitEdits[index]
+          if (typeof edited === 'string' && edited !== field.value && edited.trim() !== '') {
+            changed.push({ label: field.label, value: edited.slice(0, 200) })
+          }
+        })
+        if (changed.length > 0) fieldEdits = changed
+      }
+    }
     setBusy('answer')
     setError('')
     try {
       const bridge = window.cosmic?.browserRespondInterrupt
       if (!bridge) throw new Error('Browser answer action is unavailable.')
-      const result = await bridge(requestId, value)
+      const result = await bridge(requestId, value, fieldEdits)
       if (String(result?.status || '').trim() === 'ignored') {
         throw new Error('This question was already answered or timed out.')
       }
@@ -2884,10 +2905,35 @@ const BrowserRunCard = ({
                   {interrupt.commit.fields.map((field, index) => (
                     <div key={`${field.label}-${index}`}>
                       <dt>{field.label || 'Field'}</dt>
-                      <dd>{field.value || '—'}</dd>
+                      <dd>
+                        {isEditableCommitField(field) ? (
+                          <input
+                            className="browser-run-ask-commit-edit"
+                            type="text"
+                            value={commitEdits[index] ?? field.value}
+                            autoComplete="off"
+                            spellCheck={false}
+                            aria-label={`Correct ${field.label || 'field'}`}
+                            disabled={Boolean(busy)}
+                            onChange={(event) => setCommitEdits((prev) => ({ ...prev, [index]: event.target.value }))}
+                          />
+                        ) : (
+                          (field.value || '—')
+                        )}
+                      </dd>
                     </div>
                   ))}
                 </dl>
+              )}
+              {interrupt.commit.emptyFieldCount > 0 && (
+                <div className="browser-run-ask-commit-empty">
+                  +{interrupt.commit.emptyFieldCount} empty field{interrupt.commit.emptyFieldCount === 1 ? '' : 's'} on this form — nothing else will be sent
+                </div>
+              )}
+              {interrupt.commit.fields.some(isEditableCommitField) && (
+                <div className="browser-run-ask-commit-hint">
+                  Fix any value inline — your corrections are written into the form before it submits.
+                </div>
               )}
               <div className="browser-run-ask-compose is-confirm">
                 <button

@@ -38,6 +38,11 @@ class BrowserInterrupt:
     channel: str | None
     page_url: str = ""
     commit: dict[str, Any] = field(default_factory=dict)
+    # Corrected values from a commit card: the user edited a field's value
+    # before approving. Only ever populated on an approving answer, and only
+    # for fields the card actually showed — the engine writes them into the
+    # form just before the authorized commit fires.
+    field_edits: list[dict[str, str]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     status: str = "pending"  # pending | answered | skipped | timeout
     answer: str = ""
@@ -87,15 +92,29 @@ class BrowserInterruptManager:
                 "request_id": interrupt.request_id,
                 "status": interrupt.status,
                 "answer": interrupt.answer,
+                "field_edits": list(interrupt.field_edits),
             }
         finally:
             self._pending.pop(request_id, None)
 
-    def resolve(self, request_id: str, answer: str) -> BrowserInterrupt | None:
+    def resolve(
+        self,
+        request_id: str,
+        answer: str,
+        field_edits: list[dict[str, str]] | None = None,
+    ) -> BrowserInterrupt | None:
         interrupt = self._pending.get((request_id or "").strip())
         if interrupt is None or interrupt.status != "pending":
             return None
         interrupt.answer = answer
+        interrupt.field_edits = [
+            {"label": label, "value": value}
+            for edit in (field_edits or [])
+            if isinstance(edit, dict)
+            for label in [str(edit.get("label") or "").strip()[:80]]
+            for value in [str(edit.get("value") or "").strip()[:200]]
+            if label and value
+        ]
         interrupt.status = "answered"
         interrupt.event.set()
         return interrupt

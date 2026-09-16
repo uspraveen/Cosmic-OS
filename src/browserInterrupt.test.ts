@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  isEditableCommitField,
   normalizeInterruptCommit,
   normalizeInterruptOptions,
   presentBrowserInterrupt,
@@ -105,5 +106,29 @@ describe('normalizeInterruptCommit', () => {
       value: `Value ${index}`,
     }))
     expect(normalizeInterruptCommit({ target: 'x', fields: many })?.fields).toHaveLength(20)
+  })
+
+  it('carries the empty-field count and defaults it to zero', () => {
+    const commit = normalizeInterruptCommit({
+      target: 'Submit',
+      fields: [{ label: 'Email', value: 'uspraveenraj@gmail.com' }],
+      empty_field_count: 14,
+    })
+    expect(commit?.emptyFieldCount).toBe(14)
+    // Older engines never sent the count — the card must not invent one.
+    expect(normalizeInterruptCommit({ target: 'Submit' })?.emptyFieldCount).toBe(0)
+    expect(normalizeInterruptCommit({ target: 'Submit', empty_field_count: 'many' })?.emptyFieldCount).toBe(0)
+  })
+})
+
+describe('isEditableCommitField', () => {
+  it('allows real text values only — never secrets or checkbox states', () => {
+    expect(isEditableCommitField({ label: 'Full name', value: 'Praveen Raj' })).toBe(true)
+    expect(isEditableCommitField({ label: 'Plan', value: 'Pro' })).toBe(true)
+    expect(isEditableCommitField({ label: 'Password', value: '********' })).toBe(false)
+    expect(isEditableCommitField({ label: 'Accept terms', value: 'checked' })).toBe(false)
+    expect(isEditableCommitField({ label: 'Accept terms', value: 'unchecked' })).toBe(false)
+    expect(isEditableCommitField({ label: 'Notes', value: '' })).toBe(false)
+    expect(isEditableCommitField({ label: '', value: 'orphan value' })).toBe(false)
   })
 })

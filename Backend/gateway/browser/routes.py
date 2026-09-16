@@ -48,6 +48,34 @@ class LiveFrameRequest(BaseModel):
 
 class RespondInterruptRequest(BaseModel):
     answer: str = ""
+    # Commit cards only: values the user corrected inline before approving.
+    field_edits: list[dict[str, Any]] | None = None
+
+
+_APPROVING_ANSWERS = {"approve", "approve_all", "approve-all", "approveall", "allowed", "yes"}
+# The card can only ever display these as static text — they are not values.
+_NON_EDITABLE_VALUES = {"checked", "unchecked"}
+
+
+def _sanitize_field_edits(raw: list[Any] | None) -> list[dict[str, str]]:
+    """Cap and clamp card edits to what the card could have shown.
+
+    Labels and values keep the engine's payload caps (80/200 chars); masked
+    secrets and checkbox/radio state markers are refused — a masked edit must
+    never become a real password, and a checkbox is toggled, not typed.
+    """
+    edits: list[dict[str, str]] = []
+    for entry in (raw or [])[:20]:
+        if not isinstance(entry, dict):
+            continue
+        label = str(entry.get("label") or "").strip()[:80]
+        value = str(entry.get("value") or "").strip()[:200]
+        if not label or not value:
+            continue
+        if value == "********" or value.lower() in _NON_EDITABLE_VALUES:
+            continue
+        edits.append({"label": label, "value": value})
+    return edits
 
 
 class CommitMissRequest(BaseModel):
@@ -274,7 +302,11 @@ async def respond_interrupt(request_id: str, body: RespondInterruptRequest, requ
     answer = str(body.answer or "").strip()
     if not answer:
         raise HTTPException(status_code=400, detail="answer is required.")
-    interrupt = runtime.browser_interrupts.resolve(request_id, answer)
+    interrupt = runtime.browser_interrupts.resolve(
+        request_id,
+        answer,
+        field_edits=_sanitize_field_edits(body.field_edits) if answer.lower() in _APPROVING_ANSWERS else None,
+    )
     if interrupt is None:
         raise HTTPException(
             status_code=410,
