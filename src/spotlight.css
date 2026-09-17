@@ -5988,6 +5988,10 @@ kbd {
   display: flex;
   flex-direction: column;
   max-width: min(92vw, 1500px);
+  /* Matches the lightbox's own 32px padding. A docked ask panel adds height
+     below the frame, so the window is capped here and the panel (not the
+     page) gives way on a short viewport. */
+  max-height: calc(100vh - 64px);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 12px;
   background: rgba(10, 11, 14, 0.9);
@@ -6086,6 +6090,70 @@ kbd {
   border-color: rgba(120, 200, 160, 0.35);
   background: rgba(24, 44, 34, 0.72);
   color: rgba(190, 240, 214, 0.95);
+}
+
+/* Stands in the control rail where "Take control" would be. A pending
+   question is what withdrew that button, so the rail names the question
+   instead of quietly going one control short over a page that has stopped
+   moving. Amber, matching .docs-progress-stage.prepare — the same
+   "attention" step the run card's own status pill uses. */
+.browser-run-ask-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(196, 143, 50, 0.32);
+  background: rgba(196, 143, 50, 0.16);
+  color: rgba(255, 233, 186, 0.98);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.browser-run-ask-chip svg {
+  flex: 0 0 auto;
+  color: rgba(255, 214, 140, 0.9);
+}
+
+/* The same panel as the run card's, docked to the bottom of the expanded
+   window the way a browser docks its own credential prompt: under the page,
+   never over it. The card variant bleeds negatively to reach its parent's
+   radius; here the stage already clips, so the bleed comes off.
+   `flex: 0 0 auto` is the priority rule of this layout — the thing being
+   asked keeps its full height and the page gives way, never the reverse. */
+.browser-run-lightbox .browser-run-ask.is-docked {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 13px 16px 14px;
+  border-top: 1px solid rgba(230, 170, 60, 0.28);
+  border-radius: 0;
+  /* Backstop only, and deliberately loose: the field list below is the
+     intended scroller, and a panel that scrolls too would put two bars side
+     by side over the same content. */
+  max-height: 52vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* A commit card's field table already scrolls at 240px in the run card. The
+   expanded view has less room below the page, so it scrolls sooner — what
+   must stay on screen is the identity line and the approve/deny row, not the
+   ninth form field. Without this the Approve button sat below the fold. */
+.browser-run-lightbox .browser-run-ask.is-docked .browser-run-ask-commit-fields {
+  max-height: 18vh;
+}
+
+/* The docked panel takes its height out of the page, not out of the viewport,
+   so the window still fits the 82vh the lightbox has always used. `min-height`
+   lets the frame shrink past its cap on a short screen rather than pushing the
+   panel off the bottom — a letterboxed page beats an unanswerable question. */
+.browser-run-lightbox .browser-run-stage.is-asking .deck-preview-full {
+  max-height: min(46vh, calc(82vh - 48px));
+  min-height: 120px;
+  flex: 0 1 auto;
 }
 
 /* Anchored to the stage, just under the chrome bar — the failure belongs to

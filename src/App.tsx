@@ -36,6 +36,7 @@ import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
 import { isEditableCommitField, normalizeInterruptCommit, normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
+import { resolveBrowserLiveControls } from './browserLiveControls'
 import { groupAssistantFlowEntries } from './assistantFlow'
 import { mergeSheetRunProgress, normalizeSheetProgress, sheetRunVisibleWindow, type SheetProgressState } from './sheetRunPreview'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
@@ -2576,7 +2577,10 @@ const BrowserRunCard = ({
   const runPaused = progress.takeover === 'active'
   const [driving, setDriving] = useState(false)
   const [takeoverError, setTakeoverError] = useState('')
-  const canTakeOver = Boolean(taskId) && live && !isAwaitingInput
+  // Whether the run can be addressed at all. A pending interrupt then
+  // withdraws the offer — that rule, and the chip that explains the missing
+  // button, are resolved together in resolveBrowserLiveControls below.
+  const takeoverAvailable = Boolean(taskId) && live
   const frameElementRef = useRef<HTMLImageElement | null>(null)
 
   useEffect(() => {
@@ -2651,8 +2655,12 @@ const BrowserRunCard = ({
   // Keyboard only while actually driving, and captured, so keys reach the page
   // instead of the app underneath. Escape is kept for leaving: a full-screen
   // surface that swallows every key needs one that always gets out.
+  // An unanswered interrupt releases the capture without releasing the wheel:
+  // the card is blocking, so the keys have to reach its field rather than the
+  // page. Only the capture is lifted — `driving` is left alone, because the
+  // run still needs its explicit resume and dropping it here would strand one.
   useEffect(() => {
-    if (!driving || !runPaused) return undefined
+    if (!driving || !runPaused || isAwaitingInput) return undefined
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') return
       event.preventDefault()
@@ -2665,13 +2673,21 @@ const BrowserRunCard = ({
       window.removeEventListener('keydown', onKey, true)
       window.removeEventListener('keyup', onKey, true)
     }
-  }, [driving, runPaused, queueInput])
+  }, [driving, runPaused, isAwaitingInput, queueInput])
 
   const drivingLive = driving && runPaused
 
   // One condition for both the portal and its exits, so the Escape claim can
   // never outlive the surface that asked for it.
   const lightboxOpen = expanded && Boolean(frame)
+  // The expanded view covers the run card, so the ask panel has to travel to
+  // whichever surface is actually on screen — never rendered in both.
+  const { askPlacement, showTakeControl, showTakeoverState, showWaitingChip } = resolveBrowserLiveControls({
+    awaitingInput: isAwaitingInput,
+    lightboxOpen,
+    takeoverAvailable,
+    driving,
+  })
   useEffect(() => {
     if (!lightboxOpen) return undefined
     // Tiered: while driving, Escape gives the wheel back rather than closing
@@ -2793,6 +2809,201 @@ const BrowserRunCard = ({
     }
   }
 
+  // Built once and mounted wherever the user can actually see it: in the
+  // run card normally, inside the expanded view while that is covering it.
+  // One element, so the two surfaces can never race to answer one request.
+  const askPanel = interrupt && interruptView && isAwaitingInput ? (
+    <section
+      className={`browser-run-ask${askPlacement === 'docked' ? ' is-docked' : ''}`}
+      data-kind={interrupt.kind}
+      aria-label={interruptView.title}
+    >
+      <div className="browser-run-ask-identity">
+        <div className="browser-run-ask-title">
+          {interrupt.kind === 'password' ? <KeyRound size={15} aria-hidden="true" /> : <Shield size={15} aria-hidden="true" />}
+          <span>{interruptView.title}</span>
+        </div>
+        {interruptView.username && (
+          <div className="browser-run-ask-account">{interruptView.username}</div>
+        )}
+        {!interruptView.username && interruptView.site && (
+          <div className="browser-run-ask-account">{interruptView.site}</div>
+        )}
+        {interruptView.summary && (
+          <p className="browser-run-ask-note">{interruptView.summary}</p>
+        )}
+      </div>
+      {interrupt.kind !== 'confirm' && interrupt.kind !== 'commit' && interrupt.options.length > 0 && (
+        <div className="browser-run-ask-options" role="list">
+          {interrupt.options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              role="listitem"
+              className="browser-run-ask-option"
+              disabled={Boolean(busy)}
+              onClick={() => void submitAnswer(option)}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      )}
+      {interrupt.kind === 'commit' && interrupt.commit ? (
+        <div className="browser-run-ask-commit">
+          <div className="browser-run-ask-commit-head">
+            <span className="browser-run-ask-commit-target">{interrupt.commit.target}</span>
+            {interrupt.commit.irreversible && (
+              <span className="browser-run-ask-commit-flag">irreversible</span>
+            )}
+          </div>
+          {interrupt.commit.fields.length > 0 && (
+            <dl className="browser-run-ask-commit-fields">
+              {interrupt.commit.fields.map((field, index) => (
+                <div key={`${field.label}-${index}`}>
+                  <dt>{field.label || 'Field'}</dt>
+                  <dd>
+                    {isEditableCommitField(field) ? (
+                      <input
+                        className="browser-run-ask-commit-edit"
+                        type="text"
+                        value={commitEdits[index] ?? field.value}
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-label={`Correct ${field.label || 'field'}`}
+                        disabled={Boolean(busy)}
+                        onChange={(event) => setCommitEdits((prev) => ({ ...prev, [index]: event.target.value }))}
+                      />
+                    ) : (
+                      (field.value || '—')
+                    )}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
+          {interrupt.commit.emptyFieldCount > 0 && (
+            <div className="browser-run-ask-commit-empty">
+              +{interrupt.commit.emptyFieldCount} empty field{interrupt.commit.emptyFieldCount === 1 ? '' : 's'} on this form — nothing else will be sent
+            </div>
+          )}
+          {interrupt.commit.fields.some(isEditableCommitField) && (
+            <div className="browser-run-ask-commit-hint">
+              Fix any value inline — your corrections are written into the form before it submits.
+            </div>
+          )}
+          <div className="browser-run-ask-compose is-confirm">
+            <button
+              type="button"
+              className="browser-run-ask-skip"
+              disabled={Boolean(busy)}
+              onClick={() => void submitAnswer('deny')}
+            >
+              {busy === 'answer' ? 'Sending…' : 'Deny'}
+            </button>
+            <button
+              type="button"
+              className="browser-run-ask-option"
+              disabled={Boolean(busy)}
+              onClick={() => void submitAnswer('approve_all')}
+            >
+              Approve all for this task
+            </button>
+            <button
+              type="button"
+              className="browser-run-ask-go"
+              disabled={Boolean(busy)}
+              onClick={() => void submitAnswer('approve')}
+            >
+              {busy === 'answer' ? 'Approving…' : 'Approve'}
+            </button>
+          </div>
+        </div>
+      ) : interrupt.kind === 'confirm' ? (
+        <div className="browser-run-ask-compose is-confirm">
+          <button type="button" className="browser-run-ask-skip" disabled={Boolean(busy)} onClick={() => void skip()}>
+            {busy === 'skip' ? 'Skipping…' : 'Skip'}
+          </button>
+          <button type="button" className="browser-run-ask-go" disabled={Boolean(busy)} onClick={() => void confirmDone()}>
+            {busy === 'answer' ? 'Continuing…' : interruptView.primaryAction}
+          </button>
+        </div>
+      ) : (
+        <div className="browser-run-ask-compose">
+          <input
+            className="browser-run-ask-field"
+            type={interrupt.kind === 'password' ? 'password' : 'text'}
+            value={answer}
+            autoComplete="off"
+            autoFocus
+            spellCheck={false}
+            aria-label={interruptView.fieldLabel}
+            onChange={(event) => setAnswer(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') void submitAnswer()
+            }}
+            placeholder={interruptView.placeholder || interruptView.fieldLabel}
+          />
+          <button type="button" className="browser-run-ask-go" disabled={Boolean(busy)} onClick={() => void submitAnswer()}>
+            {busy === 'answer' ? 'Continuing…' : interruptView.primaryAction}
+          </button>
+        </div>
+      )}
+      {interrupt.kind !== 'password' && interrupt.kind !== 'verification_code' && !runEnded && (
+        <div className="browser-run-ask-note">
+          {noteOpen ? (
+            <>
+              <textarea
+                className="browser-run-ask-note-field"
+                value={note}
+                rows={2}
+                autoComplete="off"
+                spellCheck={false}
+                aria-label="Say something in addition"
+                placeholder="e.g. approve, but uncheck the newsletter box · use my other email next time"
+                onChange={(event) => setNote(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault()
+                    void submitAnswer()
+                  }
+                }}
+              />
+              <div className="browser-run-ask-note-hint">
+                Sent with whichever action you take on this card — the agent reads it as an instruction.
+              </div>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="browser-run-ask-note-toggle"
+              disabled={Boolean(busy)}
+              onClick={() => setNoteOpen(true)}
+            >
+              + Say something in addition
+            </button>
+          )}
+        </div>
+      )}
+      {error && <div className="browser-run-ask-error">{error}</div>}
+      {(interrupt.kind !== 'confirm' || interruptView.leftover) && (
+        <div className="browser-run-ask-foot">
+          {interrupt.kind !== 'confirm' && (
+            <button type="button" className="browser-run-ask-skip" disabled={Boolean(busy)} onClick={() => void skip()}>
+              {busy === 'skip' ? 'Skipping…' : 'Skip'}
+            </button>
+          )}
+          {interruptView.leftover && (
+            <details className="browser-run-ask-more">
+              <summary>Details</summary>
+              <div>{interruptView.leftover}</div>
+            </details>
+          )}
+        </div>
+      )}
+    </section>
+  ) : null
+
   return (
     <div
       className={`slide-build-card browser-run-card ${tone}${live ? ' streaming' : ''}`}
@@ -2878,211 +3089,37 @@ const BrowserRunCard = ({
           )}
         </div>
       </div>
-      {interrupt && interruptView && isAwaitingInput && (
-        <section className="browser-run-ask" data-kind={interrupt.kind} aria-label={interruptView.title}>
-          <div className="browser-run-ask-identity">
-            <div className="browser-run-ask-title">
-              {interrupt.kind === 'password' ? <KeyRound size={15} aria-hidden="true" /> : <Shield size={15} aria-hidden="true" />}
-              <span>{interruptView.title}</span>
-            </div>
-            {interruptView.username && (
-              <div className="browser-run-ask-account">{interruptView.username}</div>
-            )}
-            {!interruptView.username && interruptView.site && (
-              <div className="browser-run-ask-account">{interruptView.site}</div>
-            )}
-            {interruptView.summary && (
-              <p className="browser-run-ask-note">{interruptView.summary}</p>
-            )}
-          </div>
-          {interrupt.kind !== 'confirm' && interrupt.kind !== 'commit' && interrupt.options.length > 0 && (
-            <div className="browser-run-ask-options" role="list">
-              {interrupt.options.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  role="listitem"
-                  className="browser-run-ask-option"
-                  disabled={Boolean(busy)}
-                  onClick={() => void submitAnswer(option)}
-                >
-                  {option}
-                </button>
-              ))}
-            </div>
-          )}
-          {interrupt.kind === 'commit' && interrupt.commit ? (
-            <div className="browser-run-ask-commit">
-              <div className="browser-run-ask-commit-head">
-                <span className="browser-run-ask-commit-target">{interrupt.commit.target}</span>
-                {interrupt.commit.irreversible && (
-                  <span className="browser-run-ask-commit-flag">irreversible</span>
-                )}
-              </div>
-              {interrupt.commit.fields.length > 0 && (
-                <dl className="browser-run-ask-commit-fields">
-                  {interrupt.commit.fields.map((field, index) => (
-                    <div key={`${field.label}-${index}`}>
-                      <dt>{field.label || 'Field'}</dt>
-                      <dd>
-                        {isEditableCommitField(field) ? (
-                          <input
-                            className="browser-run-ask-commit-edit"
-                            type="text"
-                            value={commitEdits[index] ?? field.value}
-                            autoComplete="off"
-                            spellCheck={false}
-                            aria-label={`Correct ${field.label || 'field'}`}
-                            disabled={Boolean(busy)}
-                            onChange={(event) => setCommitEdits((prev) => ({ ...prev, [index]: event.target.value }))}
-                          />
-                        ) : (
-                          (field.value || '—')
-                        )}
-                      </dd>
-                    </div>
-                  ))}
-                </dl>
-              )}
-              {interrupt.commit.emptyFieldCount > 0 && (
-                <div className="browser-run-ask-commit-empty">
-                  +{interrupt.commit.emptyFieldCount} empty field{interrupt.commit.emptyFieldCount === 1 ? '' : 's'} on this form — nothing else will be sent
-                </div>
-              )}
-              {interrupt.commit.fields.some(isEditableCommitField) && (
-                <div className="browser-run-ask-commit-hint">
-                  Fix any value inline — your corrections are written into the form before it submits.
-                </div>
-              )}
-              <div className="browser-run-ask-compose is-confirm">
-                <button
-                  type="button"
-                  className="browser-run-ask-skip"
-                  disabled={Boolean(busy)}
-                  onClick={() => void submitAnswer('deny')}
-                >
-                  {busy === 'answer' ? 'Sending…' : 'Deny'}
-                </button>
-                <button
-                  type="button"
-                  className="browser-run-ask-option"
-                  disabled={Boolean(busy)}
-                  onClick={() => void submitAnswer('approve_all')}
-                >
-                  Approve all for this task
-                </button>
-                <button
-                  type="button"
-                  className="browser-run-ask-go"
-                  disabled={Boolean(busy)}
-                  onClick={() => void submitAnswer('approve')}
-                >
-                  {busy === 'answer' ? 'Approving…' : 'Approve'}
-                </button>
-              </div>
-            </div>
-          ) : interrupt.kind === 'confirm' ? (
-            <div className="browser-run-ask-compose is-confirm">
-              <button type="button" className="browser-run-ask-skip" disabled={Boolean(busy)} onClick={() => void skip()}>
-                {busy === 'skip' ? 'Skipping…' : 'Skip'}
-              </button>
-              <button type="button" className="browser-run-ask-go" disabled={Boolean(busy)} onClick={() => void confirmDone()}>
-                {busy === 'answer' ? 'Continuing…' : interruptView.primaryAction}
-              </button>
-            </div>
-          ) : (
-            <div className="browser-run-ask-compose">
-              <input
-                className="browser-run-ask-field"
-                type={interrupt.kind === 'password' ? 'password' : 'text'}
-                value={answer}
-                autoComplete="off"
-                autoFocus
-                spellCheck={false}
-                aria-label={interruptView.fieldLabel}
-                onChange={(event) => setAnswer(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') void submitAnswer()
-                }}
-                placeholder={interruptView.placeholder || interruptView.fieldLabel}
-              />
-              <button type="button" className="browser-run-ask-go" disabled={Boolean(busy)} onClick={() => void submitAnswer()}>
-                {busy === 'answer' ? 'Continuing…' : interruptView.primaryAction}
-              </button>
-            </div>
-          )}
-          {interrupt.kind !== 'password' && interrupt.kind !== 'verification_code' && !runEnded && (
-            <div className="browser-run-ask-note">
-              {noteOpen ? (
-                <>
-                  <textarea
-                    className="browser-run-ask-note-field"
-                    value={note}
-                    rows={2}
-                    autoComplete="off"
-                    spellCheck={false}
-                    aria-label="Say something in addition"
-                    placeholder="e.g. approve, but uncheck the newsletter box · use my other email next time"
-                    onChange={(event) => setNote(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                        event.preventDefault()
-                        void submitAnswer()
-                      }
-                    }}
-                  />
-                  <div className="browser-run-ask-note-hint">
-                    Sent with whichever action you take on this card — the agent reads it as an instruction.
-                  </div>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  className="browser-run-ask-note-toggle"
-                  disabled={Boolean(busy)}
-                  onClick={() => setNoteOpen(true)}
-                >
-                  + Say something in addition
-                </button>
-              )}
-            </div>
-          )}
-          {error && <div className="browser-run-ask-error">{error}</div>}
-          {(interrupt.kind !== 'confirm' || interruptView.leftover) && (
-            <div className="browser-run-ask-foot">
-              {interrupt.kind !== 'confirm' && (
-                <button type="button" className="browser-run-ask-skip" disabled={Boolean(busy)} onClick={() => void skip()}>
-                  {busy === 'skip' ? 'Skipping…' : 'Skip'}
-                </button>
-              )}
-              {interruptView.leftover && (
-                <details className="browser-run-ask-more">
-                  <summary>Details</summary>
-                  <div>{interruptView.leftover}</div>
-                </details>
-              )}
-            </div>
-          )}
-        </section>
-      )}
+      {askPlacement === 'inline' && askPanel}
       {lightboxOpen && createPortal(
         <div
           className={`deck-preview-lightbox browser-run-lightbox ${PORTAL_SURFACE_CLASS}${drivingLive ? ' is-driving' : ''}`}
           onClick={() => { if (!driving) setExpanded(false) }}
         >
-          <div className="browser-run-stage" onClick={(event) => event.stopPropagation()}>
+          <div
+            className={`browser-run-stage${askPlacement === 'docked' ? ' is-asking' : ''}`}
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="browser-run-lightbox-bar">
               <span className="browser-run-lightbox-title" title={progress.pageTitle || displayUrl}>
                 {progress.pageTitle || displayUrl || 'Live browser view'}
               </span>
               <div className="browser-run-lightbox-actions">
-                {canTakeOver && !driving && (
+                {/* Stands where Take control would be: a pending question is
+                    what withdrew it, so the rail says so instead of quietly
+                    losing a button over a page that has stopped moving. */}
+                {showWaitingChip && (
+                  <span className="browser-run-ask-chip">
+                    <Shield size={12} aria-hidden="true" />
+                    {interruptView?.kicker || 'Waiting for you'}
+                  </span>
+                )}
+                {showTakeControl && (
                   <button type="button" className="browser-run-takeover-button" onClick={() => void takeControl()}>
                     <MousePointerClick size={13} />
                     Take control
                   </button>
                 )}
-                {driving && (
+                {showTakeoverState && (
                   <>
                     <span className={`browser-run-takeover-state${drivingLive ? ' is-live' : ''}`}>
                       {drivingLive ? 'You have control' : 'Pausing at the current step…'}
@@ -3148,6 +3185,10 @@ const BrowserRunCard = ({
               }}
               onContextMenu={(event) => { if (drivingLive) event.preventDefault() }}
             />
+            {/* Docked under the page, the way a browser puts its own
+                credential prompt — the stage stays one window, and nothing
+                the user has to answer is laid over what they are reading. */}
+            {askPlacement === 'docked' && askPanel}
           </div>
         </div>,
         document.body,
