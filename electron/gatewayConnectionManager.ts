@@ -598,6 +598,29 @@ export class GatewayConnectionManager {
     return Promise.resolve(this.getState())
   }
 
+  /**
+   * Laptop lid / lock-screen wake. Frozen Node timers may not have run the
+   * heartbeat stale check yet, and a zombie TCP can look OPEN while having
+   * missed every Prophet / response frame published during sleep.
+   */
+  handleSystemResume() {
+    const staleMs = Date.now() - (this.lastSocketActivityAt || 0)
+    const socketOpen = this.socket?.readyState === WebSocket.OPEN
+    if (!socketOpen || staleMs > 8000) {
+      if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
+        try {
+          this.socket.terminate()
+        } catch {
+          // The close handler reconnects.
+        }
+      } else {
+        this.connect()
+      }
+      return Promise.resolve(this.getState())
+    }
+    return this.requestResume()
+  }
+
   sendQuery(
     content: string,
     conversationContext: any[] = [],

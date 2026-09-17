@@ -40,6 +40,16 @@ import { groupAssistantFlowEntries } from './assistantFlow'
 import { mergeSheetRunProgress, normalizeSheetProgress, sheetRunVisibleWindow, type SheetProgressState } from './sheetRunPreview'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
 import {
+  buildProphetNoticeFromGateway,
+  classifyAssistantNoticeKind,
+  isChatInactiveForNotices,
+  pendingProphetIds,
+  previewNoticeContent,
+  shouldDisplayNotice,
+  shouldSurfacePendingProphet,
+  type LocalProphetSettlement,
+} from './desktopNotifications'
+import {
   pickAutoBoundRect,
   type ScreenshotDisplayGeometry,
   type ScreenshotFrameSize,
@@ -140,7 +150,7 @@ interface BackgroundTask {
 
 interface CronResultNotification {
   id: string
-  kind?: 'cron' | 'heartbeat' | 'prophet'
+  kind?: 'cron' | 'heartbeat' | 'prophet' | 'response'
   messageId?: string | null
   requestId?: string | null
   sourceId?: string | null
@@ -5923,6 +5933,8 @@ export default function App() {
   const consumedHeartbeatKeysRef = useRef<Set<string>>(new Set())
   const seenArtifactReadyKeysRef = useRef<Set<string>>(new Set())
   const unreadBoundaryMessageIdRef = useRef<string | null>(null)
+  const prophetSettledRef = useRef<Map<string, LocalProphetSettlement>>(new Map())
+  const inFlightWhenInactiveRef = useRef<Set<string>>(new Set())
 
   // Composer input is uncontrolled — browser holds the value natively via `inputRef`.
   // React only re-renders on the empty↔non-empty transition (via `hasText`), so individual
@@ -6085,6 +6097,16 @@ export default function App() {
     () => [...cronResultNotifications].reverse(),
     [cronResultNotifications],
   )
+  const displayedCronResultNotifications = useMemo(() => {
+    const chatInactive = isChatInactiveForNotices({
+      searchState,
+      mode,
+      showLauncherTray,
+    })
+    return orderedCronResultNotifications.filter((notification) => (
+      shouldDisplayNotice(notification.kind, chatInactive)
+    ))
+  }, [mode, orderedCronResultNotifications, searchState, showLauncherTray])
   const orderedArtifactReadyNotifications = useMemo(
     () => [...artifactReadyNotifications].reverse(),
     [artifactReadyNotifications],
@@ -6320,22 +6342,34 @@ export default function App() {
   }
 
   const isCronResultChatInactive = () => {
-    return (
-      searchStateRef.current !== 'visible' ||
-      modeRef.current !== 'chat' ||
-      showLauncherTrayRef.current
-    )
+    return isChatInactiveForNotices({
+      searchState: searchStateRef.current,
+      mode: modeRef.current,
+      showLauncherTray: showLauncherTrayRef.current,
+    })
   }
 
-  const isProducedArtifactChatInactive = () => {
-    return (
-      searchStateRef.current !== 'visible' ||
-      modeRef.current !== 'chat' ||
-      showLauncherTrayRef.current
-    )
+  const isProducedArtifactChatInactive = () => isCronResultChatInactive()
+
+  const rememberInFlightWhenInactive = () => {
+    const ids = new Set<string>()
+    const streamId = String(activeStreamingRequestIdRef.current || '').trim()
+    if (streamId) {
+      ids.add(streamId)
+    }
+    for (const task of backgroundTasksRef.current) {
+      const requestId = String(task.requestId || '').trim()
+      if (requestId && !task.completed) {
+        ids.add(requestId)
+      }
+    }
+    inFlightWhenInactiveRef.current = ids
   }
 
-  const enqueueCronResultNotification = (notification: CronResultNotification) => {
+  const enqueueCronResultNotification = (
+    notification: CronResultNotification,
+    options?: { resurface?: boolean },
+  ) => {
     if (
       notification.kind === 'heartbeat' &&
       heartbeatConsumptionKeys({
@@ -6354,7 +6388,12 @@ export default function App() {
       id: notification.id,
       content: notification.content,
     })
-    if (!dedupeKey || seenCronResultKeysRef.current.has(dedupeKey)) {
+    if (!dedupeKey) {
+      return
+    }
+    if (options?.resurface) {
+      seenCronResultKeysRef.current.delete(dedupeKey)
+    } else if (seenCronResultKeysRef.current.has(dedupeKey)) {
       return
     }
     seenCronResultKeysRef.current.add(dedupeKey)
@@ -6491,6 +6530,123 @@ export default function App() {
     }
   }
 
+  const applyPendingProphetNotifications = (raw: unknown) => {
+    const items = Array.isArray(raw) ? raw : []
+    const pendingIds = pendingProphetIds(items)
+    setCronResultNotifications((prev) => prev.filter((notification) => {
+      if (notification.kind !== 'prophet') {
+        return true
+      }
+      const notificationId = String(notification.prophetNotificationId || '').trim()
+      if (!notificationId) {
+        return false
+      }
+      const local = prophetSettledRef.current.get(notificationId)
+      if (local?.state === 'snoozed') {
+        return false
+      }
+      return pendingIds.has(notificationId)
+    }))
+    for (const item of items) {
+      const notice = buildProphetNoticeFromGateway(item)
+      if (!notice) {
+        continue
+      }
+      if (!shouldSurfacePendingProphet(notice.prophetNotificationId, prophetSettledRef.current)) {
+        continue
+      }
+      enqueueCronResultNotification(notice, { resurface: true })
+    }
+  }
+
+  const refreshPendingProphetNotifications = () => {
+    if (authStateRef.current !== 'authenticated' || !window.cosmic?.listGatewayProphetNotifications) {
+      return
+    }
+    void window.cosmic.listGatewayProphetNotifications()
+      .then((payload) => {
+        applyPendingProphetNotifications(payload?.notifications)
+      })
+      .catch(() => {
+        // Catch-up is best-effort; live WS and the next poll retry.
+      })
+  }
+
+  const enqueueAssistantNotice = (value: {
+    kind: 'cron' | 'heartbeat' | 'response'
+    messageId?: string | null
+    requestId?: string | null
+    sourceId?: string | null
+    sessionId?: string | null
+    content: string
+    channel?: string | null
+    createdAt?: string | null
+  }) => {
+    const content = previewNoticeContent(value.content)
+    if (!content) {
+      return
+    }
+    enqueueCronResultNotification({
+      id: `${value.kind}_result_${String(value.requestId || value.sourceId || value.messageId || crypto.randomUUID())}`,
+      kind: value.kind,
+      messageId: value.messageId || null,
+      requestId: value.requestId || null,
+      sourceId: value.sourceId || null,
+      sessionId: value.sessionId || null,
+      content,
+      channel: value.channel || null,
+      createdAt: value.createdAt || new Date().toISOString(),
+    })
+  }
+
+  const enqueueMissedAssistantNoticesFromMessages = (
+    items: Message[],
+    sessionId: string | null | undefined,
+  ) => {
+    if (!isCronResultChatInactive() || items.length === 0) {
+      return
+    }
+    const normalizedSessionId = String(sessionId || '').trim()
+    const cursor = getChatReadCursor(normalizedSessionId)
+    const unreadIds = new Set(
+      unreadReadableMessagesAfterCursor(items, cursor).map((message) => message.id),
+    )
+    const inFlight = inFlightWhenInactiveRef.current
+    const candidates: Message[] = []
+    for (const message of items) {
+      if (message.role !== 'assistant' || isExternalChannel(message)) {
+        continue
+      }
+      if (!previewNoticeContent(message.content)) {
+        continue
+      }
+      const requestId = String(message.requestId || '').trim()
+      if (!unreadIds.has(message.id) && !(requestId && inFlight.has(requestId))) {
+        continue
+      }
+      if (!classifyAssistantNoticeKind(message.source, message.sourceId)) {
+        continue
+      }
+      candidates.push(message)
+    }
+    for (const message of candidates.slice(-4)) {
+      const kind = classifyAssistantNoticeKind(message.source, message.sourceId)
+      if (!kind) {
+        continue
+      }
+      enqueueAssistantNotice({
+        kind,
+        messageId: message.id,
+        requestId: message.requestId || null,
+        sourceId: message.sourceId || null,
+        sessionId: normalizedSessionId || null,
+        content: message.content,
+        channel: message.channel || null,
+        createdAt: message.createdAt || null,
+      })
+    }
+  }
+
   const enqueueArtifactReadyNotification = (notification: ProducedArtifactNotification) => {
     const dedupeKey = buildArtifactReadyNotificationKey({
       messageId: notification.messageId,
@@ -6522,8 +6678,22 @@ export default function App() {
     const notification = cronResultNotifications.find((item) => item.id === notificationId)
     setCronResultNotifications((prev) => prev.filter((item) => item.id !== notificationId))
     if (notification?.kind === 'prophet' && notification.prophetNotificationId) {
-      // "Later" is a snooze: hide for now, resurface after the snooze window.
       const snoozedUntil = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+      prophetSettledRef.current.set(notification.prophetNotificationId, {
+        state: 'snoozed',
+        snoozedUntil,
+      })
+      const dedupeKey = buildCronResultNotificationKey({
+        messageId: notification.messageId,
+        requestId: notification.requestId,
+        sourceId: notification.sourceId,
+        createdAt: notification.createdAt,
+        id: notification.id,
+        content: notification.content,
+      })
+      if (dedupeKey) {
+        seenCronResultKeysRef.current.delete(dedupeKey)
+      }
       try {
         void window.cosmic?.setGatewayProphetNotificationState?.({
           notificationId: notification.prophetNotificationId,
@@ -6544,6 +6714,12 @@ export default function App() {
   const clearCronResultNotifications = () => {
     setCronResultNotifications([])
     setCronResultIndex(0)
+  }
+
+  const clearNoticesConsumedByChat = () => {
+    setCronResultNotifications((prev) => prev.filter((notification) => notification.kind === 'prophet'))
+    setCronResultIndex(0)
+    setArtifactReadyNotifications([])
   }
 
   const clearArtifactReadyNotifications = () => {
@@ -6615,6 +6791,7 @@ export default function App() {
     const notification = cronResultNotifications.find((item) => item.id === notificationId)
     dismissCronResultNotification(notificationId)
     if (notification?.prophetNotificationId) {
+      prophetSettledRef.current.set(notification.prophetNotificationId, { state: 'opened' })
       try {
         void window.cosmic?.setGatewayProphetNotificationState?.({
           notificationId: notification.prophetNotificationId,
@@ -6643,7 +6820,7 @@ export default function App() {
         consumedVia: 'desktop_notification_open',
       })
     }
-    clearCronResultNotifications()
+    clearNoticesConsumedByChat()
     modeRef.current = 'chat'
     setMode('chat')
     setShowLauncherTray(false)
@@ -7119,6 +7296,7 @@ export default function App() {
     messagesRef.current = nextMessages
     if (usingHistoryTail) {
       enqueueUnreadHeartbeatNotificationsFromMessages(nextMessages, activeSessionIdRef.current)
+      enqueueMissedAssistantNoticesFromMessages(nextMessages, activeSessionIdRef.current)
     }
 
     const activeStream = [...streams].reverse().find((stream) => (
@@ -7256,6 +7434,8 @@ export default function App() {
     clearActiveStreamingRefs()
     seenCronResultKeysRef.current.clear()
     seenArtifactReadyKeysRef.current.clear()
+    prophetSettledRef.current.clear()
+    inFlightWhenInactiveRef.current.clear()
     setStreamingProgress('')
     setMessages([])
     setActiveSessionId(null)
@@ -7368,6 +7548,7 @@ export default function App() {
         taskId: activeStreamingTaskIdRef.current,
       }))
       enqueueUnreadHeartbeatNotificationsFromMessages(hydratedMessages, targetSessionId)
+      enqueueMissedAssistantNoticesFromMessages(hydratedMessages, targetSessionId)
       activeSessionIdRef.current = targetSessionId
       setActiveSessionId(targetSessionId)
     } catch {
@@ -7504,24 +7685,24 @@ export default function App() {
 
   useEffect(() => {
     const container = cronResultStackRef.current
-    if (!container || orderedCronResultNotifications.length === 0) {
+    if (!container || displayedCronResultNotifications.length === 0) {
       return
     }
     const targetLeft = container.clientWidth * cronResultIndex
     if (Math.abs(container.scrollLeft - targetLeft) > 2) {
       container.scrollTo({ left: targetLeft, behavior: 'smooth' })
     }
-  }, [cronResultIndex, orderedCronResultNotifications.length])
+  }, [cronResultIndex, displayedCronResultNotifications.length])
 
   useEffect(() => {
-    if (orderedCronResultNotifications.length === 0) {
+    if (displayedCronResultNotifications.length === 0) {
       setCronResultIndex(0)
       return
     }
-    if (cronResultIndex > orderedCronResultNotifications.length - 1) {
-      setCronResultIndex(orderedCronResultNotifications.length - 1)
+    if (cronResultIndex > displayedCronResultNotifications.length - 1) {
+      setCronResultIndex(displayedCronResultNotifications.length - 1)
     }
-  }, [cronResultIndex, orderedCronResultNotifications.length])
+  }, [cronResultIndex, displayedCronResultNotifications.length])
 
   const handleTaskInterruptScroll = () => {
     const container = taskInterruptStackRef.current
@@ -7552,7 +7733,7 @@ export default function App() {
     }
     const nextIndex = Math.max(
       0,
-      Math.min(orderedCronResultNotifications.length - 1, Math.round(container.scrollLeft / cardWidth)),
+      Math.min(displayedCronResultNotifications.length - 1, Math.round(container.scrollLeft / cardWidth)),
     )
     if (nextIndex !== cronResultIndex) {
       setCronResultIndex(nextIndex)
@@ -7562,7 +7743,7 @@ export default function App() {
   const showChatComposer = () => {
     const previousMode = modeRef.current
     hideHoverTooltip()
-    clearCronResultNotifications()
+    clearNoticesConsumedByChat()
     modeRef.current = 'chat'
     setMode('chat')
     setShowLauncherTray(false)
@@ -7884,11 +8065,12 @@ export default function App() {
       unsubSettings?.()
       window.removeEventListener('mousemove', handleMouseMove)
     }
-  }, [searchState])
+  }, [searchState, cronResultNotifications.length, artifactReadyNotifications.length])
 
   // --- VISIBILITY HANDLERS ---
   const performHide = () => {
     hideHoverTooltip()
+    rememberInFlightWhenInactive()
     if (modeRef.current === 'chat' && shouldAutoScrollRef.current) {
       markChatReadThroughLatest()
       setUnreadBoundaryMessageId(null)
@@ -7899,6 +8081,7 @@ export default function App() {
     setTimeout(() => {
       setSearchState('hidden')
       setShowLauncherTray(false)
+      refreshPendingProphetNotifications()
     }, 250)
   }
 
@@ -8026,35 +8209,10 @@ export default function App() {
         if (searchStateRef.current === 'visible' && modeRef.current === 'chat') {
           scheduleOpenUnreadScan(120, 'instant')
         }
-        // Catch-up: surface any Prophet editions that published while this
-        // device was asleep or offline. The gateway keeps these pending until
-        // some device acts on them.
-        const pendingProphet = Array.isArray((event as any).prophet_notifications)
-          ? (event as any).prophet_notifications
-          : []
-        for (const item of pendingProphet) {
-          if (!item || typeof item !== 'object') continue
-          const notifId = String((item as any).notification_id || '').trim()
-          if (!notifId) continue
-          const slot = String((item as any).slot || '').trim().toLowerCase()
-          const storyCount = Number((item as any).story_count) || 0
-          const headline = String((item as any).headline || '').trim()
-          const storyLabel = `${storyCount} ${storyCount === 1 ? 'story' : 'stories'}`
-          const content = [
-            slot === 'evening' ? 'Evening edition ready' : 'Morning edition ready',
-            storyLabel,
-            headline,
-          ]
-            .filter(Boolean)
-            .join(' · ')
-          enqueueCronResultNotification({
-            id: `prophet_edition_${notifId}`,
-            kind: 'prophet',
-            content,
-            createdAt: String((item as any).created_at || new Date().toISOString()),
-            prophetNotificationId: notifId,
-          })
-        }
+        // Catch-up after sleep / reconnect. Gateway pending rows are the
+        // source of truth for Prophet; unread + in-flight streams cover
+        // ordinary replies that finished while Cosmic was hidden.
+        applyPendingProphetNotifications((event as any).prophet_notifications)
         return
       }
 
@@ -8372,6 +8530,24 @@ export default function App() {
               createdAt: new Date().toISOString(),
               artifacts: producedArtifacts,
             })
+          } else if (isCronResultChatInactive()) {
+            const noticeKind = classifyAssistantNoticeKind(
+              typeof event.source === 'string' ? event.source : null,
+              typeof event.source_id === 'string' ? event.source_id : null,
+            )
+            const content = mergeCompletedStreamText('', event.content)
+            if (noticeKind && content) {
+              enqueueAssistantNotice({
+                kind: noticeKind,
+                messageId: typeof (event as any).message_id === 'string' ? (event as any).message_id : null,
+                requestId,
+                sourceId: typeof event.source_id === 'string' ? event.source_id : null,
+                sessionId: typeof event.session_id === 'string' ? event.session_id : null,
+                content,
+                channel: typeof event.channel === 'string' ? event.channel : null,
+                createdAt: new Date().toISOString(),
+              })
+            }
           }
           patchMessagesForRequest(requestId, (message) => ({
             ...message,
@@ -8712,14 +8888,15 @@ export default function App() {
           return updatedMessages
         })
         const eventSource = String(event.source || '').trim()
+        const eventSourceId = String(event.source_id || '').trim()
         const eventContent = String(event.content || '').trim()
-        if ((eventSource === 'cron' || eventSource === 'heartbeat') && eventContent && isCronResultChatInactive()) {
-          enqueueCronResultNotification({
-            id: `${eventSource}_result_${String(event.request_id || event.source_id || crypto.randomUUID())}`,
-            kind: eventSource === 'heartbeat' ? 'heartbeat' : 'cron',
+        const noticeKind = classifyAssistantNoticeKind(eventSource, eventSourceId)
+        if (noticeKind && eventContent && isCronResultChatInactive()) {
+          enqueueAssistantNotice({
+            kind: noticeKind,
             messageId: typeof (event as any).message_id === 'string' ? (event as any).message_id : null,
             requestId: typeof event.request_id === 'string' ? event.request_id : null,
-            sourceId: typeof event.source_id === 'string' ? event.source_id : null,
+            sourceId: eventSourceId || null,
             sessionId: typeof event.session_id === 'string' ? event.session_id : null,
             content: eventContent,
             channel: typeof event.channel === 'string' ? event.channel : null,
@@ -8760,26 +8937,10 @@ export default function App() {
       }
 
       if (eventType === 'prophet.edition.published') {
-        const notificationId = String((event as any).notification_id || '').trim() || null
-        const slot = String((event as any).slot || '').trim().toLowerCase()
-        const editionId = String((event as any).edition_id || '').trim() || crypto.randomUUID()
-        const storyCount = Number((event as any).story_count) || 0
-        const headline = String((event as any).headline || '').trim()
-        const storyLabel = `${storyCount} ${storyCount === 1 ? 'story' : 'stories'}`
-        const content = [
-          slot === 'evening' ? 'Evening edition ready' : 'Morning edition ready',
-          storyLabel,
-          headline,
-        ]
-          .filter(Boolean)
-          .join(' · ')
-        enqueueCronResultNotification({
-          id: `prophet_edition_${notificationId || editionId}`,
-          kind: 'prophet',
-          content,
-          createdAt: new Date().toISOString(),
-          prophetNotificationId: notificationId,
-        })
+        const notice = buildProphetNoticeFromGateway(event as any)
+        if (notice) {
+          enqueueCronResultNotification(notice)
+        }
         return
       }
 
@@ -9128,14 +9289,21 @@ export default function App() {
   }, [isStreaming, mode, pendingTaskCount, searchState, showLauncherTray])
 
   useEffect(() => {
-    const isChatInactiveNow =
-      searchState !== 'visible' ||
-      mode !== 'chat' ||
-      showLauncherTray
-    if (!isChatInactiveNow && cronResultNotifications.length > 0) {
-      clearCronResultNotifications()
+    const chatInactive = isChatInactiveForNotices({
+      searchState,
+      mode,
+      showLauncherTray,
+    })
+    if (!chatInactive) {
+      inFlightWhenInactiveRef.current.clear()
+      setCronResultNotifications((prev) => {
+        const next = prev.filter((notification) => notification.kind === 'prophet')
+        return next.length === prev.length ? prev : next
+      })
+    } else {
+      rememberInFlightWhenInactive()
     }
-  }, [cronResultNotifications.length, mode, searchState, showLauncherTray])
+  }, [mode, searchState, showLauncherTray])
 
   useEffect(() => {
     const isChatInactiveNow =
@@ -9156,6 +9324,32 @@ export default function App() {
     if (window.cosmic?.requestGatewayResume) {
       lastGatewayResumeRequestAtRef.current = Date.now()
       window.cosmic.requestGatewayResume().catch(() => { })
+    }
+  }, [authState])
+
+  useEffect(() => {
+    if (authState !== 'authenticated') {
+      return
+    }
+    refreshPendingProphetNotifications()
+    const poll = window.setInterval(() => {
+      refreshPendingProphetNotifications()
+    }, 60_000)
+    const offResume = window.cosmic?.onSystemResume?.(() => {
+      rememberInFlightWhenInactive()
+      if (window.cosmic?.requestGatewayResume) {
+        lastGatewayResumeRequestAtRef.current = 0
+        window.cosmic.requestGatewayResume().catch(() => { })
+      }
+      refreshPendingProphetNotifications()
+      enqueueMissedAssistantNoticesFromMessages(
+        messagesRef.current,
+        activeSessionIdRef.current,
+      )
+    })
+    return () => {
+      window.clearInterval(poll)
+      offResume?.()
     }
   }, [authState])
 
@@ -10003,13 +10197,7 @@ export default function App() {
       top,
     }
   }, [shouldShowTaskInterrupt, shouldShowResponseSurface, viewportSize.height, viewportSize.width])
-  const shouldShowCronResultSurface =
-    orderedCronResultNotifications.length > 0 &&
-    (
-      searchState !== 'visible' ||
-      mode !== 'chat' ||
-      showLauncherTray
-    )
+  const shouldShowCronResultSurface = displayedCronResultNotifications.length > 0
   const cronResultShellStyle = {
     ['--cron-result-bottom' as string]: searchState === 'visible' ? '112px' : '24px',
   } as React.CSSProperties
@@ -10134,13 +10322,14 @@ export default function App() {
             ref={cronResultStackRef}
             className="cron-result-stack"
             role="list"
-            aria-label={`${orderedCronResultNotifications.length} scheduled result${orderedCronResultNotifications.length === 1 ? '' : 's'} ready`}
+            aria-label={`${displayedCronResultNotifications.length} scheduled result${displayedCronResultNotifications.length === 1 ? '' : 's'} ready`}
             onScroll={handleCronResultScroll}
           >
-            {orderedCronResultNotifications.map((notification, index) => (
+            {displayedCronResultNotifications.map((notification, index) => (
               (() => {
                 const isHeartbeatNotification = notification.kind === 'heartbeat'
                 const isProphetNotification = notification.kind === 'prophet'
+                const isResponseNotification = notification.kind === 'response'
                 return (
               <LiquidGlass
                 key={notification.id}
@@ -10166,25 +10355,35 @@ export default function App() {
                             ? 'Daily Prophet ready'
                             : isHeartbeatNotification
                               ? 'Cosmic heartbeat'
-                              : 'Scheduled result ready'}
+                              : isResponseNotification
+                                ? 'Response ready'
+                                : 'Scheduled result ready'}
                         </div>
                         <div className="task-interrupt-meta">
-                          {orderedCronResultNotifications.length > 1
-                            ? `${index + 1} of ${orderedCronResultNotifications.length} waiting`
+                          {displayedCronResultNotifications.length > 1
+                            ? `${index + 1} of ${displayedCronResultNotifications.length} waiting`
                             : isProphetNotification
                               ? 'Open My Prophet to read the edition'
                               : isHeartbeatNotification
                                 ? 'Open chat to review the proactive note'
-                                : 'Open chat to review the latest reminder result'}
+                                : isResponseNotification
+                                  ? 'Open chat to read the reply'
+                                  : 'Open chat to review the latest reminder result'}
                         </div>
                       </div>
                     </div>
                     <div className="task-interrupt-chip-row">
-                      {orderedCronResultNotifications.length > 1 && (
-                        <div className="task-interrupt-chip count">{orderedCronResultNotifications.length} waiting</div>
+                      {displayedCronResultNotifications.length > 1 && (
+                        <div className="task-interrupt-chip count">{displayedCronResultNotifications.length} waiting</div>
                       )}
                       <div className="task-interrupt-chip cron-result-chip">
-                        {isProphetNotification ? 'Newspaper' : isHeartbeatNotification ? 'Heartbeat' : 'Reminder'}
+                        {isProphetNotification
+                          ? 'Newspaper'
+                          : isHeartbeatNotification
+                            ? 'Heartbeat'
+                            : isResponseNotification
+                              ? 'Chat'
+                              : 'Reminder'}
                       </div>
                     </div>
                   </div>
@@ -10215,12 +10414,12 @@ export default function App() {
               })()
             ))}
           </div>
-          {orderedCronResultNotifications.length > 1 && (
+          {displayedCronResultNotifications.length > 1 && (
             <div
               className="cron-result-dots"
-              aria-label={`Scheduled result card ${cronResultIndex + 1} of ${orderedCronResultNotifications.length}`}
+              aria-label={`Scheduled result card ${cronResultIndex + 1} of ${displayedCronResultNotifications.length}`}
             >
-              {orderedCronResultNotifications.map((notification, index) => (
+              {displayedCronResultNotifications.map((notification, index) => (
                 <button
                   key={notification.id}
                   type="button"
@@ -10347,7 +10546,7 @@ export default function App() {
           gatewayConnected={gatewayStatus.connected}
           gatewayDetail={gatewayStatus.detail}
           pendingTaskCount={pendingTaskCount}
-          pendingCronCount={orderedCronResultNotifications.length}
+          pendingCronCount={displayedCronResultNotifications.length}
           selectedModelLabel={MODEL_OPTIONS.find((item) => item.id === selectedModel)?.label || 'Cosmic'}
           onBackToChat={spacesOnBackToChat}
           onPromptChat={spacesOnPromptChat}

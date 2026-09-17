@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from gateway.prophet import ProphetStore, ProphetValidationError
+from gateway.prophet.store import prophet_catchup_since_date
 
 
 def _store(tmp_path: Path) -> ProphetStore:
@@ -474,6 +476,45 @@ def test_notification_lifecycle(tmp_path: Path) -> None:
     again = store.mark_notification_state(note['notification_id'], state='delivered', reason='test')
     assert again is not None
     assert again['state'] == 'opened'
+
+
+def test_prophet_catchup_since_date_uses_user_timezone_not_utc() -> None:
+    # 01:00 UTC on Sep 17 is still Sep 16 evening in Chicago.
+    now = datetime(2026, 9, 17, 1, 0, tzinfo=timezone.utc)
+    assert prophet_catchup_since_date("America/Chicago", now=now) == "2026-09-15"
+    assert prophet_catchup_since_date("UTC", now=now) == "2026-09-16"
+
+
+def test_list_pending_notifications_since_date_keeps_yesterday(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    morning = store.publish_edition(_edition())
+    evening_payload = _edition()
+    evening_payload["edition_date"] = "2026-09-10"
+    evening_payload["slot"] = "evening"
+    evening_payload["lead"]["headline"] = "Yesterday evening wrap"
+    evening = store.publish_edition(evening_payload, slot="evening")
+
+    store.create_notification_for_edition(
+        edition_id=morning["edition_id"],
+        edition_date="2026-09-11",
+        slot="morning",
+        headline="Today morning",
+        story_count=5,
+    )
+    store.create_notification_for_edition(
+        edition_id=evening["edition_id"],
+        edition_date="2026-09-10",
+        slot="evening",
+        headline="Yesterday evening wrap",
+        story_count=8,
+    )
+
+    pending = store.list_pending_notifications(since_date="2026-09-10", limit=4)
+    dates = {item["edition_date"] for item in pending}
+    assert dates == {"2026-09-11", "2026-09-10"}
+
+    today_only = store.list_pending_notifications(edition_date="2026-09-11")
+    assert {item["edition_date"] for item in today_only} == {"2026-09-11"}
 
 
 def test_notification_snooze_expires(tmp_path: Path) -> None:

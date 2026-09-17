@@ -25,6 +25,10 @@ export const PORTAL_SURFACE_CLASS = 'cosmic-portal-surface'
  *  so it must accept clicks even when the main surface is hidden. */
 export const SCREENSHOT_LAYER_CLASS = 'screenshot-layer'
 
+/** Desktop notices that must stay clickable while Cosmic chat is hidden. */
+export const CRON_RESULT_SHELL_CLASS = 'cron-result-shell'
+export const ARTIFACT_READY_SHELL_CLASS = 'artifact-ready-shell'
+
 /** The minimum of `Element` this needs — kept structural so it can be tested
  *  without a DOM. */
 export interface PointerHitTarget {
@@ -63,9 +67,12 @@ export const hitTestPointerTarget = (
   const islandHovered = island || settings
   const overlay = options.searchVisible && Boolean(target.closest('.overlay'))
   const portalSurface = options.searchVisible && Boolean(target.closest(`.${PORTAL_SURFACE_CLASS}`))
-  const cronNotice = Boolean(target.closest('.cron-result-shell'))
+  const desktopNotice = Boolean(
+    target.closest(`.${CRON_RESULT_SHELL_CLASS}`) ||
+    target.closest(`.${ARTIFACT_READY_SHELL_CLASS}`),
+  )
   return {
     islandHovered,
-    interactive: islandHovered || overlay || portalSurface || cronNotice,
+    interactive: islandHovered || overlay || portalSurface || desktopNotice,
   }
 }

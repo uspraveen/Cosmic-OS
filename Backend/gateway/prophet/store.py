@@ -10,10 +10,33 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def prophet_catchup_since_date(
+    timezone_name: str | None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Oldest local edition_date the desktop should still catch up.
+
+    Includes yesterday in the user's timezone so an evening paper published
+    after UTC midnight, or a laptop that slept through the slot, still
+    resurfaces.
+    """
+    try:
+        tz = ZoneInfo((timezone_name or "").strip() or "UTC")
+    except ZoneInfoNotFoundError:
+        tz = timezone.utc
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_today = current.astimezone(tz).date()
+    return (local_today - timedelta(days=1)).isoformat()
 
 
 PROPHET_SCHEMA_VERSION = 1
@@ -1453,6 +1476,7 @@ class ProphetStore:
         self,
         *,
         edition_date: str | None = None,
+        since_date: str | None = None,
         limit: int = 2,
     ) -> list[dict[str, Any]]:
         """Notifications that should still surface: pending, delivered but not
@@ -1460,13 +1484,18 @@ class ProphetStore:
         now = utcnow_iso()
         query = """
             SELECT * FROM prophet_notifications
-            WHERE state IN ('pending', 'delivered')
-               OR (state = 'snoozed' AND snoozed_until IS NOT NULL AND snoozed_until <= ?)
+            WHERE (
+                state IN ('pending', 'delivered')
+                OR (state = 'snoozed' AND snoozed_until IS NOT NULL AND snoozed_until <= ?)
+            )
         """
         params: list[Any] = [now]
         if edition_date:
             query += " AND edition_date = ?"
             params.append(_clean_text(edition_date, limit=20))
+        elif since_date:
+            query += " AND edition_date >= ?"
+            params.append(_clean_text(since_date, limit=20))
         query += " ORDER BY edition_date DESC, slot ASC LIMIT ?"
         params.append(max(1, min(10, int(limit or 2))))
         with self._lock, closing(self._connect()) as connection:

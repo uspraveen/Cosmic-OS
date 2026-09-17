@@ -88,6 +88,7 @@ from .prophet import (
     prophet_slot_from_source_id,
     render_prophet_context_block,
 )
+from .prophet.store import prophet_catchup_since_date
 from .prophet.archive import ProphetArchiveService, pack_archive_lines
 from orchestrator.local_code_sandbox import LocalCodeSandboxSettings, run_local_code_sandbox
 from orchestrator.sandbox_permissions import session_grant_covers, union_session_grant
@@ -10036,11 +10037,18 @@ class GatewayRuntime:
             )
 
     def prophet_pending_notifications(self, *, limit: int = 2) -> list[dict[str, Any]]:
-        """Today's notifications that still need to surface on a device."""
-        today = datetime.now(timezone.utc).date().isoformat()
+        """Notifications that still need to surface on a device.
+
+        Filter by the user's local calendar, not UTC. An evening edition at
+        19:00 in US timezones is already the next UTC day, and a laptop that
+        wakes after that must still catch up. Yesterday stays in the window
+        so a missed evening paper survives overnight sleep.
+        """
         try:
+            since = prophet_catchup_since_date(self.current_user_timezone())
+            capped = max(1, min(10, int(limit or 2)))
             return self.prophet_store.list_pending_notifications(
-                edition_date=today, limit=limit
+                since_date=since, limit=capped
             )
         except Exception:
             logger.exception("gateway.prophet_pending_notifications_failed")

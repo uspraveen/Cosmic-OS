@@ -49,6 +49,12 @@ contextBridge.exposeInMainWorld('cosmic', {
     return () => ipcRenderer.removeListener('cosmic:hiding', listener)
   },
 
+  onSystemResume: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('cosmic:system-resume', listener)
+    return () => ipcRenderer.removeListener('cosmic:system-resume', listener)
+  },
+
   /** Claim Escape for a modal surface. While claimed, main routes Escape to
    *  `onEscape` instead of hiding the whole window, so the topmost layer
    *  closes first. Main drops the claim whenever the window hides or the
@@ -124,6 +130,7 @@ contextBridge.exposeInMainWorld('cosmic', {
     ipcRenderer.invoke('gateway:get-prophet-edition', opts || {}),
   listGatewayProphetEditions: (opts?: { limit?: number; days?: number }) =>
     ipcRenderer.invoke('gateway:list-prophet-editions', opts || {}),
+  listGatewayProphetNotifications: () => ipcRenderer.invoke('gateway:list-prophet-notifications'),
   getGatewayProphetSettings: () => ipcRenderer.invoke('gateway:get-prophet-settings'),
   saveGatewayProphetSettings: (payload: any) => ipcRenderer.invoke('gateway:save-prophet-settings', payload),
   updateGatewayProphetPreferences: (payload: any) => ipcRenderer.invoke('gateway:update-prophet-preferences', payload),

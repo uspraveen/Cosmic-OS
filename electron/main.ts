@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, desktopCapturer, dialog, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
+import { app, BrowserWindow, clipboard, desktopCapturer, dialog, globalShortcut, ipcMain, nativeImage, powerMonitor, screen, shell } from 'electron'
 import { existsSync, promises as fs, readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -2260,6 +2260,40 @@ app.commandLine.appendSwitch('force-gpu-mem-available-mb', '1024')
 app.commandLine.appendSwitch('enable-gpu-rasterization')
 app.commandLine.appendSwitch('enable-zero-copy')
 
+function restackOverlayAfterSystemResume() {
+  if (!win || win.isDestroyed()) return
+  try {
+    // Windows can drop always-on-top across lock / sleep. Re-assert without
+    // stealing focus so a waiting Prophet / response card is actually visible.
+    win.setAlwaysOnTop(false)
+    win.setAlwaysOnTop(true)
+    if (!win.isVisible()) {
+      if (typeof win.showInactive === 'function') {
+        win.showInactive()
+      } else {
+        win.show()
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to restack Cosmic overlay after system resume:', error)
+  }
+}
+
+let systemResumeTimer: NodeJS.Timeout | null = null
+function handleOsWake() {
+  if (systemResumeTimer) {
+    clearTimeout(systemResumeTimer)
+  }
+  systemResumeTimer = setTimeout(() => {
+    systemResumeTimer = null
+    restackOverlayAfterSystemResume()
+    gatewayConnectionManager?.handleSystemResume()
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('cosmic:system-resume')
+    }
+  }, 400)
+}
+
 app.whenReady().then(() => {
   // Register Google login before createWindow() so the channel exists as soon as the
   // renderer can call it (avoids races with fast loads / stale partial main bundles).
@@ -2307,6 +2341,9 @@ app.whenReady().then(() => {
   screen.on('display-added', handleDisplayAdded)
   screen.on('display-removed', handleDisplayRemoved)
   screen.on('display-metrics-changed', handleDisplayMetricsChanged)
+
+  powerMonitor.on('resume', handleOsWake)
+  powerMonitor.on('unlock-screen', handleOsWake)
 
   ipcMain.on('cosmic:hide', () => { if (searchVisible) toggleSearch() })
   ipcMain.on('cosmic:toggle', toggleSearch)
@@ -3115,6 +3152,14 @@ app.whenReady().then(() => {
     }
     const suffix = query.length ? `?${query.join('&')}` : ''
     return callGatewayJson(config, `/desktop/prophet/editions${suffix}`, { timeoutMs: 20000 })
+  })
+
+  ipcMain.handle('gateway:list-prophet-notifications', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/desktop/prophet/notifications', { timeoutMs: 15000 })
   })
 
   ipcMain.handle('gateway:get-prophet-settings', async () => {

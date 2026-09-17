@@ -51,6 +51,7 @@ interface Window {
     toggle: () => void
     onShown: (cb: () => void) => () => void
     onHiding: (cb: () => void) => () => void
+    onSystemResume: (cb: () => void) => () => void
     setEscapeCapture: (active: boolean) => void
     onEscape: (cb: () => void) => () => void
     onMediaUpdate: (cb: (data: any) => void) => () => void
@@ -241,6 +242,7 @@ interface Window {
       settings: any
     }>
     listGatewayProphetEditions: (opts?: { limit?: number; days?: number }) => Promise<{ editions: any[] }>
+    listGatewayProphetNotifications: () => Promise<{ notifications?: any[] }>
     getGatewayProphetSettings: () => Promise<{
       settings: any
       interests: any[]

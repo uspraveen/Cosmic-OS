@@ -65,6 +65,10 @@ describe('hitTestPointerTarget', () => {
     expect(hitTestPointerTarget(at('.cron-result-shell'), hidden).interactive).toBe(true)
   })
 
+  it('keeps the file-ready notice interactive while the app is hidden', () => {
+    expect(hitTestPointerTarget(at('.artifact-ready-shell'), hidden).interactive).toBe(true)
+  })
+
   it('keeps the screenshot layer interactive even while the app is hidden', () => {
     expect(hitTestPointerTarget(at(`.${SCREENSHOT_LAYER_CLASS}`), { ...hidden, screenshotActive: true }))
       .toEqual({ islandHovered: false, interactive: true })
