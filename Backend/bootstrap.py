@@ -1099,6 +1099,16 @@ def build_visual_enhancement_env_rendered(
     firecrawl_existing_env = (existing_env_by_name or {}).get(FIRECRAWL_AGENT_ENV_NAME, {})
     slide_existing_env = (existing_env_by_name or {}).get(SLIDE_AGENT_ENV_NAME, {})
     orchestrator_existing_env = (existing_env_by_name or {}).get("orchestrator.env", {})
+    calendar_existing_env = (existing_env_by_name or {}).get(CALENDAR_AGENT_ENV_NAME, {})
+    calendar_external_env = (external_env_by_name or {}).get(CALENDAR_AGENT_ENV_NAME, {})
+    email_existing_env = (existing_env_by_name or {}).get(EMAIL_AGENT_ENV_NAME, {})
+    email_external_env = (external_env_by_name or {}).get(EMAIL_AGENT_ENV_NAME, {})
+    docs_existing_env = (existing_env_by_name or {}).get(GOOGLE_DOCS_AGENT_ENV_NAME, {})
+    docs_external_env = (external_env_by_name or {}).get(GOOGLE_DOCS_AGENT_ENV_NAME, {})
+    map_existing_env = (existing_env_by_name or {}).get(MAP_AGENT_ENV_NAME, {})
+    map_external_env = (external_env_by_name or {}).get(MAP_AGENT_ENV_NAME, {})
+    image_existing_env = (existing_env_by_name or {}).get(IMAGE_GENERATOR_AGENT_ENV_NAME, {})
+    image_external_env = (external_env_by_name or {}).get(IMAGE_GENERATOR_AGENT_ENV_NAME, {})
 
     def read_optional_env(path: Path) -> Dict[str, str]:
         if not path.exists():
@@ -1119,6 +1129,22 @@ def build_visual_enhancement_env_rendered(
     if not orchestrator_existing_env:
         orchestrator_existing_env = read_optional_env(
             (system_env_dir or DEFAULT_SYSTEM_ENV_DIR) / "orchestrator.env"
+        )
+    if not calendar_existing_env:
+        calendar_existing_env = read_optional_env(
+            calendar_agent_system_env_path(system_env_dir)
+        )
+    if not email_existing_env:
+        email_existing_env = read_optional_env(email_agent_system_env_path(system_env_dir))
+    if not docs_existing_env:
+        docs_existing_env = read_optional_env(
+            google_docs_agent_system_env_path(system_env_dir)
+        )
+    if not map_existing_env:
+        map_existing_env = read_optional_env(map_agent_system_env_path(system_env_dir))
+    if not image_existing_env:
+        image_existing_env = read_optional_env(
+            image_generator_agent_system_env_path(system_env_dir)
         )
 
     def pick_visual(names: Sequence[str], default: Optional[str] = None) -> Optional[str]:
@@ -1225,83 +1251,64 @@ def build_visual_enhancement_env_rendered(
     )
 
     fireworks_api_key = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_VISION_API_KEY"),
+        existing_env.get("VISUAL_ENHANCEMENT_VISION_API_KEY"),
+        source_data.get("VISUAL_ENHANCEMENT_VISION_API_KEY"),
+        map_external_env.get("MAP_AGENT_INTERNAL_LLM_API_KEY"),
+        map_existing_env.get("MAP_AGENT_INTERNAL_LLM_API_KEY"),
+        image_external_env.get("IMAGE_AGENT_OPENAI_API_KEY"),
+        image_existing_env.get("IMAGE_AGENT_OPENAI_API_KEY"),
+        calendar_external_env.get("CALENDAR_AGENT_INTERNAL_LLM_API_KEY"),
+        calendar_existing_env.get("CALENDAR_AGENT_INTERNAL_LLM_API_KEY"),
+        email_external_env.get("EMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        email_existing_env.get("EMAIL_AGENT_INTERNAL_LLM_API_KEY"),
+        docs_external_env.get("GOOGLE_DOCS_AGENT_INTERNAL_LLM_API_KEY"),
+        docs_existing_env.get("GOOGLE_DOCS_AGENT_INTERNAL_LLM_API_KEY"),
+        orchestrator_external_env.get("OPENAI_API_KEY"),
+        orchestrator_existing_env.get("OPENAI_API_KEY"),
         external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
         existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
         source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"),
-        orchestrator_external_env.get("MODEL_API_KEY"),
-        orchestrator_external_env.get("FIREWORKS_API_KEY"),
-        orchestrator_external_env.get("OPENAI_COMPAT_API_KEY"),
-        orchestrator_existing_env.get("MODEL_API_KEY"),
-        orchestrator_existing_env.get("FIREWORKS_API_KEY"),
-        orchestrator_existing_env.get("OPENAI_COMPAT_API_KEY"),
-        slide_external_env.get("MODEL_API_KEY"),
-        slide_external_env.get("SLIDE_AGENT_FIREWORKS_API_KEY"),
-        slide_external_env.get("FIREWORKS_API_KEY"),
-        slide_external_env.get("OPENAI_COMPAT_API_KEY"),
-        slide_existing_env.get("MODEL_API_KEY"),
-        slide_existing_env.get("SLIDE_AGENT_FIREWORKS_API_KEY"),
-        slide_existing_env.get("FIREWORKS_API_KEY"),
-        slide_existing_env.get("OPENAI_COMPAT_API_KEY"),
     )
     fireworks_base_url = first_meaningful_value(
-        external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"),
-        existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"),
-        orchestrator_external_env.get("MODEL_BASE_URL"),
-        orchestrator_external_env.get("FIREWORKS_BASE_URL"),
-        orchestrator_external_env.get("OPENAI_COMPAT_BASE_URL"),
-        orchestrator_existing_env.get("MODEL_BASE_URL"),
-        orchestrator_existing_env.get("FIREWORKS_BASE_URL"),
-        orchestrator_existing_env.get("OPENAI_COMPAT_BASE_URL"),
-        slide_external_env.get("MODEL_BASE_URL"),
-        slide_external_env.get("SLIDE_AGENT_FIREWORKS_BASE_URL"),
-        slide_external_env.get("FIREWORKS_BASE_URL"),
-        slide_external_env.get("OPENAI_COMPAT_BASE_URL"),
-        slide_existing_env.get("MODEL_BASE_URL"),
-        slide_existing_env.get("SLIDE_AGENT_FIREWORKS_BASE_URL"),
-        slide_existing_env.get("FIREWORKS_BASE_URL"),
-        slide_existing_env.get("OPENAI_COMPAT_BASE_URL"),
-        source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"),
-        "https://api.fireworks.ai/inference/v1",
+        external_env.get("VISUAL_ENHANCEMENT_VISION_BASE_URL"),
+        existing_env.get("VISUAL_ENHANCEMENT_VISION_BASE_URL"),
+        source_data.get("VISUAL_ENHANCEMENT_VISION_BASE_URL"),
+        calendar_external_env.get("CALENDAR_AGENT_INTERNAL_LLM_BASE_URL"),
+        calendar_existing_env.get("CALENDAR_AGENT_INTERNAL_LLM_BASE_URL"),
+        "https://api.openai.com/v1",
     )
+    if "fireworks.ai" in str(fireworks_base_url or "").lower():
+        fireworks_base_url = "https://api.openai.com/v1"
     fireworks_model = first_meaningful_value(
-        external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_MODEL"),
-        existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_MODEL"),
-        orchestrator_external_env.get("FIREWORKS_KIMI_MODEL"),
-        orchestrator_external_env.get("MODEL_NAME"),
-        orchestrator_existing_env.get("FIREWORKS_KIMI_MODEL"),
-        orchestrator_existing_env.get("MODEL_NAME"),
-        slide_external_env.get("FIREWORKS_KIMI_MODEL"),
-        slide_external_env.get("MODEL_NAME"),
-        slide_external_env.get("SLIDE_AGENT_FIREWORKS_MODEL"),
-        slide_existing_env.get("FIREWORKS_KIMI_MODEL"),
-        slide_existing_env.get("MODEL_NAME"),
-        slide_existing_env.get("SLIDE_AGENT_FIREWORKS_MODEL"),
-        source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_MODEL"),
-        "accounts/fireworks/models/kimi-k2p6",
+        external_env.get("VISUAL_ENHANCEMENT_VISION_MODEL"),
+        existing_env.get("VISUAL_ENHANCEMENT_VISION_MODEL"),
+        source_data.get("VISUAL_ENHANCEMENT_VISION_MODEL"),
+        "gpt-5.6-luna",
     )
-    fireworks_vision_model = first_meaningful_value(
-        external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL"),
-        existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL"),
-        source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL"),
-        fireworks_model,
-    )
+    if "kimi" in str(fireworks_model or "").lower():
+        fireworks_model = "gpt-5.6-luna"
+    fireworks_vision_model = fireworks_model
     fireworks_reasoning_effort = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_VISION_REASONING_EFFORT"),
+        existing_env.get("VISUAL_ENHANCEMENT_VISION_REASONING_EFFORT"),
         external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT"),
         existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT"),
+        source_data.get("VISUAL_ENHANCEMENT_VISION_REASONING_EFFORT"),
         source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT"),
         "low",
     )
     fireworks_timeout_sec = first_meaningful_value(
+        external_env.get("VISUAL_ENHANCEMENT_VISION_TIMEOUT_SEC"),
+        existing_env.get("VISUAL_ENHANCEMENT_VISION_TIMEOUT_SEC"),
         external_env.get("VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"),
         existing_env.get("VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"),
-        orchestrator_external_env.get("MODEL_TIMEOUT_SEC"),
-        orchestrator_existing_env.get("MODEL_TIMEOUT_SEC"),
-        slide_external_env.get("MODEL_TIMEOUT_SEC"),
-        slide_external_env.get("SLIDE_AGENT_FIREWORKS_TIMEOUT_SEC"),
-        slide_existing_env.get("MODEL_TIMEOUT_SEC"),
-        slide_existing_env.get("SLIDE_AGENT_FIREWORKS_TIMEOUT_SEC"),
+        source_data.get("VISUAL_ENHANCEMENT_VISION_TIMEOUT_SEC"),
         source_data.get("VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"),
-        "20",
+        "8",
+    )
+    image_vision_timeout_sec = pick_visual(
+        ("VISUAL_ENHANCEMENT_IMAGE_VISION_TIMEOUT_SEC",), "4"
     )
 
     overrides = {
@@ -1336,20 +1343,26 @@ def build_visual_enhancement_env_rendered(
         or "https://api.firecrawl.dev",
         "VISUAL_ENHANCEMENT_FIRECRAWL_REQUEST_TIMEOUT_SEC": firecrawl_request_timeout_sec
         or "20",
+        "VISUAL_ENHANCEMENT_VISION_BASE_URL": fireworks_base_url
+        or "https://api.openai.com/v1",
+        "VISUAL_ENHANCEMENT_VISION_MODEL": fireworks_model or "gpt-5.6-luna",
+        "VISUAL_ENHANCEMENT_VISION_REASONING_EFFORT": fireworks_reasoning_effort
+        or "low",
+        "VISUAL_ENHANCEMENT_IMAGE_VISION_TIMEOUT_SEC": image_vision_timeout_sec or "4",
         "VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL": fireworks_base_url
-        or "https://api.fireworks.ai/inference/v1",
-        "VISUAL_ENHANCEMENT_FIREWORKS_MODEL": fireworks_model
-        or "accounts/fireworks/models/kimi-k2p6",
+        or "https://api.openai.com/v1",
+        "VISUAL_ENHANCEMENT_FIREWORKS_MODEL": fireworks_model or "gpt-5.6-luna",
         "VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL": fireworks_vision_model
         or fireworks_model
-        or "accounts/fireworks/models/kimi-k2p6",
+        or "gpt-5.6-luna",
         "VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT": fireworks_reasoning_effort
         or "low",
-        "VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC": fireworks_timeout_sec or "20",
+        "VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC": fireworks_timeout_sec or "8",
     }
     if firecrawl_api_key is not None:
         overrides["VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY"] = firecrawl_api_key
     if fireworks_api_key is not None:
+        overrides["VISUAL_ENHANCEMENT_VISION_API_KEY"] = fireworks_api_key
         overrides["VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"] = fireworks_api_key
 
     rendered = render_env_with_overrides(source_raw, overrides)

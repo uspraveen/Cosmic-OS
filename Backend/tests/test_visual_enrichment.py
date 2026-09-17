@@ -16,6 +16,7 @@ from orchestrator.visual_enrichment.charting import normalize_chart_spec, render
 from orchestrator.visual_enrichment.clients import (
     DirectImageSearchClient,
     DirectImageSearchConfig,
+    _build_vision_chat_payload,
 )
 from orchestrator.visual_enrichment.coordinator import (
     VisualSlotDirective,
@@ -925,6 +926,10 @@ def test_visual_enrichment_default_image_timeout_is_an_eight_second_floor(
     assert config.visual_image_slot_timeout_ms == 8000
     assert config.visual_image_search_timeout_sec == 5.0
     assert config.visual_download_timeout_sec == 6.0
+    assert config.visual_fireworks_vision_model == "gpt-5.6-luna"
+    assert config.visual_fireworks_base_url == "https://api.openai.com/v1"
+    assert config.visual_image_vision_timeout_sec == 4.0
+    assert config.visual_image_vision_max_output_tokens == 200
 
 
 @pytest.mark.asyncio
@@ -1655,8 +1660,8 @@ async def test_visual_enrichment_direct_search_expands_mha_and_ofa_aliases() -> 
 
 
 @pytest.mark.asyncio
-async def test_visual_enrichment_auto_injects_image_slot_for_concrete_follow_up() -> None:
-    root = _make_test_dir("visual-image-auto-slot-")
+async def test_visual_enrichment_does_not_auto_inject_image_slot() -> None:
+    root = _make_test_dir("visual-image-no-auto-slot-")
     try:
         config = OrchestratorConfig(
             internal_token="internal-token",
@@ -1697,23 +1702,19 @@ async def test_visual_enrichment_auto_injects_image_slot_for_concrete_follow_up(
             )
 
             assert visible_delta
-            assert snapshot_events
-            assert any(
+            assert not any(
                 block.get("type") == "image_slot"
                 for event in snapshot_events
                 for block in event.get("response_blocks", [])
             )
-            assert coordinator._active_sidecars, (
-                "the automatic image sidecar must start during streaming, not in finalize()"
-            )
+            assert not coordinator._active_sidecars
 
             final_payload = await coordinator.finalize()
 
-        image_block = next(
-            block for block in final_payload["response_blocks"] if block["type"] == "image_artifact"
+        assert not any(
+            block["type"] in {"image_slot", "image_artifact"}
+            for block in final_payload["response_blocks"]
         )
-        assert image_block["provenance"]["source_image_url"] == "https://cdn.example.test/xai-macrohard-campus.jpg"
-        assert len(final_payload["supporting_artifacts"]) == 1
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -1764,9 +1765,11 @@ async def test_visual_enrichment_auto_slot_prefers_fast_search_before_slow_firec
                 (
                     "Karuppu is getting discussed because the early reviews and audience talk "
                     "are centered on the lead performance, the music, and whether the film's "
-                    "mass moments land outside the core fanbase. The useful visual here is a "
-                    "clean reference still tied to the Karuppu reviews discussion, not a slow "
-                    "page scrape that delays the whole response."
+                    "mass moments land outside the core fanbase.\n\n"
+                    "[[visual_slot {\"id\":\"img_1\",\"kind\":\"image\","
+                    "\"query\":\"Karuppu reviews and talk movie still\"}]]\n\n"
+                    "The useful visual here is a clean reference still tied to the Karuppu "
+                    "reviews discussion, not a slow page scrape that delays the whole response."
                 )
             )
 
@@ -2288,3 +2291,94 @@ async def test_visual_enrichment_run_capture_path_must_stay_inside_artifacts_roo
             assert [item.image_url for item in candidates] == ["cosmic-run://art_contained"]
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_luna_vision_payload_is_short_gpt5_json() -> None:
+    payload = _build_vision_chat_payload(
+        model="gpt-5.6-luna",
+        messages=[{"role": "user", "content": "x"}],
+        reasoning_effort="low",
+        max_output_tokens=200,
+    )
+    assert payload["max_completion_tokens"] == 200
+    assert payload["reasoning_effort"] == "low"
+    assert payload["response_format"] == {"type": "json_object"}
+    assert "max_tokens" not in payload
+    assert "temperature" not in payload
+
+
+@pytest.mark.asyncio
+async def test_visual_slot_directive_never_leaks_into_visible_text() -> None:
+    root = _make_test_dir("visual-slot-leak-")
+    try:
+        config = OrchestratorConfig(
+            internal_token="internal-token",
+            signing_secret="signing-secret",
+            task_ledger_db_path=root / "task_ledger.db",
+            visual_enhancement_enabled=True,
+            visual_image_search_enabled=False,
+            visual_firecrawl_api_key="",
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+        ) as client:
+            coordinator = VisualEnrichmentCoordinator(
+                config=config,
+                task_id="tsk_visual_slot_leak_1",
+                request_id="req_visual_slot_leak_1",
+                session_id="sess_visual_slot_leak_1",
+                channel="desktop:desk_visual_slot_leak_1",
+                user_query="Who is Grace Kasten?",
+                http_client=client,
+            )
+            visible, _events = coordinator.consume_text(
+                "Hello.\n\n"
+                "[[visual_slot {\"id\":\"img_1\",\"kind\":\"image\","
+                "\"query\":\"Grace Kasten Pace Capital\"}]]\n\n"
+                "She is an investor."
+            )
+            assert "visual_slot" not in visible
+            assert "[[" not in visible
+            coordinator.consume_text(" [[visual_slot {not-json]] leftover")
+            coordinator.consume_text(" trailing [[visual_slot {\"query\":\"x\"")
+            final_payload = await coordinator.finalize()
+        assert "visual_slot" not in final_payload["content"]
+        assert "[[visual_slot" not in final_payload["content"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_image_search_queries_use_slot_query_not_user_utterance() -> None:
+    config = OrchestratorConfig(
+        visual_enhancement_enabled=True,
+        visual_image_search_enabled=True,
+    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+    client = httpx.Client(transport=transport)
+    try:
+        coordinator = VisualEnrichmentCoordinator(
+            config=config,
+            task_id="tsk_query_clip_1",
+            request_id="req_query_clip_1",
+            session_id="sess_query_clip_1",
+            channel="desktop:desk_query_clip_1",
+            user_query=(
+                "Grace Kasten is the Z fellow interviewer. The interview is at 10.10am. "
+                "Just remember. Do not modify anything."
+            ),
+            http_client=client,
+        )
+        slot = VisualSlotDirective(
+            id="img_1",
+            kind="image",
+            query="Grace Kasten Pace Capital portrait",
+        )
+        queries = coordinator._build_image_search_queries(slot)
+        joined = " ".join(queries).lower()
+        assert queries
+        assert "grace kasten" in queries[0].lower()
+        assert "remember" not in joined
+        assert "modify" not in joined
+        assert "10am" not in joined.replace(" ", "")
+    finally:
+        client.close()

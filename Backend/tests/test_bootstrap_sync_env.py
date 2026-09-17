@@ -897,6 +897,11 @@ def test_build_visual_enhancement_env_rendered_inherits_shared_keys_from_peer_en
         "MODEL_TIMEOUT_SEC=90\n",
         encoding="utf-8",
     )
+    (agents_env_dir / bootstrap.MAP_AGENT_ENV_NAME).write_text(
+        "MAP_AGENT_INTERNAL_LLM_API_KEY=luna-map-key\n"
+        "MAP_AGENT_INTERNAL_LLM_MODEL=gpt-5.6-luna\n",
+        encoding="utf-8",
+    )
     (system_env_dir / "orchestrator.env").write_text(
         "ANTHROPIC_API_KEY=anthropic-key\n"
         "MODEL_API_KEY=fw-orch-key\n",
@@ -911,16 +916,14 @@ def test_build_visual_enhancement_env_rendered_inherits_shared_keys_from_peer_en
     assert dest_path.name == "visual_enhancement.env"
     assert "VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY=fc-key" in rendered
     assert parsed["VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY"] == "fc-key"
-    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"] == "fw-orch-key"
-    assert (
-        parsed["VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"]
-        == "https://api.fireworks.ai/inference/v1"
-    )
-    assert (
-        parsed["VISUAL_ENHANCEMENT_FIREWORKS_MODEL"]
-        == "accounts/fireworks/models/kimi-k2p6"
-    )
-    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"] == "90"
+    assert parsed["VISUAL_ENHANCEMENT_VISION_API_KEY"] == "luna-map-key"
+    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"] == "luna-map-key"
+    assert parsed["VISUAL_ENHANCEMENT_VISION_MODEL"] == "gpt-5.6-luna"
+    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL"] == "gpt-5.6-luna"
+    assert parsed["VISUAL_ENHANCEMENT_VISION_BASE_URL"] == "https://api.openai.com/v1"
+    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"] == "https://api.openai.com/v1"
+    assert parsed["VISUAL_ENHANCEMENT_IMAGE_VISION_TIMEOUT_SEC"] == "4"
+    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"] == "20"
     assert parsed["VISUAL_ENHANCEMENT_IMAGE_SEARCH_ENABLED"] == "true"
     assert (
         parsed["VISUAL_ENHANCEMENT_IMAGE_SEARCH_BASE_URL"]

@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 
 _VISUAL_SLOT_START = "[[visual_slot"
 _VISUAL_SLOT_END = "]]"
+_VISUAL_SLOT_OPEN_RE = re.compile(r"\[\[\s*visual_slot\b", re.IGNORECASE)
+_VISUAL_SLOT_LEAK_RE = re.compile(
+    r"\[\[\s*visual_slot\b[\s\S]*?(?:\]\]|$)",
+    re.IGNORECASE,
+)
+_VISUAL_SLOT_OPENER_PREFIXES = ("[[visual_slot", "[[ visual_slot")
 _WORD_RE = re.compile(r"[a-z0-9]{2,}", re.IGNORECASE)
 _EXPLICIT_IMAGE_REQUEST_MARKERS = (
     "inline image",
@@ -129,11 +135,33 @@ def _parse_float(value: Any, default: float = 0.0) -> float:
 
 
 def _longest_visual_prefix_suffix(text: str) -> int:
-    max_len = min(len(text), len(_VISUAL_SLOT_START) - 1)
-    for size in range(max_len, 0, -1):
-        if _VISUAL_SLOT_START.startswith(text[-size:]):
-            return size
-    return 0
+    lower = text.lower()
+    best = 0
+    for prefix in _VISUAL_SLOT_OPENER_PREFIXES:
+        max_len = min(len(lower), len(prefix))
+        for size in range(max_len, 0, -1):
+            if prefix.startswith(lower[-size:]):
+                best = max(best, size)
+                break
+    return best
+
+
+def _unclosed_visual_slot_index(text: str) -> int | None:
+    for match in _VISUAL_SLOT_OPEN_RE.finditer(text):
+        if _VISUAL_SLOT_END not in text[match.end() :]:
+            return match.start()
+    suffix_len = _longest_visual_prefix_suffix(text)
+    if suffix_len:
+        return len(text) - suffix_len
+    return None
+
+
+def _scrub_visual_slot_text(value: str) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    cleaned = _VISUAL_SLOT_LEAK_RE.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", cleaned)
 
 
 def _clip_text(value: Any, *, limit: int = 800) -> str:
@@ -490,34 +518,39 @@ class VisualDirectiveStreamParser:
         dirty = False
 
         while True:
-            start_index = self._buffer.find(_VISUAL_SLOT_START)
-            if start_index < 0:
-                suffix_len = _longest_visual_prefix_suffix(self._buffer)
-                flush_text = self._buffer[:-suffix_len] if suffix_len else self._buffer
-                self._buffer = self._buffer[-suffix_len:] if suffix_len else ""
+            match = _VISUAL_SLOT_OPEN_RE.search(self._buffer)
+            if match is None:
+                hold_at = _unclosed_visual_slot_index(self._buffer)
+                flush_text = self._buffer if hold_at is None else self._buffer[:hold_at]
+                self._buffer = "" if hold_at is None else self._buffer[hold_at:]
+                flush_text = _scrub_visual_slot_text(flush_text)
                 if flush_text:
                     self._append_markdown_text(flush_text)
                     visible_parts.append(flush_text)
                     dirty = True
                 break
 
-            if start_index > 0:
-                prefix = self._buffer[:start_index]
-                self._append_markdown_text(prefix)
-                visible_parts.append(prefix)
-                dirty = True
-                self._buffer = self._buffer[start_index:]
+            if match.start() > 0:
+                prefix = _scrub_visual_slot_text(self._buffer[: match.start()])
+                if prefix:
+                    self._append_markdown_text(prefix)
+                    visible_parts.append(prefix)
+                    dirty = True
+                self._buffer = self._buffer[match.start() :]
+                continue
 
-            end_index = self._buffer.find(_VISUAL_SLOT_END, len(_VISUAL_SLOT_START))
+            opener_end = match.end()
+            end_index = self._buffer.find(_VISUAL_SLOT_END, opener_end)
             if end_index < 0:
                 break
 
-            raw_directive = self._buffer[: end_index + len(_VISUAL_SLOT_END)]
-            body = self._buffer[len(_VISUAL_SLOT_START) : end_index].strip()
+            body = self._buffer[opener_end:end_index].strip()
             slot = self._parse_directive_body(body)
             if slot is None:
-                self._append_markdown_text(raw_directive)
-                visible_parts.append(raw_directive)
+                logger.warning(
+                    "visual_enrichment.directive_dropped reason=unparsed body=%s",
+                    _clip_text(body, limit=180),
+                )
             else:
                 self._append_slot_block(slot)
                 new_slots.append(slot)
@@ -529,8 +562,12 @@ class VisualDirectiveStreamParser:
     def finalize_pending_text(self) -> tuple[str, bool]:
         if not self._buffer:
             return "", False
-        trailing = self._buffer
+        hold_at = _unclosed_visual_slot_index(self._buffer)
+        raw = self._buffer if hold_at is None else self._buffer[:hold_at]
         self._buffer = ""
+        trailing = _scrub_visual_slot_text(raw)
+        if not trailing:
+            return "", False
         self._append_markdown_text(trailing)
         return trailing, True
 
@@ -607,6 +644,7 @@ class VisualDirectiveStreamParser:
         return len(self._blocks) != before
 
     def _append_markdown_text(self, text: str) -> None:
+        text = _scrub_visual_slot_text(text)
         if not text:
             return
         if self._blocks and str(self._blocks[-1].get("type")) == "markdown":
@@ -764,6 +802,7 @@ class VisualEnrichmentCoordinator:
                 vision_model=config.visual_fireworks_vision_model,
                 reasoning_effort=config.visual_fireworks_reasoning_effort,
                 timeout_sec=config.visual_fireworks_timeout_sec,
+                max_output_tokens=config.visual_image_vision_max_output_tokens,
             ),
             http_client=http_client,
         )
@@ -788,11 +827,6 @@ class VisualEnrichmentCoordinator:
     def consume_text(self, chunk: str) -> tuple[str, list[dict[str, Any]]]:
         visible_delta, new_slots, dirty = self._parser.consume_text(chunk)
         if self._register_slots(new_slots):
-            dirty = True
-        # Start the automatic fallback while the answer is still streaming. Its
-        # network and vision work remains an independent sidecar; this only moves
-        # work that used to begin in finalize() into otherwise-idle generation time.
-        if self._maybe_schedule_implicit_image_slot():
             dirty = True
         events: list[dict[str, Any]] = []
         if dirty:
@@ -824,8 +858,6 @@ class VisualEnrichmentCoordinator:
         if changed:
             self._schedule_waiting_image_slots()
         events: list[dict[str, Any]] = []
-        if changed and self._maybe_schedule_implicit_image_slot():
-            events.append(self._build_snapshot_event())
         events.extend(self._drain_ready_updates())
         return events
 
@@ -857,8 +889,6 @@ class VisualEnrichmentCoordinator:
         if changed:
             self._schedule_waiting_image_slots()
         events: list[dict[str, Any]] = []
-        if changed and self._maybe_schedule_implicit_image_slot():
-            events.append(self._build_snapshot_event())
         events.extend(self._drain_ready_updates())
         return events
 
@@ -1011,6 +1041,23 @@ class VisualEnrichmentCoordinator:
             return max(remaining, self._image_min_runtime_sec())
         return remaining
 
+    def _extend_slot_deadline(self, slot_id: str, extra_sec: float) -> None:
+        needed = time.monotonic() + max(0.0, extra_sec)
+        current = self._slot_deadlines.get(slot_id)
+        if current is None or needed > current:
+            self._slot_deadlines[slot_id] = needed
+
+    def _vision_rank_timeout_sec(self, slot_id: str) -> float:
+        """Cap collage ranking at 4s; overlap the stream when it is still open."""
+        cap = max(1.0, float(self.config.visual_image_vision_timeout_sec))
+        if self._response_open:
+            self._extend_slot_deadline(slot_id, cap)
+            return cap
+        remaining = self._remaining_slot_sec(slot_id)
+        timeout = min(cap, remaining) if remaining > 0.5 else cap
+        self._extend_slot_deadline(slot_id, timeout)
+        return timeout
+
     def _failure_label_for_slot(
         self,
         slot: VisualSlotDirective | None,
@@ -1063,89 +1110,12 @@ class VisualEnrichmentCoordinator:
         )
         return result
 
-    def _has_any_visual_blocks(self) -> bool:
-        return any(
-            str(block.get("type")) in {"image_slot", "chart_slot", "image_artifact"}
-            for block in self._parser.export_blocks()
-        ) or bool(self._supporting_artifacts)
-
     def _build_implicit_image_slot(self) -> VisualSlotDirective | None:
-        if self._has_any_visual_blocks():
-            return None
-        if self._image_slot_count >= self.config.visual_max_image_slots_per_turn:
-            return None
-        if not (self._firecrawl.available or self._image_search.available):
-            return None
-
-        visible_text = _safe_text(self._parser.visible_text)
-        if len(visible_text) < 180:
-            return None
-
-        source_infos = list(self._sources_by_url.values())
-        source_titles = [
-            _normalize_image_search_query(source.get("title"))
-            for source in source_infos[:3]
-            if isinstance(source, dict)
-            and _normalize_image_search_query(source.get("title"))
-        ]
-        explicit_image_request = _text_explicitly_requests_image(self.user_query)
-        specificity = max(
-            _query_specificity_score(self.user_query),
-            _query_specificity_score(" ".join(source_titles[:2])),
-            _query_specificity_score(_clip_text(visible_text, limit=260)),
-        )
-        if not explicit_image_request and not source_infos:
-            return None
-        if not explicit_image_request and specificity < 3:
-            return None
-
-        query = _normalize_image_search_query(self.user_query)
-        if _looks_generic_for_image_search(query):
-            query = source_titles[0] if source_titles else query
-        if not query and source_titles:
-            query = source_titles[0]
-        if not query:
-            query = _normalize_image_search_query(_clip_text(visible_text, limit=160))
-        if not query:
-            return None
-
-        source_urls = [
-            _safe_text(source.get("url"))
-            for source in source_infos[: self.config.visual_image_source_page_limit]
-            if isinstance(source, dict) and _safe_text(source.get("url"))
-        ]
-        return VisualSlotDirective(
-            id=f"img_auto_{uuid4().hex[:10]}",
-            kind="image",
-            query=query,
-            caption=None,
-            loading_label="Finding a relevant image",
-            timeout_ms=None,
-            source_urls=source_urls,
-            context_excerpt=visible_text[-1200:].strip(),
-        )
+        # Image queries come only from an orchestrator [[visual_slot]] directive.
+        return None
 
     def _maybe_schedule_implicit_image_slot(self) -> bool:
-        # This method is probed as text streams, so keep its common path O(1)
-        # until enough context and provenance exist to make a real decision.
-        if self._image_slot_count or self._chart_slot_count:
-            return False
-        if len(_safe_text(self._parser.visible_text)) < 180:
-            return False
-        if not _text_explicitly_requests_image(self.user_query) and not self._sources_by_url:
-            return False
-        slot = self._build_implicit_image_slot()
-        if slot is None:
-            return False
-        self._parser.append_slot(slot)
-        self._register_slots([slot])
-        logger.info(
-            "visual_enrichment.auto_slot_injected slot_id=%s query=%s source_count=%s",
-            slot.id,
-            slot.query,
-            len(slot.source_urls),
-        )
-        return True
+        return False
 
     async def finalize(
         self,
@@ -1155,8 +1125,6 @@ class VisualEnrichmentCoordinator:
         events: list[dict[str, Any]] = []
         _, dirty = self._parser.finalize_pending_text()
         if dirty:
-            events.append(self._build_snapshot_event())
-        if self._maybe_schedule_implicit_image_slot():
             events.append(self._build_snapshot_event())
         self._response_open = False
 
@@ -1554,7 +1522,11 @@ class VisualEnrichmentCoordinator:
             and self.config.visual_image_contact_sheet_enabled
             and not primary_run_capture
         ):
-            ranking_budget = max(1.5, self._remaining_slot_sec(slot.id) - 2.0)
+            vision_timeout = self._vision_rank_timeout_sec(slot.id)
+            sheet_timeout = max(
+                1.0,
+                self._remaining_slot_sec(slot.id) - vision_timeout,
+            )
             try:
                 (
                     contact_sheet,
@@ -1562,7 +1534,7 @@ class VisualEnrichmentCoordinator:
                     original_byte_cache,
                 ) = await asyncio.wait_for(
                     self._build_contact_sheet(ranked),
-                    timeout=max(1.0, ranking_budget * 0.55),
+                    timeout=sheet_timeout,
                 )
                 candidate_metadata = [
                     {
@@ -1582,7 +1554,7 @@ class VisualEnrichmentCoordinator:
                         contact_sheet_jpeg=contact_sheet,
                         candidates=candidate_metadata,
                     ),
-                    timeout=max(1.0, ranking_budget * 0.45),
+                    timeout=vision_timeout,
                 )
                 contact_sheet_completed = True
                 marker_map = dict(marked_candidates)
@@ -1663,9 +1635,10 @@ class VisualEnrichmentCoordinator:
             except asyncio.TimeoutError:
                 contact_sheet_timed_out = True
                 logger.warning(
-                    "visual_enrichment.contact_sheet_timed_out slot_id=%s budget_sec=%.2f",
+                    "visual_enrichment.contact_sheet_timed_out slot_id=%s vision_timeout_sec=%.2f sheet_timeout_sec=%.2f",
                     slot.id,
-                    ranking_budget,
+                    vision_timeout,
+                    sheet_timeout,
                 )
             except Exception as exc:
                 logger.warning(
@@ -1850,7 +1823,7 @@ class VisualEnrichmentCoordinator:
         if not trusted_candidates:
             return True
         top_candidate = max(trusted_candidates, key=lambda item: item.score)
-        query_tokens = _tokenize(" ".join(filter(None, [self.user_query, slot.query])))
+        query_tokens = _tokenize(_safe_text(slot.query))
         candidate_tokens = _tokenize(
             " ".join(
                 filter(
@@ -1884,7 +1857,7 @@ class VisualEnrichmentCoordinator:
             for source in source_infos[:3]
             if isinstance(source, dict) and _normalize_image_search_query(source.get("title"))
         ]
-        base_query = _normalize_image_search_query(_safe_text(slot.query) or self.user_query)
+        base_query = _normalize_image_search_query(_safe_text(slot.query))
         context_hint = _normalize_image_search_query(_clip_text(slot.context_excerpt, limit=220))
 
         ordered_raw_queries: list[str] = []
@@ -2132,7 +2105,6 @@ class VisualEnrichmentCoordinator:
                 raise ValueError("No trusted source URLs were available for this image slot.")
 
             explicit_image_request = self._slot_explicitly_requests_image(slot)
-            automatic_image_slot = self._is_automatic_image_slot(slot)
             trusted_candidates: list[ImageCandidate] = []
             search_candidates: list[ImageCandidate] = []
 
@@ -2161,7 +2133,7 @@ class VisualEnrichmentCoordinator:
                     logger.warning("visual_enrichment.image_search_failed slot_id=%s error=%s", slot.id, search_result)
                 else:
                     search_candidates = search_result
-            elif automatic_image_slot and image_search_allowed:
+            elif image_search_allowed:
                 try:
                     search_candidates = await self._timed_stage(
                         slot.id,
@@ -2440,7 +2412,6 @@ class VisualEnrichmentCoordinator:
         parts = [
             _safe_text(slot.query),
             _clip_text(slot.context_excerpt, limit=1200),
-            self.user_query,
         ]
         return _content_tokens(" ".join(part for part in parts if part))
 

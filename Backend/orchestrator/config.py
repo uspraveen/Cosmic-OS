@@ -7,10 +7,24 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from shared import is_openai_gpt5_chat_model
+
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(BACKEND_ROOT / "visual_enhancement.env")
 load_dotenv(BACKEND_ROOT / "orchestrator.env")
 load_dotenv(BACKEND_ROOT / ".env")
+for _extra_env in (
+    Path("/etc/cosmic/visual_enhancement.env"),
+    Path("/etc/cosmic/agents/map-agent.env"),
+    Path("/etc/cosmic/agents/image-generator-agent.env"),
+    BACKEND_ROOT / "agents" / "map_agent" / "agent.env",
+    BACKEND_ROOT / "agents" / "image_generator_agent" / "agent.env",
+):
+    try:
+        if _extra_env.exists():
+            load_dotenv(_extra_env)
+    except OSError:
+        pass
 
 
 def _env_int(name: str, default: int) -> int:
@@ -87,6 +101,94 @@ def _env_json_map(name: str) -> dict[str, str]:
         if normalized_key and normalized_value:
             result[normalized_key] = normalized_value
     return result
+
+
+_DEFAULT_VISION_MODEL = "gpt-5.6-luna"
+_DEFAULT_VISION_BASE_URL = "https://api.openai.com/v1"
+
+
+def _looks_like_legacy_kimi_vision(model: str, base_url: str = "") -> bool:
+    blob = f"{model} {base_url}".strip().lower()
+    return "kimi" in blob or "api.fireworks.ai" in blob
+
+
+def _env_first(*names: str) -> str:
+    for name in names:
+        value = str(os.getenv(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _resolve_visual_vision_settings() -> tuple[str, str, str, str]:
+    """Collage ranker: GPT-5.6 Luna on OpenAI, not the old Fireworks Kimi path."""
+    explicit_model = _env_first("VISUAL_ENHANCEMENT_VISION_MODEL")
+    legacy_model = _env_first(
+        "VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL",
+        "VISUAL_ENHANCEMENT_FIREWORKS_MODEL",
+    )
+    if explicit_model:
+        vision_model = explicit_model
+    elif legacy_model and not _looks_like_legacy_kimi_vision(legacy_model):
+        vision_model = legacy_model
+    else:
+        vision_model = _DEFAULT_VISION_MODEL
+
+    if is_openai_gpt5_chat_model(vision_model):
+        vision_base = _normalize_openai_like_base_url(
+            _env_first(
+                "VISUAL_ENHANCEMENT_VISION_BASE_URL",
+                "CALENDAR_AGENT_INTERNAL_LLM_BASE_URL",
+                "EMAIL_AGENT_INTERNAL_LLM_BASE_URL",
+                "GOOGLE_DOCS_AGENT_INTERNAL_LLM_BASE_URL",
+            ),
+            default=_DEFAULT_VISION_BASE_URL,
+        )
+        if _looks_like_legacy_kimi_vision("", vision_base):
+            vision_base = _DEFAULT_VISION_BASE_URL
+        vision_key = _env_first(
+            "VISUAL_ENHANCEMENT_VISION_API_KEY",
+            "OPENAI_API_KEY",
+            "MAP_AGENT_INTERNAL_LLM_API_KEY",
+            "IMAGE_AGENT_OPENAI_API_KEY",
+            "CALENDAR_AGENT_INTERNAL_LLM_API_KEY",
+            "EMAIL_AGENT_INTERNAL_LLM_API_KEY",
+            "GOOGLE_DOCS_AGENT_INTERNAL_LLM_API_KEY",
+        )
+        effort = (
+            _env_first(
+                "VISUAL_ENHANCEMENT_VISION_REASONING_EFFORT",
+                "VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT",
+            )
+            or "low"
+        )
+        return vision_key, vision_base, vision_model, effort
+
+    vision_key = _env_first(
+        "VISUAL_ENHANCEMENT_VISION_API_KEY",
+        "VISUAL_ENHANCEMENT_FIREWORKS_API_KEY",
+        "MODEL_API_KEY",
+        "FIREWORKS_API_KEY",
+        "OPENAI_COMPAT_API_KEY",
+    )
+    vision_base = _normalize_openai_like_base_url(
+        _env_first(
+            "VISUAL_ENHANCEMENT_VISION_BASE_URL",
+            "VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL",
+            "MODEL_BASE_URL",
+            "FIREWORKS_BASE_URL",
+            "OPENAI_COMPAT_BASE_URL",
+        ),
+        default="https://api.fireworks.ai/inference/v1",
+    )
+    effort = (
+        _env_first(
+            "VISUAL_ENHANCEMENT_VISION_REASONING_EFFORT",
+            "VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT",
+        )
+        or "low"
+    )
+    return vision_key, vision_base, vision_model, effort
 
 
 def _normalize_openai_like_base_url(raw: str, *, default: str = "") -> str:
@@ -221,15 +323,20 @@ class OrchestratorConfig:
     visual_image_search_base_url: str = "https://www.bing.com/images/search"
     visual_image_search_timeout_sec: float = 5.0
     visual_image_search_result_limit: int = 12
+    # Collage ranker / per-image verifier. Defaults are GPT-5.6 Luna @ low.
+    # The fireworks_* names are historical; OpenAI Luna is the vision backend.
     visual_fireworks_api_key: str = ""
-    visual_fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
-    visual_fireworks_model: str = "accounts/fireworks/models/kimi-k2p6"
-    visual_fireworks_vision_model: str = "accounts/fireworks/models/kimi-k2p6"
+    visual_fireworks_base_url: str = "https://api.openai.com/v1"
+    visual_fireworks_model: str = "gpt-5.6-luna"
+    visual_fireworks_vision_model: str = "gpt-5.6-luna"
     visual_fireworks_reasoning_effort: str = "low"
-    visual_fireworks_timeout_sec: float = 20.0
+    visual_fireworks_timeout_sec: float = 8.0
+    visual_image_vision_timeout_sec: float = 4.0
+    visual_image_vision_max_output_tokens: int = 200
 
     @classmethod
     def from_env(cls) -> "OrchestratorConfig":
+        vision_key, vision_base, vision_model, vision_effort = _resolve_visual_vision_settings()
         return cls(
             artifacts_root=Path(
                 os.getenv("COSMIC_ARTIFACTS_ROOT", str(BACKEND_ROOT / "runs" / "artifacts"))
@@ -453,47 +560,28 @@ class OrchestratorConfig:
                 1,
                 _env_int("VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT", 12),
             ),
-            visual_fireworks_api_key=(
-                os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY")
-                or os.getenv("MODEL_API_KEY")
-                or os.getenv("FIREWORKS_API_KEY")
-                or os.getenv("OPENAI_COMPAT_API_KEY")
-                or ""
-            ).strip(),
-            visual_fireworks_base_url=_normalize_openai_like_base_url(
-                (
-                    os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL")
-                    or os.getenv("MODEL_BASE_URL")
-                    or os.getenv("FIREWORKS_BASE_URL")
-                    or os.getenv("OPENAI_COMPAT_BASE_URL")
-                    or "https://api.fireworks.ai/inference/v1"
-                ).strip(),
-                default="https://api.fireworks.ai/inference/v1",
-            ),
-            visual_fireworks_model=(
-                os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_MODEL")
-                or os.getenv("FIREWORKS_KIMI_MODEL")
-                or "accounts/fireworks/models/kimi-k2p6"
-            ).strip()
-            or "accounts/fireworks/models/kimi-k2p6",
-            visual_fireworks_vision_model=(
-                os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL")
-                or os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_MODEL")
-                or os.getenv("FIREWORKS_KIMI_MODEL")
-                or "accounts/fireworks/models/kimi-k2p6"
-            ).strip()
-            or "accounts/fireworks/models/kimi-k2p6",
+            visual_fireworks_api_key=vision_key,
+            visual_fireworks_base_url=vision_base,
+            visual_fireworks_model=vision_model,
+            visual_fireworks_vision_model=vision_model,
             visual_image_min_relevance=max(
                 0.0,
                 min(1.0, float(os.getenv("VISUAL_ENHANCEMENT_IMAGE_MIN_RELEVANCE", "0.18") or 0.18)),
             ),
-            visual_fireworks_reasoning_effort=(
-                os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT")
-                or "low"
-            ).strip()
-            or "low",
+            visual_fireworks_reasoning_effort=vision_effort,
             visual_fireworks_timeout_sec=max(
                 5.0,
-                _env_float("VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC", 20.0),
+                _env_float(
+                    "VISUAL_ENHANCEMENT_VISION_TIMEOUT_SEC",
+                    _env_float("VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC", 8.0),
+                ),
+            ),
+            visual_image_vision_timeout_sec=max(
+                1.0,
+                _env_float("VISUAL_ENHANCEMENT_IMAGE_VISION_TIMEOUT_SEC", 4.0),
+            ),
+            visual_image_vision_max_output_tokens=max(
+                64,
+                _env_int("VISUAL_ENHANCEMENT_IMAGE_VISION_MAX_OUTPUT_TOKENS", 200),
             ),
         )

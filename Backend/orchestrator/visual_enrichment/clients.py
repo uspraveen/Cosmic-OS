@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from shared import is_openai_gpt5_chat_model, normalized_reasoning_effort
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +35,7 @@ class FireworksVisualConfig:
     vision_model: str
     reasoning_effort: str
     timeout_sec: float
+    max_output_tokens: int = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +272,38 @@ class DirectImageSearchClient:
         return f"Direct image search request failed ({response.status_code})."
 
 
+def _build_vision_chat_payload(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    reasoning_effort: str,
+    max_output_tokens: int,
+) -> dict[str, Any]:
+    """Chat-completions body for the collage ranker / verifier.
+
+    GPT-5.6 Luna rejects temperature/max_tokens. Keep output tiny so low
+    reasoning still has room to emit the JSON object.
+    """
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "response_format": {"type": "json_object"},
+    }
+    token_budget = max(64, int(max_output_tokens))
+    if is_openai_gpt5_chat_model(model):
+        payload["max_completion_tokens"] = token_budget
+        effort = normalized_reasoning_effort(model, reasoning_effort, default="low")
+        if effort:
+            payload["reasoning_effort"] = effort
+    else:
+        payload["temperature"] = 0.1
+        payload["max_tokens"] = token_budget
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+    return payload
+
+
 class FireworksVisualClient:
     def __init__(
         self,
@@ -300,22 +335,14 @@ class FireworksVisualClient:
         if not self.available:
             raise VisualEnrichmentError("Fireworks visual verifier is not configured.")
         prompt = (
-            "You are validating whether an image is appropriate to place inline inside an assistant response.\n"
-            "Return exactly one JSON object with keys: accept (boolean), confidence (0-1 number), "
-            "alt_text (string), caption (string), selection_reason (string).\n"
-            "Be strict. Reject decorative, generic, logo-only, unrelated, or low-information images.\n"
-            "Also reject title cards, stylized word art, screenshots of text, or hero banners dominated by branding text "
-            "unless the user explicitly asked for a logo/poster/text graphic.\n\n"
-            f"Slot intent: {slot_query}\n"
-            f"Original user question: {user_query}\n"
-            f"Answer context excerpt: {context_excerpt[:1200]}\n"
-            f"Source URL: {source_url}\n"
-            f"Source title: {source_title}\n"
-            f"Source domain: {source_domain}\n"
-            f"Candidate image URL: {candidate_image_url}\n"
-            f"Candidate alt text: {candidate_alt_text}\n"
-            f"Candidate title: {candidate_title}\n"
-            f"Candidate nearby text: {candidate_nearby_text[:800]}\n"
+            "Does this image match the search query? JSON only.\n"
+            "Keys: accept (bool), confidence (0-1), alt_text (<=12 words), "
+            "caption (<=12 words), selection_reason (<=8 words).\n"
+            "Reject logos, word art, unrelated, or decorative shots.\n"
+            f"Query: {slot_query}\n"
+            f"Source: {source_domain} {source_title}\n"
+            f"Alt: {candidate_alt_text}\n"
+            f"Title: {candidate_title}\n"
         )
         response = await self._client.post(
             f"{self.config.base_url.rstrip('/')}/chat/completions",
@@ -323,12 +350,12 @@ class FireworksVisualClient:
                 "Authorization": f"Bearer {self.config.api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": self.config.vision_model or self.config.model,
-                "messages": [
+            json=_build_vision_chat_payload(
+                model=self.config.vision_model or self.config.model,
+                messages=[
                     {
                         "role": "system",
-                        "content": "Return only JSON. Do not add prose or markdown fences.",
+                        "content": "Return only a compact JSON object. No prose.",
                     },
                     {
                         "role": "user",
@@ -338,16 +365,9 @@ class FireworksVisualClient:
                         ],
                     },
                 ],
-                "temperature": 0.1,
-                # The vision model reasons before it answers, and 350 tokens was
-                # not enough for both: it spent the budget thinking and got cut
-                # off mid-sentence, so the JSON never arrived and the verifier
-                # silently dropped out of the decision.
-                "max_tokens": 1400,
-                "response_format": {"type": "json_object"},
-                "reasoning_effort": self.config.reasoning_effort,
-                "stream": False,
-            },
+                reasoning_effort=self.config.reasoning_effort,
+                max_output_tokens=self.config.max_output_tokens,
+            ),
             timeout=httpx.Timeout(
                 self.config.timeout_sec,
                 connect=min(self.config.timeout_sec, 10.0),
@@ -409,22 +429,14 @@ class FireworksVisualClient:
                 )
             )
         prompt = (
-            "Choose the single best image to place inline in an assistant response. "
-            "The contact sheet labels candidates with visible numeric markers.\n"
-            "Return exactly one JSON object with keys: accept (boolean), "
-            "selected_marker (integer or 0), ranked_markers (array of integers), "
-            "confidence (0-1 number), alt_text (string), caption (string), "
-            "selection_reason (string).\n"
-            "Rank only candidates that are genuinely acceptable, best first. Set "
-            "accept=false, selected_marker=0, and ranked_markers=[] if none fit. "
-            "Be strict: reject decorative, generic, logo-only, unrelated, misleading, "
-            "low-information, text-heavy, or branding-dominated images unless the user "
-            "explicitly requested that kind of graphic. Prefer a visually specific image "
-            "that directly supports the answer over a merely keyword-related result.\n\n"
-            f"Slot intent: {slot_query}\n"
-            f"Original user question: {user_query}\n"
-            f"Answer context excerpt: {context_excerpt[:1200]}\n"
-            "Candidate metadata:\n"
+            "Pick the one collage marker that matches this image search query. "
+            "JSON only. Keys: accept (bool), selected_marker (int or 0), "
+            "ranked_markers (max 3 ints), confidence (0-1), alt_text (<=12 words), "
+            "caption (<=12 words), selection_reason (<=8 words). "
+            "If none match, accept=false, selected_marker=0, ranked_markers=[]. "
+            "Reject logos, word art, clocks, unrelated, or decorative shots.\n"
+            f"Query: {slot_query}\n"
+            "Markers:\n"
             + "\n".join(marker_lines)
         )
         encoded_sheet = base64.b64encode(contact_sheet_jpeg).decode("ascii")
@@ -434,12 +446,12 @@ class FireworksVisualClient:
                 "Authorization": f"Bearer {self.config.api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": self.config.vision_model or self.config.model,
-                "messages": [
+            json=_build_vision_chat_payload(
+                model=self.config.vision_model or self.config.model,
+                messages=[
                     {
                         "role": "system",
-                        "content": "Return only JSON. Do not add prose or markdown fences.",
+                        "content": "Return only a compact JSON object. No prose.",
                     },
                     {
                         "role": "user",
@@ -454,12 +466,9 @@ class FireworksVisualClient:
                         ],
                     },
                 ],
-                "temperature": 0.1,
-                "max_tokens": 1400,
-                "response_format": {"type": "json_object"},
-                "reasoning_effort": self.config.reasoning_effort,
-                "stream": False,
-            },
+                reasoning_effort=self.config.reasoning_effort,
+                max_output_tokens=self.config.max_output_tokens,
+            ),
             timeout=httpx.Timeout(
                 self.config.timeout_sec,
                 connect=min(self.config.timeout_sec, 10.0),
