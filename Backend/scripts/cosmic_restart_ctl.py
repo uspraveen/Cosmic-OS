@@ -118,8 +118,16 @@ def iso_now() -> str:
     return utcnow().isoformat()
 
 
+_TZ_ALIASES = {"UTC": "+00:00", "GMT": "+00:00"}
+
+
 def parse_epoch(value: str | float | int | None) -> float | None:
-    """Parse an ISO timestamp or epoch number into a unix epoch float."""
+    """Parse an ISO timestamp, epoch number, or systemd timestamp into epoch.
+
+    Handles systemd's ActiveEnterTimestamp shape ("Fri 2026-09-18 16:47:34 UTC")
+    with the leading weekday and named timezone, plain ISO-8601, and bare epoch
+    numbers.
+    """
     if value is None:
         return None
     if isinstance(value, (int, float)):
@@ -131,7 +139,14 @@ def parse_epoch(value: str | float | int | None) -> float | None:
         return float(text)
     except ValueError:
         pass
+    parts = text.split()
+    if len(parts) == 4 and parts[0].isalpha():
+        text = f"{parts[1]}T{parts[2]} {parts[3]}"
     normalized = text.replace("Z", "+00:00").replace(" ", "T", 1)
+    for tz_name, offset in _TZ_ALIASES.items():
+        if normalized.endswith(tz_name):
+            normalized = normalized[: -len(tz_name)].rstrip("T ") + offset
+            break
     try:
         parsed = datetime.fromisoformat(normalized)
     except ValueError:

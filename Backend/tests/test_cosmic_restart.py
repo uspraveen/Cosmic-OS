@@ -106,6 +106,21 @@ def test_parse_epoch_numeric_string():
     assert ctl.parse_epoch("1758211508.0") == 1758211508.0
 
 
+def test_parse_epoch_systemd_active_enter_timestamp():
+    value = ctl.parse_epoch("Fri 2026-09-18 16:47:34 UTC")
+    assert value is not None
+    # 2026-09-18T16:47:34Z
+    from datetime import datetime, timezone
+
+    assert datetime.fromtimestamp(value, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    ) == "2026-09-18T16:47:34"
+
+
+def test_parse_epoch_systemd_gmt_variant():
+    assert ctl.parse_epoch("Sat 2026-09-19 03:02:10 GMT") is not None
+
+
 # ---------------------------------------------------------------------------
 # maintenance drain flag
 # ---------------------------------------------------------------------------
