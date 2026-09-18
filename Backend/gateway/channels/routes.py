@@ -256,6 +256,7 @@ class SchedulerCreateRequest(BaseModel):
     delivery_target: str | None = Field(default=None, max_length=64)
     delivery_channel: str | None = Field(default=None, max_length=128)
     context_summary: str | None = Field(default=None, max_length=800)
+    until: str | None = Field(default=None, max_length=40)
     source: str | None = Field(default=None, max_length=120)
     request_id: str | None = Field(default=None, max_length=120)
     session_id: str | None = Field(default=None, max_length=120)
@@ -1623,6 +1624,7 @@ async def create_internal_scheduler_cron(
             created_session_id=body.session_id,
             created_channel=body.channel,
             context_summary=body.context_summary,
+            until=body.until,
         )
     except ValueError as exc:
         detail = str(exc)

@@ -1487,6 +1487,82 @@ class SessionStore:
                 notebooks.append(notebook)
         return notebooks
 
+    def list_recent_task_notebooks(
+        self, *, limit: int = 20, max_age_sec: float | None = None
+    ) -> list[dict[str, Any]]:
+        """Newest notebooks across all sessions, optionally age-bounded.
+
+        Cross-session views (cross-channel briefs, task-status search) need
+        recent in-flight work regardless of which session started it; the
+        per-session listing cannot answer "what is running right now".
+        """
+        cutoff_iso = ""
+        if max_age_sec is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_sec)
+            cutoff_iso = cutoff.isoformat()
+        with self._lock, self._connect() as connection:
+            if cutoff_iso:
+                rows = connection.execute(
+                    """
+                    SELECT task_id, session_id, status, current_state, notebook_json, created_at, updated_at
+                    FROM task_notebooks
+                    WHERE updated_at >= ?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (cutoff_iso, max(1, limit)),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT task_id, session_id, status, current_state, notebook_json, created_at, updated_at
+                    FROM task_notebooks
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (max(1, limit),),
+                ).fetchall()
+        notebooks: list[dict[str, Any]] = []
+        for row in rows:
+            notebook = json.loads(row["notebook_json"]) if row["notebook_json"] else {}
+            if not isinstance(notebook, dict):
+                notebook = {}
+            notebook.setdefault("task_id", row["task_id"])
+            notebook.setdefault("status", row["status"])
+            notebook.setdefault("current_state", row["current_state"])
+            notebook["session_id"] = row["session_id"]
+            notebook.setdefault("created_at", row["created_at"])
+            notebook.setdefault("updated_at", row["updated_at"])
+            notebooks.append(notebook)
+        return notebooks
+
+    def list_non_terminal_task_notebooks(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        """Every notebook not in a terminal state, oldest first for reconciliation."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT task_id, session_id, status, current_state, notebook_json, created_at, updated_at
+                FROM task_notebooks
+                WHERE status IS NULL OR status NOT IN ('completed', 'cancelled', 'failed')
+                ORDER BY updated_at ASC
+                LIMIT ?
+                """,
+                (max(1, limit),),
+            ).fetchall()
+        notebooks: list[dict[str, Any]] = []
+        for row in rows:
+            notebook = json.loads(row["notebook_json"]) if row["notebook_json"] else {}
+            if not isinstance(notebook, dict):
+                notebook = {}
+            notebook.setdefault("task_id", row["task_id"])
+            notebook.setdefault("status", row["status"])
+            notebook.setdefault("current_state", row["current_state"])
+            notebook["session_id"] = row["session_id"]
+            notebook.setdefault("created_at", row["created_at"])
+            notebook.setdefault("updated_at", row["updated_at"])
+            notebooks.append(notebook)
+        return notebooks
+
     def upsert_task_notebook(self, task_id: str, session_id: str, notebook: dict[str, Any]) -> None:
         if not task_id or not session_id:
             raise ValueError("Task notebook requires task_id and session_id")

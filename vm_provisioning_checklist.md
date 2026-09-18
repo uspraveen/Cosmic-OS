@@ -372,3 +372,23 @@ Before handing the VM to the user, confirm:
 - `https://<user_id>.thelearnchain.com/health` returns `200`
 - desktop login works with the user’s Cosmic API key
 - desktop chat works over `wss://.../ws`
+
+## Operations Notes (2026-09-18)
+
+- **Deploys and restarts:** use `sudo python3 Backend/scripts/cosmic_restart_ctl.py restart`
+  (or let `cosmic-restart-agent.timer` decide) instead of raw `systemctl restart`.
+  It drains webhook intake first (senders retry on 503) and waits for gateway
+  health before clearing the drain flag. `status` prints a dry-run decision.
+- **needrestart** is configured (`/etc/needrestart/conf.d/cosmic-restart-policy.conf`)
+  to never restart cosmic services; the restart agent applies library upgrades
+  in idle windows instead.
+- **Alpha agent and gateway** have `MemoryMax` drop-ins (see
+  `Backend/systemd/cosmic-*-agent.service.d/`) so runaway work cannot trigger
+  a global OOM.
+- **Redis** runs with AOF enabled (`appendonly yes`) so event-stream history
+  survives restarts beyond the RDB snapshot cadence.
+- **Open external dependency:** the Cosmic Mail service (agent-email webhook
+  sender, AWS-hosted) has no verified retry contract. If inbound emails ever
+  go missing across a restart window, ask the provider about webhook retries
+  or add a post-restart mailbox poll; the gateway logs every drain-refused
+  webhook as `gateway.maintenance_drain_refused`.

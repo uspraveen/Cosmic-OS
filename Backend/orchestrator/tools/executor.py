@@ -2424,6 +2424,25 @@ class ToolExecutor:
             params={"limit": limit, "offset": offset},
         )
 
+    async def _task_status(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        query = str(tool_input.get("query") or "").strip()
+        if not query:
+            return {"error": True, "message": "query is required"}
+        limit = self._coerce_int(tool_input.get("limit"), 5)
+        payload = await self._request_gateway_json(
+            "GET",
+            "/internal/session/task-status",
+            params={"q": query, "limit": limit},
+        )
+        if payload is None:
+            return {"error": True, "message": "Gateway task-status search is unavailable."}
+        return payload
+
     async def _task_notebook(
         self,
         tool_input: dict[str, Any],
@@ -2604,6 +2623,9 @@ class ToolExecutor:
         context_summary = str(tool_input.get("context_summary") or "").strip()
         if context_summary:
             request_body["context_summary"] = context_summary
+        until = str(tool_input.get("until") or "").strip()
+        if until:
+            request_body["until"] = until
         if context:
             if context.request_id:
                 request_body["request_id"] = context.request_id

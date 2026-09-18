@@ -318,6 +318,19 @@ async def task_notebook(
     return notebook
 
 
+@router.get("/internal/session/task-status")
+async def task_status(
+    q: str = Query(default="", max_length=200),
+    limit: int = Query(default=5, ge=1, le=10),
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    """Deterministic status grounding: match running/recent tasks by keyword."""
+    if not q.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="q is required")
+    return runtime.task_status_search(q, limit=limit)
+
+
 @router.post("/internal/session/revisit")
 async def session_revisit(
     payload: dict[str, Any],

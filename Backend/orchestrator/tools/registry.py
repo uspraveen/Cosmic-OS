@@ -2733,6 +2733,43 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         read_only=True,
     ),
     ToolSpec(
+        name="task_status",
+        api_definition={
+            "name": "task_status",
+            "description": (
+                "Find running or recent tasks by keyword and return their true registry state "
+                "(notebook status, orchestrator ledger status, last activity, and age). Use this "
+                "BEFORE answering any question like 'how is X going?' or 'is X done?' — never "
+                "answer task-status questions from memory alone, because memory only records "
+                "completed work and can be days stale while a task is actively running."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Keywords from the task, e.g. 'jev reranker' or 'offer letter'. "
+                            "Matched against task goals, states, and recent activity."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Optional max matches (default 5).",
+                    },
+                },
+            },
+            "required": ["query"],
+        },
+        group="history",
+        prompt_summary=(
+            "Keyword search over running/recent tasks with notebook+ledger state, "
+            "for grounded answers to status questions."
+        ),
+        handler_method="_task_status",
+        read_only=True,
+    ),
+    ToolSpec(
         name="task_notebook",
         api_definition={
             "name": "task_notebook",
@@ -2950,6 +2987,15 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                         "description": (
                             "Optional exact concrete channel such as whatsapp:+12153079021. "
                             "Use this only as an escape hatch when you must pin an exact channel."
+                        ),
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": (
+                            "Optional ISO-8601 timestamp after which the reminder auto-pauses forever. "
+                            "Use whenever the user bounds a recurring ask in time, e.g. 'email me updates "
+                            "every hour until 7am' -> until='2026-09-18T07:00:00-05:00'. Express it in the "
+                            "user's local timezone offset."
                         ),
                     },
                     "context_summary": {

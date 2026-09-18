@@ -780,6 +780,10 @@ class GatewayRuntime:
         self.agent_email_integration_store.initialize()
         self.agent_auth_store.initialize()
         self._orchestrator_task_ledger.initialize()
+        try:
+            await self._reconcile_task_notebooks_with_ledger()
+        except Exception:
+            logger.exception("gateway.startup_task_reconciliation_failed")
         await self.capability_wishlist_service.initialize()
         await self.tool_opportunity_service.initialize()
         self._usage_event_queue = asyncio.Queue(
@@ -9161,6 +9165,7 @@ class GatewayRuntime:
         created_session_id: str | None = None,
         created_channel: str | None = None,
         context_summary: str | None = None,
+        until: str | None = None,
     ) -> dict[str, Any]:
         normalized_cron_id = self._safe_text(cron_id) or f"cron_{uuid4().hex[:12]}"
         if self.scheduler_store.get_cron(normalized_cron_id) is not None:
@@ -9198,6 +9203,12 @@ class GatewayRuntime:
             created_channel=self._safe_text(created_channel),
             context_summary=self._safe_text(context_summary),
         )
+        normalized_until = ""
+        if self._safe_text(until):
+            parsed_until = self._parse_utc_iso(self._safe_text(until))
+            if parsed_until is None:
+                raise ValueError("until must be an ISO-8601 timestamp")
+            normalized_until = parsed_until.isoformat()
         record = self.scheduler_store.upsert_cron(
             cron_id=normalized_cron_id,
             name=normalized_label,
@@ -9209,6 +9220,7 @@ class GatewayRuntime:
             metadata={
                 **(metadata or {}),
                 "prompt": normalized_prompt,
+                **({"until": normalized_until} if normalized_until else {}),
                 "one_shot": bool(one_shot),
                 "delivery_target": normalized_delivery_target,
                 "delivery_channel": normalized_delivery_channel,
@@ -9497,6 +9509,28 @@ class GatewayRuntime:
         for cron in due_crons:
             cron_id = self._safe_text(cron.get("cron_id"))
             scheduled_for = self._safe_text(cron.get("next_fire_at")) or None
+            cron_metadata = (
+                cron.get("metadata") if isinstance(cron.get("metadata"), dict) else {}
+            )
+            until_raw = self._safe_text(cron_metadata.get("until"))
+            if until_raw:
+                until_dt = self._parse_utc_iso(until_raw)
+                if until_dt is not None and datetime.now(timezone.utc) > until_dt:
+                    # Deterministic expiry for bounded schedules ("every hour
+                    # until 7am"): pause instead of firing, so no sleeping user
+                    # gets the 8am, 9am, 10am... echoes of a promise whose
+                    # window closed.
+                    self.scheduler_store.pause_cron(
+                        cron_id, reason=f"until passed: {until_dt.isoformat()}"
+                    )
+                    self.scheduler_store.record_cron_result(
+                        cron_id=cron_id,
+                        scheduled_for=scheduled_for,
+                        status="skipped",
+                        summary=f"Reminder window ended (until {until_dt.isoformat()}); paused.",
+                        next_fire_at=None,
+                    )
+                    continue
             status = "ignored"
             summary = "Unknown cron."
             next_fire_at = None
@@ -12588,10 +12622,11 @@ class GatewayRuntime:
             lines.append(
                 f"- [{created.strftime('%H:%M')} UTC, {self._channel_platform(channel)}] {speaker}: {excerpt}"
             )
-        if not lines:
+        task_lines = self._running_tasks_brief_lines()
+        if not lines and not task_lines:
             return None
         lines = lines[-self.CROSS_CHANNEL_BRIEF_MAX_ITEMS :]
-        return {
+        brief = {
             "role": "assistant",
             "content": (
                 "[Recent activity on the user's other channels, for context only. This is not "
@@ -12602,6 +12637,70 @@ class GatewayRuntime:
                 + chr(10).join(lines)
             ),
         }
+        brief["content"] = self._append_running_tasks_to_brief(brief["content"])
+        return brief
+
+    RUNNING_TASKS_BRIEF_MAX = 4
+    RUNNING_TASKS_BRIEF_MAX_AGE_SEC = 12 * 3600
+    RUNNING_TASKS_BRIEF_GOAL_CHARS = 200
+
+    def _running_tasks_brief_lines(self) -> list[str]:
+        """Live in-flight tasks, visible from any session.
+
+        A running task otherwise exists only inside the session that started
+        it: nothing enters memory until completion, so an isolated email-thread
+        turn could not know a build was already underway. Recency-bounded and
+        age-labelled, never status-trusting -- a notebook can say "running"
+        for hours after its process died, so the line always carries how long
+        since the last activity and the model judges from that.
+        """
+        try:
+            notebooks = self.session_store.list_recent_task_notebooks(
+                limit=24, max_age_sec=self.RUNNING_TASKS_BRIEF_MAX_AGE_SEC
+            )
+        except Exception:
+            logger.exception("gateway.running_tasks_brief_failed")
+            return []
+        lines: list[str] = []
+        now = datetime.now(timezone.utc)
+        for notebook in notebooks:
+            if len(lines) >= self.RUNNING_TASKS_BRIEF_MAX:
+                break
+            status = (self._safe_text(notebook.get("status")) or "").lower()
+            if status in {"completed", "cancelled", "failed"}:
+                continue
+            updated_raw = self._safe_text(notebook.get("updated_at"))
+            try:
+                updated = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            age_minutes = int((now - updated).total_seconds() // 60)
+            goal = self._bounded_excerpt(
+                notebook.get("goal"), limit=self.RUNNING_TASKS_BRIEF_GOAL_CHARS
+            )
+            state = self._bounded_excerpt(notebook.get("current_state"), limit=60)
+            task_id = self._safe_text(notebook.get("task_id"))
+            if not goal or not task_id:
+                continue
+            suffix = f" [{state}]" if state else ""
+            lines.append(
+                f"- {task_id}: {goal}{suffix} (last activity {age_minutes}m ago)"
+            )
+        return lines
+
+    def _append_running_tasks_to_brief(self, content: str) -> str:
+        task_lines = self._running_tasks_brief_lines()
+        if not task_lines:
+            return content
+        return (
+            content
+            + chr(10)
+            + "Tasks currently in flight on the user's behalf (from the task registry):"
+            + chr(10)
+            + chr(10).join(task_lines)
+        )
 
     def _recent_email_brief_for_session(self, session_id: str) -> dict[str, str] | None:
         """What just happened in the user's email correspondence, for a day-session turn.
@@ -12635,6 +12734,7 @@ class GatewayRuntime:
         if not messages:
             return None
 
+        task_lines = self._running_tasks_brief_lines()
         lines: list[str] = []
         for item in messages:
             channel = self._safe_text(item.get("channel"))
@@ -12660,19 +12760,20 @@ class GatewayRuntime:
             lines.append(
                 f"- [{created.strftime('%H:%M')} UTC, email] {speaker}: {excerpt}"
             )
-        if not lines:
+        if not lines and not task_lines:
             return None
         lines = lines[-self.CROSS_CHANNEL_BRIEF_MAX_ITEMS :]
+        content_lines = (
+            "[Recent email correspondence, for context only. These turns ran in the user's "
+            "email threads, not in this session, and must not be quoted back as part of "
+            "this conversation. Use it to recognise when the user is following up on "
+            "something just handled over email, rather than treating the reference as new.]"
+            + chr(10)
+            + chr(10).join(lines)
+        )
         return {
             "role": "assistant",
-            "content": (
-                "[Recent email correspondence, for context only. These turns ran in the user's "
-                "email threads, not in this session, and must not be quoted back as part of "
-                "this conversation. Use it to recognise when the user is following up on "
-                "something just handled over email, rather than treating the reference as new.]"
-                + chr(10)
-                + chr(10).join(lines)
-            ),
+            "content": self._append_running_tasks_to_brief(content_lines),
         }
 
     def _build_conversation_context(
@@ -12716,6 +12817,14 @@ class GatewayRuntime:
             return context
 
         if not fallback_context:
+            # First turn in a fresh isolated session (the opening email of a
+            # new thread): there is no history and no fallback, but the
+            # cross-channel brief must still attach -- skipping it here is how
+            # a "how's it going?" email got answered from days-old memory while
+            # the task it asked about was running on desktop.
+            brief = self._recent_cross_channel_brief(session_id)
+            if brief is not None:
+                return [brief]
             return []
         normalized = self._normalize_conversation_context(fallback_context)[:limit]
         brief = self._recent_cross_channel_brief(session_id)
@@ -13836,6 +13945,118 @@ class GatewayRuntime:
     def get_task_notebook(self, task_id: str) -> dict[str, Any] | None:
         return self.session_store.get_task_notebook(task_id)
 
+    TASK_STATUS_SEARCH_LIMIT = 5
+    TASK_STATUS_SEARCH_GOAL_CHARS = 260
+    TASK_STATUS_SEARCH_SCAN = 60
+
+    def task_status_search(self, query: str, *, limit: int | None = None) -> dict[str, Any]:
+        """Deterministic grounding for "how is X going?" questions.
+
+        Keyword-matches recent task notebooks (any session) over goal, state,
+        and recent activity text, then overlays the orchestrator ledger's
+        status/error for each hit -- so status answers come from the registry,
+        not from whatever stale memory recall happens to surface. Recency and
+        non-terminal work rank first; a quiet notebook still matches but its
+        age is reported so the caller can judge liveness.
+        """
+        normalized_query = (self._safe_text(query) or "").strip().lower()
+        tokens = [t for t in normalized_query.replace(",", " ").split() if len(t) >= 3]
+        effective_limit = max(1, min(int(limit or self.TASK_STATUS_SEARCH_LIMIT), 10))
+        if not tokens:
+            return {"query": normalized_query, "matches": [], "note": "no usable keywords"}
+        try:
+            notebooks = self.session_store.list_recent_task_notebooks(
+                limit=self.TASK_STATUS_SEARCH_SCAN
+            )
+        except Exception:
+            logger.exception("gateway.task_status_search_failed")
+            return {"query": normalized_query, "matches": [], "note": "registry unavailable"}
+
+        now = datetime.now(timezone.utc)
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for notebook in notebooks:
+            task_id = self._safe_text(notebook.get("task_id"))
+            if not task_id:
+                continue
+            goal = self._safe_text(notebook.get("goal"))
+            state = self._safe_text(notebook.get("current_state"))
+            activity_log = notebook.get("activity_log")
+            activity_text = " ".join(
+                self._safe_text(item.get("label"))
+                for item in (activity_log if isinstance(activity_log, list) else [])[-8:]
+                if isinstance(item, dict)
+            )
+            haystack = " ".join(
+                part for part in (goal, state, activity_text) if part
+            ).lower()
+            if not haystack.strip():
+                continue
+            hits = sum(1 for token in tokens if token in haystack)
+            if hits == 0:
+                continue
+            status = (self._safe_text(notebook.get("status")) or "").lower() or "unknown"
+            updated_raw = self._safe_text(notebook.get("updated_at"))
+            age_minutes: int | None = None
+            try:
+                updated = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+                age_minutes = max(0, int((now - updated).total_seconds() // 60))
+            except ValueError:
+                pass
+            score = float(hits)
+            if status not in self.TERMINAL_TASK_STATUSES:
+                score += 0.5
+            if age_minutes is not None and age_minutes < 120:
+                score += 0.25
+            ledger_status = ""
+            ledger_error = ""
+            try:
+                ledger = self._orchestrator_task_ledger.get_task(task_id)
+            except Exception:
+                ledger = None
+            if ledger:
+                ledger_status = (self._safe_text(ledger.get("status")) or "").lower()
+                ledger_error = " ".join(
+                    part
+                    for part in (
+                        self._safe_text(ledger.get("error_code")),
+                        self._safe_text(ledger.get("error_message")),
+                    )
+                    if part
+                )
+            last_activity = ""
+            if isinstance(activity_log, list) and activity_log:
+                for item in reversed(activity_log):
+                    if isinstance(item, dict) and self._safe_text(item.get("label")):
+                        last_activity = self._safe_text(item.get("label"))
+                        break
+            scored.append(
+                (
+                    score,
+                    {
+                        "task_id": task_id,
+                        "status": ledger_status or status,
+                        "notebook_status": status,
+                        "ledger_status": ledger_status,
+                        "ledger_error": ledger_error,
+                        "current_state": state,
+                        "goal": self._bounded_excerpt(
+                            goal, limit=self.TASK_STATUS_SEARCH_GOAL_CHARS
+                        ),
+                        "last_activity": last_activity,
+                        "age_minutes": age_minutes,
+                        "updated_at": updated_raw,
+                        "session_id": self._safe_text(notebook.get("session_id")),
+                    },
+                )
+            )
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return {
+            "query": normalized_query,
+            "matches": [item for _score, item in scored[:effective_limit]],
+        }
+
     def build_revisit_payload(
         self,
         *,
@@ -13888,6 +14109,139 @@ class GatewayRuntime:
             self._finalize_turn_after_delivery(event=event),
             name="gateway-turn-ledger-finalize",
         )
+
+    TERMINAL_TASK_STATUSES = {"completed", "cancelled", "failed"}
+
+    async def _reconcile_task_notebooks_with_ledger(self) -> None:
+        """Startup truth-sync between task notebooks and the orchestrator ledger.
+
+        The ledger is written by the orchestrator's own lifecycle paths and is
+        the durable record; notebooks are updated from live events and go
+        stale whenever the gateway dies mid-task -- the Sep 18 restart left a
+        notebook claiming 'running' for eight hours after the ledger recorded
+        'failed / STREAM_DISCONNECTED'. For every non-terminal notebook whose
+        ledger row is definitely terminal, the terminal state is copied in
+        with an audit entry; and when the session never received any assistant
+        response for that task, a post-crash notice is appended so the user
+        hears "it died" instead of silence. Missing ledger rows are left
+        strictly alone -- absence of evidence is not a terminal state.
+        """
+        try:
+            notebooks = self.session_store.list_non_terminal_task_notebooks()
+        except Exception:
+            logger.exception("gateway.task_reconciliation_list_failed")
+            return
+        reconciled = 0
+        noticed = 0
+        for notebook in notebooks:
+            task_id = self._safe_text(notebook.get("task_id"))
+            session_id = self._safe_text(notebook.get("session_id"))
+            if not task_id:
+                continue
+            try:
+                ledger = self._orchestrator_task_ledger.get_task(task_id)
+            except Exception:
+                logger.exception(
+                    "gateway.task_reconciliation_ledger_read_failed task_id=%s", task_id
+                )
+                continue
+            if not ledger:
+                continue
+            ledger_status = (self._safe_text(ledger.get("status")) or "").lower()
+            if ledger_status not in self.TERMINAL_TASK_STATUSES:
+                continue
+
+            error_code = self._safe_text(ledger.get("error_code"))
+            error_message = self._safe_text(ledger.get("error_message"))
+            detail = " ".join(part for part in (error_code, error_message) if part)
+            state_line = f"{ledger_status}: {detail}" if detail else ledger_status
+            now_iso = utcnow_iso()
+            notebook["status"] = ledger_status
+            notebook["current_state"] = (
+                f"{state_line} (reconciled from orchestrator ledger at startup)"
+            )
+            notebook.setdefault("activity_log", [])
+            if isinstance(notebook["activity_log"], list):
+                notebook["activity_log"] = [
+                    *notebook["activity_log"],
+                    {
+                        "id": f"activity_reconcile_{uuid4().hex[:12]}",
+                        "label": f"Reconciled from ledger: {state_line}",
+                        "status": ledger_status,
+                        "kind": "generic",
+                        "created_at": now_iso,
+                    },
+                ][-TASK_ACTIVITY_LOG_LIMIT:]
+            reconciled += 1
+
+            notice_sent = bool(notebook.get("post_crash_notice_sent"))
+            request_id = self._safe_text(ledger.get("request_id"))
+            needs_notice = (
+                ledger_status in {"failed", "cancelled"}
+                and not notice_sent
+                and bool(session_id)
+                and bool(request_id)
+            )
+            if needs_notice:
+                try:
+                    assistant_message = self.session_store.find_message_by_request_id(
+                        session_id, request_id=request_id, role="assistant"
+                    )
+                except Exception:
+                    logger.exception(
+                        "gateway.task_reconciliation_message_lookup_failed task_id=%s",
+                        task_id,
+                    )
+                    assistant_message = None
+                if assistant_message is None:
+                    goal = self._bounded_excerpt(notebook.get("goal"), limit=220)
+                    channel = self._safe_text(ledger.get("channel")) or None
+                    notice = (
+                        "A background task failed while services were restarting and "
+                        "never got to report back."
+                        + chr(10) + chr(10)
+                        + f"Task `{task_id}` — {goal or '(no goal recorded)'} — ended as "
+                        f"**{ledger_status}** ({detail or 'no error detail'}). "
+                        "Nothing from it is still running. If this still matters, tell "
+                        "me to resume it and I will pick it up from the task notebook."
+                    )
+                    message_id = self._append_session_message(
+                        session_id,
+                        role="assistant",
+                        content=notice,
+                        route="orchestrator",
+                        channel=channel,
+                        metadata={
+                            "post_crash_notice": True,
+                            "task_id": task_id,
+                            "request_id": request_id,
+                            "reconciled_status": ledger_status,
+                        },
+                        in_reply_to_request_id=request_id,
+                    )
+                    if message_id:
+                        noticed += 1
+                        self._track_background_task(
+                            self._broadcast_cross_channel_to_realtime_clients(
+                                session_id,
+                                role="assistant",
+                                content=notice,
+                                channel=channel,
+                            )
+                        )
+            notebook["post_crash_notice_sent"] = True
+            try:
+                self.session_store.upsert_task_notebook(task_id, session_id, notebook)
+            except Exception:
+                logger.exception(
+                    "gateway.task_reconciliation_upsert_failed task_id=%s", task_id
+                )
+        if reconciled or noticed:
+            logger.info(
+                "gateway.task_reconciliation_done reconciled=%d post_crash_notices=%d",
+                reconciled,
+                noticed,
+            )
 
     async def _finalize_turn_after_delivery(self, *, event: dict[str, Any]) -> None:
         request_id = self._safe_text(event.get("request_id"))
@@ -14592,7 +14946,18 @@ class GatewayRuntime:
         awaiting_reply_messages = self.session_store.list_awaiting_reply_messages(
             session_id, limit=8
         )
-        session_artifacts = self.artifact_store.list_for_session(session_id, limit=24)
+        # Peripheral collectors are individually isolated: one flaky dependency
+        # (artifact store, Gmail drafts during an OAuth outage, memory tool
+        # receipts) must not abort the whole refresh -- an aborted refresh left
+        # the working set silently stale for the rest of the day on Sep 18.
+        try:
+            session_artifacts = self.artifact_store.list_for_session(session_id, limit=24)
+        except Exception:
+            logger.exception(
+                "gateway.working_set_refresh_collector_failed collector=artifacts session_id=%s",
+                session_id,
+            )
+            session_artifacts = []
 
         active_task_refs = []
         workstreams = [
@@ -14612,12 +14977,26 @@ class GatewayRuntime:
         )
         artifact_pointers = []
         recent_document_artifacts: list[dict[str, Any]] = []
-        recent_tool_receipts = self._recent_memory_tool_receipts(
-            session_id, limit=RECENT_MEMORY_TOOL_RECEIPT_LIMIT
-        )
-        contested_keys, contested_ids, contested_claims = (
-            self._active_contested_memory_refs(session_id)
-        )
+        try:
+            recent_tool_receipts = self._recent_memory_tool_receipts(
+                session_id, limit=RECENT_MEMORY_TOOL_RECEIPT_LIMIT
+            )
+        except Exception:
+            logger.exception(
+                "gateway.working_set_refresh_collector_failed collector=memory_tool_receipts session_id=%s",
+                session_id,
+            )
+            recent_tool_receipts = []
+        try:
+            contested_keys, contested_ids, contested_claims = (
+                self._active_contested_memory_refs(session_id)
+            )
+        except Exception:
+            logger.exception(
+                "gateway.working_set_refresh_collector_failed collector=contested_refs session_id=%s",
+                session_id,
+            )
+            contested_keys, contested_ids, contested_claims = [], [], []
         raw_carry_forward_goal = self._safe_text(carry_forward.get("goal")) or ""
         carry_forward_goal = (
             ""
@@ -14629,9 +15008,15 @@ class GatewayRuntime:
         turn_window_end_at = ""
         recent_research_receipts: list[dict[str, Any]] = []
         recent_specialist_receipts: list[dict[str, Any]] = []
-        pending_gmail_drafts = self._pending_gmail_draft_refs(
-            limit=PENDING_GMAIL_DRAFT_REF_LIMIT
-        )
+        try:
+            pending_gmail_drafts = self._pending_gmail_draft_refs(
+                limit=PENDING_GMAIL_DRAFT_REF_LIMIT
+            )
+        except Exception:
+            logger.exception(
+                "gateway.working_set_refresh_collector_failed collector=gmail_drafts"
+            )
+            pending_gmail_drafts = []
         backgrounded_task_ids = self._backgrounded_active_task_ids(session_id)
 
         for turn in recent_turns:
