@@ -14111,6 +14111,11 @@ class GatewayRuntime:
         )
 
     TERMINAL_TASK_STATUSES = {"completed", "cancelled", "failed"}
+    # Notices are for deaths the user plausibly still cares about; reconciling
+    # a five-month-old corpse is hygiene, but telling the user about it is
+    # noise. The first live run without this gate posted failure notices into
+    # April sessions.
+    POST_CRASH_NOTICE_MAX_AGE_SEC = 48 * 3600
 
     async def _reconcile_task_notebooks_with_ledger(self) -> None:
         """Startup truth-sync between task notebooks and the orchestrator ledger.
@@ -14176,8 +14181,26 @@ class GatewayRuntime:
 
             notice_sent = bool(notebook.get("post_crash_notice_sent"))
             request_id = self._safe_text(ledger.get("request_id"))
+            updated_epoch: float | None = None
+            try:
+                updated_dt = datetime.fromisoformat(
+                    (self._safe_text(notebook.get("updated_at")) or "").replace(
+                        "Z", "+00:00"
+                    )
+                )
+                if updated_dt.tzinfo is None:
+                    updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+                updated_epoch = updated_dt.timestamp()
+            except ValueError:
+                updated_epoch = None
+            age_ok = (
+                updated_epoch is not None
+                and (datetime.now(timezone.utc).timestamp() - updated_epoch)
+                <= self.POST_CRASH_NOTICE_MAX_AGE_SEC
+            )
             needs_notice = (
                 ledger_status in {"failed", "cancelled"}
+                and age_ok
                 and not notice_sent
                 and bool(session_id)
                 and bool(request_id)

@@ -461,3 +461,22 @@ def test_cron_without_until_untouched():
     runtime._maybe_run_due_heartbeat = _heartbeat
     asyncio.run(runtime._run_due_crons_locked())
     assert store.paused == []
+
+
+def test_reconcile_notice_gated_by_age():
+    """Deaths older than the notice window are reconciled silently."""
+    store = _ReconcileStore([_zombie_notebook(updated_at=_minutes_ago(60 * 24 * 10))])
+    ledger = _Ledger(
+        {
+            "tsk_zombie": {
+                "status": "failed",
+                "error_code": "STREAM_DISCONNECTED",
+                "error_message": "stream ended",
+                "request_id": "req_old_1",
+            }
+        }
+    )
+    runtime = _reconcile_runtime(store, ledger)
+    asyncio.run(runtime._reconcile_task_notebooks_with_ledger())
+    assert store.upserts[0][2]["status"] == "failed"
+    assert store.appended == []
