@@ -89,7 +89,7 @@ async def maintenance_drain_middleware(request: Request, call_next):
             "gateway.maintenance_drain_refused path=%s", request.url.path
         )
         return JSONResponse(status_code=status, content=body, headers=headers)
-    return await call_next()
+    return await call_next(request)
 
 
 app.include_router(browser_router)
