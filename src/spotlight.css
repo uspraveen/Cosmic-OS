@@ -3269,15 +3269,6 @@ kbd {
   animation: assistantVisualSlotShimmer 2.8s linear infinite;
 }
 
-.assistant-inline-visual-slot.is-failed {
-  gap: 0;
-  padding: 10px 12px;
-}
-
-.assistant-inline-visual-slot.is-failed::before {
-  content: none;
-}
-
 .assistant-inline-visual-slot-shell,
 .assistant-inline-visual-slot-copy {
   position: relative;

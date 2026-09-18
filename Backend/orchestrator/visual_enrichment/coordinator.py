@@ -95,10 +95,6 @@ _IMAGE_QUERY_NOISE_PATTERNS = tuple(
     re.compile(rf"\b{re.escape(marker)}\b", flags=re.IGNORECASE)
     for marker in _EXPLICIT_IMAGE_REQUEST_MARKERS
 )
-_FAILED_INLINE_IMAGE_LABEL = "Couldn't find a reliable inline image for this answer."
-_FAILED_INLINE_CHART_LABEL = "Couldn't generate a clear inline chart for this answer."
-_TIMED_OUT_INLINE_IMAGE_LABEL = "This inline image took too long to finish."
-_TIMED_OUT_INLINE_CHART_LABEL = "This inline chart took too long to finish."
 # Images the run itself captured are addressed by this scheme so they travel the
 # same candidate/download/artifact path as anything pulled off the web.
 _RUN_CAPTURE_SCHEME = "cosmic-run://"
@@ -594,46 +590,6 @@ class VisualDirectiveStreamParser:
         ]
         return len(self._blocks) != before
 
-    def fail_slot(self, slot_id: str, *, label: str, detail: str | None = None) -> bool:
-        normalized_slot_id = _safe_text(slot_id)
-        if not normalized_slot_id:
-            return False
-        for item in self._blocks:
-            if _safe_text(item.get("id")) != normalized_slot_id:
-                continue
-            if str(item.get("type")) not in {"image_slot", "chart_slot"}:
-                return False
-            item["status"] = "failed"
-            if label:
-                item["loading_label"] = label
-            if detail:
-                item["failure_detail"] = detail
-            else:
-                item.pop("failure_detail", None)
-            return True
-        return False
-
-    def fail_all_pending_slots(
-        self,
-        *,
-        image_label: str,
-        chart_label: str,
-    ) -> bool:
-        changed = False
-        for item in self._blocks:
-            block_type = str(item.get("type"))
-            if block_type not in {"image_slot", "chart_slot"}:
-                continue
-            if _safe_text(item.get("status")).lower() == "failed":
-                continue
-            item["status"] = "failed"
-            item["loading_label"] = (
-                chart_label if block_type == "chart_slot" else image_label
-            )
-            item.pop("failure_detail", None)
-            changed = True
-        return changed
-
     def drop_all_pending_slots(self) -> bool:
         before = len(self._blocks)
         self._blocks = [
@@ -1058,29 +1014,6 @@ class VisualEnrichmentCoordinator:
         self._extend_slot_deadline(slot_id, timeout)
         return timeout
 
-    def _failure_label_for_slot(
-        self,
-        slot: VisualSlotDirective | None,
-        *,
-        timed_out: bool = False,
-    ) -> str:
-        kind = _safe_text(getattr(slot, "kind", "")).lower()
-        if kind == "chart":
-            return (
-                _TIMED_OUT_INLINE_CHART_LABEL
-                if timed_out
-                else _FAILED_INLINE_CHART_LABEL
-            )
-        return (
-            _TIMED_OUT_INLINE_IMAGE_LABEL
-            if timed_out
-            else _FAILED_INLINE_IMAGE_LABEL
-        )
-
-    @staticmethod
-    def _is_automatic_image_slot(slot: VisualSlotDirective) -> bool:
-        return slot.kind == "image" and slot.id.startswith("img_auto_")
-
     async def _timed_stage(self, slot_id: str, stage: str, awaitable: Any) -> Any:
         started = time.perf_counter()
         try:
@@ -1109,13 +1042,6 @@ class VisualEnrichmentCoordinator:
             (time.perf_counter() - started) * 1000.0,
         )
         return result
-
-    def _build_implicit_image_slot(self) -> VisualSlotDirective | None:
-        # Image queries come only from an orchestrator [[visual_slot]] directive.
-        return None
-
-    def _maybe_schedule_implicit_image_slot(self) -> bool:
-        return False
 
     async def finalize(
         self,
@@ -1158,10 +1084,9 @@ class VisualEnrichmentCoordinator:
         self._slot_deadlines.clear()
         events.extend(self._drain_ready_updates())
 
-        if self._parser.fail_all_pending_slots(
-            image_label=_TIMED_OUT_INLINE_IMAGE_LABEL,
-            chart_label=_TIMED_OUT_INLINE_CHART_LABEL,
-        ):
+        # Every slot is now either an artifact or gone. Nothing that was still
+        # searching when the answer ended survives into the transcript.
+        if self._parser.drop_all_pending_slots():
             events.append(self._build_snapshot_event())
 
         final_blocks = self._parser.export_blocks()
@@ -1171,7 +1096,6 @@ class VisualEnrichmentCoordinator:
         )
         if deliverable_blocks:
             final_blocks.extend(deliverable_blocks)
-        final_blocks = self._clean_final_visual_blocks(final_blocks)
 
         return {
             "events": events,
@@ -1179,32 +1103,6 @@ class VisualEnrichmentCoordinator:
             "response_blocks": final_blocks,
             "supporting_artifacts": copy.deepcopy(self._supporting_artifacts),
         }
-
-    @staticmethod
-    def _clean_final_visual_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Remove stale automatic visual placeholders from completed responses."""
-        has_image_artifact = any(
-            str(block.get("type")) == "image_artifact"
-            for block in blocks
-            if isinstance(block, dict)
-        )
-        if not has_image_artifact:
-            return blocks
-        cleaned: list[dict[str, Any]] = []
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            block_type = str(block.get("type"))
-            block_id = _safe_text(block.get("id"))
-            status = _safe_text(block.get("status")).lower()
-            if (
-                block_type == "image_slot"
-                and block_id.startswith("img_auto_")
-                and status == "failed"
-            ):
-                continue
-            cleaned.append(block)
-        return cleaned
 
     def _register_slots(self, slots: list[VisualSlotDirective]) -> bool:
         dirty = False
@@ -2738,22 +2636,14 @@ class VisualEnrichmentCoordinator:
             if isinstance(block, dict):
                 return self._parser.replace_slot(slot_id, dict(block))
             return False
-        if action == "fail_slot":
-            slot = self._slots.get(slot_id)
-            detail = _clip_text(update.get("error"), limit=240) or None
-            return self._parser.fail_slot(
-                slot_id,
-                label=self._failure_label_for_slot(slot, timed_out=False),
-                detail=detail,
-            )
-        if action == "drop_slot":
-            slot = self._slots.get(slot_id)
-            detail = _clip_text(update.get("error"), limit=240) or None
-            return self._parser.fail_slot(
-                slot_id,
-                label=self._failure_label_for_slot(slot, timed_out=False),
-                detail=detail,
-            )
+        if action in {"fail_slot", "drop_slot"}:
+            # A visual has two honest outcomes: it becomes an artifact, or it
+            # was never asked for. There is no third state to render, because
+            # the answer is written to stand without it either way — an
+            # apology card in the middle of the prose is worse than no image.
+            # The reason is not lost: every sidecar failure is already logged
+            # at warning level with its slot id (visual_enrichment.*_failed).
+            return self._parser.drop_slot(slot_id)
         return False
 
     def _candidate_source_infos(self, slot: VisualSlotDirective | None) -> list[dict[str, str]]:

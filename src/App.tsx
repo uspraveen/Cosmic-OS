@@ -5519,35 +5519,36 @@ const AssistantResponseBlocks = memo(({
           )
         }
         if (block.type === 'image_slot' || block.type === 'chart_slot') {
-          const slotStatus = typeof block.status === 'string' ? block.status.toLowerCase() : ''
-          const slotFailed = slotStatus === 'failed'
-          const slotLabel = slotFailed
-            ? (block.type === 'chart_slot' ? 'Inline chart unavailable' : 'Inline image unavailable')
-            : block.loadingLabel || (block.type === 'chart_slot' ? 'Generating a chart' : 'Finding a relevant image')
+          // A slot is a placeholder for work still in flight, and nothing else.
+          // The orchestrator now erases one that produced no artifact rather
+          // than marking it failed, so this branch only still fires for
+          // transcripts recorded before that change — they lose their
+          // "Inline image unavailable" card on the next render too. The answer
+          // is written to stand without the visual either way.
+          if (typeof block.status === 'string' && block.status.toLowerCase() === 'failed') {
+            return null
+          }
+          const slotLabel = block.loadingLabel
+            || (block.type === 'chart_slot' ? 'Generating a chart' : 'Finding a relevant image')
           return (
             <div
               key={block.id}
               className={[
                 'assistant-inline-visual-slot',
                 block.type === 'chart_slot' ? 'is-chart' : 'is-image',
-                slotFailed ? 'is-failed' : '',
               ].join(' ')}
             >
-              {!slotFailed && (
-                <div className="assistant-inline-visual-slot-shell" aria-hidden="true">
-                  <div className="assistant-inline-visual-slot-band" />
-                  <div className="assistant-inline-visual-slot-band short" />
-                </div>
-              )}
+              <div className="assistant-inline-visual-slot-shell" aria-hidden="true">
+                <div className="assistant-inline-visual-slot-band" />
+                <div className="assistant-inline-visual-slot-band short" />
+              </div>
               <div className="assistant-inline-visual-slot-copy">
                 <div className="assistant-inline-visual-slot-badge">
                   {block.type === 'chart_slot' ? 'INLINE CHART' : 'INLINE IMAGE'}
                 </div>
                 <div className="assistant-inline-visual-slot-label">{slotLabel}</div>
                 <div className="assistant-inline-visual-slot-subtle">
-                  {slotFailed
-                    ? 'Cosmic could not attach a reliable visual for this response.'
-                    : 'Cosmic is preparing this visual without stopping the response.'}
+                  Cosmic is preparing this visual without stopping the response.
                 </div>
               </div>
             </div>

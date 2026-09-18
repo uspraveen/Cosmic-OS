@@ -19,6 +19,7 @@ from orchestrator.visual_enrichment.clients import (
     _build_vision_chat_payload,
 )
 from orchestrator.visual_enrichment.coordinator import (
+    VisualDirectiveStreamParser,
     VisualSlotDirective,
     _is_probably_text_art,
 )
@@ -871,45 +872,51 @@ async def test_visual_enrichment_explicit_image_request_uses_relaxed_trusted_fal
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_visual_enrichment_final_blocks_drop_failed_auto_image_slot_when_visual_artifacts_exist(
-) -> None:
-    blocks = [
-        {"id": "markdown_1", "type": "markdown", "text": "Here is the analysis."},
-        {
-            "id": "img_auto_abc123",
-            "type": "image_slot",
-            "status": "failed",
-            "loading_label": "This inline image took too long to finish.",
-        },
-        {
-            "id": "artifact_1",
-            "type": "image_artifact",
-            "artifact_id": "anthropic_file_1",
-            "filename": "chart.png",
-            "mime_type": "image/png",
-        },
-    ]
-
-    cleaned = VisualEnrichmentCoordinator._clean_final_visual_blocks(blocks)
-
-    assert [block["id"] for block in cleaned] == ["markdown_1", "artifact_1"]
+def _safe_block_status(block: dict) -> str:
+    return str(block.get("status") or "").lower()
 
 
-def test_visual_enrichment_final_blocks_keep_failed_explicit_image_slot_without_artifact(
-) -> None:
-    blocks = [
-        {"id": "markdown_1", "type": "markdown", "text": "Here is the analysis."},
-        {
-            "id": "img_1",
-            "type": "image_slot",
-            "status": "failed",
-            "loading_label": "No reliable inline image was found.",
-        },
-    ]
+def _parser_with_slot(slot_id: str = "img_1", kind: str = "image") -> VisualDirectiveStreamParser:
+    parser = VisualDirectiveStreamParser(OrchestratorConfig())
+    parser.consume_text(
+        "Here is the analysis.\n\n"
+        f'[[visual_slot {{"id":"{slot_id}","kind":"{kind}","query":"a specific subject"}}]]\n\n'
+        "And the reason it matters."
+    )
+    return parser
 
-    cleaned = VisualEnrichmentCoordinator._clean_final_visual_blocks(blocks)
 
-    assert cleaned == blocks
+def test_visual_enrichment_dropped_slot_leaves_no_trace_in_the_answer() -> None:
+    """A slot that produced nothing is erased, not turned into an apology.
+
+    The answer is written to stand without the visual (the response policy
+    forbids promising one), so a placeholder that never filled has nothing to
+    say. It used to render as an "Inline image unavailable" card in the middle
+    of the prose.
+    """
+    parser = _parser_with_slot()
+    assert any(block["type"] == "image_slot" for block in parser.export_blocks())
+
+    assert parser.drop_slot("img_1") is True
+
+    blocks = parser.export_blocks()
+    assert not any(block["type"] in {"image_slot", "chart_slot"} for block in blocks)
+    assert not any(_safe_block_status(block) == "failed" for block in blocks)
+    # The prose either side of the directive survives intact.
+    text = " ".join(str(block.get("text") or "") for block in blocks)
+    assert "Here is the analysis." in text
+    assert "And the reason it matters." in text
+
+
+def test_visual_enrichment_finalize_leaves_no_placeholder_behind() -> None:
+    """Whatever is still searching when the answer ends leaves with it."""
+    parser = _parser_with_slot(slot_id="chart_1", kind="chart")
+
+    assert parser.drop_all_pending_slots() is True
+
+    blocks = parser.export_blocks()
+    assert not any(block["type"] in {"image_slot", "chart_slot"} for block in blocks)
+    assert any(block["type"] == "markdown" for block in blocks)
 
 
 def test_visual_enrichment_default_image_timeout_is_an_eight_second_floor(
@@ -1029,7 +1036,7 @@ async def test_visual_enrichment_non_explicit_image_request_keeps_strict_thresho
             )
             _note_three_generic_sources(coordinator)
 
-            coordinator.consume_text(
+            _, streamed_events = coordinator.consume_text(
                 (
                     "Here is more context about the deal.\n\n"
                     "[[visual_slot {\"id\":\"img_1\",\"kind\":\"image\",\"query\":\"deal coverage visual\","
@@ -1043,11 +1050,21 @@ async def test_visual_enrichment_non_explicit_image_request_keeps_strict_thresho
         assert not any(
             block["type"] == "image_artifact" for block in final_payload["response_blocks"]
         )
-        failed_slot = next(
-            block for block in final_payload["response_blocks"] if block["type"] == "image_slot"
+        # Fail closed, and leave nothing behind: no artifact, and no placeholder
+        # card sitting in the prose explaining that there isn't one.
+        assert not any(
+            block["type"] in {"image_slot", "chart_slot"}
+            for block in final_payload["response_blocks"]
         )
-        assert failed_slot["status"] == "failed"
-        assert "reliable inline image" in failed_slot["loading_label"].lower()
+        # And never at any point on the way there. Snapshots stream to the
+        # desktop as they are produced, so a slot marked failed mid-answer
+        # would flash an "unavailable" card into the reply the user is reading
+        # even if the final payload came out clean.
+        for event in [*streamed_events, *final_payload["events"]]:
+            for block in event.get("response_blocks", []):
+                assert str(block.get("status") or "").lower() != "failed", (
+                    f"snapshot {event.get('snapshot_seq')} carried a failed slot"
+                )
         assert final_payload["supporting_artifacts"] == []
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -2042,10 +2059,10 @@ async def test_visual_enrichment_rejects_lexically_similar_but_offtopic_image() 
         assert not any(
             block["type"] == "image_artifact" for block in final_payload["response_blocks"]
         ), "a forum post about a Bain interview does not illustrate YC's Fall 2026 batch"
-        failed_slot = next(
-            block for block in final_payload["response_blocks"] if block["type"] == "image_slot"
-        )
-        assert failed_slot["status"] == "failed"
+        assert not any(
+            block["type"] in {"image_slot", "chart_slot"}
+            for block in final_payload["response_blocks"]
+        ), "rejecting the image must erase the slot, not leave an 'unavailable' card"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
