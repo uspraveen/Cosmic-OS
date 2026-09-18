@@ -1,0 +1,14 @@
+[Unit]
+Description=Run COSMIC Restart Agent every 15 minutes
+# Frequent enough that a busy system only defers a few ticks before its next
+# look, sparse enough that each tick is cheap (a handful of sqlite reads).
+# Persistent=true: if the box is down at a tick time, catch up once on boot.
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=45
+Unit=cosmic-restart-agent.service
+
+[Install]
+WantedBy=timers.target

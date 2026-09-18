@@ -4,7 +4,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 import uvicorn
+
+from . import maintenance
 
 from .browser.routes import router as browser_router
 from .channels.routes import router as channel_router
@@ -64,6 +67,31 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def maintenance_drain_middleware(request: Request, call_next):
+    """Refuse auto-retried webhook intake while a graceful restart drains.
+
+    Push senders (Gmail Pub/Sub, GitHub, Telegram, WhatsApp, agent-email)
+    retry non-2xx on their own, so a 503 here loses nothing -- whereas
+    accepting work seconds before a fleet restart would kill it mid-flight.
+    Health stays open so the restart helper can wait on it; interactive
+    desktop/mobile sends are not drained (no sender retry, seconds-long window).
+    """
+    if (
+        request.method == "POST"
+        and maintenance.drain_active()
+        and maintenance.request_should_drain(request.url.path)
+    ):
+        status, body, headers = maintenance.drain_retry_response()
+        logger.warning(
+            "gateway.maintenance_drain_refused path=%s", request.url.path
+        )
+        return JSONResponse(status_code=status, content=body, headers=headers)
+    return await call_next()
+
+
 app.include_router(browser_router)
 app.include_router(channel_router)
 app.include_router(automation_router)

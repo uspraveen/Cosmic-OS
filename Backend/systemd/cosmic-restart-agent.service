@@ -1,0 +1,17 @@
+[Unit]
+Description=COSMIC Restart Agent (activity-aware graceful fleet restarts)
+# Replaces blind needrestart restarts of cosmic services: detects stale
+# libraries, waits for an idle window (recent turns, running tasks, imminent
+# crons, pending deliveries, live Alpha builds), then restarts gracefully
+# through a drain window. See scripts/cosmic_restart_ctl.py.
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/ubuntu/Cosmic-OS/Backend
+ExecStart=/usr/bin/python3 /home/ubuntu/Cosmic-OS/Backend/scripts/cosmic_restart_ctl.py agent
+# One tick at a time; a restart in progress must never overlap a check.
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
