@@ -1349,21 +1349,21 @@ def build_visual_enhancement_env_rendered(
         "VISUAL_ENHANCEMENT_VISION_REASONING_EFFORT": fireworks_reasoning_effort
         or "low",
         "VISUAL_ENHANCEMENT_IMAGE_VISION_TIMEOUT_SEC": image_vision_timeout_sec or "4",
-        "VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL": fireworks_base_url
+        "VISUAL_ENHANCEMENT_LUNA_BASE_URL": fireworks_base_url
         or "https://api.openai.com/v1",
-        "VISUAL_ENHANCEMENT_FIREWORKS_MODEL": fireworks_model or "gpt-5.6-luna",
-        "VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL": fireworks_vision_model
+        "VISUAL_ENHANCEMENT_LUNA_MODEL": fireworks_model or "gpt-5.6-luna",
+        "VISUAL_ENHANCEMENT_LUNA_VISION_MODEL": fireworks_vision_model
         or fireworks_model
         or "gpt-5.6-luna",
-        "VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT": fireworks_reasoning_effort
+        "VISUAL_ENHANCEMENT_LUNA_REASONING_EFFORT": fireworks_reasoning_effort
         or "low",
-        "VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC": fireworks_timeout_sec or "8",
+        "VISUAL_ENHANCEMENT_LUNA_TIMEOUT_SEC": fireworks_timeout_sec or "8",
     }
     if firecrawl_api_key is not None:
         overrides["VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY"] = firecrawl_api_key
     if fireworks_api_key is not None:
         overrides["VISUAL_ENHANCEMENT_VISION_API_KEY"] = fireworks_api_key
-        overrides["VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"] = fireworks_api_key
+        overrides["VISUAL_ENHANCEMENT_LUNA_API_KEY"] = fireworks_api_key
 
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)

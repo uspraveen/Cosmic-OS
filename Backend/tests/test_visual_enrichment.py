@@ -933,8 +933,8 @@ def test_visual_enrichment_default_image_timeout_is_an_eight_second_floor(
     assert config.visual_image_slot_timeout_ms == 8000
     assert config.visual_image_search_timeout_sec == 5.0
     assert config.visual_download_timeout_sec == 6.0
-    assert config.visual_fireworks_vision_model == "gpt-5.6-luna"
-    assert config.visual_fireworks_base_url == "https://api.openai.com/v1"
+    assert config.visual_luna_vision_model == "gpt-5.6-luna"
+    assert config.visual_luna_base_url == "https://api.openai.com/v1"
     assert config.visual_image_vision_timeout_sec == 4.0
     assert config.visual_image_vision_max_output_tokens == 200
 
@@ -1477,7 +1477,7 @@ async def test_visual_enrichment_contact_sheet_uses_one_vision_call_and_selected
             visual_firecrawl_api_key="",
             visual_image_search_enabled=True,
             visual_image_search_base_url="https://www.bing.com/images/search",
-            visual_fireworks_api_key="fireworks-key",
+            visual_luna_api_key="luna-key",
         )
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             coordinator = VisualEnrichmentCoordinator(
@@ -2072,7 +2072,7 @@ async def test_visual_enrichment_verifier_crash_does_not_publish_unvetted_image(
     """A verifier that falls over must not hand the decision back to the lexical score."""
     root = _make_test_dir("visual-verifier-crash-")
     try:
-        config = _yc_config(root, visual_fireworks_api_key="fireworks-key")
+        config = _yc_config(root, visual_luna_api_key="luna-key")
         async with httpx.AsyncClient(transport=_build_verifier_crash_transport()) as client:
             coordinator = VisualEnrichmentCoordinator(
                 config=config,

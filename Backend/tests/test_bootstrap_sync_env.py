@@ -917,13 +917,13 @@ def test_build_visual_enhancement_env_rendered_inherits_shared_keys_from_peer_en
     assert "VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY=fc-key" in rendered
     assert parsed["VISUAL_ENHANCEMENT_FIRECRAWL_API_KEY"] == "fc-key"
     assert parsed["VISUAL_ENHANCEMENT_VISION_API_KEY"] == "luna-map-key"
-    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_API_KEY"] == "luna-map-key"
+    assert parsed["VISUAL_ENHANCEMENT_LUNA_API_KEY"] == "luna-map-key"
     assert parsed["VISUAL_ENHANCEMENT_VISION_MODEL"] == "gpt-5.6-luna"
-    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL"] == "gpt-5.6-luna"
+    assert parsed["VISUAL_ENHANCEMENT_LUNA_VISION_MODEL"] == "gpt-5.6-luna"
     assert parsed["VISUAL_ENHANCEMENT_VISION_BASE_URL"] == "https://api.openai.com/v1"
-    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL"] == "https://api.openai.com/v1"
+    assert parsed["VISUAL_ENHANCEMENT_LUNA_BASE_URL"] == "https://api.openai.com/v1"
     assert parsed["VISUAL_ENHANCEMENT_IMAGE_VISION_TIMEOUT_SEC"] == "4"
-    assert parsed["VISUAL_ENHANCEMENT_FIREWORKS_TIMEOUT_SEC"] == "20"
+    assert parsed["VISUAL_ENHANCEMENT_LUNA_TIMEOUT_SEC"] == "20"
     assert parsed["VISUAL_ENHANCEMENT_IMAGE_SEARCH_ENABLED"] == "true"
     assert (
         parsed["VISUAL_ENHANCEMENT_IMAGE_SEARCH_BASE_URL"]

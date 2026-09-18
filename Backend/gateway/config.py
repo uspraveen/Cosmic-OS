@@ -221,6 +221,15 @@ class GatewayConfig:
     anthropic_version: str = "2023-06-01"
     haiku_max_tokens: int = 16000
     haiku_thinking_budget_tokens: int = 10000
+    # Luna (OpenAI) backs the summarizer work: rollover summaries and mid-day
+    # compaction. Falls back to haiku_adapter when unset. The Anthropic
+    # credits behind haiku have been exhausted, which silently killed every
+    # 4AM session summary until this existed.
+    luna_api_key: str = ""
+    luna_model: str = "gpt-5.6-luna"
+    luna_base_url: str = "https://api.openai.com/v1"
+    luna_reasoning_effort: str = "low"
+    luna_timeout_sec: float = 180.0
     perplexity_api_key: str = ""
     perplexity_model: str = "sonar"
     capability_wishlist_embedding_model: str = "pplx-embed-v1-4b"
@@ -833,6 +842,24 @@ class GatewayConfig:
                 0,
                 _env_int("HAIKU_THINKING_BUDGET_TOKENS", 10000),
             ),
+            luna_api_key=(
+                os.getenv("LUNA_API_KEY")
+                or os.getenv("VISUAL_ENHANCEMENT_LUNA_API_KEY")
+                or os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY")
+                or os.getenv("OPENAI_API_KEY")
+                or ""
+            ).strip(),
+            luna_model=(os.getenv("LUNA_MODEL") or "gpt-5.6-luna").strip()
+            or "gpt-5.6-luna",
+            luna_base_url=(
+                os.getenv("LUNA_BASE_URL") or "https://api.openai.com/v1"
+            ).strip().rstrip("/")
+            or "https://api.openai.com/v1",
+            luna_reasoning_effort=(
+                os.getenv("LUNA_REASONING_EFFORT") or "low"
+            ).strip()
+            or "low",
+            luna_timeout_sec=max(30.0, _env_float("LUNA_TIMEOUT_SEC", 180.0)),
             perplexity_api_key=os.getenv("PERPLEXITY_API_KEY", "").strip(),
             perplexity_model=os.getenv("PERPLEXITY_MODEL", "sonar").strip(),
             capability_wishlist_embedding_model=(

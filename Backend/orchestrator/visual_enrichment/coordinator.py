@@ -28,8 +28,8 @@ from .clients import (
     DirectImageSearchConfig,
     FirecrawlVisualClient,
     FirecrawlVisualConfig,
-    FireworksVisualClient,
-    FireworksVisualConfig,
+    LunaVisualClient,
+    LunaVisualConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -750,14 +750,14 @@ class VisualEnrichmentCoordinator:
             ),
             http_client=http_client,
         )
-        self._fireworks = FireworksVisualClient(
-            FireworksVisualConfig(
-                api_key=config.visual_fireworks_api_key,
-                base_url=config.visual_fireworks_base_url,
-                model=config.visual_fireworks_model,
-                vision_model=config.visual_fireworks_vision_model,
-                reasoning_effort=config.visual_fireworks_reasoning_effort,
-                timeout_sec=config.visual_fireworks_timeout_sec,
+        self._luna = LunaVisualClient(
+            LunaVisualConfig(
+                api_key=config.visual_luna_api_key,
+                base_url=config.visual_luna_base_url,
+                model=config.visual_luna_model,
+                vision_model=config.visual_luna_vision_model,
+                reasoning_effort=config.visual_luna_reasoning_effort,
+                timeout_sec=config.visual_luna_timeout_sec,
                 max_output_tokens=config.visual_image_vision_max_output_tokens,
             ),
             http_client=http_client,
@@ -1416,7 +1416,7 @@ class VisualEnrichmentCoordinator:
         contact_sheet_completed = False
         contact_sheet_timed_out = False
         if (
-            self._fireworks.available
+            self._luna.available
             and self.config.visual_image_contact_sheet_enabled
             and not primary_run_capture
         ):
@@ -1445,7 +1445,7 @@ class VisualEnrichmentCoordinator:
                     for marker, candidate in marked_candidates
                 ]
                 sheet_verdict = await asyncio.wait_for(
-                    self._fireworks.rank_image_contact_sheet(
+                    self._luna.rank_image_contact_sheet(
                         slot_query=_safe_text(slot.query) or self.user_query,
                         user_query=self.user_query,
                         context_excerpt=slot.context_excerpt,
@@ -1555,7 +1555,7 @@ class VisualEnrichmentCoordinator:
             len(ranked),
         )
         if (
-            self._fireworks.available
+            self._luna.available
             and top_k > 0
             and not contact_sheet_completed
             and not contact_sheet_timed_out
@@ -1572,7 +1572,7 @@ class VisualEnrichmentCoordinator:
                 verdict: dict[str, Any] = {}
                 verifier_error = False
                 try:
-                    verdict = await self._fireworks.verify_image_candidate(
+                    verdict = await self._luna.verify_image_candidate(
                         slot_query=_safe_text(slot.query) or self.user_query,
                         user_query=self.user_query,
                         context_excerpt=slot.context_excerpt,

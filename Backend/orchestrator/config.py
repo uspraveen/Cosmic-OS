@@ -124,6 +124,8 @@ def _resolve_visual_vision_settings() -> tuple[str, str, str, str]:
     """Collage ranker: GPT-5.6 Luna on OpenAI, not the old Fireworks Kimi path."""
     explicit_model = _env_first("VISUAL_ENHANCEMENT_VISION_MODEL")
     legacy_model = _env_first(
+        "VISUAL_ENHANCEMENT_LUNA_VISION_MODEL",
+        "VISUAL_ENHANCEMENT_LUNA_MODEL",
         "VISUAL_ENHANCEMENT_FIREWORKS_VISION_MODEL",
         "VISUAL_ENHANCEMENT_FIREWORKS_MODEL",
     )
@@ -158,6 +160,7 @@ def _resolve_visual_vision_settings() -> tuple[str, str, str, str]:
         effort = (
             _env_first(
                 "VISUAL_ENHANCEMENT_VISION_REASONING_EFFORT",
+                "VISUAL_ENHANCEMENT_LUNA_REASONING_EFFORT",
                 "VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT",
             )
             or "low"
@@ -166,6 +169,7 @@ def _resolve_visual_vision_settings() -> tuple[str, str, str, str]:
 
     vision_key = _env_first(
         "VISUAL_ENHANCEMENT_VISION_API_KEY",
+        "VISUAL_ENHANCEMENT_LUNA_API_KEY",
         "VISUAL_ENHANCEMENT_FIREWORKS_API_KEY",
         "MODEL_API_KEY",
         "FIREWORKS_API_KEY",
@@ -174,6 +178,7 @@ def _resolve_visual_vision_settings() -> tuple[str, str, str, str]:
     vision_base = _normalize_openai_like_base_url(
         _env_first(
             "VISUAL_ENHANCEMENT_VISION_BASE_URL",
+            "VISUAL_ENHANCEMENT_LUNA_BASE_URL",
             "VISUAL_ENHANCEMENT_FIREWORKS_BASE_URL",
             "MODEL_BASE_URL",
             "FIREWORKS_BASE_URL",
@@ -184,6 +189,7 @@ def _resolve_visual_vision_settings() -> tuple[str, str, str, str]:
     effort = (
         _env_first(
             "VISUAL_ENHANCEMENT_VISION_REASONING_EFFORT",
+            "VISUAL_ENHANCEMENT_LUNA_REASONING_EFFORT",
             "VISUAL_ENHANCEMENT_FIREWORKS_REASONING_EFFORT",
         )
         or "low"
@@ -323,14 +329,15 @@ class OrchestratorConfig:
     visual_image_search_base_url: str = "https://www.bing.com/images/search"
     visual_image_search_timeout_sec: float = 5.0
     visual_image_search_result_limit: int = 12
-    # Collage ranker / per-image verifier. Defaults are GPT-5.6 Luna @ low.
-    # The fireworks_* names are historical; OpenAI Luna is the vision backend.
-    visual_fireworks_api_key: str = ""
-    visual_fireworks_base_url: str = "https://api.openai.com/v1"
-    visual_fireworks_model: str = "gpt-5.6-luna"
-    visual_fireworks_vision_model: str = "gpt-5.6-luna"
-    visual_fireworks_reasoning_effort: str = "low"
-    visual_fireworks_timeout_sec: float = 8.0
+    # Collage ranker / per-image verifier. GPT-5.6 Luna on the OpenAI API
+    # (https://api.openai.com/v1). The old Fireworks/Kimi endpoint is gone;
+    # LUNA_* env names are canonical, FIREWORKS_* names still read as legacy.
+    visual_luna_api_key: str = ""
+    visual_luna_base_url: str = "https://api.openai.com/v1"
+    visual_luna_model: str = "gpt-5.6-luna"
+    visual_luna_vision_model: str = "gpt-5.6-luna"
+    visual_luna_reasoning_effort: str = "low"
+    visual_luna_timeout_sec: float = 8.0
     visual_image_vision_timeout_sec: float = 4.0
     visual_image_vision_max_output_tokens: int = 200
 
@@ -375,6 +382,7 @@ class OrchestratorConfig:
                 os.getenv("ORCHESTRATOR_FIREWORKS_API_KEY")
                 or os.getenv("FIREWORKS_API_KEY")
                 or os.getenv("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY")
+                or os.getenv("VISUAL_ENHANCEMENT_LUNA_API_KEY")
                 or os.getenv("MODEL_API_KEY")
                 or os.getenv("SLIDE_AGENT_FIREWORKS_API_KEY")
                 or os.getenv("OPENAI_COMPAT_API_KEY")
@@ -560,16 +568,16 @@ class OrchestratorConfig:
                 1,
                 _env_int("VISUAL_ENHANCEMENT_IMAGE_SEARCH_RESULT_LIMIT", 12),
             ),
-            visual_fireworks_api_key=vision_key,
-            visual_fireworks_base_url=vision_base,
-            visual_fireworks_model=vision_model,
-            visual_fireworks_vision_model=vision_model,
+            visual_luna_api_key=vision_key,
+            visual_luna_base_url=vision_base,
+            visual_luna_model=vision_model,
+            visual_luna_vision_model=vision_model,
             visual_image_min_relevance=max(
                 0.0,
                 min(1.0, float(os.getenv("VISUAL_ENHANCEMENT_IMAGE_MIN_RELEVANCE", "0.18") or 0.18)),
             ),
-            visual_fireworks_reasoning_effort=vision_effort,
-            visual_fireworks_timeout_sec=max(
+            visual_luna_reasoning_effort=vision_effort,
+            visual_luna_timeout_sec=max(
                 5.0,
                 _env_float(
                     "VISUAL_ENHANCEMENT_VISION_TIMEOUT_SEC",

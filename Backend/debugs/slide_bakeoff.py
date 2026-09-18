@@ -55,6 +55,11 @@ GRAY = RGBColor(0x8A, 0x8A, 0x8A)
 
 def load_key() -> str:
     for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        if line.startswith("VISUAL_ENHANCEMENT_LUNA_API_KEY="):
+            key = line.split("=", 1)[1].strip()
+            if key:
+                candidates.append(("visual-luna-env", key))
+            continue
         if line.startswith("VISUAL_ENHANCEMENT_FIREWORKS_API_KEY="):
             return line.split("=", 1)[1].strip()
     raise SystemExit("no fireworks key found")

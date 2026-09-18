@@ -24,7 +24,7 @@ from urllib.parse import urlencode
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .adapters import HaikuAdapter, PerplexityAdapter
+from .adapters import HaikuAdapter, LunaAdapter, PerplexityAdapter
 from .adapters.response_processor import DirectRouteHandoff
 from .agent_auth_store import AgentAuthStore
 from .artifacts.store import ArtifactStore
@@ -649,6 +649,19 @@ class GatewayRuntime:
             thinking_budget_tokens=config.haiku_thinking_budget_tokens,
             timeout_sec=config.direct_llm_timeout_sec,
         )
+        # Summarizer work (rollover summaries, mid-day compaction, email-thread
+        # summaries) rides Luna on OpenAI when configured, because the Anthropic
+        # credits behind haiku have been dead for months -- every 4AM session
+        # summary was silently failing. Unset LUNA_API_KEY falls back to haiku.
+        self.summarizer_adapter = self.haiku_adapter
+        if config.luna_api_key and config.luna_model:
+            self.summarizer_adapter = LunaAdapter(
+                api_key=config.luna_api_key,
+                model=config.luna_model,
+                base_url=config.luna_base_url,
+                reasoning_effort=config.luna_reasoning_effort,
+                timeout_sec=config.luna_timeout_sec,
+            )
         self.perplexity_adapter = PerplexityAdapter(
             api_key=config.perplexity_api_key,
             model=config.perplexity_model,
@@ -925,6 +938,8 @@ class GatewayRuntime:
         await self.orchestrator.stop()
         await self.memory_client.stop()
         await self.capability_wishlist_service.close()
+        if self.summarizer_adapter is not self.haiku_adapter:
+            await self.summarizer_adapter.close()
         await self.haiku_adapter.close()
         await self.perplexity_adapter.close()
         await self.push_dispatcher.close()
@@ -15289,7 +15304,10 @@ class GatewayRuntime:
                 return
             if len(history) <= COMPACTION_RECENT_WINDOW_MESSAGES:
                 return
-            if not self.haiku_adapter.api_key or not self.haiku_adapter.model:
+            if (
+                not self.summarizer_adapter.api_key
+                or not self.summarizer_adapter.model
+            ):
                 return
 
             recent_history = history[-COMPACTION_RECENT_WINDOW_MESSAGES:]
@@ -15421,14 +15439,14 @@ class GatewayRuntime:
             recent_window_count=len(recent_history),
             current_tasks=self._normalize_string_list(current_tasks),
         )
-        summary_text, _usage, _stop_reason = await self.haiku_adapter.generate_text(
+        summary_text, _usage, _stop_reason = await self.summarizer_adapter.generate_text(
             system_prompt=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
             max_tokens=1200,
             usage_recorder=self._build_gateway_usage_recorder(
-                source_id="gateway:haiku",
+                source_id=self.summarizer_adapter.usage_source_id,
                 operation="gateway.session_compaction",
-                route="haiku",
+                route=self.summarizer_adapter.usage_route,
                 request_id=None,
                 session_id=session_id,
                 extra_metadata={
@@ -26190,7 +26208,10 @@ class GatewayRuntime:
     ) -> str | None:
         if not history:
             return None
-        if not self.haiku_adapter.api_key or not self.haiku_adapter.model:
+        if (
+            not self.summarizer_adapter.api_key
+            or not self.summarizer_adapter.model
+        ):
             return None
 
         transcript_source = self._session_summary_source_text(transcript_markdown)
@@ -26199,14 +26220,14 @@ class GatewayRuntime:
             message_count=len(history),
             transcript_source=transcript_source,
         )
-        summary_text, _usage, _stop_reason = await self.haiku_adapter.generate_text(
+        summary_text, _usage, _stop_reason = await self.summarizer_adapter.generate_text(
             system_prompt=system_prompt,
             messages=[{"role": "user", "content": user_message}],
             max_tokens=self.config.session_summary_max_output_tokens,
             usage_recorder=self._build_gateway_usage_recorder(
-                source_id="gateway:haiku",
+                source_id=self.summarizer_adapter.usage_source_id,
                 operation="gateway.session_summary",
-                route="haiku",
+                route=self.summarizer_adapter.usage_route,
                 request_id=None,
                 session_id=session_id,
                 extra_metadata={

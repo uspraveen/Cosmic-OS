@@ -1,5 +1,6 @@
 from .gemini import GeminiAdapter
 from .haiku import HaikuAdapter
+from .luna import LunaAdapter
 from .perplexity import PerplexityAdapter
 from .prompts import (
     AWAITING_REPLY_INSTRUCTION,
@@ -26,6 +27,7 @@ __all__ = [
     "HANDOFF_TAG",
     "LEGACY_HANDOFF_OPUS_TAG",
     "LLMStreamProcessor",
+    "LunaAdapter",
     "PerplexityAdapter",
     "StreamProcessingResult",
 ]

@@ -21,6 +21,9 @@ class SSEEvent:
 class HaikuAdapter(LLMStreamProcessor):
     """Direct Claude Haiku 4.5 streaming adapter for Gateway-routed chat."""
 
+    usage_source_id = "gateway:haiku"
+    usage_route = "haiku"
+
     def __init__(
         self,
         *,

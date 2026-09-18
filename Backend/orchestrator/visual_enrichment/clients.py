@@ -28,7 +28,7 @@ class FirecrawlVisualConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class FireworksVisualConfig:
+class LunaVisualConfig:
     api_key: str
     base_url: str
     model: str
@@ -304,10 +304,10 @@ def _build_vision_chat_payload(
     return payload
 
 
-class FireworksVisualClient:
+class LunaVisualClient:
     def __init__(
         self,
-        config: FireworksVisualConfig,
+        config: LunaVisualConfig,
         *,
         http_client: httpx.AsyncClient,
     ) -> None:
@@ -333,7 +333,7 @@ class FireworksVisualClient:
         candidate_nearby_text: str,
     ) -> dict[str, Any]:
         if not self.available:
-            raise VisualEnrichmentError("Fireworks visual verifier is not configured.")
+            raise VisualEnrichmentError("Luna visual verifier is not configured.")
         prompt = (
             "Does this image match the search query? JSON only.\n"
             "Keys: accept (bool), confidence (0-1), alt_text (<=12 words), "
@@ -378,10 +378,10 @@ class FireworksVisualClient:
         try:
             payload = response.json()
         except json.JSONDecodeError as exc:
-            raise VisualEnrichmentError("Fireworks visual verifier returned non-JSON.") from exc
+            raise VisualEnrichmentError("Luna visual verifier returned non-JSON.") from exc
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise VisualEnrichmentError("Fireworks visual verifier returned no choices.")
+            raise VisualEnrichmentError("Luna visual verifier returned no choices.")
         message = choices[0].get("message") if isinstance(choices[0], dict) else {}
         content = ""
         if isinstance(message, dict):
@@ -389,12 +389,12 @@ class FireworksVisualClient:
             if not content and isinstance(message.get("reasoning_content"), str):
                 content = str(message.get("reasoning_content") or "").strip()
         if not content:
-            raise VisualEnrichmentError("Fireworks visual verifier returned empty content.")
+            raise VisualEnrichmentError("Luna visual verifier returned empty content.")
         try:
             return _extract_json_object(content)
         except ValueError as exc:
-            logger.warning("visual_enrichment.fireworks_parse_failed: %s", exc)
-            raise VisualEnrichmentError("Fireworks visual verifier returned invalid JSON.") from exc
+            logger.warning("visual_enrichment.luna_parse_failed: %s", exc)
+            raise VisualEnrichmentError("Luna visual verifier returned invalid JSON.") from exc
 
     async def rank_image_contact_sheet(
         self,
@@ -412,7 +412,7 @@ class FireworksVisualClient:
         replaces N sequential verifier calls with a single comparison.
         """
         if not self.available:
-            raise VisualEnrichmentError("Fireworks visual verifier is not configured.")
+            raise VisualEnrichmentError("Luna visual verifier is not configured.")
         if not contact_sheet_jpeg:
             raise VisualEnrichmentError("Contact sheet was empty.")
         marker_lines: list[str] = []
@@ -479,10 +479,10 @@ class FireworksVisualClient:
         try:
             payload = response.json()
         except json.JSONDecodeError as exc:
-            raise VisualEnrichmentError("Fireworks contact-sheet ranker returned non-JSON.") from exc
+            raise VisualEnrichmentError("Luna contact-sheet ranker returned non-JSON.") from exc
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise VisualEnrichmentError("Fireworks contact-sheet ranker returned no choices.")
+            raise VisualEnrichmentError("Luna contact-sheet ranker returned no choices.")
         message = choices[0].get("message") if isinstance(choices[0], dict) else {}
         content = ""
         if isinstance(message, dict):
@@ -490,19 +490,19 @@ class FireworksVisualClient:
             if not content and isinstance(message.get("reasoning_content"), str):
                 content = str(message.get("reasoning_content") or "").strip()
         if not content:
-            raise VisualEnrichmentError("Fireworks contact-sheet ranker returned empty content.")
+            raise VisualEnrichmentError("Luna contact-sheet ranker returned empty content.")
         try:
             return _extract_json_object(content)
         except ValueError as exc:
-            logger.warning("visual_enrichment.fireworks_contact_sheet_parse_failed: %s", exc)
-            raise VisualEnrichmentError("Fireworks contact-sheet ranker returned invalid JSON.") from exc
+            logger.warning("visual_enrichment.luna_contact_sheet_parse_failed: %s", exc)
+            raise VisualEnrichmentError("Luna contact-sheet ranker returned invalid JSON.") from exc
 
     @staticmethod
     def _extract_http_error(response: httpx.Response) -> str:
         try:
             payload = response.json()
         except json.JSONDecodeError:
-            return response.text.strip()[:500] or f"Fireworks request failed ({response.status_code})."
+            return response.text.strip()[:500] or f"Luna request failed ({response.status_code})."
         if isinstance(payload, dict):
             error = payload.get("error")
             if isinstance(error, dict):
@@ -513,4 +513,4 @@ class FireworksVisualClient:
                 value = payload.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()[:500]
-        return f"Fireworks request failed ({response.status_code})."
+        return f"Luna request failed ({response.status_code})."

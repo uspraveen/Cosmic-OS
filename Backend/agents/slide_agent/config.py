@@ -115,6 +115,7 @@ class SlideAgentConfig:
             # VM-wide Fireworks credentials the bootstrap may have rendered for
             # peers; the slide agent can ride the same account.
             "ORCHESTRATOR_FIREWORKS_API_KEY",
+            "VISUAL_ENHANCEMENT_LUNA_API_KEY",
             "VISUAL_ENHANCEMENT_FIREWORKS_API_KEY",
         )
         openai_api_key = _first_env(
