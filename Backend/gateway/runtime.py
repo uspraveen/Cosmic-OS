@@ -13947,7 +13947,11 @@ class GatewayRuntime:
 
     TASK_STATUS_SEARCH_LIMIT = 5
     TASK_STATUS_SEARCH_GOAL_CHARS = 260
-    TASK_STATUS_SEARCH_SCAN = 60
+    # Wide enough that a mass startup reconciliation (which bumps updated_at
+    # on every zombie it flips) cannot bury the day's genuinely-recent tasks
+    # below the scan window -- the first live run reconciled 156 old corpses
+    # at once and 'jev reranker' stopped matching until this was widened.
+    TASK_STATUS_SEARCH_SCAN = 250
 
     def task_status_search(self, query: str, *, limit: int | None = None) -> dict[str, Any]:
         """Deterministic grounding for "how is X going?" questions.
@@ -13996,12 +14000,31 @@ class GatewayRuntime:
                 continue
             status = (self._safe_text(notebook.get("status")) or "").lower() or "unknown"
             updated_raw = self._safe_text(notebook.get("updated_at"))
+            # Age from the last real activity, not updated_at: reconciliation
+            # and other bookkeeping upserts bump updated_at without the task
+            # actually doing anything, which made months-old corpses look
+            # minutes-fresh on the first live run.
+            activity_items = (
+                activity_log if isinstance(activity_log, list) else []
+            )
+            age_source_raw = updated_raw
+            for item in reversed(activity_items):
+                if not isinstance(item, dict):
+                    continue
+                entry_id = self._safe_text(item.get("id")) or ""
+                if entry_id.startswith("activity_reconcile_"):
+                    continue
+                if self._safe_text(item.get("created_at")):
+                    age_source_raw = self._safe_text(item.get("created_at"))
+                    break
             age_minutes: int | None = None
             try:
-                updated = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
-                if updated.tzinfo is None:
-                    updated = updated.replace(tzinfo=timezone.utc)
-                age_minutes = max(0, int((now - updated).total_seconds() // 60))
+                age_source = datetime.fromisoformat(
+                    (age_source_raw or "").replace("Z", "+00:00")
+                )
+                if age_source.tzinfo is None:
+                    age_source = age_source.replace(tzinfo=timezone.utc)
+                age_minutes = max(0, int((now - age_source).total_seconds() // 60))
             except ValueError:
                 pass
             score = float(hits)
