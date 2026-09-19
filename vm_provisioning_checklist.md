@@ -392,3 +392,25 @@ Before handing the VM to the user, confirm:
   go missing across a restart window, ask the provider about webhook retries
   or add a post-restart mailbox poll; the gateway logs every drain-refused
   webhook as `gateway.maintenance_drain_refused`.
+
+## cosmic-browser-use Engine Updates (2026-09-18)
+
+`bootstrap.py provision-vm` clones the browser engine once (shallow, from
+`https://github.com/uspraveen/agent-browser-index.git`) into
+`/home/ubuntu/cosmic-browser-use` and never pulls again
+(`ensure_browser_repo_checkout` reuses any existing checkout as-is). After
+pushing engine changes to GitHub, sync a running VM manually:
+
+```bash
+ssh <vm-host>
+cd /home/ubuntu/cosmic-browser-use && git pull
+sudo systemctl restart cosmic-browser-agent   # or: sudo python3 /home/ubuntu/Cosmic-OS/Backend/scripts/cosmic_restart_ctl.py restart
+```
+
+Browser-agent env vars live in `/etc/cosmic/agents/browser-agent.env`
+(rendered by bootstrap from the shared env on each provision; new keys:
+`TYPESAFE_API_KEY` for the Jev decision-engine fast path, optional
+`COSMIC_DECISION_ENGINE=jev|llm`, default jev). Adding a key to an
+already-provisioned VM means appending it to that file by hand and
+restarting the service. Keyless is safe: the engine downgrades to the
+classic planner.

@@ -997,6 +997,12 @@ def build_browser_agent_env_rendered(
     browser_agent_model_set = pick_env(["BROWSER_AGENT_MODEL_SET"])
     mimo_api_url = pick_env(["MIMO_API_URL"])
     mimo_api_key = pick_env(["MIMO_API_KEY"])
+    # Jev decision engine (cosmic-browser-use fast path). Passed through only
+    # when the operator set it; the engine itself defaults to jev and
+    # downgrades to the classic planner when TYPESAFE_API_KEY is absent, so an
+    # unset key changes nothing about existing runs.
+    typesafe_api_key = pick_env(["TYPESAFE_API_KEY"])
+    cosmic_decision_engine = pick_env(["COSMIC_DECISION_ENGINE"])
     # AskUser mid-run interrupts (OTP/CAPTCHA/phone-approval/ambiguous forms)
     # now round-trip through the desktop instead of a CLI stdin prompt, so the
     # deployed default needs to be longer than cosmic-browser-use's own 120s.
@@ -1029,6 +1035,10 @@ def build_browser_agent_env_rendered(
         overrides["MIMO_API_URL"] = mimo_api_url
     if meaningful_env_value(mimo_api_key) is not None:
         overrides["MIMO_API_KEY"] = mimo_api_key
+    if meaningful_env_value(typesafe_api_key) is not None:
+        overrides["TYPESAFE_API_KEY"] = typesafe_api_key
+    if meaningful_env_value(cosmic_decision_engine) is not None:
+        overrides["COSMIC_DECISION_ENGINE"] = cosmic_decision_engine
 
     rendered = render_env_with_overrides(source_raw, overrides)
     rendered_data = parse_env_text(rendered)
