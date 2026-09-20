@@ -76,6 +76,10 @@ class EmailAgentConfig:
     attachment_docs_parse_timeout_sec: float = 240.0
     attachment_docs_parse_reconcile_timeout_sec: float = 900.0
     attachment_docs_parse_poll_interval_sec: float = 0.25
+    # Cosmic-authored notifications (progress updates, alerts) go to this
+    # address when a send is requested but no recipient could be resolved —
+    # the "email me" case never depends on parsing prose.
+    default_notification_recipient: str = ""
     internal_llm_api_key: str = ""
     internal_llm_base_url: str = ""
     internal_llm_model: str = "gpt-5.6-luna"
@@ -117,6 +121,7 @@ class EmailAgentConfig:
                 0.1,
                 _env_float("EMAIL_AGENT_ATTACHMENT_DOCS_PARSE_POLL_INTERVAL_SEC", 0.25),
             ),
+            default_notification_recipient=os.getenv("EMAIL_AGENT_NOTIFICATION_RECIPIENT", "").strip(),
             internal_llm_api_key=(os.getenv("EMAIL_AGENT_INTERNAL_LLM_API_KEY") or os.getenv("OPENAI_COMPAT_API_KEY") or "").strip(),
             internal_llm_base_url=normalize_openai_compatible_base_url(
                 (os.getenv("EMAIL_AGENT_INTERNAL_LLM_BASE_URL") or os.getenv("OPENAI_COMPAT_BASE_URL") or "").strip()

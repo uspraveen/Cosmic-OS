@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "draft_id": { "type": "string", "minLength": 1 },
+    "to_recipients": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "email": { "type": "string", "minLength": 3 },
+          "name": { "type": ["string", "null"] }
+        },
+        "required": ["email"]
+      }
+    },
+    "cc_recipients": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "email": { "type": "string", "minLength": 3 },
+          "name": { "type": ["string", "null"] }
+        },
+        "required": ["email"]
+      }
+    },
+    "subject": { "type": "string" },
+    "body": { "type": "string" },
+    "mailbox_address": { "type": "string", "minLength": 1 },
+    "mailbox_id": { "type": "string", "minLength": 1 }
+  }
+}

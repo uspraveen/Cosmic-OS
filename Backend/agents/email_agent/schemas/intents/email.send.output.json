@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "properties": {
+    "response": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string"
+    },
+    "sent": {
+      "type": "boolean"
+    },
+    "thread_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "message_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "draft_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "to_recipients": {
+      "type": "array"
+    },
+    "cc_recipients": {
+      "type": "array"
+    },
+    "search_results": {
+      "type": "array"
+    },
+    "delivery_status": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

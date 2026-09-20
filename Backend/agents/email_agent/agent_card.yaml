@@ -33,6 +33,16 @@ intents:
       - Cosmic Mail enforces a per-agent approval gate when an outbound mailbox's agent has approval_required enabled. A response with queued_for_approval=true (equivalently delivery_status="queued_for_approval" or a non-null approval_id) means the draft was successfully handed off to a human reviewer — this is a successful outcome, not a stall or failure. Treat the intent as complete, surface the approval_id and the queued status to the user, and do not retry or recompose the draft.
       - The user maintains a trusted-senders allowlist (managed in Spaces > Agent Email > Settings) that is mirrored into Cosmic Mail. Outbound to addresses on that list bypasses the approval gate, so the same agent may return sent=true for a trusted recipient and queued_for_approval=true for an untrusted recipient on the same draft path; this is expected and per-recipient.
 
+  - name: email.send
+    description: "Mechanically send an email from COSMIC's own mailbox — either deliver an existing draft by draft_id, or create and send with fully structured to_recipients, subject, and body. No goal parsing and no interpretation: every field is explicit."
+    input_schema: schemas/intents/email.send.input.json
+    output_schema: schemas/intents/email.send.output.json
+    timeout_sec: 120
+    usage_hints:
+      - "Preferred for notifications, alerts, progress updates, and any 'email me X' where COSMIC is the author and the user is the recipient. Pass to_recipients (the user's address), subject, and body explicitly."
+      - "Pass draft_id to deliver an existing draft; the draft is sent as-is, never recomposed."
+      - "A send request that ends without confirmed delivery returns failed (EMAIL_SEND_NOT_COMPLETED) — retry the same structured call; do not switch to a prose email.handle goal."
+      - "Do not hand COSMIC-authored mail to the Gmail specialist; Gmail is the user's own account for their correspondence with other people."
   - name: email.reason
     description: Legacy alias for `email.handle`. Prefer `email.handle` for new work.
     input_schema: schemas/intents/email.reason.input.json
