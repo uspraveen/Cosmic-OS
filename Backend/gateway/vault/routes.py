@@ -516,13 +516,26 @@ async def internal_lookup(body: LookupRequest, request: Request):
         if code:
             totp_code, totp_remaining = code
     store.append_audit(entry_id, "orchestrator", "use", body.task_id)
-    return {
+    result = {
         "status": "ok",
         "credential_ref": f"{CREDENTIAL_REF_PREFIX}{entry_id}",
         **agent_lookup_metadata(entry),
         "totp_code": totp_code,
         "totp_seconds_remaining": totp_remaining,
     }
+    if not str(entry.get("site_domain") or "").strip():
+        # The browser agent keys its credential store by site, so an entry
+        # saved with a title and no URL cannot be offered on any page unless
+        # the run itself names one. Say so where the model can act on it,
+        # rather than letting the approval succeed and the login silently
+        # never happen.
+        result["site_warning"] = (
+            f"This vault entry ({entry['title']!r}) has no site URL. The browser agent can "
+            "only fill it on a page it can match to a site: pass initial_url naming the login "
+            "page when you call browser_task, or ask the user to add the site URL to the entry "
+            "in Password Vault settings. Do not ask the user to type the password."
+        )
+    return result
 
 
 @router.post("/internal/vault/resolve")

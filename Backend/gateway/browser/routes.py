@@ -389,6 +389,42 @@ async def skip_interrupt(request_id: str, request: Request) -> dict[str, Any]:
     return {"status": "skipped", "request_id": interrupt.request_id}
 
 
+def _vault_already_holds_login(store: Any, *, domain: str, username: str) -> bool:
+    """Whether an existing entry is, in the user's terms, this same login.
+
+    `find_entries(domain)` only knows domains. An entry the user saved with a
+    title and no site — "ycombinator", usp@… — is invisible to it, so a
+    password typed on account.ycombinator.com was offered for saving and the
+    vault grew a second copy of a login it already had. Same account name plus
+    a title that names the site — one of the domain's own labels, or the
+    domain itself — is that entry.
+
+    Deliberately not "same account and no site": that would read a site-less
+    entry as a match for every login the account has anywhere, and a missed
+    save is worse than an extra offer.
+    """
+    account = str(username or "").strip().lower()
+    host = str(domain or "").strip().lower()
+    if not account or not host:
+        return False
+    labels = {label for label in host.split(".") if label}
+    try:
+        entries = store.list_entries() or []
+    except Exception:
+        return False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("username") or "").strip().lower() != account:
+            continue
+        title = str(entry.get("title") or "").strip().lower()
+        if not title:
+            continue
+        if title in labels or host == title or host.endswith("." + title):
+            return True
+    return False
+
+
 async def _offer_password_to_vault(runtime: Any, interrupt: Any, password: str) -> None:
     """Approval-gated vault offer for a password typed into a browser card.
 
@@ -412,8 +448,12 @@ async def _offer_password_to_vault(runtime: Any, interrupt: Any, password: str) 
         store = getattr(runtime, "vault_store", None)
         if store is None:
             return
+        email_match = _EMAIL_RE.search(question)
+        username = email_match.group(0) if email_match else ""
         try:
             if store.find_entries(domain):
+                return
+            if _vault_already_holds_login(store, domain=domain, username=username):
                 return
         except Exception:
             pass
@@ -431,8 +471,6 @@ async def _offer_password_to_vault(runtime: Any, interrupt: Any, password: str) 
                     return
         except Exception:
             pass
-        email_match = _EMAIL_RE.search(question)
-        username = email_match.group(0) if email_match else ""
         pending = await runtime.create_vault_pending_and_notify(
             {
                 "action": "add_entry",

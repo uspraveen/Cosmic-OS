@@ -1048,6 +1048,18 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                         <span className="vault-tag is-expiry">Expires {formatVaultExpiry(entry.expires_at)}</span>
                       ) : null}
                       {entry.source === 'agent' ? <span className="vault-tag is-agent">By Cosmic</span> : null}
+                      {/* A login is offered on a page by matching its site. With
+                          none recorded the browser agent can only guess one from
+                          the run — or not at all — so say it here, next to the
+                          entry the user can fix, instead of at the login wall. */}
+                      {normalizeVaultCredentialKind(entry.credential_kind) === 'login' && !entry.site_domain ? (
+                        <span
+                          className="vault-tag is-expiry"
+                          title="Add the site URL so the browser agent knows which login page this belongs to."
+                        >
+                          No site
+                        </span>
+                      ) : null}
                       {mode === 'window' && windowActive(policy) ? (
                         <span className="vault-tag is-window">Window open</span>
                       ) : null}

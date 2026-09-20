@@ -63,6 +63,40 @@ _SCREENSHOT_MIME_BY_SUFFIX = {
 # credential governor uses (main.py:_detect_credential_handoff_reason) so the
 # two stay in sync without importing across the repo boundary.
 _PASSWORD_HINT_WORDS = ("password",)
+
+# A hostname as it appears in prose or a URL: "account.ycombinator.com",
+# "chase.com". Used only to recover a site for a vault entry saved without
+# one — never to decide whether a page is a login page.
+_HOSTNAME_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\b", re.IGNORECASE)
+
+
+def _host_of(url: str) -> str:
+    """Hostname of a URL or bare domain, lower-cased, without a leading www."""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(raw).hostname or "").strip().lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def _first_hostname_in(text: str) -> str:
+    """First thing in free text that reads as a hostname, or empty."""
+    text = str(text or "")
+    for match in _HOSTNAME_RE.finditer(text):
+        # An email address carries a hostname too; skip the domain half of
+        # one so "usp@upenn.edu" never becomes the login site.
+        if match.start() > 0 and text[match.start() - 1] == "@":
+            continue
+        host = match.group(0).lower()
+        return host[4:] if host.startswith("www.") else host
+    return ""
 _CODE_HINT_WORDS = ("verification code", "security code", "one-time code", "otp", "mfa", "2fa")
 # `confirm`: nothing to type — the user does something themselves (approve on
 # a phone, sign in in another window, solve a puzzle) and just acknowledges
@@ -212,7 +246,7 @@ class BrowserAgent(AgentRuntime):
         # e.g. a CSV of URLs to visit or account notes to act on.
         goal = self._goal_with_artifact_context(goal, task)
 
-        credentials = self._credentials_from_auth()
+        credentials, vault_credential_gap = self._resolve_vault_credentials(task.input)
 
         await self._emit_progress(task.task_id, f"Starting browser run: {goal[:120]}")
 
@@ -445,6 +479,19 @@ class BrowserAgent(AgentRuntime):
                 "No vault credentials were available for this site. Ask the user via the "
                 "credential request flow (browser_credential_request), then re-run browser.run "
                 "with the resulting credential_ref."
+            )
+        if vault_credential_gap:
+            # Distinct from needs_credentials on purpose: the vault DOES hold
+            # this login, so asking the user to enter one would be the wrong
+            # follow-up. What is missing is the site the entry applies to.
+            output["vault_credential_unusable"] = vault_credential_gap
+            output["credential_hint"] = (
+                f"The vault entry {vault_credential_gap.get('title') or 'for this login'!r} was "
+                "resolved for this run but has no site URL, so the browser could not tell which "
+                "page it belongs to and never offered it. Do NOT ask the user to enter the "
+                "password. Either re-run browser.run with the same credential_ref and an "
+                "initial_url naming the login page, or ask the user to add the site URL to that "
+                "vault entry in Password Vault settings."
             )
         recall_summary = str(result.get("recall_summary") or "").strip()
         self._record_session_run(
@@ -734,23 +781,80 @@ class BrowserAgent(AgentRuntime):
         except Exception:
             logger.debug("browser_agent.usage_build_failed task_id=%s", task.task_id, exc_info=True)
 
-    def _credentials_from_auth(self) -> dict[str, dict[str, str]] | None:
+    def _credentials_from_auth(
+        self,
+        run_input: dict[str, Any] | None = None,
+    ) -> dict[str, dict[str, str]] | None:
         """Map dispatch-injected vault credentials to the run's secure store.
 
         auth.vault is the decrypted vault entry the orchestrator resolved at
         dispatch time — it never came from a model context.
         """
+        resolved, _gap = self._resolve_vault_credentials(run_input)
+        return resolved
+
+    def _resolve_vault_credentials(
+        self,
+        run_input: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, dict[str, str]] | None, dict[str, Any] | None]:
+        """The credential store for this run, plus a diagnosis when the injected
+        entry could not be used.
+
+        The store is keyed by site: CredentialFill only ever offers a login on
+        a host that matches its key, which is what keeps a vault password off
+        every other page the run visits. An entry the user saved with a title
+        but no site therefore has no key of its own — and it used to be dropped
+        here without a word, one line after the vault had approved it, resolved
+        it, and handed it over. The run then met the login page with an empty
+        store and asked the user to type the password the vault already held.
+
+        So the key is recovered from what the run itself knows: the site the
+        entry names, else the page the orchestrator pointed the run at, else a
+        hostname written into the goal. Every fallback is logged. When none of
+        them yields a host the entry is still unusable — but the run result now
+        says so (`vault_credential_unusable`) instead of letting the
+        orchestrator believe the credential reached the page.
+        """
         auth = self.auth
         if not isinstance(auth, dict):
-            return None
+            return None, None
         vault = auth.get("vault")
         if not isinstance(vault, dict):
-            return None
-        site = str(vault.get("site_domain") or vault.get("site_url") or "").strip()
+            return None, None
         username = str(vault.get("username") or "")
         password = str(vault.get("password") or "")
-        if not site or not (username or password):
-            return None
+        if not (username or password):
+            return None, None
+        title = str(vault.get("title") or "").strip()
+        run_input = run_input if isinstance(run_input, dict) else {}
+
+        site = _host_of(str(vault.get("site_domain") or "")) or _host_of(str(vault.get("site_url") or ""))
+        site_source = "vault_entry"
+        if not site:
+            site = _host_of(str(run_input.get("initial_url") or ""))
+            site_source = "initial_url"
+        if not site:
+            site = _first_hostname_in(str(run_input.get("goal") or ""))
+            site_source = "goal_text"
+        if not site:
+            logger.warning(
+                "browser_agent.vault_credential_unusable title=%r username=%r reason=no_site "
+                "(entry has no site, run has no initial_url, goal names no host)",
+                title,
+                username,
+            )
+            return None, {
+                "title": title,
+                "username": username,
+                "reason": "vault_entry_has_no_site",
+            }
+        if site_source != "vault_entry":
+            logger.warning(
+                "browser_agent.vault_credential_site_recovered title=%r site=%s source=%s",
+                title,
+                site,
+                site_source,
+            )
         return {
             site: {
                 "username": username,
@@ -759,7 +863,7 @@ class BrowserAgent(AgentRuntime):
                 "notes": str(vault.get("notes") or ""),
                 "site_url": str(vault.get("site_url") or ""),
             }
-        }
+        }, None
 
     async def _emit_progress(self, task_id: str, message: str, **payload: Any) -> None:
         try:

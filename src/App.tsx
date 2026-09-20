@@ -64,7 +64,7 @@ import {
   mouseInputEvent,
   type TakeoverInputEvent,
 } from './browserTakeoverInput'
-import { VAULT_ALLOW_WINDOW_SECONDS, vaultIslandAllowWindowLabel } from './vaultIsland'
+import { VAULT_ALLOW_WINDOW_SECONDS, vaultIslandAllowWindowLabel, vaultIslandAlwaysAllowLabel } from './vaultIsland'
 
 export type SearchPosition = 'bottom' | 'middle'
 export type QueryMode = 'chat' | 'task' | 'meeting' | 'spaces'

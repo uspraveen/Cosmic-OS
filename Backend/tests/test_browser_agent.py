@@ -132,6 +132,65 @@ def test_credentials_from_auth(browser_agent):
     assert browser_agent._credentials_from_auth() is None
 
 
+def _title_only_entry() -> dict:
+    # Exactly what the YC entry looked like on 2026-09-17: saved from the
+    # settings page with a title and a login, no site. The vault approved it,
+    # resolved it, injected it — and the run threw it away without a word.
+    return {"title": "ycombinator", "site_domain": "", "site_url": "", "username": "me@example.com", "password": "hunter2"}
+
+
+def test_title_only_vault_entry_recovers_its_site_from_initial_url(browser_agent, caplog):
+    browser_agent.auth = {"vault": _title_only_entry()}
+    with caplog.at_level("WARNING"):
+        credentials, gap = browser_agent._resolve_vault_credentials(
+            {"goal": "Sign in and fill the application", "initial_url": "https://account.ycombinator.com/?continue=x"}
+        )
+    assert gap is None
+    assert credentials is not None
+    assert list(credentials) == ["account.ycombinator.com"]
+    assert credentials["account.ycombinator.com"]["password"] == "hunter2"
+    assert "vault_credential_site_recovered" in caplog.text
+    assert "source=initial_url" in caplog.text
+
+
+def test_title_only_vault_entry_recovers_its_site_from_the_goal(browser_agent):
+    browser_agent.auth = {"vault": _title_only_entry()}
+    credentials, gap = browser_agent._resolve_vault_credentials(
+        {"goal": "Log in at www.ycombinator.com and open the events page"}
+    )
+    assert gap is None
+    assert credentials is not None
+    assert list(credentials) == ["ycombinator.com"]
+
+
+def test_goal_hostname_recovery_skips_email_domains(browser_agent):
+    # The user's own address must never be mistaken for the login site.
+    browser_agent.auth = {"vault": _title_only_entry()}
+    credentials, gap = browser_agent._resolve_vault_credentials(
+        {"goal": "Use me@example.com to sign in to portal.example.org"}
+    )
+    assert gap is None
+    assert list(credentials) == ["portal.example.org"]
+
+
+def test_title_only_vault_entry_with_no_recoverable_site_is_reported_not_dropped(browser_agent, caplog):
+    browser_agent.auth = {"vault": _title_only_entry()}
+    with caplog.at_level("WARNING"):
+        credentials, gap = browser_agent._resolve_vault_credentials({"goal": "Log in to YC and apply"})
+    assert credentials is None
+    assert gap == {"title": "ycombinator", "username": "me@example.com", "reason": "vault_entry_has_no_site"}
+    assert "vault_credential_unusable" in caplog.text
+
+
+def test_entry_with_its_own_site_ignores_run_hints(browser_agent):
+    # The fallbacks are only for an entry that has nothing; an entry that names
+    # its site keeps it even when the run points somewhere else.
+    browser_agent.auth = {"vault": {**_title_only_entry(), "site_domain": "greenhouse.io"}}
+    credentials, gap = browser_agent._resolve_vault_credentials({"initial_url": "https://elsewhere.example"})
+    assert gap is None
+    assert list(credentials) == ["greenhouse.io"]
+
+
 def test_classify_ask_user_kind(browser_agent):
     assert browser_agent._classify_ask_user_kind("Please enter your password to continue.") == "password"
     assert browser_agent._classify_ask_user_kind("What is the verification code sent to your phone?") == "verification_code"

@@ -4,6 +4,7 @@ import {
   parseVaultIslandOpen,
   vaultIslandAllowLabel,
   vaultIslandAllowWindowLabel,
+  vaultIslandAlwaysAllowLabel,
   vaultIslandFromPending,
   vaultIslandHeadline,
 } from './vaultIsland'
@@ -24,7 +25,11 @@ describe('vaultIsland', () => {
     expect(request?.credentialKind).toBe('api_key')
     expect(vaultIslandHeadline(request!)).toBe('Cosmic wants to use a saved credential')
     expect(vaultIslandAllowLabel(request!)).toBe('Allow once')
-    expect(vaultIslandAllowWindowLabel()).toBe('Allow 15 min')
+    // The window is 24 hours since 408ec51 — a 15-minute grant expired
+    // mid-build and locked Alpha out. The button says the duration so it
+    // is never a surprise; this pins the label to the real window.
+    expect(vaultIslandAllowWindowLabel()).toBe('Allow 24 hours')
+    expect(vaultIslandAlwaysAllowLabel()).toBe('Always allow')
   })
 
   it('opens browser credential requests with a provide-credentials action', () => {

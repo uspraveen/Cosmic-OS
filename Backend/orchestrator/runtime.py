@@ -3285,6 +3285,20 @@ class OrchestratorRuntime:
             vault_auth = dict(child_input["auth"]) if isinstance(child_input.get("auth"), dict) else {}
             vault_auth["vault"] = vault_credential
             child_input["auth"] = vault_auth
+            if not str(vault_credential.get("site_domain") or "").strip():
+                # The browser specialist keys its credential store by site. An
+                # entry with none reaches it as a login with nowhere to go — it
+                # recovers a host from initial_url or the goal when it can, and
+                # reports the gap when it cannot. Either way this is the moment
+                # the audit trail should show a fully approved credential
+                # leaving the vault without a site attached.
+                logger.warning(
+                    "orchestrator.vault_credential_without_site title=%r intent=%s initial_url=%r task=%s",
+                    vault_credential.get("title"),
+                    resolved_intent,
+                    child_input.get("initial_url"),
+                    parent_task.task_id,
+                )
             usage_notes = str(vault_credential.get("notes") or "").strip()
             if usage_notes:
                 # Usage constraints belong in the specialist's task input so they
