@@ -1846,3 +1846,49 @@ async def test_publish_prophet_edition_forces_cron_slot_over_model_input() -> No
     assert result["slot"] == "evening"
     assert captured["body"]["slot"] == "evening"
     assert captured["body"]["edition"]["slot"] == "evening"
+    assert "LIVE" in result["message"]
+    assert "overwrote" not in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_publish_prophet_edition_receipt_names_the_overwritten_revision() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            201,
+            json={
+                "edition_id": "ped_morning",
+                "edition_date": "2026-09-20",
+                "slot": "morning",
+                "story_count": 15,
+                "revision": 28,
+                "warnings": [],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    executor = ToolExecutor(
+        gateway_url="http://gateway",
+        gateway_internal_token="internal-token",
+        client=client,
+    )
+    try:
+        raw_result = await executor.execute(
+            "publish_prophet_edition",
+            {
+                "slot": "morning",
+                "sections": [
+                    {
+                        "id": "tech",
+                        "label": "Technology",
+                        "stories": [{"headline": "Wrap", "body": ["Body."]}],
+                    }
+                ],
+            },
+        )
+    finally:
+        await client.aclose()
+
+    result = json.loads(raw_result)
+    assert result["published"] is True
+    assert result["revision"] == 28
+    assert "overwrote revision 27" in result["message"]

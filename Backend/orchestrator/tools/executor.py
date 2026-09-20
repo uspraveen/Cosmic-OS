@@ -2724,15 +2724,24 @@ class ToolExecutor:
         if not isinstance(response, dict):
             return {"error": True, "message": "Daily Prophet store returned an unexpected response."}
         warnings = response.get("warnings")
+        revision = response.get("revision")
+        message = (
+            "Daily Prophet edition published and is LIVE — readers see this "
+            "paper now. Call publish_prophet_edition again only to fix an "
+            "error or add genuinely new stories; every call overwrites the "
+            "live paper."
+        )
+        if isinstance(revision, int) and revision > 1:
+            message += f" This overwrote revision {revision - 1} of today's paper."
         return {
             "published": True,
             "edition_id": response.get("edition_id"),
             "edition_date": response.get("edition_date"),
             "slot": response.get("slot"),
             "story_count": response.get("story_count"),
-            "revision": response.get("revision"),
+            "revision": revision,
             "warnings": warnings if isinstance(warnings, list) else [],
-            "message": "Daily Prophet edition published.",
+            "message": message,
         }
 
     async def _read_prophet_edition(

@@ -9,6 +9,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -152,6 +153,47 @@ def _url_hash(url: str | None) -> str | None:
     if not normalized:
         return None
     return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:20]
+
+
+_URL_NOISE_PARAM_PREFIXES = ("utm_",)
+_URL_NOISE_PARAMS = frozenset({"fbclid", "gclid"})
+
+
+def _canonical_article_url(url: str | None) -> str:
+    """Identity of a story's source link: the same article behind minor URL dressing.
+
+    Two links that differ only by tracking params, a trailing slash, a fragment,
+    scheme (http/https), or a www prefix point at the same article; links that
+    differ in path or non-noise query are treated as different articles.
+    """
+    cleaned = _clean_text(url, limit=2000)
+    if not cleaned:
+        return ""
+    try:
+        parts = urlsplit(cleaned)
+    except ValueError:
+        return cleaned
+    if not parts.scheme or not parts.netloc:
+        return cleaned
+    host = parts.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not key.lower().startswith(_URL_NOISE_PARAM_PREFIXES)
+        and key.lower() not in _URL_NOISE_PARAMS
+    ]
+    query_text = urlencode(query)
+    return f"{host}{parts.path.rstrip('/')}" + (f"?{query_text}" if query_text else "")
+
+
+def _story_identity(story: dict[str, Any]) -> tuple[str, str]:
+    """(canonical source url, normalized headline key) for duplicate detection."""
+    source = story.get("source")
+    source = source if isinstance(source, dict) else {}
+    url = _clean_text(source.get("url"), limit=2000) if source else None
+    return _canonical_article_url(url), _normalize_headline_key(str(story.get("headline") or ""))
 
 
 def _parse_embedding_vector(value: Any) -> list[float] | None:
@@ -354,6 +396,60 @@ def validate_edition_payload(
         if role == "image_led" and not _story_has_image(story):
             story["role"] = "standard"
             warnings.append(f"Image-led '{story['headline'][:60]}' had no image; downgraded to standard.")
+
+    # One article, one story. A reworded headline over the same link is the
+    # same article, and a paper that repeats itself is the classic failure of
+    # a thin research day. This raises before any write, so the previously
+    # published edition stays live and the model can fix its story set.
+    identity_stories: list[tuple[str, dict[str, Any]]] = [
+        (f"section '{section['id']}'", story)
+        for section in sections
+        for story in section["stories"]
+    ]
+    if isinstance(payload.get("lead"), dict):
+        identity_stories.insert(0, ("the lead", payload["lead"]))
+
+    seen_by_url: dict[str, tuple[str, str]] = {}
+    seen_by_headline: dict[str, tuple[str, str]] = {}
+    reported_pairs: set[frozenset[str]] = set()
+    duplicates: list[str] = []
+    for where, story in identity_stories:
+        headline = str(story.get("headline") or "")
+        url, headline_key = _story_identity(story)
+        matched: list[tuple[tuple[str, str], str]] = []
+        if url and url in seen_by_url:
+            matched.append((seen_by_url[url], "same source link"))
+        if headline_key and headline_key in seen_by_headline:
+            first = seen_by_headline[headline_key]
+            if not any(entry is first for entry, _reason in matched):
+                matched.append((first, "same headline"))
+        for (first_where, first_headline), reason in matched:
+            pair = frozenset((first_headline, headline))
+            if pair in reported_pairs:
+                continue
+            reported_pairs.add(pair)
+            duplicates.append(
+                f"'{first_headline[:70]}' ({first_where}) and "
+                f"'{headline[:70]}' ({where}) are the same article ({reason})"
+            )
+        if url and url not in seen_by_url:
+            seen_by_url[url] = (where, headline)
+        if headline_key and headline_key not in seen_by_headline:
+            seen_by_headline[headline_key] = (where, headline)
+
+    if duplicates:
+        shown = "; ".join(duplicates[:5])
+        if len(duplicates) > 5:
+            shown += f"; and {len(duplicates) - 5} more"
+        raise ProphetValidationError(
+            "An edition may contain each article only once, but this one repeats "
+            "stories: "
+            + shown
+            + ". Keep one story per article — drop the reworded duplicates or "
+            "replace them with genuinely different articles — and republish.",
+            code="duplicate_stories",
+            details={"duplicates": duplicates},
+        )
 
     lead_raw = payload.get("lead")
     lead: dict[str, Any] | None = None

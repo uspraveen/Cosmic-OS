@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -81,7 +82,12 @@ async def test_archive_briefing_is_labelled_and_token_capped(tmp_path: Path) -> 
 
     import sqlite3
 
-    cutoff = "2026-08-20T00:00:00Z"
+    # Backdate the older edition outside the 3-day recent window but inside
+    # the 28-day semantic window, relative to *now* — a fixed date here rots
+    # as the calendar advances toward it.
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=10)
+    ).isoformat().replace("+00:00", "Z")
     with sqlite3.connect(store.db_path) as connection:
         connection.execute(
             "UPDATE prophet_story_index SET shown_at = ? WHERE edition_id = ?",

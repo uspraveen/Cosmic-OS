@@ -215,6 +215,106 @@ def test_placeholder_editions_are_rejected(tmp_path: Path) -> None:
     assert excinfo.value.code == "placeholder_edition"
 
 
+def test_same_article_under_two_headlines_is_rejected(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    payload = _edition()
+    payload["sections"].append(
+        {
+            "id": "wire2",
+            "label": "Wire Two",
+            "stories": [
+                {
+                    "headline": "Chip deal rethink spreads across the industry",
+                    "importance": 65,
+                    "source": {"name": "Reuters", "url": "https://example.com/tech-1"},
+                }
+            ],
+        }
+    )
+    with pytest.raises(ProphetValidationError) as excinfo:
+        store.publish_edition(payload)
+    assert excinfo.value.code == "duplicate_stories"
+    assert "same source link" in str(excinfo.value)
+    assert "wire2" in str(excinfo.value)
+
+
+def test_duplicate_detection_ignores_url_dressing(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    payload = _edition()
+    payload["sections"][0]["stories"].append(
+        {
+            "headline": "Tech story one gets a second write-up",
+            "importance": 55,
+            "source": {
+                "name": "The Verge",
+                "url": "http://www.example.com/tech-1/?utm_source=rss#top",
+            },
+        }
+    )
+    with pytest.raises(ProphetValidationError) as excinfo:
+        store.publish_edition(payload)
+    assert excinfo.value.code == "duplicate_stories"
+
+
+def test_reworded_identical_headline_is_rejected(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    payload = _edition()
+    payload["sections"][0]["stories"].append(
+        {
+            "headline": "Tech story one!",
+            "importance": 55,
+            "source": {"name": "The Verge", "url": "https://example.com/tech-1-again"},
+        }
+    )
+    with pytest.raises(ProphetValidationError) as excinfo:
+        store.publish_edition(payload)
+    assert excinfo.value.code == "duplicate_stories"
+    assert "same headline" in str(excinfo.value)
+
+
+def test_lead_and_section_sharing_a_link_are_rejected(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    payload = _edition()
+    payload["lead"]["source"]["url"] = "https://example.com/tech-1"
+    with pytest.raises(ProphetValidationError) as excinfo:
+        store.publish_edition(payload)
+    assert excinfo.value.code == "duplicate_stories"
+
+
+def test_distinct_articles_from_same_domain_are_kept(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    payload = _edition()
+    payload["sections"][0]["stories"].append(
+        {
+            "headline": "Tech story three on a different beat",
+            "importance": 50,
+            "source": {"name": "The Verge", "url": "https://www.example.com/tech-3"},
+        }
+    )
+    result = store.publish_edition(payload)
+    assert result["story_count"] == 4
+    assert not any("same article" in warning for warning in result["warnings"])
+
+
+def test_rejected_duplicate_publish_leaves_previous_edition_live(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    good = store.publish_edition(_edition())
+    bad = _edition()
+    bad["sections"][0]["stories"].append(
+        {
+            "headline": "Chip deal rethink spreads across the industry",
+            "importance": 65,
+            "source": {"name": "Reuters", "url": "https://example.com/tech-1"},
+        }
+    )
+    with pytest.raises(ProphetValidationError):
+        store.publish_edition(bad)
+    current = store.get_edition("2026-09-11", "morning")
+    assert current is not None
+    assert current["revision"] == good["revision"]
+    assert current["story_count"] == good["story_count"]
+
+
 def test_lead_auto_promoted(tmp_path: Path) -> None:
     store = _store(tmp_path)
     payload = _edition()
