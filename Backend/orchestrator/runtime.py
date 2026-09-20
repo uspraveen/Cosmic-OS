@@ -383,6 +383,10 @@ class OrchestratorRuntime:
                 self._agent_event_consumer_loop(),
                 name=self._agent_event_consumer_name,
             )
+            self._task_sweeper_task = asyncio.create_task(
+                self._task_sweeper_loop(),
+                name="orchestrator-task-sweeper",
+            )
             self._reply_consumer_task = asyncio.create_task(
                 self._user_reply_consumer_loop(),
                 name="orchestrator-user-reply-consumer",
@@ -4283,15 +4287,18 @@ class OrchestratorRuntime:
 
     @staticmethod
     def _intent_can_queue_busy(intent: str) -> bool:
-        """Intents whose tasks safely queue in the agent's Redis stream.
+        """Whether a task may queue behind a busy-but-alive agent instance.
 
-        The browser agent runs one task at a time by design (max_concurrency:
-        1). Treating a busy instance as unavailable made the orchestrator
-        report the agent as gone ("no healthy instance") and give up on a task
-        it was actively running — the crash story from the PetScreening night.
-        Queue instead: the task waits and the agent picks it up on release.
+        Default True for every intent: execute_with_idempotency makes queuing
+        safe everywhere — a re-delivery while the agent is busy resolves to
+        TaskInProgress (deferred) instead of double execution, and the queued
+        envelope waits in the agent's stream for its slot. Treating busy as
+        gone orphaned tasks: browser first (the PetScreening night), then alpha
+        (Sep 19: a status poll for a mid-flight remediation could never be
+        delivered because the task itself held the agent's only slot, and the
+        orchestrator gave up after two seconds).
         """
-        return str(intent or "").strip() in {"browser.run"}
+        return True
 
     async def _find_available_agent(
         self,
@@ -4892,6 +4899,122 @@ class OrchestratorRuntime:
             reverse_task_record = self.task_ledger.get_task(reverse_task_id)
             if reverse_task_record is not None and str(reverse_task_record.get("status") or "").strip() not in {"completed", "failed"}:
                 self.task_ledger.mark_failed(reverse_task_id, code=code, message=message)
+
+    async def _task_sweeper_loop(self) -> None:
+        """Terminate non-terminal tasks whose executor has verifiably vanished.
+
+        A deferred/running task with no event flow past its own check window is
+        either working silently or orphaned; the registry decides which. The
+        agent heartbeat now advertises `active_task_id`, so "no live instance
+        of the owning agent claims this task" is definitive evidence the
+        executor is gone (Sep 19: a remediation deferred at 21:48 was still
+        being narrated as running four hours later). Truth comes from the
+        registry; the decision — fail, and let requeue semantics bring it back
+        — lives here.
+        """
+        while True:
+            try:
+                await self._sweep_orphaned_tasks()
+            except Exception:
+                logger.exception("orchestrator.task_sweeper_failed")
+            await asyncio.sleep(self.config.task_sweep_interval_sec)
+
+    async def _sweep_orphaned_tasks(self) -> None:
+        active = self.task_ledger.list_active_tasks()
+        now = datetime.now(timezone.utc)
+        for record in active:
+            task_id = str(record.get("task_id") or "")
+            status = str(record.get("status") or "")
+            recipient = str(record.get("recipient") or "").strip()
+            updated_at = str(record.get("updated_at") or "")
+            if not task_id or not updated_at:
+                continue
+            try:
+                updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            age_sec = (now - updated).total_seconds()
+            threshold = (
+                self.config.task_sweep_deferred_after_sec
+                if status == "deferred"
+                else self.config.task_sweep_running_after_sec
+            )
+            if age_sec < threshold:
+                continue
+            if await self._agent_reports_task_alive(recipient, task_id):
+                continue
+            message = (
+                f"ORPHANED_EXECUTOR: no live instance of {recipient or 'the owning agent'} "
+                f"reports this task (status={status}, last update {updated_at}); "
+                "force-failed by the orchestrator task sweeper."
+            )
+            try:
+                self.task_ledger.mark_failed(task_id, code="ORPHANED_EXECUTOR", message=message)
+            except Exception:
+                logger.exception("orchestrator.task_sweeper_mark_failed task_id=%s", task_id)
+                continue
+            self._append_task_sweeper_note(task_id, status, updated_at, message)
+            logger.warning(
+                "orchestrator.task_sweeper_orphaned task_id=%s status=%s age_sec=%d",
+                task_id,
+                status,
+                int(age_sec),
+            )
+
+    async def _agent_reports_task_alive(self, recipient: str, task_id: str) -> bool:
+        """True iff a live instance of `recipient` advertises this task_id."""
+        if self._redis is None or not recipient:
+            return False
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = await self._redis.scan(
+                    cursor=cursor, match=f"registry:{recipient}:*", count=20
+                )
+                for key in keys:
+                    state = await self._redis.hgetall(key)
+                    if not state:
+                        continue
+                    if str(state.get("status") or "") not in {"healthy", "degraded"}:
+                        continue
+                    details_raw = str(state.get("health_details") or "")
+                    if details_raw:
+                        try:
+                            details = json.loads(details_raw)
+                        except ValueError:
+                            details = {}
+                        if isinstance(details, dict) and str(
+                            details.get("active_task_id") or ""
+                        ) == task_id:
+                            return True
+                if cursor == 0:
+                    break
+        except Exception:
+            logger.exception("orchestrator.task_sweeper_probe_failed recipient=%s", recipient)
+            # Probe failure must fail open toward "leave it alone": an
+            # unreachable registry is not evidence of a dead executor.
+            return True
+        return False
+
+    def _append_task_sweeper_note(
+        self, task_id: str, status: str, updated_at: str, message: str
+    ) -> None:
+        """Record the sweep in the model-readable heartbeat notes."""
+        try:
+            path = self.config.heartbeat_notes_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(
+                    f"[{stamp}] task-sweeper: {task_id} ({status}, last update {updated_at}) "
+                    f"force-failed — {message} If the user asks about it, report it failed "
+                    "and offer to requeue; do not report it as running."
+                    + chr(10)
+                )
+        except OSError:
+            logger.exception("orchestrator.task_sweeper_note_failed task_id=%s", task_id)
 
     async def _agent_event_consumer_loop(self) -> None:
         assert self._redis is not None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import hashlib
 import json
 import logging
@@ -114,6 +115,11 @@ class AgentRuntime:
         self.started = False
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._active_task_count = 0
+        # Identity + handle for the in-flight execution, so the heartbeat can
+        # advertise what is actually running and the timebox watchdog can
+        # cancel a hung handler instead of holding the slot forever.
+        self._active_task_meta: dict[str, Any] | None = None
+        self._active_process_task: asyncio.Task[None] | None = None
 
         self.auth: dict[str, Any] | None = None
         self.step_plan: StepPlan | None = None
@@ -174,7 +180,7 @@ class AgentRuntime:
             )
             for stream_name, items in messages:
                 for message_id, fields in items:
-                    await self._process_message(message_id, fields, stream_name)
+                    await self._run_message_task(message_id, fields, stream_name)
                     return True
         return False
 
@@ -333,6 +339,10 @@ class AgentRuntime:
     async def _heartbeat_loop(self) -> None:
         while True:
             await self._publish_heartbeat(healthy=True, status="healthy")
+            try:
+                await self._enforce_execution_timebox()
+            except Exception:
+                logger.exception("agent.execution_timebox_check_failed")
             await asyncio.sleep(self.heartbeat_interval_sec)
 
     async def _claim_stale_messages(self, stream: str) -> bool:
@@ -348,9 +358,93 @@ class AgentRuntime:
         )
         messages = self._extract_claimed_messages(claimed)
         for message_id, fields in messages:
-            await self._process_message(message_id, fields, stream)
+            await self._run_message_task(message_id, fields, stream)
             return True
         return False
+
+    async def _run_message_task(
+        self, message_id: str, fields: dict[str, Any], stream: str
+    ) -> None:
+        """Run one message as a cancellable task the watchdog can reach.
+
+        The worker loop awaits the handler inline, so a hung handler would
+        hold the slot forever; as a tracked task the timebox watchdog can
+        cancel it and the worker loop survives to process the next message.
+        """
+        self._active_process_task = asyncio.create_task(
+            self._process_message(message_id, fields, stream)
+        )
+        try:
+            await self._active_process_task
+        except asyncio.CancelledError:
+            # The timebox watchdog cancelled a hung handler (the inner task
+            # reports cancelled and the watchdog has already emitted the
+            # terminal event). Swallow so the worker loop survives; a
+            # cancellation from real shutdown leaves the inner task
+            # un-cancelled and re-raises below.
+            if (
+                self._active_process_task is not None
+                and self._active_process_task.cancelled()
+            ):
+                return
+            raise
+        finally:
+            if self._active_process_task is not None and self._active_process_task.done():
+                self._active_process_task = None
+
+    async def _enforce_execution_timebox(self) -> None:
+        """Cancel an execution that ran past twice its declared ceiling.
+
+        A hung handler holds the concurrency slot forever: the registry keeps
+        saying healthy/load=1 while nothing progresses, polls cannot dispatch,
+        and nothing downstream can tell "working" from "gone". Cancelling runs
+        the handler's own cleanup path (runner process teardown, load
+        decrement, meta clear); this adds the terminal event the hung handler
+        can no longer produce.
+        """
+        meta = self._active_task_meta
+        if not meta:
+            return
+        elapsed = time.monotonic() - float(meta["started_monotonic"])
+        ceiling = max(60.0, float(self.max_task_duration_sec)) * 2
+        if elapsed < ceiling:
+            return
+        process_task = self._active_process_task
+        if process_task is None or process_task.done():
+            return
+        logger.error(
+            "agent.execution_timebox_exceeded agent_id=%s task_id=%s intent=%s "
+            "elapsed_sec=%d ceiling_sec=%d -- cancelling hung handler",
+            self.agent_id,
+            meta.get("task_id"),
+            meta.get("intent"),
+            int(elapsed),
+            int(ceiling),
+        )
+        process_task.cancel()
+        await asyncio.gather(process_task, return_exceptions=True)
+        try:
+            await self.emit_terminal_event(
+                str(meta.get("task_id")),
+                AgentResult(
+                    status="failed",
+                    output={},
+                    artifacts=[],
+                    error=AgentError(
+                        code="EXECUTION_TIMEBOX_EXCEEDED",
+                        retryable=False,
+                        message=(
+                            f"Execution exceeded {int(ceiling)}s with no progress and "
+                            "was force-cancelled by the agent watchdog."
+                        ),
+                        next_action="requeue",
+                    ),
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "agent.timebox_terminal_emit_failed task_id=%s", meta.get("task_id")
+            )
 
     async def _process_message(self, message_id: str, fields: dict[str, Any], stream: str) -> None:
         try:
@@ -420,6 +514,11 @@ class AgentRuntime:
         )
 
         self._active_task_count += 1
+        self._active_task_meta = {
+            "task_id": task.task_id,
+            "intent": working_task.intent,
+            "started_monotonic": time.monotonic(),
+        }
         await self._publish_heartbeat(healthy=True, status="healthy")
         try:
             result = await execute_with_idempotency(
@@ -466,6 +565,8 @@ class AgentRuntime:
             await self.redis.xack(stream, WORKER_GROUP, message_id)
         finally:
             self._active_task_count = max(0, self._active_task_count - 1)
+            self._active_task_meta = None
+            self._active_process_task = None
             await self._publish_heartbeat(healthy=True, status="healthy")
             self.auth = None
             self.step_plan = None
@@ -515,8 +616,20 @@ class AgentRuntime:
         heartbeat_healthy = healthy
         heartbeat_status = status
         health_details: dict[str, Any] | None = None
+        active_meta = self._active_task_meta
         if healthy:
             health_details = await self.provider_health_probe()
+            if active_meta:
+                # Advertise exactly what is executing so the orchestrator's
+                # sweeper can distinguish "busy and alive" from "slot leaked"
+                # without inference (the Sep 19 zombie was invisible because
+                # nothing in the registry named the in-flight task).
+                health_details = dict(health_details or {})
+                health_details["active_task_id"] = active_meta.get("task_id")
+                health_details["active_task_intent"] = active_meta.get("intent")
+                health_details["active_task_age_sec"] = max(
+                    0, int(time.monotonic() - float(active_meta["started_monotonic"]))
+                )
             if health_details:
                 heartbeat_status = str(health_details.get("status") or heartbeat_status or "healthy")
                 heartbeat_healthy = bool(health_details.get("available", health_details.get("healthy", True)))

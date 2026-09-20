@@ -3080,6 +3080,14 @@ class GatewayRuntime:
             "no material change since the last beat. "
             "Still suppress for low-value noise, unchanged "
             "watchpoints already surfaced repeatedly after a recent successful delivery, or when nothing material changed. "
+            "Before you describe any task as running, in progress, stuck, finished, or failed, call "
+            "task_status with the task's keywords and report what the registry says — never infer "
+            "task state from file timestamps, workspace edits, or stale terminal logs, because a "
+            "silently dead executor looks identical to a busy one there. If task_status reports "
+            "verdict STUCK, or a task in flight has had no activity for more than ~30 minutes, or "
+            "an agent probe says no healthy instance while a task is in flight, surface that as a "
+            "blocker to the user immediately: it failed or froze, and the user decides whether to "
+            "requeue. Do not call it transient, and do not wait for a later beat to mention it. "
             "Your final response must be one JSON object and nothing else. Do not use Markdown. "
             "Schema: {\"decision\":\"suppress\"|\"deliver\",\"message\":\"\",\"reason\":\"\","
             "\"confidence\":0.0,\"pending_checks\":[],\"notes\":\"\"}. "
@@ -13947,6 +13955,11 @@ class GatewayRuntime:
 
     TASK_STATUS_SEARCH_LIMIT = 5
     TASK_STATUS_SEARCH_GOAL_CHARS = 260
+    # A non-terminal task with no activity for this long is STUCK, whatever
+    # its status column says — "deferred"/"running" only mean alive while the
+    # executor is actually reporting. Matches the orchestrator sweeper's
+    # deferred threshold so the model's vocabulary and the enforcement agree.
+    TASK_STUCK_AFTER_MINUTES = 30
     # Wide enough that a mass startup reconciliation (which bumps updated_at
     # on every zombie it flips) cannot bury the day's genuinely-recent tasks
     # below the scan window -- the first live run reconciled 156 old corpses
@@ -14054,12 +14067,22 @@ class GatewayRuntime:
                     if isinstance(item, dict) and self._safe_text(item.get("label")):
                         last_activity = self._safe_text(item.get("label"))
                         break
+            effective_status = ledger_status or status
+            if effective_status == "completed":
+                verdict = "DONE"
+            elif effective_status in self.TERMINAL_TASK_STATUSES:
+                verdict = "FAILED"
+            elif age_minutes is None or age_minutes >= self.TASK_STUCK_AFTER_MINUTES:
+                verdict = "STUCK"
+            else:
+                verdict = "ACTIVE"
             scored.append(
                 (
                     score,
                     {
                         "task_id": task_id,
-                        "status": ledger_status or status,
+                        "verdict": verdict,
+                        "status": effective_status,
                         "notebook_status": status,
                         "ledger_status": ledger_status,
                         "ledger_error": ledger_error,

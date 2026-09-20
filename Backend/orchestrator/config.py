@@ -291,6 +291,11 @@ class OrchestratorConfig:
     task_input_orchestrator_group: str = "orchestrator"
     task_ledger_db_path: Path = BACKEND_ROOT / "agents" / "orchestrator" / "store" / "data" / "task_ledger.db"
     heartbeat_notes_path: Path = BACKEND_ROOT / "agents" / "orchestrator" / "store" / "heartbeat_notes.md"
+    # Orphaned-task sweeping: how often to look, and how long a deferred vs
+    # running task may sit without events before the registry probe decides.
+    task_sweep_interval_sec: float = 60.0
+    task_sweep_deferred_after_sec: float = 1800.0
+    task_sweep_running_after_sec: float = 14400.0
     # Tool executor service endpoints
     perplexity_api_key: str = ""
     perplexity_model: str = "sonar"
@@ -495,6 +500,15 @@ class OrchestratorConfig:
                     str(BACKEND_ROOT / "agents" / "orchestrator" / "store" / "heartbeat_notes.md"),
                 )
             ).expanduser(),
+            task_sweep_interval_sec=max(
+                5.0, float(os.getenv("TASK_SWEEP_INTERVAL_SEC", "60") or 60)
+            ),
+            task_sweep_deferred_after_sec=max(
+                60.0, float(os.getenv("TASK_SWEEP_DEFERRED_AFTER_SEC", "1800") or 1800)
+            ),
+            task_sweep_running_after_sec=max(
+                300.0, float(os.getenv("TASK_SWEEP_RUNNING_AFTER_SEC", "14400") or 14400)
+            ),
             perplexity_api_key=os.getenv("PERPLEXITY_API_KEY", "").strip(),
             perplexity_model=os.getenv("PERPLEXITY_MODEL", "sonar").strip() or "sonar",
             cosmic_memory_url=os.getenv("COSMIC_MEMORY_URL", "http://127.0.0.1:8090").strip(),

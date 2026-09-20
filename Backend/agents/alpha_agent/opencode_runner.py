@@ -391,10 +391,29 @@ class OpenCodeWorkspaceRunner:
         stderr_task = asyncio.create_task(read_stderr())
         monitor_task = asyncio.create_task(monitor_process())
         try:
-            await asyncio.gather(stdout_task, stderr_task)
+            # Wait for the CLI process itself to exit, then bound the readers.
+            # Grandchild processes (package installs, shells, language servers)
+            # inherit the output pipes and can hold them open long after the
+            # CLI is gone; awaiting the readers unconditionally hung the whole
+            # handler with the load slot held (the Sep 19 zombie: task deferred
+            # at 21:48, handler silently hung until manual intervention, and
+            # the hard-timeout backstop disarmed because the monitor exits as
+            # soon as returncode is set).
+            while process.returncode is None and not readers_done.is_set():
+                await asyncio.sleep(1.0)
             readers_done.set()
-            if process.returncode is None:
-                await process.wait()
+            # Grace window: let the readers flush whatever is already buffered
+            # (a normal exit closes the pipes and they finish at EOF almost
+            # immediately), then cancel whatever is stuck on a held pipe.
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                stdout_task.cancel()
+                stderr_task.cancel()
+                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         finally:
             readers_done.set()
             if not monitor_task.done():
