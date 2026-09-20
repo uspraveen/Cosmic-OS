@@ -930,7 +930,12 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "says permission_required, briefly tell the user why vault access is needed, end "
                 "your turn, and wait. After they approve, the turn resumes with credential_ref "
                 "already granted — do not call vault_lookup again unless a later message says "
-                "the approval did not carry."
+                "the approval did not carry. A vault entry's title is NOT evidence of which "
+                "provider it belongs to: entries are frequently named after something else "
+                "(for example a key for TypeSafe Jev stored under a project title). If the user "
+                "asks whether a saved credential is for X, answer only from the lookup result's "
+                "credential_kind/domain/notes, or say you could not verify it without an approved "
+                "lookup — never assert identity from the entry's name alone."
             ),
             "input_schema": {
                 "type": "object",

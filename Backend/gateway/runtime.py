@@ -14093,6 +14093,9 @@ class GatewayRuntime:
                         "last_activity": last_activity,
                         "age_minutes": age_minutes,
                         "updated_at": updated_raw,
+                        "origin_request_id": self._safe_text(
+                            notebook.get("origin_request_id")
+                        ),
                         "session_id": self._safe_text(notebook.get("session_id")),
                     },
                 )
@@ -14312,6 +14315,179 @@ class GatewayRuntime:
                 noticed,
             )
 
+    def _mark_task_origin_anchor(self, notebook: dict[str, Any]) -> bool:
+        """True exactly once per task, when it first earns its origin anchor."""
+        if not self._safe_text(notebook.get("origin_request_id")):
+            return False
+        if notebook.get("origin_anchored"):
+            return False
+        notebook["origin_anchored"] = True
+        return True
+
+    async def _write_task_origin_anchor(
+        self, *, task_id: str, session_id: str, notebook: dict[str, Any]
+    ) -> None:
+        """One pointer memory at dispatch: goal + provenance, never chatter.
+
+        Written the first time the task is seen so even a task that dies in
+        minute one is findable by recall and carries its original request —
+        the interrupted turn leaves a memory footprint instead of a hole.
+        """
+        goal = self._safe_text(notebook.get("origin_query")) or self._safe_text(
+            notebook.get("goal")
+        )
+        request_id = self._safe_text(notebook.get("origin_request_id"))
+        payload = {
+            "kind": "task_summary",
+            "title": f"Task created {task_id}",
+            "content": (
+                f"{self._bounded_excerpt(goal, limit=1200)}\n\n"
+                f"task_id: {task_id} | request: {request_id} | session: {session_id}. "
+                "This is the creation record, written at dispatch. The task's current "
+                "state — running, completed, or failed — lives in the task registry "
+                "(task_status / task_notebook), which is authoritative over this note."
+            ),
+            "tags": ["task_origin", "task"],
+            "metadata": {
+                "lifecycle": "created",
+                "task_id": task_id,
+                "request_id": request_id,
+                "session_id": session_id,
+            },
+            "provenance": {
+                "source_kind": "gateway",
+                "source_id": task_id,
+                "created_by": "cosmic/gateway:1.0.0",
+                "session_id": session_id,
+            },
+        }
+        try:
+            await self._write_memory_record(
+                payload=payload,
+                audit_event=self._build_memory_write_audit_event(
+                    payload=payload,
+                    operation="task_origin_anchor_write",
+                    write_source="gateway_task_origin",
+                    original_kind=payload["kind"],
+                    normalized_kind=payload["kind"],
+                    guard_applied=False,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "gateway.task_origin_anchor_failed task_id=%s", task_id
+            )
+            # Allow a later retry: clear the persisted flag so the next event
+            # re-attempts the anchor instead of losing it forever.
+            try:
+                fresh = self.session_store.get_task_notebook(task_id) or notebook
+                fresh.pop("origin_anchored", None)
+                self.session_store.upsert_task_notebook(task_id, session_id, fresh)
+            except Exception:
+                pass
+
+    async def _ingest_interrupted_episode(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        channel: str,
+        task_id: str,
+        partial_content: str,
+        error_message: str,
+        reason: str,
+    ) -> None:
+        """Memory episode for a turn the user stopped or that failed mid-run.
+
+        Completion-time episode ingest only fires on response.complete, so an
+        interrupted turn used to vanish from memory entirely. This writes what
+        happened — the user's message, any partial response, and why it
+        stopped — with the same claim dedupe the success path uses.
+        """
+        if not request_id or not session_id:
+            return
+        if not self.session_store.claim_memory_episode_ingest(
+            request_id=request_id,
+            session_id=session_id,
+        ):
+            return
+        try:
+            user_message = self.session_store.find_message_by_request_id(
+                session_id,
+                request_id=request_id,
+                role="user",
+            )
+            user_content = self._safe_text(
+                user_message.get("content") if user_message else None
+            )
+            if not user_content:
+                self.session_store.release_memory_episode_ingest_claim(
+                    request_id,
+                    error_text="no user message for interrupted turn",
+                )
+                return
+            assistant_content = self._bounded_excerpt(partial_content, limit=4000) or (
+                "(stopped before any response was produced)"
+            )
+            payload, audit_event = self._normalize_episode_write_payload(
+                {
+                    "observations": [
+                        {
+                            "role": "user",
+                            "content": user_content,
+                            "metadata": {"request_id": request_id, "channel": channel},
+                        },
+                        {
+                            "role": "assistant",
+                            "content": assistant_content,
+                            "metadata": {
+                                "request_id": request_id,
+                                "interrupted": True,
+                                "stop_reason": reason,
+                                "error": (error_message or "")[:500],
+                            },
+                        },
+                    ],
+                    "provenance": {
+                        "source_kind": "gateway",
+                        "source_id": request_id,
+                        "created_by": "cosmic/gateway:1.0.0",
+                        "session_id": session_id,
+                        "channel": channel,
+                    },
+                    "kind": "transcript",
+                    "title": f"Interrupted turn {request_id}",
+                    "tags": [
+                        "conversation_turn",
+                        "interrupted",
+                        self._safe_text(channel.split(":", 1)[0]) or "unknown_channel",
+                    ],
+                    "metadata": {
+                        "request_id": request_id,
+                        "interrupted": True,
+                        "stop_reason": reason,
+                        "task_id": task_id or None,
+                    },
+                    "episode_type": "interrupted_turn",
+                    "extract_graph": self.config.cosmic_memory_episode_extract_graph,
+                },
+                write_source="gateway_interrupted_episode",
+            )
+            await self._ingest_memory_episode(payload=payload, audit_event=audit_event)
+            logger.info(
+                "gateway.interrupted_episode_ingested request_id=%s reason=%s",
+                request_id,
+                reason,
+            )
+        except Exception as exc:
+            self.session_store.release_memory_episode_ingest_claim(
+                request_id,
+                error_text=str(exc),
+            )
+            logger.exception(
+                "gateway.interrupted_episode_ingest_failed request_id=%s", request_id
+            )
+
     async def _finalize_turn_after_delivery(self, *, event: dict[str, Any]) -> None:
         request_id = self._safe_text(event.get("request_id"))
         session_id = self._safe_text(event.get("session_id"))
@@ -14358,7 +14534,15 @@ class GatewayRuntime:
                 event=event,
                 turn_entry=turn_entry,
             )
+            anchor_now = self._mark_task_origin_anchor(notebook)
             self.session_store.upsert_task_notebook(task_id, session_id, notebook)
+            if anchor_now:
+                self._schedule_background_task(
+                    self._write_task_origin_anchor(
+                        task_id=task_id, session_id=session_id, notebook=notebook
+                    ),
+                    name="gateway-task-origin-anchor",
+                )
 
         self._refresh_active_working_set(session_id)
         self._schedule_background_task(
@@ -14571,6 +14755,7 @@ class GatewayRuntime:
 
         event_type = self._safe_text(event.get("type")) or ""
         request_text = ""
+        origin_query = ""
         if request_id:
             user_message = self.session_store.find_message_by_request_id(
                 session_id,
@@ -14578,7 +14763,11 @@ class GatewayRuntime:
                 role="user",
             )
             if user_message is not None:
-                request_text = self._bounded_excerpt(user_message.get("content"))
+                full_text = " ".join(
+                    str(user_message.get("content") or "").split()
+                )
+                request_text = self._bounded_excerpt(full_text)
+                origin_query = full_text[:20_000]
             elif isinstance(self.request_records.get(request_id), dict):
                 request_record = self.request_records[request_id]
                 message = (
@@ -14586,9 +14775,22 @@ class GatewayRuntime:
                     if isinstance(request_record.get("message"), dict)
                     else {}
                 )
-                request_text = self._bounded_excerpt(message.get("content"))
+                full_text = " ".join(str(message.get("content") or "").split())
+                request_text = self._bounded_excerpt(full_text)
+                origin_query = full_text[:20_000]
         if request_text and not self._safe_text(notebook.get("goal")):
             notebook["goal"] = request_text
+        # Task origin, written once at first sight and never overwritten: the
+        # full original request (the bounded goal above is a display excerpt),
+        # plus where it came from. Resume flows and status lookups read this —
+        # a task that dies in minute one keeps its origin forever (Sep 19: the
+        # Blaxel credentials lived only in this text and were "forgotten").
+        if origin_query and not self._safe_text(notebook.get("origin_query")):
+            notebook["origin_query"] = origin_query
+        if request_id and not self._safe_text(notebook.get("origin_request_id")):
+            notebook["origin_request_id"] = request_id
+            notebook["origin_session_id"] = session_id
+        notebook.setdefault("origin_anchored", False)
 
         state_message = (
             self._safe_text(event.get("message"))
@@ -17202,7 +17404,15 @@ class GatewayRuntime:
                     request_id=request_id,
                     event=forwarded,
                 )
+                anchor_now = self._mark_task_origin_anchor(notebook)
                 self.session_store.upsert_task_notebook(root_task_id, session_id, notebook)
+                if anchor_now:
+                    self._schedule_background_task(
+                        self._write_task_origin_anchor(
+                            task_id=root_task_id, session_id=session_id, notebook=notebook
+                        ),
+                        name="gateway-task-origin-anchor",
+                    )
                 self._refresh_active_working_set(session_id)
             self._persist_specialist_completion_artifacts(event=event, forwarded=forwarded)
             self._track_forwarded_foreground_event(forwarded)
@@ -26100,6 +26310,32 @@ class GatewayRuntime:
         )
 
     def _finalize_active_request(self, state: ActiveRequest) -> None:
+        # A user-visible turn that ended without success — stopped mid-response
+        # or failed — must still leave a memory trace. The claim dedupe makes
+        # this a no-op when the success path already ingested the turn.
+        try:
+            if (
+                state.foreground
+                and (state.source or "user") == "user"
+                and self.memory_client.enabled
+                and (state.failed or state.cancel_requested)
+            ):
+                self._schedule_background_task(
+                    self._ingest_interrupted_episode(
+                        request_id=state.request_id,
+                        session_id=state.session_id,
+                        channel=state.channel,
+                        task_id=state.task_id,
+                        partial_content=state.partial_content,
+                        error_message=state.error_message,
+                        reason=(
+                            "cancelled by user" if state.cancel_requested else "failed"
+                        ),
+                    ),
+                    name="gateway-interrupted-episode-ingest",
+                )
+        except Exception:
+            logger.exception("gateway.interrupted_episode_schedule_failed")
         state.worker = None  # release the asyncio.Task reference
         current = self.active_requests.get(state.request_id)
         if current is state:
