@@ -37,6 +37,7 @@ import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPr
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
 import { isEditableCommitField, normalizeInterruptCommit, normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
 import { resolveBrowserLiveControls } from './browserLiveControls'
+import { groupAssistantTurns } from './assistantTurnGroups'
 import { groupAssistantFlowEntries } from './assistantFlow'
 import { mergeSheetRunProgress, normalizeSheetProgress, sheetRunVisibleWindow, type SheetProgressState } from './sheetRunPreview'
 import { PORTAL_SURFACE_CLASS, hitTestPointerTarget } from './windowInteractivity'
@@ -90,6 +91,10 @@ interface Message {
   sheetRunAnchors?: AlphaConsoleAnchor[]
   sources?: Array<{ url: string; title?: string; domain?: string } | string>
   stopped?: boolean
+  /** The turn ended blocked on the user — the model's own `<awaiting_reply/>`,
+   * or a card that parks the work. Groups the resumed work with this task
+   * instead of drawing it as a new one (see assistantTurnGroups). */
+  awaitingReply?: boolean
   channel?: string | null
   requestId?: string | null
   source?: string | null
@@ -1265,6 +1270,22 @@ const isSyntheticSlideChoiceMessage = (content?: string | null, metadata?: any):
   String(metadata?.message_type || '') === 'slide_workflow_choice'
   || String(content || '').trimStart().startsWith(SLIDE_CHOICE_MESSAGE_MARKER)
 
+/** Sources across a task's messages, in first-seen order, one card per URL.
+ * A task that paused and resumed often cites the same page in both halves. */
+const dedupeMessageSources = (
+  sources: Array<{ url?: string; title?: string; domain?: string } | string>,
+): Array<{ url: string; title?: string; domain?: string } | string> => {
+  const seen = new Set<string>()
+  const merged: Array<{ url: string; title?: string; domain?: string } | string> = []
+  for (const source of sources) {
+    const url = String((typeof source === 'string' ? source : source?.url) || '').trim()
+    if (!url || seen.has(url)) continue
+    seen.add(url)
+    merged.push(source as { url: string; title?: string; domain?: string } | string)
+  }
+  return merged
+}
+
 const historyToMessages = (history: any[] = []): Message[] => {
   return groupRepliesWithTheirQuery(history
     .filter((item) => item
@@ -1286,6 +1307,10 @@ const historyToMessages = (history: any[] = []): Message[] => {
       sheetRunAnchors: normalizeAlphaConsoleAnchors(item?.metadata?.sheet_run_anchors),
       sources: Array.isArray(item?.metadata?.sources) ? item.metadata.sources : undefined,
       stopped: Boolean(item?.metadata?.interrupted),
+      // Persisted as a column by the session store and mirrored into metadata
+      // by the gateway bridge; read both so a reopened transcript groups the
+      // same way the live one did.
+      awaitingReply: item?.awaiting_reply === true || item?.metadata?.awaiting_reply === true,
       channel: typeof item?.channel === 'string' ? item.channel : null,
       requestId: typeof item?.request_id === 'string'
         ? item.request_id
@@ -7320,6 +7345,10 @@ export default function App() {
         sourceId: taskId || String(stream.sourceId || '').trim() || existingMessage?.sourceId || null,
         channel: stream.channel ?? existingMessage?.channel ?? null,
         createdAt: stream.updatedAt || existingMessage?.createdAt || new Date().toISOString(),
+        // Only meaningful once the stream has completed; a snapshot of a
+        // still-running turn reports false, which is correct — it is not
+        // waiting on anyone yet.
+        awaitingReply: stream.awaitingReply ?? existingMessage?.awaitingReply,
         stopped: isStreamUserStopped(requestId, taskId) || existingMessage?.stopped || false,
       }
       if (existingIndex >= 0) {
@@ -8930,6 +8959,9 @@ export default function App() {
               source: typeof event.source === 'string' ? event.source : message.source,
               sourceId: typeof event.source_id === 'string' ? event.source_id : message.sourceId,
               createdAt: new Date().toISOString(),
+              // The turn is over; whether it ended blocked on the user decides
+              // if the work that resumes belongs to this task's group.
+              awaitingReply: (event as any).awaiting_reply === true,
               progress: undefined,
               stopped: false,
             }
@@ -10210,6 +10242,20 @@ export default function App() {
     return null
   }, [messages])
 
+  // One task that paused to ask something is still one task: the assistant
+  // messages it resumed into share a group, so the Flow, Thinking, Sources and
+  // Copy render once around the whole thing instead of once per pause.
+  const turnGroups = useMemo(
+    () => groupAssistantTurns(messages.map((message) => ({
+      role: message.role,
+      awaitingReply: message.awaitingReply,
+      // Proactive and cross-channel messages are their own event; they must
+      // neither join a task nor bridge two halves of one.
+      standalone: isHeartbeatMessage(message) || isExternalChannel(message),
+    }))),
+    [messages],
+  )
+
   // Render Classes
   const shouldShowTaskInterrupt =
     visibleTaskInterrupts.length > 0 &&
@@ -11302,18 +11348,50 @@ export default function App() {
                         return unreadDivider ? <Fragment key={msg.id}>{unreadDivider}</Fragment> : null // Already rendered as part of the collapsed group
                       }
                     }
+                    // What this message contributes to its group's single set
+                    // of chrome. `group` is undefined for a proactive message
+                    // (heartbeat, cron) and for user rows — both keep their own.
+                    const group = msg.role === 'assistant' ? turnGroups.get(idx) : undefined
+                    const groupMembers = group ? group.members.map((index) => messages[index]).filter(Boolean) : []
+                    // The start carries the whole task's reasoning and steps, in
+                    // order; a pause does not begin a second Flow.
+                    const groupThinking = group?.isStart
+                      ? groupMembers.map((m) => String(m.thinking || '').trim()).filter(Boolean).join('\n\n')
+                      : ''
+                    const groupActivityLog = group?.isStart
+                      ? groupMembers.flatMap((m) => m.activityLog || [])
+                      : []
+                    // The tail carries what the task ended up citing, and the one
+                    // Copy that yields the whole answer rather than its last part.
+                    const groupSources = group?.isTail
+                      ? dedupeMessageSources(groupMembers.flatMap((m) => m.sources || []))
+                      : []
+                    const groupCopyText = group?.isTail
+                      ? groupMembers.map((m) => String(m.content || '').trim()).filter(Boolean).join('\n\n')
+                      : ''
                     const activeRequestId = String(activeStreamingRequestIdRef.current || '').trim()
                     const activeTaskId = String(activeStreamingTaskIdRef.current || '').trim()
-                    const messageIsStreaming = Boolean(
+                    const messageAtIsStreaming = (candidate: Message | undefined, candidateIdx: number) => Boolean(
                       isStreaming &&
-                      msg.role === 'assistant' &&
-                      !msg.stopped &&
+                      candidate &&
+                      candidate.role === 'assistant' &&
+                      !candidate.stopped &&
                       (
-                        (activeRequestId && msg.requestId === activeRequestId) ||
-                        (activeTaskId && msg.sourceId === activeTaskId) ||
-                        (!activeRequestId && !activeTaskId && idx === messages.length - 1)
+                        (activeRequestId && candidate.requestId === activeRequestId) ||
+                        (activeTaskId && candidate.sourceId === activeTaskId) ||
+                        (!activeRequestId && !activeTaskId && candidateIdx === messages.length - 1)
                       ),
                     )
+                    const messageIsStreaming = messageAtIsStreaming(msg, idx)
+                    // Group chrome lives on the start but reports the task's
+                    // state, which is the tail's: while a resumed turn streams
+                    // into a new message, the Flow above it is still live.
+                    const groupIsStreaming = group
+                      ? (() => {
+                          const tailIdx = group.members[group.members.length - 1]
+                          return messageAtIsStreaming(messages[tailIdx], tailIdx)
+                        })()
+                      : messageIsStreaming
 
                     return (
                     <Fragment key={msg.id}>
@@ -11358,29 +11436,32 @@ export default function App() {
                               streaming={messageIsStreaming}
                             />
                           )}
-                          {msg.thinking && (
+                          {(group ? group.isStart && Boolean(groupThinking) : Boolean(msg.thinking)) && (
                             <AssistantCollapsibleSection
                               title="Thinking"
                               accent="thinking"
-                              streaming={messageIsStreaming}
-                              preview={messageIsStreaming ? thinkingPreview(msg.thinking) : undefined}
+                              streaming={groupIsStreaming}
+                              preview={groupIsStreaming ? thinkingPreview(group ? groupThinking : msg.thinking) : undefined}
                             >
                               <div className="thinking-block">
-                                <div className="thinking-text">{msg.thinking}</div>
+                                <div className="thinking-text">{group ? groupThinking : msg.thinking}</div>
                               </div>
                             </AssistantCollapsibleSection>
                           )}
-                          {msg.activityLog && msg.activityLog.length > 0 && (
+                          {(group
+                            ? group.isStart && groupActivityLog.length > 0
+                            : Boolean(msg.activityLog && msg.activityLog.length > 0)
+                          ) && (
                             <AssistantCollapsibleSection
                               title="Flow"
                               accent="flow"
-                              streaming={messageIsStreaming}
-                              signalEntries={msg.activityLog}
+                              streaming={groupIsStreaming}
+                              signalEntries={group ? groupActivityLog : msg.activityLog!}
                             >
                               <AssistantFlowTimeline
-                                entries={msg.activityLog}
+                                entries={group ? groupActivityLog : msg.activityLog!}
                                 showLabel={false}
-                                streaming={messageIsStreaming}
+                                streaming={groupIsStreaming}
                               />
                             </AssistantCollapsibleSection>
                           )}
@@ -11399,35 +11480,43 @@ export default function App() {
                             onDownload={handleDownloadProducedArtifact}
                           />
 
-                          {/* Copy Button for AI Response (Bottom) */}
-                          <button
-                            className="copy-btn-ai"
-                            onClick={() => handleCopy(msg.content, `ai-${idx}`)}
-                            style={{ marginTop: 12, alignSelf: 'flex-start' }}
-                          >
-                            {copiedId === `ai-${idx}` ? (
-                              <>
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ marginRight: 6 }}>
-                                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
-                                </svg>
-                                Copied
-                              </>
-                            ) : (
-                              <>
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ marginRight: 6 }}>
-                                  <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
-                                </svg>
-                                Copy
-                              </>
-                            )}
-                          </button>
+                          {/* One Copy per task, and only once there is a whole
+                              answer to copy — while the text is still streaming
+                              the button offers a fragment that changes under the
+                              click. */}
+                          {!groupIsStreaming && (group ? group.isTail : true) && (
+                            <button
+                              className="copy-btn-ai"
+                              onClick={() => handleCopy(group ? groupCopyText : msg.content, `ai-${idx}`)}
+                              style={{ marginTop: 12, alignSelf: 'flex-start' }}
+                            >
+                              {copiedId === `ai-${idx}` ? (
+                                <>
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ marginRight: 6 }}>
+                                    <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+                                  </svg>
+                                  Copied
+                                </>
+                              ) : (
+                                <>
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ marginRight: 6 }}>
+                                    <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
+                                  </svg>
+                                  Copy
+                                </>
+                              )}
+                            </button>
+                          )}
 
                           {/* Sources for Assistant Messages (Bottom) */}
-                          {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
+                          {msg.role === 'assistant' && (group
+                            ? group.isTail && groupSources.length > 0
+                            : Boolean(msg.sources && msg.sources.length > 0)
+                          ) && (
                             <div className="sources-section" style={{ marginTop: 16, marginBottom: 4, width: '100%' }}>
                               <div className="sources-header">SOURCES</div>
                               <div className="sources-grid">
-                                {msg.sources.map((src: any, sIdx: number) => {
+                                {(group ? groupSources : msg.sources!).map((src: any, sIdx: number) => {
                                   // Handle both old string format and new object format
                                   const url = typeof src === 'string' ? src : src.url;
                                   const title = typeof src === 'object' ? src.title : null;

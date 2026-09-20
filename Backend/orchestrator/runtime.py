@@ -89,6 +89,23 @@ from .visual_enrichment import VisualEnrichmentCoordinator
 logger = logging.getLogger(__name__)
 
 _PARALLEL_SAFE_TOOLS = get_parallel_safe_local_tool_names()
+
+# Cards the turn cannot get past on its own. Each ends the turn with a user
+# action outstanding, and the work resumes only when that action arrives —
+# as a synthetic continuation query (vault, sandbox, browser credentials) or
+# a hidden choice message (slides). A turn that raised one of these is
+# awaiting the user whether or not the model remembered to say so, and the
+# desktop groups the resumed work under the same task on that signal.
+# Deliberately not keyed on `response_mode: brief_acknowledgement`: content
+# cards and email draft approvals say that too, and neither blocks the turn.
+_BLOCKING_CARD_BLOCK_TYPES = frozenset(
+    {
+        "vault_permission_request",
+        "sandbox_permission_request",
+        "browser_credential_request",
+        "slide_workflow_choice",
+    }
+)
 # Daily Prophet editions are research-heavy and must still end with a publish
 # tool call, so they get a deeper iteration budget than a normal chat turn.
 PROPHET_CRON_TOOL_ITERATIONS = 45
@@ -674,6 +691,7 @@ class OrchestratorRuntime:
             prophet_published = False
             prophet_forced_publish_turn = False
             prophet_nudge_injected = False
+            awaiting_user_card = False
             last_turn_stop_reason: str | None = None
 
             iteration = 0
@@ -1195,6 +1213,8 @@ class OrchestratorRuntime:
                             specialist_receipts=specialist_receipts,
                         )
                         self._collect_content_card_blocks(result_str, content_card_blocks)
+                        if self._tool_result_raises_blocking_card(result_str):
+                            awaiting_user_card = True
 
                         yield {
                             **ev, "type": "tool.result",
@@ -1326,6 +1346,9 @@ class OrchestratorRuntime:
                 display_text=display_text,
             )
             awaiting_reply = display_text.endswith(AWAITING_REPLY_TAG)
+            # The model's own judgement for the prose case; a hard signal for
+            # the card case, where the turn is blocked whatever the text says.
+            awaiting_reply = awaiting_reply or awaiting_user_card
             if awaiting_reply:
                 display_text = display_text.removesuffix(AWAITING_REPLY_TAG).rstrip()
                 if final_response_blocks:
@@ -1558,6 +1581,7 @@ class OrchestratorRuntime:
             prophet_published = False
             prophet_forced_publish_turn = False
             prophet_nudge_injected = False
+            awaiting_user_card = False
             last_turn_stop_reason: str | None = None
             visual_coordinator = (
                 VisualEnrichmentCoordinator(
@@ -1954,6 +1978,8 @@ class OrchestratorRuntime:
                             specialist_receipts=specialist_receipts,
                         )
                         self._collect_content_card_blocks(result_str, content_card_blocks)
+                        if self._tool_result_raises_blocking_card(result_str):
+                            awaiting_user_card = True
                         yield {
                             **ev,
                             "type": "tool.result",
@@ -2157,6 +2183,9 @@ class OrchestratorRuntime:
                 display_text=display_text,
             )
             awaiting_reply = display_text.endswith(AWAITING_REPLY_TAG)
+            # The model's own judgement for the prose case; a hard signal for
+            # the card case, where the turn is blocked whatever the text says.
+            awaiting_reply = awaiting_reply or awaiting_user_card
             if awaiting_reply:
                 display_text = display_text.removesuffix(AWAITING_REPLY_TAG).rstrip()
                 if final_response_blocks:
@@ -7535,6 +7564,23 @@ class OrchestratorRuntime:
         except (json.JSONDecodeError, TypeError):
             return None
         return payload if isinstance(payload, dict) else None
+
+    @classmethod
+    def _tool_result_raises_blocking_card(cls, result_str: str) -> bool:
+        """Whether a tool result parks the turn on a user action.
+
+        Every blocking card arrives as a tool result carrying a `_cosmic_ui`
+        contract whose block_type names it — the executor attaches one for
+        desktop/mobile channels and the gateway's own reply carries one too,
+        so either shape is read.
+        """
+        payload = cls._parse_tool_result_json(result_str)
+        if not isinstance(payload, dict):
+            return False
+        contract = payload.get("_cosmic_ui")
+        if not isinstance(contract, dict):
+            return False
+        return str(contract.get("block_type") or "").strip() in _BLOCKING_CARD_BLOCK_TYPES
 
     def _collect_content_card_blocks(self, result_str: str, cards: list[dict[str, Any]]) -> None:
         payload = self._parse_tool_result_json(result_str)
