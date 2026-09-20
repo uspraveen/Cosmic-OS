@@ -2,9 +2,9 @@ import { normalizeVaultCredentialKind, vaultKindLabel } from './vaultKinds'
 
 export type VaultIslandAction = 'use_entry' | 'add_entry' | 'browser_credential_request'
 
-export type VaultApproveGrant = 'once' | 'window'
+export type VaultApproveGrant = 'once' | 'window' | 'always'
 
-export const VAULT_ALLOW_WINDOW_SECONDS = 15 * 60
+export const VAULT_ALLOW_WINDOW_SECONDS = 24 * 60 * 60
 
 export type VaultIslandRequest = {
   requestId: string
@@ -71,7 +71,11 @@ export function vaultIslandAllowLabel(request: VaultIslandRequest): string {
 }
 
 export function vaultIslandAllowWindowLabel(): string {
-  return 'Allow 15 min'
+  return 'Allow 24 hours'
+}
+
+export function vaultIslandAlwaysAllowLabel(): string {
+  return 'Always allow'
 }
 
 export function vaultIslandKindLabel(request: VaultIslandRequest): string {

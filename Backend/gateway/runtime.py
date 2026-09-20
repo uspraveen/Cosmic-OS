@@ -47,7 +47,7 @@ from .event_automation_store import EventAutomationStore
 from .gmail_approval_store import GmailApprovalStore
 from .gmail_context_store import GmailContextStore
 from .sandbox_permission_store import SandboxPermissionStore
-from .vault.store import POLICY_WINDOW, VaultStore, decrypt_entry_secrets
+from .vault.store import POLICY_ALWAYS_ALLOW, POLICY_WINDOW, VaultStore, decrypt_entry_secrets
 from .browser_interrupts import BrowserInterruptManager
 from .slide_workflow_choice_store import SlideWorkflowChoiceStore
 from .memory import MemoryWriteAuditStore
@@ -5486,9 +5486,23 @@ class GatewayRuntime:
                     self._safe_text(pending.get("channel")) or None,
                     purpose="Approved with the save of these credentials",
                 )
-        grant_kind = grant if grant in {"once", "window"} else "once"
+        grant_kind = grant if grant in {"once", "window", "always"} else "once"
+        if action == "use_entry" and entry_id and grant_kind == "always":
+            # Always-allow is a deliberate settings-page-grade choice; the card
+            # labels it explicitly so the duration is never a surprise.
+            self.vault_store.set_policy(entry_id, POLICY_ALWAYS_ALLOW)
+            self.vault_store.append_audit(
+                entry_id,
+                "user",
+                "policy_change",
+                task_id,
+                detail="mode=always_allow",
+            )
+            logger.info(
+                "vault.approve_always entry=%s request=%s", entry_id, request_id
+            )
         if action == "use_entry" and entry_id and grant_kind == "window":
-            seconds = window_seconds if window_seconds and window_seconds > 0 else 15 * 60
+            seconds = window_seconds if window_seconds and window_seconds > 0 else 24 * 3600
             seconds = min(float(seconds), 24 * 3600)
             expires_at = (
                 datetime.now(timezone.utc) + timedelta(seconds=seconds)

@@ -320,6 +320,16 @@ can fix the actual error. They can't fix the vague feeling.
 """
 
 
+_GATEWAY_AUTH_BLOCK = """\
+Gateway internal APIs are already authenticated for you: the environment
+exports GATEWAY_INTERNAL_TOKEN, and gateway calls take the header
+`X-Internal-Token: $GATEWAY_INTERNAL_TOKEN`. Never read `/etc/cosmic/**`
+(or any *.env) to find tokens, never copy tokens into files — including
+/tmp — and never echo them into logs or code. Secrets for delegated work
+arrive inside the task itself; there is never a reason to call vault
+endpoints from inside a run.
+"""
+
 _GUARDRAILS_BLOCK = """\
 Alpha has full system access by design. With that access:
 
@@ -517,7 +527,9 @@ def render_global_instructions(
     parts.append(_BLOCKED_BLOCK)
     parts.append("\n## 8 · Guardrails\n")
     parts.append(_GUARDRAILS_BLOCK)
-    parts.append("\n## 9 · How you sound\n")
+    parts.append("\n## 9 · Gateway API and secrets hygiene\n")
+    parts.append(_GATEWAY_AUTH_BLOCK)
+    parts.append("\n## 10 · How you sound\n")
     parts.append(_VOICE_BLOCK)
     return "\n".join(parts).rstrip() + "\n"
 

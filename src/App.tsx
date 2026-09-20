@@ -4958,7 +4958,7 @@ const SandboxPermissionActionBlock = ({ block }: { block: ResponseActionBlock })
 
 const VaultPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) => {
   const [status, setStatus] = useState(block.status || 'pending')
-  const [busy, setBusy] = useState<'approve' | 'window' | 'reject' | null>(null)
+  const [busy, setBusy] = useState<'approve' | 'window' | 'always' | 'reject' | null>(null)
   const [error, setError] = useState('')
   const isPending = status.toLowerCase() === 'pending' && block.canRespond !== false
   const action = block.action === 'add_entry' ? 'add_entry' : 'use_entry'
@@ -4971,7 +4971,7 @@ const VaultPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) =
     setStatus(block.status || 'pending')
   }, [block.status])
 
-  const act = async (kind: 'approve' | 'window' | 'reject') => {
+  const act = async (kind: 'approve' | 'window' | 'always' | 'reject') => {
     if (!block.requestId || busy || !isPending) return
     setBusy(kind)
     setError('')
@@ -4983,7 +4983,7 @@ const VaultPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) =
       const result = kind === 'reject'
         ? await cosmicApi.vaultRejectPending!(block.requestId)
         : await cosmicApi.vaultApprovePending!(block.requestId, {
-            grant: kind === 'window' ? 'window' : 'once',
+            grant: kind,
             window_seconds: kind === 'window' ? VAULT_ALLOW_WINDOW_SECONDS : undefined,
           })
       if (String(result?.status || '').trim() === 'ignored') {
@@ -5042,6 +5042,16 @@ const VaultPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) =
                 onClick={() => void act('window')}
               >
                 {busy === 'window' ? 'Working…' : vaultIslandAllowWindowLabel()}
+              </button>
+            ) : null}
+            {action === 'use_entry' ? (
+              <button
+                type="button"
+                className="assistant-action-button"
+                disabled={Boolean(busy)}
+                onClick={() => void act('always')}
+              >
+                {busy === 'always' ? 'Working…' : vaultIslandAlwaysAllowLabel()}
               </button>
             ) : null}
             <button

@@ -1021,6 +1021,10 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
         {entries.map((entry) => {
           const policy = entry.policy
           const mode = (policy?.mode || 'always_ask') as PolicyMode
+          // An expired window no longer grants anything, so the selection must
+          // show the mode that is actually in effect (ask), not the stored one.
+          const windowExpired = mode === 'window' && !windowActive(policy)
+          const effectiveMode = windowExpired ? 'always_ask' : mode
           const isRevealed = revealedId === entry.entry_id
           const showTotp = totpState?.entryId === entry.entry_id
           const confirmingDelete = confirmDeleteId === entry.entry_id
@@ -1047,6 +1051,9 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                       {mode === 'window' && windowActive(policy) ? (
                         <span className="vault-tag is-window">Window open</span>
                       ) : null}
+                      {windowExpired ? (
+                        <span className="vault-tag is-expired">Window expired</span>
+                      ) : null}
                     </div>
                   </div>
                   <span className="vault-entry-desc">
@@ -1062,7 +1069,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                     <button
                       key={option}
                       type="button"
-                      className={mode === option ? 'active' : ''}
+                      className={effectiveMode === option ? 'active' : ''}
                       disabled={busyEntryId === entry.entry_id}
                       title={
                         option === 'always_ask'
@@ -1079,6 +1086,9 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                 </div>
                 {mode === 'window' && windowActive(policy) ? (
                   <span className="vault-policy-note">until {formatTimestamp(policy?.window_expires_at)}</span>
+                ) : null}
+                {windowExpired ? (
+                  <span className="vault-policy-note">window expired — Cosmic will ask before each use until you pick a new policy</span>
                 ) : null}
               </div>
 
