@@ -508,3 +508,52 @@ Do not store them here permanently.
 - `public.user_vms.api_token` must always match the VM's live `GATEWAY_LOCAL_API_TOKEN`.
 - Shared provider keys are intentionally platform-wide, not per-user.
 - Current live `gateway_url` is still `http://3.137.194.119:8080`. This should eventually move to the final HTTPS/WSS edge host.
+
+11. TypeSafe (Jev) Key for the Browser Agent — 2026-09-20
+---------------------------------------------------------
+The browser specialist's Jev decision engine reads TYPESAFE_API_KEY from
+/etc/cosmic/agents/browser-agent.env. bootstrap.py passes the key through
+from the Supabase payload section `browser_agent_env` (added to
+normalize_bootstrap_env_payload), but the platform side below was PENDING as
+of this writing — run it in the Supabase SQL Editor to complete the chain.
+Until then, new VMs simply run keyless (the engine downgrades to the
+classic planner; set the key per-VM by hand or via the bootstrap
+invocation env to enable Jev).
+
+a) Store the shared key in Vault:
+
+```sql
+select vault.create_secret(
+  '<TYPESAFE_API_KEY>',
+  'platform_typesafe_api_key',
+  'Shared TypeSafe (Jev decision engine) key for COSMIC VMs'
+);
+```
+
+b) Teach `consume_bootstrap_token` to deliver it (create or replace the
+function; add the `v_typesafe` declaration, the Vault read, and the
+`browser_agent_env` section to the return object — everything else stays
+as in section 9):
+
+```sql
+-- in the declare block:
+  v_typesafe text;
+
+-- after the v_xai read:
+  select decrypted_secret
+    into v_typesafe
+    from vault.decrypted_secrets
+   where name = 'platform_typesafe_api_key'
+   order by created_at desc
+   limit 1;
+
+-- in the return jsonb_build_object(...):
+    'browser_agent_env', jsonb_build_object(
+      'TYPESAFE_API_KEY', coalesce(v_typesafe, '')
+    )
+```
+
+The key is deliberately coalesce'd to '' (never a hard requirement):
+a missing Vault secret yields an empty value, bootstrap's
+meaningful_env_value filter skips it, and the agent env renders without
+a TYPESAFE line — keyless-safe by construction.

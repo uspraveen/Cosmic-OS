@@ -3995,6 +3995,11 @@ def normalize_bootstrap_env_payload(
         if isinstance(payload.get("meeting_env"), dict)
         else {}
     )
+    browser_agent_env = (
+        dict(payload.get("browser_agent_env") or {})
+        if isinstance(payload.get("browser_agent_env"), dict)
+        else {}
+    )
     vm_payload = (
         dict(payload.get("vm") or {}) if isinstance(payload.get("vm"), dict) else {}
     )
@@ -4060,6 +4065,8 @@ def normalize_bootstrap_env_payload(
         normalized[GOOGLE_SHEETS_AGENT_ENV_NAME] = google_sheets_agent_env
     if image_generator_agent_env:
         normalized[IMAGE_GENERATOR_AGENT_ENV_NAME] = image_generator_agent_env
+    if browser_agent_env:
+        normalized[BROWSER_AGENT_ENV_NAME] = browser_agent_env
     required_fields = {
         "gateway.env": (
             "GATEWAY_LOCAL_API_TOKEN",

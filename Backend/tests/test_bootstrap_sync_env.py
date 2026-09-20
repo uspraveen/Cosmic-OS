@@ -356,6 +356,59 @@ def test_normalize_bootstrap_env_payload_accepts_email_agent_env() -> None:
     assert normalized[bootstrap.EMAIL_AGENT_ENV_NAME]["COSMIC_MAIL_API_TOKEN"] == "mail-token"
 
 
+def test_normalize_bootstrap_env_payload_accepts_browser_agent_env() -> None:
+    """The browser specialist's Supabase section (Jev key et al.) maps to the
+    browser-agent env file the way firecrawl/email sections do — and stays
+    absent when Supabase has not provisioned it yet."""
+    normalized = bootstrap.normalize_bootstrap_env_payload(
+        {
+            "success": True,
+            "vm": {
+                "gateway_url": "http://127.0.0.1:8080",
+                "vm_dns": "localhost",
+            },
+            "gateway_env": {
+                "GATEWAY_LOCAL_API_TOKEN": "pg_live_token",
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "PERPLEXITY_API_KEY": "perplexity-live",
+                "HAIKU_MODEL": "claude-haiku-4-5",
+            },
+            "orchestrator_env": {
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "OPUS_MODEL": "claude-opus-4-6",
+            },
+            "meeting_env": {
+                "GROQ_API_KEY": "groq-live",
+            },
+            "browser_agent_env": {
+                "TYPESAFE_API_KEY": "typesafe-live",
+            },
+        }
+    )
+
+    assert normalized[bootstrap.BROWSER_AGENT_ENV_NAME]["TYPESAFE_API_KEY"] == "typesafe-live"
+
+    without = bootstrap.normalize_bootstrap_env_payload(
+        {
+            "success": True,
+            "vm": {"gateway_url": "http://127.0.0.1:8080", "vm_dns": "localhost"},
+            "gateway_env": {
+                "GATEWAY_LOCAL_API_TOKEN": "pg_live_token",
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "PERPLEXITY_API_KEY": "perplexity-live",
+            },
+            "orchestrator_env": {
+                "ANTHROPIC_API_KEY": "anthropic-live",
+                "OPUS_MODEL": "claude-opus-4-6",
+            },
+            "meeting_env": {
+                "GROQ_API_KEY": "groq-live",
+            },
+        }
+    )
+    assert bootstrap.BROWSER_AGENT_ENV_NAME not in without
+
+
 def test_normalize_bootstrap_env_payload_accepts_image_generator_agent_env() -> None:
     normalized = bootstrap.normalize_bootstrap_env_payload(
         {
