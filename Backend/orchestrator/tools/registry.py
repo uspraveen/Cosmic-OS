@@ -1245,12 +1245,13 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "present_content_cards",
             "description": (
                 "Present portable objects as native Cosmic cards beside the final response. "
-                "Use this after you have authored copy the user will take: X/Twitter drafts, checklists, option sets, "
+                "Use this after you have authored copy the user will take: X/Twitter drafts, option sets, "
                 "or compact summaries. The client owns layout. Do not send HTML, CSS, colors, or privileged actions. "
                 "Allowed actions are copy and open_url. After this tool returns _cosmic_ui, do not repeat covered card content in Markdown. "
                 "These cards are static, read-only text: nothing in them is clickable, checkable, or fillable, and "
                 "they are never interactive. If the user should answer, choose, tick, or fill in anything — including "
-                "a checklist — call ask_user_question instead (mode=form for fill-in skeletons)."
+                "a checklist — call ask_user_question instead (mode=form for fill-in skeletons); checklist preset is "
+                "rejected here for exactly that reason."
             ),
             "input_schema": {
                 "type": "object",
@@ -1265,8 +1266,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                             "properties": {
                                 "preset": {
                                     "type": "string",
-                                    "enum": ["social_post", "copy_payload", "option_set", "checklist"],
-                                    "description": "Optional Cosmic preset. Use social_post for X/Twitter or similar drafts.",
+                                    "enum": ["social_post", "copy_payload", "option_set"],
+                                    "description": "Optional Cosmic preset. Use social_post for X/Twitter or similar drafts. There is no checklist preset: checklists are static lies about interactivity — use ask_user_question(mode=form).",
                                 },
                                 "brand": {
                                     "type": "string",

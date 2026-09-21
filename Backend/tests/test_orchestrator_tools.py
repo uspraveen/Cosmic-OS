@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from orchestrator.tools.executor import ToolExecutionContext, ToolExecutor
-from orchestrator.tools.registry import build_tool_prompt_catalog, get_local_tool_definitions
+from orchestrator.tools.registry import build_tool_prompt_catalog, get_local_tool_definitions, get_tool_spec
 from shared import AgentError, AgentResult, TaskEnvelope, TaskInProgress, sign_task_envelope, utcnow
 
 
@@ -2063,3 +2063,70 @@ async def test_ask_user_question_form_mode_requires_fields() -> None:
 
 async def requester_stub(task_id: str, **kwargs):  # pragma: no cover - only reached on success
     return {"input_request_id": "uir_x", "status": "pending"}
+
+
+@pytest.mark.asyncio
+async def test_present_content_cards_rejects_checklist_preset_with_steering() -> None:
+    executor = ToolExecutor()
+    raw = await executor.execute(
+        "present_content_cards",
+        {
+            "cards": [
+                {
+                    "preset": "checklist",
+                    "title": "Coppr update skeleton",
+                    "items": ["Shipped", "Demo", "Traction"],
+                }
+            ]
+        },
+        context=ToolExecutionContext(channel="desktop"),
+    )
+    result = json.loads(raw)
+    assert result["error"] is True
+    assert "ask_user_question" in result["message"]
+    assert "mode=form" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_present_content_cards_rejects_checklist_section_style() -> None:
+    executor = ToolExecutor()
+    raw = await executor.execute(
+        "present_content_cards",
+        {
+            "cards": [
+                {
+                    "title": "Skeleton",
+                    "sections": [{"type": "list", "style": "checklist", "items": ["A", "B"]}],
+                }
+            ]
+        },
+        context=ToolExecutionContext(channel="desktop"),
+    )
+    result = json.loads(raw)
+    assert result["error"] is True
+    assert "ask_user_question" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_present_content_cards_still_allows_plain_lists() -> None:
+    executor = ToolExecutor()
+    raw = await executor.execute(
+        "present_content_cards",
+        {
+            "cards": [
+                {
+                    "title": "Packing",
+                    "sections": [{"type": "list", "style": "bullets", "items": ["Passport", "Charger"]}],
+                }
+            ]
+        },
+        context=ToolExecutionContext(channel="desktop"),
+    )
+    result = json.loads(raw)
+    assert result["status"] == "presented"
+
+
+def test_checklist_preset_removed_from_tool_schema() -> None:
+    spec = get_tool_spec("present_content_cards")
+    enum = spec.api_definition["input_schema"]["properties"]["cards"]["items"]["properties"]["preset"]["enum"]
+    assert "checklist" not in enum

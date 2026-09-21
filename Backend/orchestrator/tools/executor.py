@@ -215,6 +215,30 @@ class ToolExecutor:
         normalized = normalize_content_cards(tool_input.get("cards"))
         if normalized.get("error"):
             return {"error": True, "message": normalized.get("message") or "Invalid content cards."}
+        # Checkbox-styled cards are the one presentation we refuse outright:
+        # they draw inputs that can never be used, and every observed misuse of
+        # this tool ("it's interactive this time") came through this door. The
+        # error names the right tool so the model can recover in the same turn.
+        for block in normalized.get("response_blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            preset_is_checklist = str(block.get("preset") or "") == "checklist"
+            section_is_checklist = any(
+                isinstance(section, dict) and str(section.get("style") or "") == "checklist"
+                for section in (block.get("sections") or [])
+            )
+            if preset_is_checklist or section_is_checklist:
+                return {
+                    "error": True,
+                    "message": (
+                        "Checklist cards are rejected: they render as static text with dead checkboxes the "
+                        "user cannot tick, which has repeatedly misled the user. To have the user fill in one "
+                        "line per row, call ask_user_question with mode=form and one field per checklist row "
+                        "(labels + placeholders; the card docks beside their input box and returns their "
+                        "answers as this tool's result). For a plain display list, use a list section with "
+                        "style bullets."
+                    ),
+                }
         response = {
             "status": "presented",
             "card_count": normalized["card_count"],
