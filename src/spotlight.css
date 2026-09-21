@@ -1927,7 +1927,6 @@ kbd {
 }
 
 .task-hub {
-.task-hub {
   display: flex;
   flex-direction: column;
   gap: 14px;
