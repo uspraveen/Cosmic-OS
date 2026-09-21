@@ -35,9 +35,12 @@ describe('resolveBrowserLiveControls', () => {
     expect(controls({ awaitingInput: false }).showWaitingChip).toBe(false)
   })
 
-  it('withdraws take control while an interrupt is pending, and says why', () => {
+  it('keeps take control while an interrupt is pending, with the chip as status', () => {
+    // Questions are exactly when hands on the page matter (solve this CAPTCHA,
+    // finish this login) — the run is paused by the question, but the wheel
+    // must stay reachable.
     const waiting = controls({ awaitingInput: true, lightboxOpen: true })
-    expect(waiting.showTakeControl).toBe(false)
+    expect(waiting.showTakeControl).toBe(true)
     expect(waiting.showWaitingChip).toBe(true)
   })
 
