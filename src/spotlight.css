@@ -1328,20 +1328,6 @@ kbd {
   text-transform: uppercase;
 }
 
-.task-interrupt-shell {
-  position: fixed;
-  top: var(--task-rail-top, 200px);
-  right: var(--task-rail-edge, 24px);
-  width: min(var(--task-rail-width, 340px), calc(100vw - (var(--task-rail-edge, 28px) * 2)));
-  max-height: calc(100vh - var(--task-rail-top, 120px) - 132px);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  pointer-events: none;
-  z-index: 44;
-}
-
 .cron-result-shell {
   position: fixed;
   right: 24px;
@@ -1710,64 +1696,237 @@ kbd {
   color: rgba(255, 255, 255, 0.98);
 }
 
-.task-interrupt-shell.compact .task-interrupt-card {
-  padding: 16px 16px 14px;
-  border-radius: 24px;
+/* ── Ask-user question card, docked above the composer ── */
+
+.ask-user-shell {
+  position: fixed;
+  left: var(--ask-user-left, 50%);
+  bottom: var(--ask-user-bottom, 96px);
+  width: var(--ask-user-width, min(560px, calc(100vw - 48px)));
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  z-index: 9106;
+  pointer-events: none;
 }
 
-.task-interrupt-shell.compact .task-interrupt-head {
+.ask-user-shell .task-interrupt-stack {
+  max-height: min(58vh, 520px);
+}
+
+.ask-card {
+  width: 100%;
+  padding: 15px 18px 14px;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  margin-bottom: 10px;
+  pointer-events: auto;
+  overflow-y: auto;
+  scrollbar-width: none;
 }
 
-.task-interrupt-shell.compact .task-interrupt-title-cluster {
+.ask-card::-webkit-scrollbar {
+  display: none;
+}
+
+.ask-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ask-card-kicker-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ask-card-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.ask-card-counter {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(132, 206, 255, 0.14);
+  border: 1px solid rgba(132, 206, 255, 0.26);
+  color: rgba(214, 238, 255, 0.92);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+}
+
+.ask-card-question {
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.96);
+}
+
+.ask-card-context {
+  margin-top: -5px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.ask-card-options {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ask-card-option {
+  display: flex;
+  align-items: center;
   gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px 8px 9px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.045);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
 }
 
-.task-interrupt-shell.compact .task-interrupt-logo-shell {
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
+.ask-card-option:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+  transform: translateY(-1px);
 }
 
-.task-interrupt-shell.compact .task-interrupt-logo {
+.ask-card-option:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.ask-card-option-key {
+  flex-shrink: 0;
   width: 22px;
   height: 22px;
-  object-position: 50% 50%;
-}
-
-.task-interrupt-shell.compact .task-interrupt-kicker {
-  font-size: 10px;
-}
-
-.task-interrupt-shell.compact .task-interrupt-meta {
-  font-size: 11px;
-}
-
-.task-interrupt-shell.compact .task-interrupt-chip {
-  min-height: 24px;
-  padding: 0 10px;
-  font-size: 10px;
-}
-
-.task-interrupt-shell.compact .task-interrupt-preview {
-  min-height: 0;
-  margin-bottom: 12px;
-  padding: 10px 12px;
-  font-size: 12px;
-}
-
-.task-interrupt-shell.compact .task-interrupt-actions {
-  margin-top: 4px;
-  flex-direction: column-reverse;
-  align-items: stretch;
-}
-
-.task-interrupt-shell.compact .task-interrupt-btn {
-  width: 100%;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
   justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.78);
 }
 
+.ask-card-option.is-selected {
+  background:
+    linear-gradient(180deg, rgba(132, 206, 255, 0.2), rgba(132, 206, 255, 0.07)),
+    rgba(132, 206, 255, 0.1);
+  border-color: rgba(132, 206, 255, 0.42);
+  color: rgba(240, 249, 255, 0.98);
+}
+
+.ask-card-option.is-selected .ask-card-option-key {
+  background: rgba(132, 206, 255, 0.26);
+  border-color: rgba(158, 216, 255, 0.4);
+  color: rgba(236, 248, 255, 0.98);
+}
+
+.ask-card-custom-input {
+  margin-top: -2px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(132, 206, 255, 0.35);
+  background: rgba(0, 0, 0, 0.28);
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 13.5px;
+  outline: none;
+}
+
+.ask-card-custom-input:focus {
+  border-color: rgba(132, 206, 255, 0.6);
+}
+
+.ask-card-custom-input::placeholder {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.ask-card-error {
+  font-size: 12px;
+  color: rgba(255, 174, 191, 0.92);
+}
+
+.ask-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.ask-card-footer-spacer {
+  flex: 1;
+}
+
+.ask-card-sent {
+  flex: 1;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: rgba(140, 232, 178, 0.95);
+}
+
+.ask-card-skip,
+.ask-card-continue {
+  border: none;
+  border-radius: 12px;
+  padding: 8px 16px;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: transform 0.15s ease, filter 0.15s ease, color 0.15s ease;
+}
+
+.ask-card-skip {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.ask-card-skip:hover:not(:disabled) {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.ask-card-continue {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.06)),
+    rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: rgba(255, 255, 255, 0.98);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 8px 18px rgba(0, 0, 0, 0.12);
+}
+
+.ask-card-continue:hover:not(:disabled) {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+}
+
+.ask-card-skip:disabled,
+.ask-card-continue:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.task-hub {
 .task-hub {
   display: flex;
   flex-direction: column;

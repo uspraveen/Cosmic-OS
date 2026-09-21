@@ -31,7 +31,7 @@ import { canAdoptTaskForActiveStream, canClaimActiveStreamSlot, extractEventStre
 import { groupRepliesWithTheirQuery } from './transcriptOrder'
 import { groupEmailThreads, stripEmailEnvelope, type EmailThreadUnit } from './emailThreads'
 import { findPendingApprovals } from './pendingApprovals'
-import { ContentCardStack, normalizeContentCard, type ContentCardBlock } from './responseSurfaces'
+import { ContentCardStack, QuestionCard, normalizeContentCard, type ContentCardBlock } from './responseSurfaces'
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
@@ -6116,6 +6116,10 @@ export default function App() {
   const [foregroundingRequestId, setForegroundingRequestId] = useState<string | null>(null)
   const [taskInputErrors, setTaskInputErrors] = useState<Record<string, string>>({})
   const [dismissedTaskInterruptIds, setDismissedTaskInterruptIds] = useState<string[]>([])
+  // Answers already accepted by the gateway. The `task.input_reply.accepted`
+  // event is what removes the card, but it can lag the HTTP reply by a beat —
+  // this set flips the docked question to its "Answer sent" state instantly.
+  const [answeredTaskInputs, setAnsweredTaskInputs] = useState<string[]>([])
   const [selectedTaskInputId, setSelectedTaskInputId] = useState<string | null>(null)
   const [selectedBackgroundRequestId, setSelectedBackgroundRequestId] = useState<string | null>(null)
   const [backgroundTaskListRetracted, setBackgroundTaskListRetracted] = useState(false)
@@ -9743,6 +9747,9 @@ export default function App() {
         taskId: taskInput.taskId,
         content,
       })
+      setAnsweredTaskInputs((prev) => (
+        prev.includes(taskInput.inputRequestId) ? prev : [...prev, taskInput.inputRequestId]
+      ))
       setTaskInputDrafts((prev) => ({
         ...prev,
         [taskInput.inputRequestId]: content,
@@ -10265,36 +10272,38 @@ export default function App() {
     !showLauncherTray
   const shouldShowPrimarySurface = mode !== 'meeting' && mode !== 'spaces' && !showLauncherTray
   const shouldShowResponseSurface = shouldShowPrimarySurface && (mode === 'task' || messages.length > 0)
-  const taskRailLayout = useMemo(() => {
-    if (!shouldShowTaskInterrupt) {
-      return null
+  // The question card docks above the composer instead of squatting on a
+  // right-hand rail, so the chat surface keeps its full width while a
+  // question is pending (--task-rail-reserve stays 0).
+  const [askUserDock, setAskUserDock] = useState<{ left: number; width: number; bottom: number } | null>(null)
+  useLayoutEffect(() => {
+    if (!shouldShowTaskInterrupt || visibleTaskInterrupts.length === 0) {
+      setAskUserDock(null)
+      return undefined
     }
-
-    const edgePadding = viewportSize.width >= 1440 ? 32 : 24
-    const railGap = 20
-    const preferredRailWidth = viewportSize.width >= 1380 ? 360 : 328
-    const minimumRailWidth = viewportSize.width < 920 ? 228 : 252
-    const minimumMainWidth = shouldShowResponseSurface ? 420 : 360
-
-    const railWidth = Math.min(
-      preferredRailWidth,
-      Math.max(
-        minimumRailWidth,
-        viewportSize.width - (minimumMainWidth + edgePadding * 2 + railGap),
-      ),
-    )
-    const reserve = railWidth + railGap + edgePadding
-    const compact = railWidth < 286
-    const top = viewportSize.height < 820 ? 176 : 200
-
-    return {
-      edgePadding,
-      railWidth,
-      reserve,
-      compact,
-      top,
+    const measure = () => {
+      const rect = readVisibleRect(composerSurfaceRef.current)
+      if (!rect) {
+        setAskUserDock(null)
+        return
+      }
+      const width = Math.max(300, Math.min(560, rect.width))
+      setAskUserDock({
+        left: rect.x + Math.max(0, (rect.width - width) / 2),
+        width,
+        bottom: Math.max(16, window.innerHeight - rect.y + 12),
+      })
     }
-  }, [shouldShowTaskInterrupt, shouldShowResponseSurface, viewportSize.height, viewportSize.width])
+    measure()
+    // The composer re-anchors as neighboring surfaces settle (response pane,
+    // wide mode, attachment bar); re-measure once they have laid out.
+    const raf = window.requestAnimationFrame(measure)
+    const timer = window.setTimeout(measure, 240)
+    return () => {
+      window.cancelAnimationFrame(raf)
+      window.clearTimeout(timer)
+    }
+  }, [shouldShowTaskInterrupt, visibleTaskInterrupts.length, viewportSize.width, viewportSize.height, chatWideMode, searchState])
   const shouldShowCronResultSurface = displayedCronResultNotifications.length > 0
   const cronResultShellStyle = {
     ['--cron-result-bottom' as string]: searchState === 'visible' ? '112px' : '24px',
@@ -10351,15 +10360,14 @@ export default function App() {
     : undefined), [surfaceLaunch])
   const overlayStyle = {
     pointerEvents: searchState === 'visible' ? 'auto' : 'none',
-    ['--task-rail-reserve' as string]: taskRailLayout ? `${taskRailLayout.reserve}px` : '0px',
   } as React.CSSProperties
   const isMeetingSurfaceActive = mode === 'meeting' && searchState !== 'hidden'
   const isSpacesSurfaceActive = mode === 'spaces' && searchState !== 'hidden'
-  const taskInterruptStyle = taskRailLayout
+  const askUserShellStyle = askUserDock
     ? ({
-      ['--task-rail-width' as string]: `${taskRailLayout.railWidth}px`,
-      ['--task-rail-edge' as string]: `${taskRailLayout.edgePadding}px`,
-      ['--task-rail-top' as string]: `${taskRailLayout.top}px`,
+      ['--ask-user-left' as string]: `${askUserDock.left}px`,
+      ['--ask-user-width' as string]: `${askUserDock.width}px`,
+      ['--ask-user-bottom' as string]: `${askUserDock.bottom}px`,
     } as React.CSSProperties)
     : undefined
   const hasMultiplePendingTaskInputs = orderedPendingTaskInputs.length > 1
@@ -10663,12 +10671,12 @@ export default function App() {
         />
 
         {shouldShowTaskInterrupt && visibleTaskInterrupts.length > 0 && (
-          <div className={`task-interrupt-shell ${taskRailLayout?.compact ? 'compact' : ''}`} style={taskInterruptStyle}>
+          <div className="ask-user-shell" style={askUserShellStyle}>
             <div
               ref={taskInterruptStackRef}
               className="task-interrupt-stack"
               role="list"
-              aria-label={`${visibleTaskInterrupts.length} task inputs waiting`}
+              aria-label={`${visibleTaskInterrupts.length} question${visibleTaskInterrupts.length === 1 ? '' : 's'} waiting for you`}
               onScroll={handleTaskInterruptScroll}
             >
               {visibleTaskInterrupts.map((taskInput, index) => (
@@ -10679,59 +10687,21 @@ export default function App() {
                   className="task-interrupt-glass"
                   style={{ width: '100%' }}
                 >
-                  <div className="task-interrupt-card">
-                    <div className="task-interrupt-head">
-                      <div className="task-interrupt-title-cluster">
-                        <div className="task-interrupt-logo-shell" aria-hidden="true">
-                          <img
-                            src={cosmicBallLogo}
-                            alt=""
-                            className="task-interrupt-logo"
-                            draggable={false}
-                          />
-                        </div>
-                        <div className="task-interrupt-copy">
-                          <div className="task-interrupt-kicker">Task needs your input</div>
-                          <div className="task-interrupt-meta">
-                            {visibleTaskInterrupts.length > 1
-                              ? `${index + 1} of ${visibleTaskInterrupts.length} waiting`
-                              : taskInput.options.length > 0
-                                ? `${taskInput.options.length} quick choices in Task Inbox`
-                                : 'Open Task Inbox to continue'}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="task-interrupt-chip-row">
-                        {visibleTaskInterrupts.length > 1 && (
-                          <div className="task-interrupt-chip count">{visibleTaskInterrupts.length} waiting</div>
-                        )}
-                        <div className="task-interrupt-chip">Orchestrator task</div>
-                      </div>
-                    </div>
-                    <div className="task-interrupt-preview">{taskInput.question}</div>
-                    <div className="task-interrupt-actions">
-                      <button
-                        type="button"
-                        className="task-interrupt-btn secondary"
-                        onClick={() => dismissTaskInterrupt(taskInput.inputRequestId)}
-                      >
-                        Later
-                      </button>
-                      <button
-                        type="button"
-                        className="task-interrupt-btn primary"
-                        onClick={() => {
-                          setDismissedTaskInterruptIds([])
-                          showTaskSurface({
-                            focusComposer: false,
-                            focusInputRequestId: taskInput.inputRequestId,
-                          })
-                        }}
-                      >
-                        Reply
-                      </button>
-                    </div>
-                  </div>
+                  <QuestionCard
+                    question={taskInput.question}
+                    options={taskInput.options}
+                    allowCustom={true}
+                    counterLabel={
+                      visibleTaskInterrupts.length > 1
+                        ? `${index + 1} of ${visibleTaskInterrupts.length} waiting`
+                        : null
+                    }
+                    busy={Boolean(submittingTaskInputs[taskInput.inputRequestId])}
+                    error={taskInputErrors[taskInput.inputRequestId] || null}
+                    sent={answeredTaskInputs.includes(taskInput.inputRequestId)}
+                    onContinue={(answer: string) => void submitTaskInputReply(taskInput, answer)}
+                    onSkip={() => dismissTaskInterrupt(taskInput.inputRequestId)}
+                  />
                 </LiquidGlass>
               ))}
             </div>

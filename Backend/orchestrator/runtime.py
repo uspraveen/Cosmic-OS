@@ -433,6 +433,8 @@ class OrchestratorRuntime:
             local_code_execution_max_file_bytes=self.config.local_code_execution_max_file_bytes,
             agent_dispatcher=self.dispatch_agent_task,
             agent_catalog_searcher=self.search_agent_catalog,
+            user_input_requester=self.request_user_input,
+            ask_user_wait_timeout_sec=self.config.ask_user_wait_timeout_sec,
         )
         self.started = True
 

@@ -138,3 +138,31 @@ def test_merge_content_cards_builds_markdown_when_needed_and_dedupes() -> None:
     assert merged[-1]["id"] == card["id"]
     again = merge_content_cards_into_response_blocks(merged, [card])
     assert [item["id"] for item in again or []].count(card["id"]) == 1
+
+
+def test_checklist_items_survive_long_instructions() -> None:
+    long_line = "Demo: 60-90s clip of intent-to-Gerbers, or a screenshot set if video is too much friction this week"
+    result = normalize_content_cards(
+        [
+            {
+                "preset": "checklist",
+                "title": "Coppr update skeleton",
+                "items": [long_line, "Traction: one number that moved"],
+            }
+        ]
+    )
+
+    assert result["status"] == "presented"
+    section = result["response_blocks"][0]["sections"][0]
+    assert section["style"] == "checklist"
+    assert section["items"][0] == long_line
+    assert not section["items"][0].endswith("…")
+
+
+def test_chip_items_keep_the_tight_cap() -> None:
+    chip = "#" + "x" * 200
+    result = normalize_content_cards([{"title": "Draft", "body": "Body", "tags": [chip]}])
+
+    card = result["response_blocks"][0]
+    assert card["tags"][0].endswith("…")
+    assert len(card["tags"][0]) <= 80

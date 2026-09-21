@@ -109,6 +109,8 @@ class ToolExecutor:
         local_code_execution_max_file_bytes: int = 25 * 1024 * 1024,
         agent_dispatcher: Callable[..., Awaitable[AgentResult | TaskInProgress]] | None = None,
         agent_catalog_searcher: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        user_input_requester: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        ask_user_wait_timeout_sec: float = 300.0,
         client: httpx.AsyncClient | None = None,
         heartbeat_notes_path: str | Path | None = None,
     ) -> None:
@@ -143,6 +145,8 @@ class ToolExecutor:
         )
         self._agent_dispatcher = agent_dispatcher
         self._agent_catalog_searcher = agent_catalog_searcher
+        self._user_input_requester = user_input_requester
+        self.ask_user_wait_timeout_sec = max(5.0, float(ask_user_wait_timeout_sec or 300.0))
         timeout = httpx.Timeout(30.0, connect=10.0)
         self._client = client or httpx.AsyncClient(timeout=timeout, http2=True)
         self._owns_client = client is None
@@ -222,6 +226,93 @@ class ToolExecutor:
             card_count=int(normalized["card_count"]),
         )
         return response
+
+    # ── Ask the user a question ─────────────────────────────────
+
+    async def _ask_user_question(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        channel = context.channel if context else None
+        if not channel_supports_trusted_ui(channel):
+            return {
+                "error": True,
+                "message": "Interactive questions are only available on desktop and mobile.",
+            }
+        if self._user_input_requester is None:
+            return {"error": True, "message": "Asking the user is not available in this runtime."}
+        task_id = str(context.task_id if context else "") or ""
+        if not task_id:
+            return {"error": True, "message": "No active task to attach the question to."}
+
+        question = str(tool_input.get("question") or "").strip()
+        if not question:
+            return {"error": True, "message": "question is required."}
+        question = question[:500]
+
+        options: list[str] = []
+        raw_options = tool_input.get("options")
+        if isinstance(raw_options, list):
+            for raw in raw_options:
+                text = str(raw or "").strip()[:200]
+                if text and text not in options:
+                    options.append(text)
+                if len(options) >= 6:
+                    break
+
+        allow_custom = tool_input.get("allow_custom")
+        allow_custom_flag = bool(allow_custom) if isinstance(allow_custom, bool) else True
+        ask_context = str(tool_input.get("context") or "").strip()[:200] or None
+
+        try:
+            result = await self._user_input_requester(
+                task_id,
+                question=question,
+                options=options,
+                channel=channel,
+                wait_timeout_sec=self.ask_user_wait_timeout_sec,
+            )
+        except Exception as exc:
+            logger.warning("tool.ask_user_question.failed error=%s", str(exc)[:200])
+            return {"error": True, "message": "The question could not be delivered to the user."}
+
+        status = str(result.get("status") or "pending")
+        if status == "answered" and isinstance(result.get("reply"), dict):
+            answer = str(result["reply"].get("content") or "").strip()
+            if answer:
+                return {
+                    "status": "answered",
+                    "question": question,
+                    "answer": answer,
+                }
+
+        # Still pending: the card stays live in the client. A late answer is
+        # not lost — the reply consumer dispatches an agent.resume task into
+        # this same session, so the model only needs to end its turn cleanly.
+        contract: dict[str, Any] = {
+            "version": 1,
+            "render": "interactive_question_card",
+            "input_request_id": str(result.get("input_request_id") or ""),
+            "response_mode": "end_turn_without_answer",
+            "instruction": (
+                "The question card is live beside the user's input box. You do not have the answer yet: "
+                "end your turn now with a short note that you are waiting, and do not guess. "
+                "The user's answer will arrive as a new message in this conversation."
+            ),
+        }
+        payload: dict[str, Any] = {
+            "status": "pending",
+            "question": question,
+            "options": options,
+            "allow_custom": allow_custom_flag,
+            "input_request_id": str(result.get("input_request_id") or ""),
+        }
+        if ask_context:
+            payload["context"] = ask_context
+        payload["_cosmic_ui"] = contract
+        return payload
 
     # ── Perplexity Research ──────────────────────────────────────
 

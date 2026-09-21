@@ -254,6 +254,7 @@ class OrchestratorConfig:
     # turns) and is still ~15x faster than the unbounded Max default. The model
     # can raise it for the rest of a turn via the think_deeper tool.
     fireworks_reasoning_effort: str | int = "medium"
+    ask_user_wait_timeout_sec: float = 300.0
     local_code_execution_enabled: bool = True
     local_code_execution_timeout_sec: float = 45.0
     local_code_execution_allow_network: bool = False
@@ -430,6 +431,10 @@ class OrchestratorConfig:
             ),
             fireworks_reasoning_effort=_env_reasoning_effort(
                 "ORCHESTRATOR_FIREWORKS_REASONING_EFFORT", "medium"
+            ),
+            ask_user_wait_timeout_sec=max(
+                5.0,
+                _env_float("ORCHESTRATOR_ASK_USER_WAIT_TIMEOUT_SEC", 300.0),
             ),
             local_code_execution_enabled=_env_bool("ORCHESTRATOR_CODE_SANDBOX_ENABLED", True),
             local_code_execution_timeout_sec=max(

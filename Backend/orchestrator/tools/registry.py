@@ -74,6 +74,13 @@ def _present_content_cards_progress(tool_input: dict[str, Any]) -> str:
     return "Preparing response cards..."
 
 
+def _ask_user_question_progress(tool_input: dict[str, Any]) -> str:
+    question = str(tool_input.get("question") or "").strip()
+    if question:
+        return f"Waiting on your answer: {question[:80]}"
+    return "Waiting on your answer..."
+
+
 def _web_search_progress(tool_input: dict[str, Any]) -> str:
     query = str(tool_input.get("query") or "").strip()
     return f"Searching the web for: {query}" if query else "Searching the web..."
@@ -1240,7 +1247,8 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "Present portable objects as native Cosmic cards beside the final response. "
                 "Use this after you have authored copy the user will take: X/Twitter drafts, checklists, option sets, "
                 "or compact summaries. The client owns layout. Do not send HTML, CSS, colors, or privileged actions. "
-                "Allowed actions are copy and open_url. After this tool returns _cosmic_ui, do not repeat covered card content in Markdown."
+                "Allowed actions are copy and open_url. After this tool returns _cosmic_ui, do not repeat covered card content in Markdown. "
+                "These cards are read-only displays — when you need the user to answer or decide something, call ask_user_question instead."
             ),
             "input_schema": {
                 "type": "object",
@@ -1353,6 +1361,52 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Present copyable or choosable objects as native Cosmic cards. Use social_post for X drafts. Never invent HTML or privileged buttons.",
         progress_builder=_present_content_cards_progress,
         handler_method="_present_content_cards",
+        read_only=True,
+        trusted_ui_only=True,
+    ),
+    ToolSpec(
+        name="ask_user_question",
+        api_definition={
+            "name": "ask_user_question",
+            "description": (
+                "Ask the user a question whose answer you need before you can proceed. The desktop client renders an "
+                "interactive question card beside the input box with clickable option rows, an optional custom answer "
+                "field, and Skip / Continue buttons; the user's answer returns as this tool's result. Offer 2-6 "
+                "concrete options when the decision is choosable; omit options for an open question. If the user does "
+                "not answer in time the result says so — then finish your turn normally without inventing an answer, "
+                "and the answer will follow as a new message later. For copy the user will take (drafts, checklists, "
+                "summaries) use present_content_cards instead; this tool is for decisions, not deliverables."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question, phrased so each option reads as a complete answer to it.",
+                    },
+                    "options": {
+                        "type": "array",
+                        "minItems": 0,
+                        "maxItems": 6,
+                        "items": {"type": "string"},
+                        "description": "Up to six answer choices, each a complete self-contained line.",
+                    },
+                    "allow_custom": {
+                        "type": "boolean",
+                        "description": "Whether the user may type a free-form answer instead of a listed option. Defaults to true.",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional one-line context shown under the question.",
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+        group="presentation",
+        prompt_summary="Ask the user a question as an interactive card near their input box; the chosen answer returns as the tool result.",
+        progress_builder=_ask_user_question_progress,
+        handler_method="_ask_user_question",
         read_only=True,
         trusted_ui_only=True,
     ),

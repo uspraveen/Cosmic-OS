@@ -14,6 +14,9 @@ MAX_SUBTITLE_CHARS = 200
 MAX_TEXT_CHARS = 4000
 MAX_CODE_CHARS = 6000
 MAX_LIST_ITEMS = 12
+# List/checklist rows carry instructions ("Demo: 60-90s clip of ..."), not
+# chips; an 80-char clip amputated them mid-sentence. Chips keep the 80 cap.
+MAX_LIST_ITEM_CHARS = 240
 MAX_CHIPS = 16
 MAX_KEY_VALUES = 12
 MAX_ACTIONS = 3
@@ -276,11 +279,11 @@ def _sections_from_preset(
     if chips:
         sections.append({"type": "chips", "items": chips[:MAX_CHIPS]})
     if preset == "checklist":
-        items = _string_list(raw.get("items") or raw.get("options"), limit=MAX_LIST_ITEMS)
+        items = _string_list(raw.get("items") or raw.get("options"), limit=MAX_LIST_ITEMS, max_item_chars=MAX_LIST_ITEM_CHARS)
         if items:
             sections.append({"type": "list", "style": "checklist", "items": items})
     elif preset == "option_set":
-        items = _string_list(raw.get("options") or raw.get("items"), limit=MAX_LIST_ITEMS)
+        items = _string_list(raw.get("options") or raw.get("items"), limit=MAX_LIST_ITEMS, max_item_chars=MAX_LIST_ITEM_CHARS)
         if items:
             sections.append({"type": "list", "style": "options", "items": items})
     return sections[:MAX_SECTIONS_PER_CARD]
@@ -323,7 +326,7 @@ def _normalize_section(raw: Any) -> dict[str, Any] | None:
             return None
         return {"type": "chips", "items": items}
     if section_type == "list":
-        items = _string_list(raw.get("items"), limit=MAX_LIST_ITEMS)
+        items = _string_list(raw.get("items"), limit=MAX_LIST_ITEMS, max_item_chars=MAX_LIST_ITEM_CHARS)
         if not items:
             return None
         style = str(raw.get("style") or "").strip().lower()
@@ -562,7 +565,7 @@ def _safe_https_url(value: Any) -> str | None:
     return url
 
 
-def _string_list(value: Any, *, limit: int) -> list[str]:
+def _string_list(value: Any, *, limit: int, max_item_chars: int = 80) -> list[str]:
     if isinstance(value, str):
         values = [value]
     elif isinstance(value, list):
@@ -572,7 +575,7 @@ def _string_list(value: Any, *, limit: int) -> list[str]:
     items: list[str] = []
     seen: set[str] = set()
     for raw in values:
-        text = _clip(_safe_text(raw), 80)
+        text = _clip(_safe_text(raw), max_item_chars)
         if not text or text in seen:
             continue
         seen.add(text)

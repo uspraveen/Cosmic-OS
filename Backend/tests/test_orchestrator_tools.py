@@ -33,6 +33,128 @@ def test_present_content_cards_is_desktop_only() -> None:
     assert "Response Surfaces" in catalog
 
 
+def test_ask_user_question_is_registered_desktop_only() -> None:
+    desktop_names = {tool.get("name") for tool in get_local_tool_definitions(channel="desktop")}
+    mobile_names = {tool.get("name") for tool in get_local_tool_definitions(channel="mobile")}
+    whatsapp_names = {tool.get("name") for tool in get_local_tool_definitions(channel="whatsapp")}
+    hidden_names = {tool.get("name") for tool in get_local_tool_definitions()}
+    assert "ask_user_question" in desktop_names
+    assert "ask_user_question" in mobile_names
+    assert "ask_user_question" not in whatsapp_names
+    assert "ask_user_question" not in hidden_names
+    catalog = build_tool_prompt_catalog(channel="desktop")
+    assert "`ask_user_question`" in catalog
+
+
+@pytest.mark.asyncio
+async def test_ask_user_question_returns_answer_when_user_replies() -> None:
+    async def requester(task_id: str, **kwargs):
+        assert task_id == "task_123"
+        assert kwargs["question"] == "Which update should I bank?"
+        assert kwargs["options"] == ["Shipped feature", "Traction number"]
+        assert kwargs["wait_timeout_sec"] > 0
+        return {
+            "input_request_id": "uir_1",
+            "status": "answered",
+            "reply": {"content": "Shipped feature"},
+        }
+
+    executor = ToolExecutor(user_input_requester=requester)
+    raw = await executor.execute(
+        "ask_user_question",
+        {
+            "question": "Which update should I bank?",
+            "options": ["Shipped feature", "Traction number", ""],
+        },
+        context=ToolExecutionContext(task_id="task_123", channel="desktop"),
+    )
+    result = json.loads(raw)
+    assert result["status"] == "answered"
+    assert result["answer"] == "Shipped feature"
+
+
+@pytest.mark.asyncio
+async def test_ask_user_question_pending_when_not_answered() -> None:
+    async def requester(task_id: str, **kwargs):
+        return {"input_request_id": "uir_2", "status": "pending", "question": "Go ahead?"}
+
+    executor = ToolExecutor(user_input_requester=requester)
+    raw = await executor.execute(
+        "ask_user_question",
+        {"question": "Go ahead?", "options": ["Yes", "No"], "context": "before deploy"},
+        context=ToolExecutionContext(task_id="task_123", channel="desktop"),
+    )
+    result = json.loads(raw)
+    assert result["status"] == "pending"
+    assert result["input_request_id"] == "uir_2"
+    assert result["context"] == "before deploy"
+    assert result["_cosmic_ui"]["response_mode"] == "end_turn_without_answer"
+    assert "new message" in result["_cosmic_ui"]["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_ask_user_question_validates_and_gates() -> None:
+    executor = ToolExecutor()
+
+    off_desktop = await executor.execute(
+        "ask_user_question",
+        {"question": "Hello?"},
+        context=ToolExecutionContext(task_id="task_1", channel="whatsapp"),
+    )
+    assert json.loads(off_desktop)["error"] is True
+
+    no_task = await executor.execute(
+        "ask_user_question",
+        {"question": "Hello?"},
+        context=ToolExecutionContext(task_id="", channel="desktop"),
+    )
+    assert json.loads(no_task)["error"] is True
+
+    missing = await executor.execute(
+        "ask_user_question",
+        {"options": ["A"]},
+        context=ToolExecutionContext(task_id="task_1", channel="desktop"),
+    )
+    assert json.loads(missing)["error"] is True
+
+    async def failing_requester(task_id: str, **kwargs):
+        raise RuntimeError("redis down")
+
+    broken = ToolExecutor(user_input_requester=failing_requester)
+    undelivered = await broken.execute(
+        "ask_user_question",
+        {"question": "Hello?"},
+        context=ToolExecutionContext(task_id="task_1", channel="desktop"),
+    )
+    assert json.loads(undelivered)["error"] is True
+
+
+@pytest.mark.asyncio
+async def test_ask_user_question_normalizes_options() -> None:
+    captured: dict = {}
+
+    async def requester(task_id: str, **kwargs):
+        captured.update(kwargs)
+        return {"input_request_id": "uir_3", "status": "pending"}
+
+    executor = ToolExecutor(user_input_requester=requester, ask_user_wait_timeout_sec=120)
+    long_option = "x" * 500
+    raw = await executor.execute(
+        "ask_user_question",
+        {
+            "question": "y" * 700,
+            "options": [long_option, "Dup", "Dup", "  ", None],
+        },
+        context=ToolExecutionContext(task_id="task_1", channel="desktop"),
+    )
+    json.loads(raw)
+    assert len(captured["question"]) <= 500
+    assert len(captured["options"]) == 2
+    assert captured["options"][1] == "Dup"
+    assert len(captured["options"][0]) == 200
+    assert captured["wait_timeout_sec"] == 120
+
+
 @pytest.mark.asyncio
 async def test_present_content_cards_returns_validated_blocks() -> None:
     executor = ToolExecutor()
