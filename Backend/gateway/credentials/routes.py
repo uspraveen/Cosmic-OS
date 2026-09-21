@@ -296,7 +296,7 @@ async def start_github_connect(body: ConnectGitHubRequest, request: Request):
     app_slug = ""
     if runtime is not None:
         app_slug = str(getattr(runtime.config, "github_app_slug", "") or "").strip()
-    already_connected = bool(mgr.list_accounts("github"))
+    already_connected = _github_already_connected(mgr.list_accounts("github"))
     if app_slug and not already_connected:
         result["authorize_url"] = (
             f"https://github.com/apps/{app_slug}/installations/new"
@@ -306,6 +306,19 @@ async def start_github_connect(body: ConnectGitHubRequest, request: Request):
     else:
         result["flow"] = "authorize"
     return result
+
+
+def _github_already_connected(accounts: list[dict[str, Any]]) -> bool:
+    """Does any account row short-circuit the connect flow to plain authorize?
+
+    Only an explicit user disconnect (``revoked``) re-opens the install page,
+    because that page is the only place repository grants are chosen — the
+    plain authorize flow never carries an installation id, so a reconnect that
+    skips it cannot restate the grant or trigger the connect-time repo sync.
+    A ``needs_auth`` row keeps the light path: its grant is intact and a fresh
+    token heals it without dragging the user through the repo picker again.
+    """
+    return any(str(account.get("status") or "") != "revoked" for account in accounts)
 
 
 @router.get("/auth/callback/github")
@@ -401,7 +414,28 @@ async def list_accounts(request: Request, provider: str = Query("google")):
     """List connected accounts for a provider. Used by desktop settings."""
     _check_local_token(request)
     mgr = _get_manager(request)
-    return {"accounts": mgr.list_accounts(provider)}
+    return {"accounts": _visible_settings_accounts(provider, mgr.list_accounts(provider))}
+
+
+def _visible_settings_accounts(
+    provider: str, accounts: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The account rows the settings panel should render.
+
+    A revoked GitHub connection is not a card: the user deleted it, the
+    GitHub-side grant lives in the installation (not this row), and the
+    auth-health route already refuses to probe revoked accounts. Rendering
+    the row made deletion look like it did nothing. Google keeps rendering
+    its removed accounts — its cards carry per-account reconnect/remove
+    actions.
+    """
+    if provider == "github":
+        return [
+            account
+            for account in accounts
+            if str(account.get("status") or "") != "revoked"
+        ]
+    return accounts
 
 
 @router.get("/internal/credentials/accounts/{account_id}")

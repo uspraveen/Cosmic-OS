@@ -827,11 +827,37 @@ class CredentialManager:
             await self._capture_github_installation_metadata(account_id, token)
             repositories = []
             if installation_id:
-                repositories = await self._github_api_client().list_installation_repositories(
-                    token,
-                    installation_id,
-                    max_pages=max_pages,
-                )
+                try:
+                    repositories = await self._github_api_client().list_installation_repositories(
+                        token,
+                        installation_id,
+                        max_pages=max_pages,
+                    )
+                except KeyError:
+                    # 404: the stored installation id no longer exists. An
+                    # uninstall + reinstall on the GitHub side mints a new
+                    # installation id, and a stale stored one would fail every
+                    # future sync — discovery only ever fires when metadata
+                    # has no id at all. Forget the stale id and discover once
+                    # with this fresh token; only when GitHub confirms no
+                    # installation of ours remains does this stay
+                    # installation_missing.
+                    self.update_account_metadata(
+                        account_id, {"github_installation_id": ""}
+                    )
+                    installation_id = await self._discover_github_installation_id(
+                        token, account_id
+                    )
+                    if not installation_id:
+                        raise
+                    self.update_account_metadata(
+                        account_id, {"github_installation_id": installation_id}
+                    )
+                    repositories = await self._github_api_client().list_installation_repositories(
+                        token,
+                        installation_id,
+                        max_pages=max_pages,
+                    )
         except GitHubScopeError as exc:
             # The token authenticated; GitHub denied the operation because the
             # connector's grant is repo-scoped and this call is outside it.
@@ -1290,6 +1316,23 @@ class CredentialManager:
                 logger.warning("Failed to revoke token on provider side: %s", exc)
 
         self._store.revoke_account_credentials(account_id)
+        if acct["provider"] == "github":
+            # Disconnected means ungranted. Flip the account's repository rows
+            # to `revoked` — mirroring what an installation-deleted webhook
+            # does — so the registry and Alpha's rendered repo list stop
+            # offering access that no longer exists. A reconnect's sync marks
+            # granted rows active again.
+            self._store.mark_github_repositories_status(
+                account_id=account_id,
+                github_repo_ids=[
+                    str(row["github_repo_id"])
+                    for row in self._store.list_github_repositories(
+                        account_id=account_id, statuses=("active",), limit=200
+                    )
+                ],
+                status="revoked",
+                sync_error="Account disconnected in Cosmic settings.",
+            )
         self._store.update_account(
             account_id,
             status="revoked",

@@ -523,3 +523,176 @@ def test_public_repo_payload_carries_login_for_pinning() -> None:
         {"name": "Praveen Raj", "email": "1+uspraveen@users.noreply.github.com", "login": "uspraveen"},
     )
     assert payload["git_author_login"] == "uspraveen"
+
+
+# ── Stale installation recovery + disconnect honesty ────────────────────────
+
+
+def test_sync_recovers_when_stored_installation_was_reinstalled(tmp_path: Path) -> None:
+    """An uninstall + reinstall mints a new installation id; the stale stored
+    one must be forgotten and rediscovered, not failed on forever."""
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+
+    class ReinstalledClient:
+        def __init__(self) -> None:
+            self.repo_calls: list[str] = []
+
+        async def list_user_installations(self, token: str) -> list[dict]:
+            del token
+            # The reinstall minted a new installation id.
+            return [{"id": 99, "app_slug": "cosmic-dev"}]
+
+        async def list_installation_repositories(self, token, installation_id, *, max_pages=10):
+            del token, max_pages
+            self.repo_calls.append(str(installation_id))
+            if str(installation_id) == "42":
+                raise KeyError("GitHub installation not found: /user/installations/42/repositories")
+            return [
+                {
+                    "id": 1,
+                    "full_name": "acme/site",
+                    "clone_url": "https://github.com/acme/site.git",
+                }
+            ]
+
+    fake = ReinstalledClient()
+    mgr = CredentialManager(store=store, github_api_client=fake)
+
+    summary = asyncio.run(mgr.sync_github_repositories(account_id))
+
+    assert summary["synced"] is True
+    assert summary["installation_id"] == "99"
+    assert fake.repo_calls == ["42", "99"]
+    metadata = store.get_account(account_id)["_metadata"]
+    assert metadata["github_installation_id"] == "99"
+    assert [row["full_name"] for row in mgr.list_github_repositories()] == ["acme/site"]
+
+
+def test_sync_still_reports_missing_when_no_installation_exists(tmp_path: Path) -> None:
+    """Rediscovery finding nothing keeps the honest installation_missing
+    result — and the stale id is not left behind to poison the next sync."""
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+
+    class UninstalledClient:
+        async def list_user_installations(self, token: str) -> list[dict]:
+            del token
+            return []  # the app was uninstalled from the GitHub side
+
+        async def list_installation_repositories(self, token, installation_id, *, max_pages=10):
+            del token, max_pages
+            raise KeyError("GitHub installation not found: /user/installations/42/repositories")
+
+    mgr = CredentialManager(store=store, github_api_client=UninstalledClient())
+
+    summary = asyncio.run(mgr.sync_github_repositories(account_id))
+
+    assert summary["synced"] is False
+    assert summary["reason"] == "installation_missing"
+    assert store.get_account(account_id)["_metadata"].get("github_installation_id") == ""
+
+
+def test_github_connect_gate_treats_revoked_as_disconnected() -> None:
+    """Only an explicit user disconnect re-opens the install page with the
+    repository picker; a needs_auth reconnect stays on the light path."""
+    from gateway.credentials.routes import _github_already_connected
+
+    assert _github_already_connected([]) is False
+    assert _github_already_connected([{"status": "active"}]) is True
+    assert _github_already_connected([{"status": "needs_auth"}]) is True
+    assert _github_already_connected([{"status": "revoked"}]) is False
+    assert _github_already_connected([{"status": "revoked"}, {"status": "active"}]) is True
+
+
+def test_settings_account_list_hides_only_revoked_github_accounts() -> None:
+    from gateway.credentials.routes import _visible_settings_accounts
+
+    accounts = [
+        {"account_id": "a1", "status": "active"},
+        {"account_id": "a2", "status": "needs_auth"},
+        {"account_id": "a3", "status": "revoked"},
+    ]
+
+    github_visible = _visible_settings_accounts("github", accounts)
+    assert [item["account_id"] for item in github_visible] == ["a1", "a2"]
+
+    # Google's panel keeps rendering removed accounts (per-card actions).
+    assert _visible_settings_accounts("google", accounts) == accounts
+
+
+def test_disconnect_revokes_repository_rows_and_reconnect_restores(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The full deleted-then-reconnected journey: disconnect flips the account
+    to revoked and its repo rows with it; reconnecting and syncing marks the
+    granted rows active again."""
+    from gateway.credentials import manager as manager_module
+    from gateway.credentials.routes import _github_already_connected
+
+    class _NoopAdapter:
+        provider = "github"
+
+        async def revoke_token(self, token: str, client_id: str, client_secret: str) -> bool:
+            del token, client_id, client_secret
+            return True
+
+    monkeypatch.setattr(
+        manager_module, "get_provider_adapter", lambda _provider: _NoopAdapter()
+    )
+
+    store = CredentialStore(tmp_path / "credentials.db")
+    account_id = store.create_account(provider="github")["account_id"]
+    _seed_credential(store, account_id, installation_id="42")
+    store.upsert_github_repositories(
+        account_id=account_id,
+        installation_id="42",
+        repos=[
+            {
+                "id": 1,
+                "full_name": "acme/site",
+                "clone_url": "https://github.com/acme/site.git",
+            }
+        ],
+    )
+    fake = _FakeGitHubClient(
+        repositories=[
+            {
+                "id": 1,
+                "full_name": "acme/site",
+                "clone_url": "https://github.com/acme/site.git",
+            }
+        ]
+    )
+    mgr = CredentialManager(store=store, github_api_client=fake)
+
+    account = asyncio.run(mgr.disconnect_account(account_id))
+    assert account["status"] == "revoked"
+    rows = {
+        item["github_repo_id"]: item["status"]
+        for item in mgr.list_github_repositories(statuses=["all"])
+    }
+    assert rows == {"1": "revoked"}
+    # A deleted account no longer short-circuits the connect flow: the next
+    # connect goes back through the install page and its repo picker.
+    assert _github_already_connected(mgr.list_accounts("github")) is False
+
+    # Reconnect: the callback reactivates the row, stores a fresh credential
+    # (the disconnect revoked the old one), then the sync re-grants.
+    store.update_account(account_id, status="active")
+    store.store_credential(
+        account_id=account_id,
+        granted_scopes=[],
+        access_token="reconnected-token",
+        refresh_token="refresh-token-2",
+        expires_at_ts=9999999999.0,
+    )
+    summary = asyncio.run(mgr.sync_github_repositories(account_id))
+    assert summary["synced"] is True
+    rows = {
+        item["github_repo_id"]: item["status"]
+        for item in mgr.list_github_repositories(statuses=["all"])
+    }
+    assert rows == {"1": "active"}
