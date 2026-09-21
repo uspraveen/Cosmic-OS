@@ -1248,7 +1248,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "Use this after you have authored copy the user will take: X/Twitter drafts, checklists, option sets, "
                 "or compact summaries. The client owns layout. Do not send HTML, CSS, colors, or privileged actions. "
                 "Allowed actions are copy and open_url. After this tool returns _cosmic_ui, do not repeat covered card content in Markdown. "
-                "These cards are read-only displays — when you need the user to answer or decide something, call ask_user_question instead."
+                "These cards are static, read-only text: nothing in them is clickable, checkable, or fillable, and "
+                "they are never interactive. If the user should answer, choose, tick, or fill in anything — including "
+                "a checklist — call ask_user_question instead (mode=form for fill-in skeletons)."
             ),
             "input_schema": {
                 "type": "object",
@@ -1369,35 +1371,56 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "ask_user_question",
             "description": (
-                "Ask the user a question whose answer you need before you can proceed. The desktop client renders an "
-                "interactive question card beside the input box with clickable option rows, an optional custom answer "
-                "field, and Skip / Continue buttons; the user's answer returns as this tool's result. Offer 2-6 "
-                "concrete options when the decision is choosable; omit options for an open question. If the user does "
-                "not answer in time the result says so — then finish your turn normally without inventing an answer, "
-                "and the answer will follow as a new message later. For copy the user will take (drafts, checklists, "
-                "summaries) use present_content_cards instead; this tool is for decisions, not deliverables."
+                "Ask the user for input and receive their answer as this tool's result; the desktop client renders "
+                "an interactive card beside the input box with Skip / Continue buttons. Two modes. "
+                "mode=choice (default): a decision among 2-6 options you list, plus an optional custom answer. "
+                "mode=form: the user fills in one line per field you list — use this for skeletons, templates, and "
+                "fill-in checklists. This is the ONLY way to collect anything from the user: present_content_cards "
+                "are static read-only text with no interactivity at all, so never present a card when you need an "
+                "answer, and never claim a content card is clickable or fillable. If the user does not answer in "
+                "time the result says so — then finish your turn normally without inventing an answer, and the "
+                "answer will follow as a new message later."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "question": {
                         "type": "string",
-                        "description": "The question, phrased so each option reads as a complete answer to it.",
+                        "description": "Choice mode: the question, phrased so each option reads as a complete answer. Form mode: a short heading for the form.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["choice", "form"],
+                        "description": "choice = pick among options. form = fill in one line per field. Defaults to choice.",
                     },
                     "options": {
                         "type": "array",
                         "minItems": 0,
                         "maxItems": 6,
                         "items": {"type": "string"},
-                        "description": "Up to six answer choices, each a complete self-contained line.",
+                        "description": "Choice mode only: up to six answer choices, each a complete self-contained line.",
+                    },
+                    "fields": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 6,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "description": "Field label / row name, e.g. 'Shipped'."},
+                                "placeholder": {"type": "string", "description": "Optional hint shown inside the input."},
+                            },
+                            "required": ["label"],
+                        },
+                        "description": "Form mode only: up to six rows the user fills in, one line each.",
                     },
                     "allow_custom": {
                         "type": "boolean",
-                        "description": "Whether the user may type a free-form answer instead of a listed option. Defaults to true.",
+                        "description": "Choice mode: whether the user may type a free-form answer instead of a listed option. Defaults to true.",
                     },
                     "context": {
                         "type": "string",
-                        "description": "Optional one-line context shown under the question.",
+                        "description": "Optional one-line context shown under the heading.",
                     },
                 },
                 "required": ["question"],

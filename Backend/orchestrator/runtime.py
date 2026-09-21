@@ -3450,6 +3450,7 @@ class OrchestratorRuntime:
         *,
         question: str,
         options: list[str] | None = None,
+        fields: list[dict[str, Any]] | None = None,
         channel: str | None = None,
         agent: str = "cosmic/orchestrator:1.0.0",
         wait_timeout_sec: float | None = None,
@@ -3473,6 +3474,10 @@ class OrchestratorRuntime:
             "channel": resolved_channel,
             "question": nq,
             "options": [str(i) for i in options or [] if str(i).strip()],
+            "fields": [
+                {"label": str(f.get("label") or "").strip(), "placeholder": str(f.get("placeholder") or "").strip()}
+                for f in (fields or []) if isinstance(f, dict) and str(f.get("label") or "").strip()
+            ][:6],
             "status": "pending",
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }

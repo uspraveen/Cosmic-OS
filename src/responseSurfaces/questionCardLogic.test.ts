@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   customRow,
+  normalizeQuestionFields,
   normalizeQuestionRows,
   questionCustomAllowed,
   questionKeyRow,
+  resolveFormAnswers,
   resolveQuestionAnswer,
 } from './questionCardLogic'
 
@@ -100,5 +102,41 @@ describe('questionKeyRow', () => {
     expect(questionKeyRow('0', rowCount, true)).toBeNull()
     expect(questionKeyRow('Enter', rowCount, true)).toBeNull()
     expect(questionKeyRow('F1', rowCount, true)).toBeNull()
+  })
+})
+
+describe('form mode', () => {
+  it('normalizes form fields, dropping empties and capping at six', () => {
+    const fields = normalizeQuestionFields([
+      { label: '  Shipped ', placeholder: ' one feature or fix ' },
+      { label: '' },
+      null,
+      { placeholder: 'no label' },
+      { label: 'Traction' },
+      { label: 'a' }, { label: 'b' }, { label: 'c' }, { label: 'd' }, { label: 'e' },
+    ])
+    expect(fields).toHaveLength(6)
+    expect(fields[0]).toEqual({ label: 'Shipped', placeholder: 'one feature or fix' })
+    expect(fields[1]).toEqual({ label: 'Traction', placeholder: null })
+    expect(normalizeQuestionFields(undefined)).toEqual([])
+  })
+
+  it('assembles labeled lines from filled rows', () => {
+    const fields = normalizeQuestionFields([
+      { label: 'Shipped', placeholder: null },
+      { label: 'Demo', placeholder: null },
+    ])
+    const result = resolveFormAnswers(fields, { 0: ' intent-to-Gerbers clip ', 1: '' })
+    expect(result).toEqual({
+      ok: true,
+      answer: 'Shipped: intent-to-Gerbers clip\nDemo: (left blank)',
+    })
+  })
+
+  it('refuses to continue with every row blank', () => {
+    const fields = normalizeQuestionFields([{ label: 'Shipped', placeholder: null }])
+    const result = resolveFormAnswers(fields, { 0: '   ' })
+    expect(result.ok).toBe(false)
+    expect(!result.ok && result.error).toContain('at least one line')
   })
 })

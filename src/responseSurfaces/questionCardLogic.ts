@@ -91,3 +91,47 @@ export function questionKeyRow(
   if (customAllowed && row === rowCount) return customRow(rowCount)
   return null
 }
+
+// ── Form mode: the user fills in one line per field ──────────
+
+export interface QuestionField {
+  label: string
+  placeholder: string | null
+}
+
+export function normalizeQuestionFields(raw: unknown): QuestionField[] {
+  if (!Array.isArray(raw)) return []
+  const fields: QuestionField[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const label = String(record.label ?? '').trim()
+    if (!label) continue
+    const placeholder = String(record.placeholder ?? '').trim()
+    fields.push({ label, placeholder: placeholder || null })
+    if (fields.length >= MAX_QUESTION_OPTIONS) break
+  }
+  return fields
+}
+
+/**
+ * Assemble the reply text from filled form rows: `Label: value` per line,
+ * unfilled rows marked honestly so the model can see what was skipped.
+ * At least one row must be filled to continue.
+ */
+export function resolveFormAnswers(
+  fields: QuestionField[],
+  values: Readonly<Record<number, string>>,
+): { ok: true; answer: string } | { ok: false; error: string } {
+  const lines: string[] = []
+  let filled = 0
+  fields.forEach((field, index) => {
+    const value = String(values[index] ?? '').trim()
+    if (value) filled += 1
+    lines.push(`${field.label}: ${value || '(left blank)'}`)
+  })
+  if (filled === 0) {
+    return { ok: false, error: 'Fill in at least one line, or Skip.' }
+  }
+  return { ok: true, answer: lines.join('\n') }
+}

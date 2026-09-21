@@ -123,6 +123,7 @@ interface PendingTaskInput {
   channel?: string | null
   question: string
   options: string[]
+  fields?: Array<{ label: string; placeholder: string | null }>
   status?: string
   timestamp?: string | null
 }
@@ -5826,9 +5827,30 @@ const normalizePendingTaskInput = (value: any): PendingTaskInput | null => {
     channel: typeof value?.channel === 'string' ? value.channel : null,
     question,
     options: Array.isArray(value?.options) ? value.options.map((item: any) => String(item || '').trim()).filter(Boolean) : [],
+    fields: normalizePendingTaskInputFields(value),
     status: typeof value?.status === 'string' ? value.status : undefined,
     timestamp: typeof value?.timestamp === 'string' ? value.timestamp : null,
   }
+}
+
+// Form-mode rows live top-level on live events and inside metadata on
+// reconnect replays; both shapes land here.
+const normalizePendingTaskInputFields = (value: any): Array<{ label: string; placeholder: string | null }> => {
+  const raw = Array.isArray(value?.fields)
+    ? value.fields
+    : Array.isArray(value?.metadata?.fields)
+      ? value.metadata.fields
+      : []
+  const fields: Array<{ label: string; placeholder: string | null }> = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const label = String((item as any).label || '').trim()
+    if (!label) continue
+    const placeholder = String((item as any).placeholder || '').trim()
+    fields.push({ label, placeholder: placeholder || null })
+    if (fields.length >= 6) break
+  }
+  return fields
 }
 
 const sortPendingTaskInputs = (items: PendingTaskInput[]) => {
@@ -10690,6 +10712,7 @@ export default function App() {
                   <QuestionCard
                     question={taskInput.question}
                     options={taskInput.options}
+                    fields={taskInput.fields}
                     allowCustom={true}
                     counterLabel={
                       visibleTaskInterrupts.length > 1

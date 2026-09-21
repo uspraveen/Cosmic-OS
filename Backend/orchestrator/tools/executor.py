@@ -266,11 +266,36 @@ class ToolExecutor:
         allow_custom_flag = bool(allow_custom) if isinstance(allow_custom, bool) else True
         ask_context = str(tool_input.get("context") or "").strip()[:200] or None
 
+        mode = str(tool_input.get("mode") or "").strip().lower()
+        if mode not in {"choice", "form"}:
+            mode = "form" if isinstance(tool_input.get("fields"), list) and tool_input.get("fields") else "choice"
+
+        fields: list[dict[str, str]] = []
+        if mode == "form":
+            raw_fields = tool_input.get("fields")
+            if isinstance(raw_fields, list):
+                for raw in raw_fields:
+                    if not isinstance(raw, dict):
+                        continue
+                    label = str(raw.get("label") or "").strip()[:120]
+                    if not label:
+                        continue
+                    placeholder = str(raw.get("placeholder") or "").strip()[:120] or None
+                    entry = {"label": label}
+                    if placeholder:
+                        entry["placeholder"] = placeholder
+                    fields.append(entry)
+                if len(fields) > 6:
+                    fields = fields[:6]
+            if not fields:
+                return {"error": True, "message": "mode=form requires at least one field with a label."}
+
         try:
             result = await self._user_input_requester(
                 task_id,
                 question=question,
-                options=options,
+                options=[] if mode == "form" else options,
+                fields=fields,
                 channel=channel,
                 wait_timeout_sec=self.ask_user_wait_timeout_sec,
             )
@@ -305,10 +330,14 @@ class ToolExecutor:
         payload: dict[str, Any] = {
             "status": "pending",
             "question": question,
-            "options": options,
+            "mode": mode,
             "allow_custom": allow_custom_flag,
             "input_request_id": str(result.get("input_request_id") or ""),
         }
+        if mode == "form":
+            payload["fields"] = fields
+        else:
+            payload["options"] = options
         if ask_context:
             payload["context"] = ask_context
         payload["_cosmic_ui"] = contract

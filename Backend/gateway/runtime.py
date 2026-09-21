@@ -17337,6 +17337,7 @@ class GatewayRuntime:
                     for item in request.get("options", [])
                     if str(item).strip()
                 ],
+                "fields": self._normalize_task_input_fields(request.get("fields")),
                 "status": self._safe_text(request.get("status")) or "pending",
                 "timestamp": self._safe_text(request.get("timestamp")) or utcnow_iso(),
             }
@@ -18102,6 +18103,27 @@ class GatewayRuntime:
             return explicit_channel
         return self.active_task_channels.get(task_id)
 
+    @staticmethod
+    def _normalize_task_input_fields(raw: Any) -> list[dict[str, str]]:
+        """Form-mode rows (label + optional placeholder) on a task input request."""
+        if not isinstance(raw, list):
+            return []
+        fields: list[dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()[:120]
+            if not label:
+                continue
+            placeholder = str(item.get("placeholder") or "").strip()[:120]
+            entry = {"label": label}
+            if placeholder:
+                entry["placeholder"] = placeholder
+            fields.append(entry)
+            if len(fields) >= 6:
+                break
+        return fields
+
     def _persist_task_input_request(self, event: dict[str, Any]) -> None:
         input_request_id = self._safe_text(event.get("input_request_id"))
         task_id = self._safe_text(event.get("task_id"))
@@ -18128,6 +18150,9 @@ class GatewayRuntime:
             agent=self._safe_text(event.get("agent")),
             metadata={
                 "timestamp": self._safe_text(event.get("timestamp")),
+                # Form-mode rows ride in metadata so reconnect replays can
+                # rehydrate the card without a schema change.
+                "fields": event.get("fields") if isinstance(event.get("fields"), list) else [],
             },
             status=self._safe_text(event.get("status")) or "pending",
             created_at=self._safe_text(event.get("timestamp")),
@@ -18143,6 +18168,13 @@ class GatewayRuntime:
         pending = self.session_store.list_pending_task_inputs(
             session_id=session_id, channel=channel, limit=50
         )
+        # Rehydrate form-mode rows stored in metadata so a reloaded client
+        # rebuilds the same fill-in card the live event carried.
+        for item in pending:
+            metadata = item.get("metadata")
+            fields = metadata.get("fields") if isinstance(metadata, dict) else None
+            if isinstance(fields, list) and fields:
+                item["fields"] = fields
         persisted = self.delivery_queue_store.list_pending_inputs(channel)
         if not persisted:
             return pending

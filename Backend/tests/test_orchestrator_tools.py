@@ -2014,3 +2014,52 @@ async def test_publish_prophet_edition_receipt_names_the_overwritten_revision() 
     assert result["published"] is True
     assert result["revision"] == 28
     assert "overwrote revision 27" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_ask_user_question_form_mode_passes_fields() -> None:
+    captured: dict = {}
+
+    async def requester(task_id: str, **kwargs):
+        captured.update(kwargs)
+        return {"input_request_id": "uir_4", "status": "pending"}
+
+    executor = ToolExecutor(user_input_requester=requester)
+    raw = await executor.execute(
+        "ask_user_question",
+        {
+            "question": "Coppr update skeleton",
+            "mode": "form",
+            "fields": [
+                {"label": "Shipped", "placeholder": "the one feature or fix"},
+                {"label": ""},
+                {"label": "x" * 500},
+                "not-a-dict",
+                {"label": "Traction"},
+            ],
+        },
+        context=ToolExecutionContext(task_id="task_9", channel="desktop"),
+    )
+    result = json.loads(raw)
+    assert result["status"] == "pending"
+    assert result["mode"] == "form"
+    assert [f["label"] for f in result["fields"]] == ["Shipped", "x" * 120, "Traction"]
+    assert captured["fields"][0]["placeholder"] == "the one feature or fix"
+    # Form mode carries rows, not choice options.
+    assert captured["options"] == []
+
+
+@pytest.mark.asyncio
+async def test_ask_user_question_form_mode_requires_fields() -> None:
+    executor = ToolExecutor(user_input_requester=requester_stub)
+
+    raw = await executor.execute(
+        "ask_user_question",
+        {"question": "Skeleton", "mode": "form", "fields": [{"label": ""}]},
+        context=ToolExecutionContext(task_id="task_9", channel="desktop"),
+    )
+    assert json.loads(raw)["error"] is True
+
+
+async def requester_stub(task_id: str, **kwargs):  # pragma: no cover - only reached on success
+    return {"input_request_id": "uir_x", "status": "pending"}
