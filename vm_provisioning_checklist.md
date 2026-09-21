@@ -387,11 +387,14 @@ Before handing the VM to the user, confirm:
   a global OOM.
 - **Redis** runs with AOF enabled (`appendonly yes`) so event-stream history
   survives restarts beyond the RDB snapshot cadence.
-- **Open external dependency:** the Cosmic Mail service (agent-email webhook
-  sender, AWS-hosted) has no verified retry contract. If inbound emails ever
-  go missing across a restart window, ask the provider about webhook retries
-  or add a post-restart mailbox poll; the gateway logs every drain-refused
-  webhook as `gateway.maintenance_drain_refused`.
+- **Cosmic Mail webhook contract (verified d726644):** the Cosmic Mail
+  service persists every push to a durable `webhook_deliveries` outbox
+  before first send, retries with exponential backoff (60s → 15m cap,
+  ~24h budget), and honors the gateway's `Retry-After` on 503 drain
+  responses — so inbound email survives restart windows end to end with
+  the gateway drain protocol. Refused webhooks are logged as
+  `gateway.maintenance_drain_refused`; exhausted retries alert on the
+  Cosmic Mail side.
 
 ## cosmic-browser-use Engine Updates (2026-09-18)
 
