@@ -1688,7 +1688,7 @@ kbd {
 
 .ask-card-flow {
   width: var(--response-column, 100%);
-  margin: 4px auto 24px;
+  margin: 22px auto 24px;
   display: flex;
   flex-direction: column;
   gap: 12px;

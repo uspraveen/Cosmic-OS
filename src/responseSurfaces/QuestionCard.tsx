@@ -75,6 +75,14 @@ export function QuestionCard({
   const [localError, setLocalError] = useState('')
   const customInputRef = useRef<HTMLInputElement | null>(null)
 
+  // Reset on real content changes only. Keying on the options/fields arrays
+  // themselves reset mid-interaction on every replayed task.input_required
+  // (a reconnect re-delivers the same ask as fresh arrays) — wiping the
+  // selection the user just made and every keystroke they just typed.
+  const optionsKey = rowsInfo.rows.join('\u0000')
+  const fieldsKey = formFields
+    .map((field) => `${field.label}\u0000${field.placeholder || ''}\u0000${field.kind}\u0000${field.options.join(',')}`)
+    .join('\u0001')
   useEffect(() => {
     setSelected(initialSelection)
     setCustomValue('')
@@ -82,7 +90,7 @@ export function QuestionCard({
     setFormPicks({})
     setLocalError('')
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [question, options, formFields.length])
+  }, [question, optionsKey, fieldsKey])
 
   useEffect(() => {
     if (selected === custom) customInputRef.current?.focus()

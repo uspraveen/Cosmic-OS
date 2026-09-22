@@ -6008,6 +6008,9 @@ export default function App() {
   const composerSurfaceRef = useRef<HTMLDivElement>(null)
   const chatResponseSurfaceRef = useRef<HTMLDivElement>(null)
   const taskInterruptStackRef = useRef<HTMLDivElement>(null)
+  // Asks the open chat has already displayed inline. Once seen, hiding the
+  // screen must not raise the bottom-right beacon for them again.
+  const askSeenInChatRef = useRef<Set<string>>(new Set())
   const cronResultStackRef = useRef<HTMLDivElement>(null)
   const responseEndRef = useRef<HTMLDivElement>(null)
   const followScrollFrameRef = useRef<number | null>(null)
@@ -7576,6 +7579,15 @@ export default function App() {
     setDismissedTaskInterruptIds((prev) => (
       prev.includes(inputRequestId) ? prev : [...prev, inputRequestId]
     ))
+    const failSkip = () => {
+      // The skip never landed: put the card back with the reason, instead of
+      // pretending and leaving the orchestrator waiting on a ghost.
+      setDismissedTaskInterruptIds((prev) => prev.filter((id) => id !== inputRequestId))
+      setTaskInputErrors((prev) => ({
+        ...prev,
+        [inputRequestId]: 'Skip did not reach Cosmic — try again.',
+      }))
+    }
     try {
       void Promise.resolve(
         window.cosmic?.submitGatewayTaskInputReply({
@@ -7584,12 +7596,11 @@ export default function App() {
           content: '',
           skipped: true,
         }),
-      ).catch(() => {
-        // Keep the local dismissal even if the bridge is unavailable; a later
-        // reconnect replay can resurface the card if the skip never landed.
-      })
+      ).then((result) => {
+        if (!result || result.ok !== true) failSkip()
+      }).catch(failSkip)
     } catch {
-      // Same: local dismissal stands on its own.
+      failSkip()
     }
   }
 
@@ -7825,6 +7836,17 @@ export default function App() {
     const validIds = new Set(pendingTaskInputs.map((item) => item.inputRequestId))
     setDismissedTaskInterruptIds((prev) => prev.filter((id) => validIds.has(id)))
   }, [dismissedTaskInterruptIds.length, pendingTaskInputs])
+
+  // The inline ask card is the tail of the conversation: while the chat is
+  // open on it, the question has been shown and the beacon has done its job.
+  useEffect(() => {
+    if (searchState !== 'visible' || mode !== 'chat' || showLauncherTray) {
+      return
+    }
+    for (const item of visibleTaskInterrupts) {
+      askSeenInChatRef.current.add(item.inputRequestId)
+    }
+  }, [searchState, mode, showLauncherTray, visibleTaskInterrupts])
 
   useEffect(() => {
     const container = cronResultStackRef.current
@@ -8783,7 +8805,10 @@ export default function App() {
           delete next[pendingInput.inputRequestId]
           return next
         })
-        setDismissedTaskInterruptIds((prev) => prev.filter((id) => id !== pendingInput.inputRequestId))
+        // A user-dismissed card stays dismissed. Re-delivery of the same ask
+        // (reconnect replay, queue flush) must never resurrect what the user
+        // already skipped — the skip is a terminal resolution server-side, and
+        // until it lands, re-showing the card is exactly the bug this fixes.
         if (modeRef.current === 'task') {
           setSelectedTaskInputId(pendingInput.inputRequestId)
         }
@@ -10313,10 +10338,21 @@ export default function App() {
   const shouldShowPrimarySurface = mode !== 'meeting' && mode !== 'spaces' && !showLauncherTray
   const shouldShowResponseSurface = shouldShowPrimarySurface && (mode === 'task' || messages.length > 0)
   const shouldShowCronResultSurface = displayedCronResultNotifications.length > 0
-  // Bottom-right shells stack upward from the corner. The waiting-ask beacon
-  // owns the lowest slot while an ask is open (it is the only one that blocks
-  // a turn), and the ready-result cards reserve their slots above it.
-  const noticeShellsBase = (searchState === 'visible' ? 112 : 24) + (shouldShowTaskInterrupt ? 148 : 0)
+  // Bottom-right shells obey the family contract (desktopNotifications.ts):
+  // standing cards surface only while you are NOT looking at the chat, and
+  // nothing nags about what the open chat already showed you. The ask beacon
+  // is no exception — while the screen is on chat, the inline card is the
+  // surface; once an ask has been displayed there, hiding the screen must not
+  // produce "a card for something I already saw".
+  const chatActiveForNotices = !isChatInactiveForNotices({ searchState, mode, showLauncherTray })
+  const beaconTaskInputs = chatActiveForNotices
+    ? []
+    : visibleTaskInterrupts.filter((item) => !askSeenInChatRef.current.has(item.inputRequestId))
+  const shouldShowAskNotice = beaconTaskInputs.length > 0
+  // Stack upward from the corner. The waiting-ask beacon owns the lowest slot
+  // while one is live (it is the only one blocking a turn), and the
+  // ready-result cards reserve their slots above it.
+  const noticeShellsBase = (searchState === 'visible' ? 112 : 24) + (shouldShowAskNotice ? 148 : 0)
   const cronResultShellStyle = {
     ['--cron-result-bottom' as string]: `${noticeShellsBase}px`,
   } as React.CSSProperties
@@ -10637,10 +10673,11 @@ export default function App() {
         </div>
       )}
 
-      {/* The waiting-ask beacon: while a question is open it lives here, in
-          the bottom-right corner with the other standing cards — so the ask
-          is never more than one click away wherever you are in the app. */}
-      {visibleTaskInterrupts.length > 0 && mode !== 'meeting' && mode !== 'spaces' && (
+      {/* The waiting-ask beacon: only while the chat is not already showing
+          the card (family contract), and never for an ask the open chat has
+          already displayed — hiding the screen must not re-notify you about
+          something you already saw. */}
+      {shouldShowAskNotice && (
         <div className="ask-user-notice-shell" style={askNoticeShellStyle}>
           <LiquidGlass
             disableTilt={true}
@@ -10653,25 +10690,25 @@ export default function App() {
               <div className="ask-user-notice-head">
                 <span className="task-interrupt-kicker">Cosmic asks</span>
                 <div className="task-interrupt-chip-row">
-                  {visibleTaskInterrupts.length > 1 && (
-                    <div className="task-interrupt-chip count">{visibleTaskInterrupts.length} waiting</div>
+                  {beaconTaskInputs.length > 1 && (
+                    <div className="task-interrupt-chip count">{beaconTaskInputs.length} waiting</div>
                   )}
                   <div className="task-interrupt-chip">Needs you</div>
                 </div>
               </div>
-              <div className="ask-user-notice-question">{visibleTaskInterrupts[0].question}</div>
+              <div className="ask-user-notice-question">{beaconTaskInputs[0].question}</div>
               <div className="task-interrupt-actions ask-user-notice-actions">
                 <button
                   type="button"
                   className="task-interrupt-btn secondary"
-                  onClick={() => dismissTaskInterrupt(visibleTaskInterrupts[0])}
+                  onClick={() => dismissTaskInterrupt(beaconTaskInputs[0])}
                 >
                   Skip
                 </button>
                 <button
                   type="button"
                   className="task-interrupt-btn primary"
-                  onClick={() => focusAskCard(visibleTaskInterrupts[0].inputRequestId)}
+                  onClick={() => focusAskCard(beaconTaskInputs[0].inputRequestId)}
                 >
                   Answer
                 </button>
@@ -11558,6 +11595,13 @@ export default function App() {
                       className="ask-card-flow"
                       role="list"
                       aria-label={`${visibleTaskInterrupts.length} question${visibleTaskInterrupts.length === 1 ? '' : 's'} waiting for you`}
+                      onPointerDown={(event) => {
+                        // Answering the card is not "the user scrolling the
+                        // response": letting it count suppressed auto-follow,
+                        // which stalled the read cursor and made already-seen
+                        // replies look unread to the hide-catch-up notices.
+                        event.stopPropagation()
+                      }}
                     >
                       {visibleTaskInterrupts.map((taskInput, index) => (
                         <QuestionCard
