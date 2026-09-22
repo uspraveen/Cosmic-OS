@@ -1373,10 +1373,16 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "name": "ask_user_question",
             "description": (
                 "Ask the user for input and receive their answer as this tool's result; the desktop client renders "
-                "an interactive card beside the input box with Skip / Continue buttons. Two modes. "
+                "an interactive card in the conversation with Skip / Done buttons. Two modes. "
                 "mode=choice (default): a decision among 2-6 options you list, plus an optional custom answer. "
-                "mode=form: the user fills in one line per field you list — use this for skeletons, templates, and "
-                "fill-in checklists. This is the ONLY way to collect anything from the user: present_content_cards "
+                "mode=form: up to six labeled rows the user fills in — use this for skeletons, templates, and "
+                "fill-in checklists. Each form row picks its own kind: text (a free line), single (pick one of "
+                "the row's options), or multi (check any of the row's options) — so one card can mix fill-in "
+                "lines with selectable choices. One open question per conversation: asking again while a card "
+                "is still open replaces it, so batch multi-part asks into one form instead of stacking cards. "
+                "The user can also Skip the card: the result then says so — proceed without the answer, invent "
+                "nothing, and do not immediately re-ask the same question. This is the ONLY way to collect "
+                "anything from the user: present_content_cards "
                 "are static read-only text with no interactivity at all, so never present a card when you need an "
                 "answer, and never claim a content card is clickable or fillable. If the user does not answer in "
                 "time the result says so — then finish your turn normally without inventing an answer, and the "
@@ -1409,11 +1415,26 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                             "type": "object",
                             "properties": {
                                 "label": {"type": "string", "description": "Field label / row name, e.g. 'Shipped'."},
-                                "placeholder": {"type": "string", "description": "Optional hint shown inside the input."},
+                                "placeholder": {"type": "string", "description": "text rows only: hint shown inside the input."},
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["text", "single", "multi"],
+                                    "description": "text = one free line. single = pick exactly one of `options`. multi = check any of `options`. Defaults to text.",
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 6,
+                                    "items": {"type": "string"},
+                                    "description": "single/multi rows only: 1-6 selectable choices for this row.",
+                                },
                             },
                             "required": ["label"],
                         },
-                        "description": "Form mode only: up to six rows the user fills in, one line each.",
+                        "description": (
+                            "Form mode only: up to six rows, each a text input, a single-select, or a "
+                            "multi-select — mix freely in one card."
+                        ),
                     },
                     "allow_custom": {
                         "type": "boolean",
@@ -1428,7 +1449,7 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="presentation",
-        prompt_summary="Ask the user a question as an interactive card near their input box; the chosen answer returns as the tool result.",
+        prompt_summary="Ask the user a question as an interactive card in the conversation; the answer returns as the tool result.",
         progress_builder=_ask_user_question_progress,
         handler_method="_ask_user_question",
         read_only=True,

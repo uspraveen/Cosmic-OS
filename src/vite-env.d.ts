@@ -328,7 +328,7 @@ interface Window {
       routeOverride?: string
       attachments?: GatewayPendingDocumentAttachment[]
     }) => Promise<{ requestId: string }>
-    submitGatewayTaskInputReply: (payload: { inputRequestId: string; taskId: string; content: string }) => Promise<{ ok: boolean; requestId: string }>
+    submitGatewayTaskInputReply: (payload: { inputRequestId: string; taskId: string; content: string; skipped?: boolean }) => Promise<{ ok: boolean; requestId: string }>
     cancelGatewayResponse: (payload: { requestId?: string; taskId?: string }) => Promise<{ ok: boolean }>
     backgroundGatewayRequest: (payload: { requestId: string }) => Promise<{ ok: boolean; requestId: string }>
     foregroundGatewayRequest: (payload: { requestId: string }) => Promise<{ ok: boolean; requestId: string }>

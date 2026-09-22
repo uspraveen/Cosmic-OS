@@ -2560,7 +2560,7 @@ app.whenReady().then(() => {
     )
   })
 
-  ipcMain.handle('gateway:submit-task-input-reply', async (_, payload: { inputRequestId?: string; taskId?: string; content?: string }) => {
+  ipcMain.handle('gateway:submit-task-input-reply', async (_, payload: { inputRequestId?: string; taskId?: string; content?: string; skipped?: boolean }) => {
     if (!gatewayConnectionManager) {
       throw new Error('Gateway connection manager is unavailable.')
     }
@@ -2568,6 +2568,7 @@ app.whenReady().then(() => {
       String(payload?.inputRequestId || ''),
       String(payload?.taskId || ''),
       String(payload?.content || ''),
+      Boolean(payload?.skipped),
     )
   })
 

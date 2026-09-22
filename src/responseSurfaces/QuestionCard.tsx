@@ -5,8 +5,8 @@ import {
   normalizeQuestionRows,
   questionCustomAllowed,
   questionKeyRow,
-  resolveFormAnswers,
   resolveQuestionAnswer,
+  resolveRowsAnswers,
   splitOptionLabel,
   type QuestionSelection,
 } from './questionCardLogic'
@@ -14,8 +14,17 @@ import {
 export interface QuestionCardProps {
   question: string
   options: string[]
-  /** Form-mode rows; when present the card renders fill-in inputs instead of options. */
-  fields?: Array<{ label: string; placeholder?: string | null }> | null
+  /**
+   * Form-mode rows; when present the card renders one input per row. Each row
+   * picks its own kind: text (free line), single (pick one of its options), or
+   * multi (check any) — one card can mix the three.
+   */
+  fields?: Array<{
+    label: string
+    placeholder?: string | null
+    kind?: string | null
+    options?: string[] | null
+  }> | null
   allowCustom?: boolean
   context?: string | null
   /** Parent-rendered status chip in the head row, e.g. "1 of 2 waiting". */
@@ -23,6 +32,8 @@ export interface QuestionCardProps {
   busy?: boolean
   error?: string | null
   sent?: boolean
+  /** DOM id so the bottom-right waiting beacon can scroll here and focus it. */
+  cardId?: string | null
   onContinue: (answer: string) => void
   onSkip?: () => void
 }
@@ -44,6 +55,7 @@ export function QuestionCard({
   busy = false,
   error,
   sent = false,
+  cardId,
   onContinue,
   onSkip,
 }: QuestionCardProps) {
@@ -58,14 +70,16 @@ export function QuestionCard({
 
   const [selected, setSelected] = useState<QuestionSelection>(initialSelection)
   const [customValue, setCustomValue] = useState('')
-  const [formValues, setFormValues] = useState<Record<number, string>>({})
+  const [formTexts, setFormTexts] = useState<Record<number, string>>({})
+  const [formPicks, setFormPicks] = useState<Record<number, number[]>>({})
   const [localError, setLocalError] = useState('')
   const customInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     setSelected(initialSelection)
     setCustomValue('')
-    setFormValues({})
+    setFormTexts({})
+    setFormPicks({})
     setLocalError('')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [question, options, formFields.length])
@@ -82,10 +96,33 @@ export function QuestionCard({
     setSelected(row)
   }
 
+  const setTextRow = (row: number, value: string) => {
+    setFormTexts((prev) => ({ ...prev, [row]: value }))
+    if (localError) setLocalError('')
+  }
+
+  const selectChoiceRow = (row: number, option: number) => {
+    if (busy || sent) return
+    setFormPicks((prev) => ({ ...prev, [row]: [option] }))
+    if (localError) setLocalError('')
+  }
+
+  const toggleMultiRow = (row: number, option: number) => {
+    if (busy || sent) return
+    setFormPicks((prev) => {
+      const current = prev[row] || []
+      const next = current.includes(option)
+        ? current.filter((item) => item !== option)
+        : [...current, option].sort((left, right) => left - right)
+      return { ...prev, [row]: next }
+    })
+    if (localError) setLocalError('')
+  }
+
   const handleContinue = () => {
     if (busy || sent) return
     const result = isForm
-      ? resolveFormAnswers(formFields, formValues)
+      ? resolveRowsAnswers(formFields, { texts: formTexts, picks: formPicks })
       : resolveQuestionAnswer({
         rowsInfo,
         customAllowed,
@@ -138,15 +175,16 @@ export function QuestionCard({
 
   return (
     <section
-      className={`ask-card${sent ? ' is-sent' : ''}`}
+      id={cardId || undefined}
+      className={`assistant-action-card ask-card${sent ? ' is-sent' : ''}`}
       data-kind="ask_user_question"
       aria-label={question}
       onKeyDown={onContainerKeyDown}
     >
-      <div className="ask-card-head">
-        <div className="ask-card-kicker-cluster">
-          <span className="ask-card-kicker" aria-hidden="true">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+      <div className="assistant-action-card-head">
+        <div className="assistant-action-card-heading">
+          <span className="assistant-action-card-icon" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
               <path
                 d="M12 17v.5M9.1 9a3 3 0 1 1 5.82 1c-.5 1.7-2.42 2.1-2.92 3.5"
                 stroke="currentColor"
@@ -155,51 +193,110 @@ export function QuestionCard({
               />
               <circle cx="12" cy="12" r="9.2" stroke="currentColor" strokeWidth="1.6" />
             </svg>
-            Cosmic asks
           </span>
-          {counterLabel && <span className="ask-card-counter">{counterLabel}</span>}
+          <div className="assistant-action-card-heading-copy">
+            <div className="assistant-action-card-kicker">Cosmic asks</div>
+            <div className="assistant-action-card-title">{question}</div>
+          </div>
         </div>
-        {!sent && onSkip && (
-          <button
-            type="button"
-            className="ask-card-dismiss"
-            aria-label="Dismiss question"
-            disabled={busy}
-            onClick={() => onSkip()}
-          >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path
-                d="M6 6l12 12M18 6L6 18"
-                stroke="currentColor"
-                strokeWidth="2.2"
-                strokeLinecap="round"
-              />
-            </svg>
-          </button>
-        )}
+        <div className="assistant-action-card-head-actions">
+          {counterLabel && <div className="assistant-action-card-status">{counterLabel}</div>}
+          {sent ? (
+            <div className="assistant-action-card-status is-sent">Answer sent</div>
+          ) : onSkip ? (
+            <button
+              type="button"
+              className="assistant-action-icon-button ask-card-dismiss"
+              aria-label="Dismiss question"
+              title="Skip this question"
+              disabled={busy}
+              onClick={() => onSkip()}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M6 6l12 12M18 6L6 18"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+          ) : null}
+        </div>
       </div>
-      <div className="ask-card-body">
-        <div className="ask-card-question">{question}</div>
-        {context && <div className="ask-card-context">{context}</div>}
-        {isForm ? (
-          <div className="ask-card-form">
-            {formFields.map((field, index) => (
-              <label key={`${index}-${field.label}`} className="ask-card-form-row">
-                <span className="ask-card-form-label">{field.label}</span>
+      {context && <div className="ask-card-context">{context}</div>}
+      {isForm ? (
+        <div className="ask-card-rows">
+          {formFields.map((field, index) => {
+            const key = `${index}-${field.label}`
+            if (field.kind === 'single' || field.kind === 'multi') {
+              const picks = formPicks[index] || []
+              const isSingle = field.kind === 'single'
+              return (
+                <div key={key} className="ask-card-row" role="group" aria-label={field.label}>
+                  <span className="ask-card-row-label">{field.label}</span>
+                  <div className={isSingle ? 'ask-card-row-choices' : 'ask-card-row-checks'}>
+                    {field.options.map((option, optionIndex) => {
+                      const active = picks.includes(optionIndex)
+                      if (isSingle) {
+                        return (
+                          <button
+                            key={option}
+                            type="button"
+                            className={`ask-card-chip${active ? ' is-selected' : ''}`}
+                            aria-pressed={active}
+                            disabled={busy || sent}
+                            onClick={() => selectChoiceRow(index, optionIndex)}
+                          >
+                            {option}
+                          </button>
+                        )
+                      }
+                      return (
+                        <button
+                          key={option}
+                          type="button"
+                          className={`ask-card-check${active ? ' is-selected' : ''}`}
+                          role="checkbox"
+                          aria-checked={active}
+                          disabled={busy || sent}
+                          onClick={() => toggleMultiRow(index, optionIndex)}
+                        >
+                          <span className="ask-card-check-box" aria-hidden="true">
+                            {active && (
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none">
+                                <path
+                                  d="M5 12.5l4.5 4.5L19 7.5"
+                                  stroke="currentColor"
+                                  strokeWidth="3"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                              </svg>
+                            )}
+                          </span>
+                          <span className="ask-card-check-label">{option}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            }
+            return (
+              <label key={key} className="ask-card-row">
+                <span className="ask-card-row-label">{field.label}</span>
                 <input
-                  className="ask-card-form-input"
+                  className="ask-card-row-input"
                   type="text"
-                  value={formValues[index] ?? ''}
+                  value={formTexts[index] ?? ''}
                   autoComplete="off"
                   placeholder={field.placeholder || `Fill in ${field.label.toLowerCase()}…`}
                   disabled={busy || sent}
                   spellCheck={false}
                   maxLength={240}
                   aria-label={field.label}
-                  onChange={(event) => {
-                    setFormValues((prev) => ({ ...prev, [index]: event.target.value }))
-                    if (localError) setLocalError('')
-                  }}
+                  onChange={(event) => setTextRow(index, event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' && !event.shiftKey) {
                       event.preventDefault()
@@ -209,91 +306,91 @@ export function QuestionCard({
                   }}
                 />
               </label>
-            ))}
-          </div>
-        ) : (
-          <>
-            <div className="ask-card-options" role="listbox" aria-label="Answer choices">
-              {rowsInfo.rows.map((option, index) => {
-                const isSelected = selected === index
-                const parts = splitOptionLabel(option)
-                return (
-                  <button
-                    key={`${index}-${option}`}
-                    type="button"
-                    role="option"
-                    aria-selected={isSelected}
-                    className={`ask-card-option${isSelected ? ' is-selected' : ''}`}
-                    disabled={busy || sent}
-                    onClick={() => selectRow(index)}
-                  >
-                    <span className="ask-card-option-key" aria-hidden="true">
-                      {String.fromCharCode(65 + index)}
-                    </span>
-                    <span className="ask-card-option-label">
-                      <span className="ask-card-option-lead">{parts.lead}</span>
-                      {parts.tail && <span className="ask-card-option-tail">{parts.tail}</span>}
-                    </span>
-                  </button>
-                )
-              })}
-              {customAllowed && (
+            )
+          })}
+        </div>
+      ) : (
+        <>
+          <div className="ask-card-options" role="listbox" aria-label="Answer choices">
+            {rowsInfo.rows.map((option, index) => {
+              const isSelected = selected === index
+              const parts = splitOptionLabel(option)
+              return (
                 <button
+                  key={`${index}-${option}`}
                   type="button"
                   role="option"
-                  aria-selected={selected === custom}
-                  className={`ask-card-option is-custom${selected === custom ? ' is-selected' : ''}`}
+                  aria-selected={isSelected}
+                  className={`ask-card-option${isSelected ? ' is-selected' : ''}`}
                   disabled={busy || sent}
-                  onClick={() => selectRow(custom)}
+                  onClick={() => selectRow(index)}
                 >
                   <span className="ask-card-option-key" aria-hidden="true">
-                    {String.fromCharCode(65 + rowsInfo.rows.length)}
+                    {String.fromCharCode(65 + index)}
                   </span>
-                  <span className="ask-card-option-label">Custom answer</span>
+                  <span className="ask-card-option-label">
+                    <span className="ask-card-option-lead">{parts.lead}</span>
+                    {parts.tail && <span className="ask-card-option-tail">{parts.tail}</span>}
+                  </span>
                 </button>
-              )}
-            </div>
-            {customAllowed && selected === custom && (
-              <input
-                ref={customInputRef}
-                className="ask-card-custom-input"
-                type="text"
-                value={customValue}
-                autoComplete="off"
-                placeholder="Type your answer…"
+              )
+            })}
+            {customAllowed && (
+              <button
+                type="button"
+                role="option"
+                aria-selected={selected === custom}
+                className={`ask-card-option is-custom${selected === custom ? ' is-selected' : ''}`}
                 disabled={busy || sent}
-                spellCheck={false}
-                maxLength={2000}
-                aria-label="Custom answer"
-                onChange={(event) => {
-                  setCustomValue(event.target.value)
-                  if (localError) setLocalError('')
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    const result = resolveQuestionAnswer({
-                      rowsInfo,
-                      customAllowed,
-                      selected,
-                      customValue: event.currentTarget.value,
-                    })
-                    if (result.ok) onContinue(result.answer)
-                    else setLocalError(result.error)
-                  }
-                  if (event.key === 'Escape') {
-                    event.stopPropagation()
-                    customInputRef.current?.blur()
-                  }
-                }}
-              />
+                onClick={() => selectRow(custom)}
+              >
+                <span className="ask-card-option-key" aria-hidden="true">
+                  {String.fromCharCode(65 + rowsInfo.rows.length)}
+                </span>
+                <span className="ask-card-option-label">Custom answer</span>
+              </button>
             )}
-          </>
-        )}
-        {resolvedError && <div className="ask-card-error" role="alert">{resolvedError}</div>}
-      </div>
-      <div className="ask-card-footer">
+          </div>
+          {customAllowed && selected === custom && (
+            <input
+              ref={customInputRef}
+              className="ask-card-custom-input"
+              type="text"
+              value={customValue}
+              autoComplete="off"
+              placeholder="Type your answer…"
+              disabled={busy || sent}
+              spellCheck={false}
+              maxLength={2000}
+              aria-label="Custom answer"
+              onChange={(event) => {
+                setCustomValue(event.target.value)
+                if (localError) setLocalError('')
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  const result = resolveQuestionAnswer({
+                    rowsInfo,
+                    customAllowed,
+                    selected,
+                    customValue: event.currentTarget.value,
+                  })
+                  if (result.ok) onContinue(result.answer)
+                  else setLocalError(result.error)
+                }
+                if (event.key === 'Escape') {
+                  event.stopPropagation()
+                  customInputRef.current?.blur()
+                }
+              }}
+            />
+          )}
+        </>
+      )}
+      {resolvedError && <div className="assistant-action-card-error ask-card-error" role="alert">{resolvedError}</div>}
+      <div className="assistant-action-card-actions ask-card-footer">
         {sent ? (
           <div className="ask-card-sent">Answer sent ✓</div>
         ) : (
@@ -312,7 +409,7 @@ export function QuestionCard({
         {!sent && (
           <button
             type="button"
-            className="ask-card-continue"
+            className="assistant-action-button is-primary ask-card-continue"
             disabled={busy}
             onClick={handleContinue}
           >

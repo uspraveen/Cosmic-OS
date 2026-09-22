@@ -7,6 +7,7 @@ import {
   questionCustomAllowed,
   questionKeyRow,
   resolveFormAnswers,
+  resolveRowsAnswers,
   resolveQuestionAnswer,
 } from './questionCardLogic'
 
@@ -136,9 +137,20 @@ describe('form mode', () => {
       { label: 'a' }, { label: 'b' }, { label: 'c' }, { label: 'd' }, { label: 'e' },
     ])
     expect(fields).toHaveLength(6)
-    expect(fields[0]).toEqual({ label: 'Shipped', placeholder: 'one feature or fix' })
-    expect(fields[1]).toEqual({ label: 'Traction', placeholder: null })
+    expect(fields[0]).toEqual({ label: 'Shipped', placeholder: 'one feature or fix', kind: 'text', options: [] })
+    expect(fields[1]).toEqual({ label: 'Traction', placeholder: null, kind: 'text', options: [] })
     expect(normalizeQuestionFields(undefined)).toEqual([])
+  })
+
+  it('normalizes row kinds and degrades option-less picks to text', () => {
+    const fields = normalizeQuestionFields([
+      { label: 'Links', kind: 'multi', options: [' Demo ', 'Deck', 'Demo', '', 'Video'] },
+      { label: 'Phase', kind: 'single', options: [] },
+      { label: 'Note', kind: 'nonsense', options: ['x'] },
+    ])
+    expect(fields[0]).toEqual({ label: 'Links', placeholder: null, kind: 'multi', options: ['Demo', 'Deck', 'Video'] })
+    expect(fields[1].kind).toBe('text')
+    expect(fields[2].kind).toBe('text')
   })
 
   it('assembles labeled lines from filled rows', () => {
@@ -157,6 +169,29 @@ describe('form mode', () => {
     const fields = normalizeQuestionFields([{ label: 'Shipped', placeholder: null }])
     const result = resolveFormAnswers(fields, { 0: '   ' })
     expect(result.ok).toBe(false)
-    expect(!result.ok && result.error).toContain('at least one line')
+    expect(!result.ok && result.error).toContain('at least one row')
+  })
+
+  it('assembles mixed text, single, and multi rows honestly', () => {
+    const fields = normalizeQuestionFields([
+      { label: 'Shipped', kind: 'text' },
+      { label: 'Phase', kind: 'single', options: ['Idea', 'Building', 'Shipped'] },
+      { label: 'Links', kind: 'multi', options: ['Demo', 'Deck', 'Video'] },
+    ])
+    const filled = resolveRowsAnswers(fields, {
+      texts: { 0: 'Verilog-to-layout agent v0.3' },
+      picks: { 1: [2], 2: [0, 2] },
+    })
+    expect(filled).toEqual({
+      ok: true,
+      answer: 'Shipped: Verilog-to-layout agent v0.3\nPhase: Shipped\nLinks: Demo, Video',
+    })
+    const partial = resolveRowsAnswers(fields, { texts: {}, picks: { 2: [1] } })
+    expect(partial).toEqual({
+      ok: true,
+      answer: 'Shipped: (left blank)\nPhase: (left blank)\nLinks: Deck',
+    })
+    const empty = resolveRowsAnswers(fields, { texts: {}, picks: { 1: [], 2: [] } })
+    expect(empty.ok).toBe(false)
   })
 })

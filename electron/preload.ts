@@ -191,7 +191,7 @@ contextBridge.exposeInMainWorld('cosmic', {
   downloadGatewayOutputArtifact: (payload: { messageId: string; artifactId: string; suggestedFilename?: string; mimeType?: string; timeoutMs?: number }) => ipcRenderer.invoke('gateway:download-output-artifact', payload),
   pickGatewayDocuments: () => ipcRenderer.invoke('gateway:pick-documents'),
   sendGatewayQuery: (payload: { content: string; conversationContext?: any[]; requestId?: string; routeOverride?: string; attachments?: any[] }) => ipcRenderer.invoke('gateway:send-query', payload),
-  submitGatewayTaskInputReply: (payload: { inputRequestId: string; taskId: string; content: string }) => ipcRenderer.invoke('gateway:submit-task-input-reply', payload),
+  submitGatewayTaskInputReply: (payload: { inputRequestId: string; taskId: string; content: string; skipped?: boolean }) => ipcRenderer.invoke('gateway:submit-task-input-reply', payload),
   cancelGatewayResponse: (payload: { requestId?: string; taskId?: string }) => ipcRenderer.invoke('gateway:cancel-response', payload),
   backgroundGatewayRequest: (payload: { requestId: string }) => ipcRenderer.invoke('gateway:background-request', payload),
   foregroundGatewayRequest: (payload: { requestId: string }) => ipcRenderer.invoke('gateway:foreground-request', payload),

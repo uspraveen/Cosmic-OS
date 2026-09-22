@@ -157,7 +157,8 @@ class AlphaAgentConfigRequest(BaseModel):
 
 
 class TaskInputReplyRequest(BaseModel):
-    content: str = Field(..., min_length=1, max_length=8000)
+    content: str = Field(default="", max_length=8000)
+    skipped: bool = False
 
 
 class MobileDeviceAuthorizeRequest(BaseModel):
@@ -792,6 +793,7 @@ async def _handle_realtime_websocket_message(
                 task_id=str(payload.get("task_id") or "").strip(),
                 content=str(payload.get("content") or "").strip(),
                 channel=channel,
+                skipped=bool(payload.get("skipped")),
             )
         except ValueError as exc:
             await adapter.send(
@@ -1562,6 +1564,7 @@ async def submit_task_input_reply(
             task_id=task_id,
             content=payload.content,
             channel=channel,
+            skipped=bool(payload.skipped),
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

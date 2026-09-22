@@ -3466,6 +3466,37 @@ class OrchestratorRuntime:
         resolved_channel = str(channel or (run_state.channel if run_state else "") or "").strip() or None
         resolved_session = run_state.session_id if run_state else None
         irid = f"uir_{uuid4().hex[:12]}"
+        normalized_fields: list[dict[str, Any]] = []
+        for raw_field in fields or []:
+            if not isinstance(raw_field, dict):
+                continue
+            label = str(raw_field.get("label") or "").strip()
+            if not label:
+                continue
+            kind = str(raw_field.get("kind") or "").strip().lower()
+            if kind not in {"text", "single", "multi"}:
+                kind = "text"
+            entry: dict[str, Any] = {"label": label, "kind": kind}
+            if kind == "text":
+                placeholder = str(raw_field.get("placeholder") or "").strip()
+                if placeholder:
+                    entry["placeholder"] = placeholder
+            else:
+                row_options = [
+                    str(option).strip()
+                    for option in (raw_field.get("options") or [])
+                    if str(option).strip()
+                ][:6]
+                if not row_options:
+                    entry["kind"] = "text"
+                    placeholder = str(raw_field.get("placeholder") or "").strip()
+                    if placeholder:
+                        entry["placeholder"] = placeholder
+                else:
+                    entry["options"] = row_options
+            normalized_fields.append(entry)
+            if len(normalized_fields) >= 6:
+                break
         payload = {
             "input_request_id": irid,
             "task_id": ntid,
@@ -3474,13 +3505,62 @@ class OrchestratorRuntime:
             "channel": resolved_channel,
             "question": nq,
             "options": [str(i) for i in options or [] if str(i).strip()],
-            "fields": [
-                {"label": str(f.get("label") or "").strip(), "placeholder": str(f.get("placeholder") or "").strip()}
-                for f in (fields or []) if isinstance(f, dict) and str(f.get("label") or "").strip()
-            ][:6],
+            "fields": normalized_fields,
             "status": "pending",
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
+        # One open question per conversation: a new ask replaces whatever card
+        # is still open instead of stacking a second copy of itself beside the
+        # first — the 1/2-and-2/2-the-same failure mode, closed in physics.
+        try:
+            stale_rows = self.task_ledger.list_pending_task_input_requests(
+                session_id=resolved_session or None,
+                task_id=None if resolved_session else ntid,
+            )
+        except Exception:
+            logger.exception("orchestrator.ask_supersede_lookup_failed")
+            stale_rows = []
+        for stale in stale_rows:
+            stale_irid = str(stale.get("input_request_id") or "").strip()
+            if not stale_irid or stale_irid == irid:
+                continue
+            self.task_ledger.mark_task_input_replied(
+                stale_irid,
+                content="(replaced by a newer question)",
+                status="superseded",
+            )
+            stale_future = self._pending_input_futures.pop(stale_irid, None)
+            superseded_reply = {
+                "input_request_id": stale_irid,
+                "task_id": str(stale.get("task_id") or ntid),
+                "content": "(replaced by a newer question)",
+                "superseded": True,
+                "resolution": "superseded",
+            }
+            if stale_future is not None and not stale_future.done():
+                stale_future.set_result(superseded_reply)
+            await self._redis.xadd(
+                self.config.task_input_requests_stream,
+                {
+                    "payload": json.dumps(
+                        {
+                            "kind": "input_resolution",
+                            **superseded_reply,
+                            "session_id": resolved_session,
+                            "channel": resolved_channel,
+                            "timestamp": payload["timestamp"],
+                        },
+                        ensure_ascii=False,
+                    )
+                },
+            )
+            await self._dispatch_resumed_task_for_input_reply(superseded_reply)
+            logger.info(
+                "orchestrator.ask_superseded old=%s new=%s session=%s",
+                stale_irid,
+                irid,
+                resolved_session,
+            )
         self.task_ledger.create_task_input_request(
             input_request_id=irid, task_id=ntid, session_id=resolved_session,
             channel=resolved_channel, agent=agent, question=nq, options=payload["options"],
@@ -3500,8 +3580,10 @@ class OrchestratorRuntime:
                 return payload
             return {**payload, "reply": reply, "status": "answered"}
         finally:
-            if future.done() or (wait_timeout_sec is None or wait_timeout_sec <= 0):
-                self._pending_input_futures.pop(irid, None)
+            # Always release the waiter. A late answer no longer needs it — the
+            # reply consumer's resume dispatch is the late path — and keeping a
+            # timed-out future here just leaked it while its card idled.
+            self._pending_input_futures.pop(irid, None)
 
     async def resolve_browser_interrupt(
         self,
@@ -7755,7 +7837,14 @@ class OrchestratorRuntime:
                         if not irid:
                             raise ValueError("input_request_id is required.")
                         content = str(reply.get("content") or "").strip()
-                        self.task_ledger.mark_task_input_replied(irid, content=content)
+                        resolution = str(reply.get("resolution") or "").strip().lower() or (
+                            "skipped" if reply.get("skipped") else "answered"
+                        )
+                        if resolution not in {"answered", "skipped", "superseded"}:
+                            resolution = "answered"
+                        self.task_ledger.mark_task_input_replied(
+                            irid, content=content, status=resolution
+                        )
                         future = self._pending_input_futures.get(irid)
                         if future is not None and not future.done():
                             future.set_result(reply)

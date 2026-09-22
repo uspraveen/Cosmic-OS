@@ -110,9 +110,14 @@ export function splitOptionLabel(label: string): { lead: string; tail: string | 
 
 // ── Form mode: the user fills in one line per field ──────────
 
+export type QuestionFieldKind = 'text' | 'single' | 'multi'
+
 export interface QuestionField {
   label: string
   placeholder: string | null
+  kind: QuestionFieldKind
+  /** single/multi rows: the selectable choices for this row. */
+  options: string[]
 }
 
 export function normalizeQuestionFields(raw: unknown): QuestionField[] {
@@ -124,30 +129,87 @@ export function normalizeQuestionFields(raw: unknown): QuestionField[] {
     const label = String(record.label ?? '').trim()
     if (!label) continue
     const placeholder = String(record.placeholder ?? '').trim()
-    fields.push({ label, placeholder: placeholder || null })
+    let kind = String(record.kind ?? '').trim().toLowerCase()
+    if (kind !== 'single' && kind !== 'multi') kind = 'text'
+    const options: string[] = []
+    const rawOptions = record.options
+    if (Array.isArray(rawOptions)) {
+      for (const option of rawOptions) {
+        const text = String(option ?? '').trim()
+        if (!text || options.includes(text)) continue
+        options.push(text)
+        if (options.length >= MAX_QUESTION_OPTIONS) break
+      }
+    }
+    if (kind !== 'text' && options.length === 0) kind = 'text'
+    fields.push({
+      label,
+      placeholder: placeholder || null,
+      kind: kind as QuestionFieldKind,
+      options,
+    })
     if (fields.length >= MAX_QUESTION_OPTIONS) break
   }
   return fields
 }
 
+/** Per-row live values: typed text for text rows, picked option indexes otherwise. */
+export interface RowAnswers {
+  texts: Readonly<Record<number, string>>
+  picks: Readonly<Record<number, number[]>>
+}
+
+const rowAnswerLine = (
+  field: QuestionField,
+  answers: RowAnswers,
+  index: number,
+): { line: string; filled: boolean } => {
+  if (field.kind === 'text') {
+    const value = String(answers.texts[index] ?? '').trim()
+    return { line: `${field.label}: ${value || '(left blank)'}`, filled: Boolean(value) }
+  }
+  const picked = (answers.picks[index] || [])
+    .map((optionIndex) => field.options[optionIndex])
+    .filter((option): option is string => Boolean(option))
+  if (field.kind === 'single') {
+    return { line: `${field.label}: ${picked[0] || '(left blank)'}`, filled: picked.length > 0 }
+  }
+  return {
+    line: `${field.label}: ${picked.length > 0 ? picked.join(', ') : '(none checked)'}`,
+    filled: picked.length > 0,
+  }
+}
+
 /**
- * Assemble the reply text from filled form rows: `Label: value` per line,
- * unfilled rows marked honestly so the model can see what was skipped.
- * At least one row must be filled to continue.
+ * Assemble the reply text from filled rows: `Label: value` per line,
+ * unfilled rows marked honestly (`(left blank)` / `(none checked)`) so the
+ * model can see what was skipped. At least one row must be filled to
+ * continue. Works across mixed row kinds in the same card.
+ */
+export function resolveRowsAnswers(
+  fields: QuestionField[],
+  answers: RowAnswers,
+): { ok: true; answer: string } | { ok: false; error: string } {
+  const lines: string[] = []
+  let filled = 0
+  fields.forEach((field, index) => {
+    const row = rowAnswerLine(field, answers, index)
+    if (row.filled) filled += 1
+    lines.push(row.line)
+  })
+  if (filled === 0) {
+    return { ok: false, error: 'Fill in at least one row, or Skip.' }
+  }
+  return { ok: true, answer: lines.join('\n') }
+}
+
+/**
+ * Text-only assembly kept as the compatibility entry for plain fill-in
+ * cards: values map straight onto rows as free lines.
  */
 export function resolveFormAnswers(
   fields: QuestionField[],
   values: Readonly<Record<number, string>>,
 ): { ok: true; answer: string } | { ok: false; error: string } {
-  const lines: string[] = []
-  let filled = 0
-  fields.forEach((field, index) => {
-    const value = String(values[index] ?? '').trim()
-    if (value) filled += 1
-    lines.push(`${field.label}: ${value || '(left blank)'}`)
-  })
-  if (filled === 0) {
-    return { ok: false, error: 'Fill in at least one line, or Skip.' }
-  }
-  return { ok: true, answer: lines.join('\n') }
+  return resolveRowsAnswers(fields, { texts: values, picks: {} })
 }

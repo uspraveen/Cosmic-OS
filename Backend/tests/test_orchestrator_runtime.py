@@ -3633,6 +3633,152 @@ async def test_request_user_input_publishes_request_and_resumes_on_reply(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_request_user_input_supersedes_the_previous_open_ask(tmp_path) -> None:
+    """One open question per conversation: a new ask replaces the open card
+    instead of stacking a second copy beside it (the 1/2-and-2/2-the-same
+    failure). The superseded ask resolves immediately — flagged — and its
+    removal rides the requests stream so clients drop the old card."""
+    fake_redis = FakeRedis()
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_supersede.db",
+    )
+    runtime = OrchestratorRuntime(config, client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))), redis_client=fake_redis)
+    runtime._active_runs["tsk_waiting"] = ActiveTaskRun(
+        runner_task=None,
+        request_id="req_waiting",
+        session_id="sess_20260312",
+        channel="desktop:desk_waiting",
+    )
+
+    await runtime.start()
+    try:
+        first_task = asyncio.create_task(
+            runtime.request_user_input(
+                "tsk_waiting",
+                question="Coppr weekly update?",
+                fields=[{"label": "Shipped", "kind": "text"}],
+                wait_timeout_sec=30.0,
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while "user_input:requests" not in fake_redis.streams and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        first_payload = json.loads(fake_redis.streams["user_input:requests"][0][1]["payload"])
+        first_id = first_payload["input_request_id"]
+
+        second_task = asyncio.create_task(
+            runtime.request_user_input(
+                "tsk_waiting",
+                question="Coppr weekly update?",
+                fields=[{"label": "Shipped", "kind": "text"}],
+                wait_timeout_sec=30.0,
+            )
+        )
+        first_result = await asyncio.wait_for(first_task, timeout=2.0)
+        assert first_result["reply"]["superseded"] is True
+        assert first_result["reply"]["input_request_id"] == first_id
+
+        second_payload = json.loads(fake_redis.streams["user_input:requests"][-1][1]["payload"])
+        assert second_payload["input_request_id"] != first_id
+
+        resolutions = [
+            json.loads(payload[1]["payload"])
+            for payload in fake_redis.streams["user_input:requests"]
+            if json.loads(payload[1]["payload"]).get("kind") == "input_resolution"
+        ]
+        assert any(
+            item["input_request_id"] == first_id and item["resolution"] == "superseded"
+            for item in resolutions
+        )
+
+        with sqlite3.connect(config.task_ledger_db_path) as connection:
+            row = connection.execute(
+                "SELECT status FROM task_input_requests WHERE input_request_id = ?",
+                (first_id,),
+            ).fetchone()
+        assert row == ("superseded",)
+
+        second_task.cancel()
+        try:
+            await second_task
+        except asyncio.CancelledError:
+            pass
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_request_user_input_skip_reply_resolves_flagged(tmp_path) -> None:
+    """A skipped card resolves the waiting ask immediately, flagged skipped,
+    so the turn moves on instead of idling on a question the user dismissed."""
+    fake_redis = FakeRedis()
+    config = OrchestratorConfig(
+        internal_token="internal-token",
+        signing_secret="signing-secret",
+        anthropic_api_key="anthropic-key",
+        orchestrator_default_provider="anthropic",
+        anthropic_model="claude-opus-4-6",
+        task_ledger_db_path=tmp_path / "task_ledger_skip.db",
+    )
+    runtime = OrchestratorRuntime(config, client=httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200))), redis_client=fake_redis)
+    runtime._active_runs["tsk_waiting"] = ActiveTaskRun(
+        runner_task=None,
+        request_id="req_waiting",
+        session_id="sess_20260312",
+        channel="desktop:desk_waiting",
+    )
+
+    await runtime.start()
+    try:
+        request_task = asyncio.create_task(
+            runtime.request_user_input(
+                "tsk_waiting",
+                question="Which environment should I target?",
+                options=["staging", "production"],
+                wait_timeout_sec=30.0,
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while "user_input:requests" not in fake_redis.streams and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        request_payload = json.loads(fake_redis.streams["user_input:requests"][0][1]["payload"])
+
+        await fake_redis.xadd(
+            config.task_input_replies_stream,
+            {
+                "payload": json.dumps(
+                    {
+                        "input_request_id": request_payload["input_request_id"],
+                        "task_id": "tsk_waiting",
+                        "content": "(user skipped this question)",
+                        "channel": "desktop:desk_waiting",
+                        "resolution": "skipped",
+                        "skipped": True,
+                        "timestamp": "2026-03-12T12:00:00Z",
+                    }
+                )
+            },
+        )
+        result = await asyncio.wait_for(request_task, timeout=3.0)
+
+        assert result["status"] == "answered"
+        assert result["reply"]["skipped"] is True
+        with sqlite3.connect(config.task_ledger_db_path) as connection:
+            row = connection.execute(
+                "SELECT status, reply_content FROM task_input_requests WHERE input_request_id = ?",
+                (request_payload["input_request_id"],),
+            ).fetchone()
+        assert row == ("skipped", "(user skipped this question)")
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_runtime_retries_transient_overload_before_response_text(tmp_path) -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
     config = OrchestratorConfig(

@@ -5867,7 +5867,7 @@ async def test_whatsapp_message_auto_submits_pending_task_input_reply(tmp_path) 
         stored = runtime.session_store.get_task_input_request("uir_whatsapp_1")
         assert stored is not None
         assert stored["status"] == "answered"
-        assert stored["reply_content"] == "Use Cosmic-OS."
+        assert stored["content"] == "Use Cosmic-OS."
     finally:
         await runtime.stop()
 
@@ -5928,7 +5928,120 @@ def test_desktop_websocket_accepts_task_input_reply_messages(tmp_path) -> None:
         stored = runtime.session_store.get_task_input_request("uir_desktop_1")
         assert stored is not None
         assert stored["status"] == "answered"
-        assert stored["reply_content"] == "Use staging."
+        assert stored["content"] == "Use staging."
+
+
+def test_desktop_websocket_task_input_skip_marks_request_skipped(tmp_path) -> None:
+    """Skipping a card is a real resolution: the store goes terminal and the
+    orchestrator's reply stream hears it flagged — the waiting turn must never
+    stay blocked because the user dismissed the question."""
+    runtime = build_runtime(tmp_path, route="haiku")
+    runtime._redis = FakeRedis()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.gateway_runtime = runtime
+        await runtime.start()
+        try:
+            yield
+        finally:
+            await runtime.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(channel_router)
+
+    with TestClient(app) as client:
+        session_id = runtime._current_session_id()
+        runtime.session_store.upsert_task_input_request(
+            input_request_id="uir_skip_1",
+            task_id="tsk_waiting_skip",
+            session_id=session_id,
+            channel="desktop:desk_input",
+            question="Which update should I bank?",
+            options=["Shipped feature", "Traction number"],
+            agent="cosmic/orchestrator:1.0.0",
+            metadata={},
+            status="pending",
+            created_at=utcnow_iso(),
+        )
+
+        with client.websocket_connect("/ws?token=test-token&device_id=desk_input") as websocket:
+            websocket.send_json(
+                {
+                    "type": "task.input_reply",
+                    "request_id": "skip_req_1",
+                    "input_request_id": "uir_skip_1",
+                    "task_id": "tsk_waiting_skip",
+                    "content": "",
+                    "skipped": True,
+                }
+            )
+            accepted = websocket.receive_json()
+
+        assert accepted["type"] == "task.input_reply.accepted"
+        assert accepted["input_request_id"] == "uir_skip_1"
+
+        reply_stream = runtime._redis.streams[runtime.config.task_input_replies_stream]
+        reply_payload = json.loads(reply_stream[0][1]["payload"])
+        assert reply_payload["skipped"] is True
+        assert reply_payload["resolution"] == "skipped"
+        assert reply_payload["content"] == "(user skipped this question)"
+
+        stored = runtime.session_store.get_task_input_request("uir_skip_1")
+        assert stored is not None
+        assert stored["status"] == "skipped"
+        assert stored["content"] == "(user skipped this question)"
+
+
+@pytest.mark.asyncio
+async def test_task_input_resolution_marks_store_and_notifies_channel(tmp_path) -> None:
+    """A supersede resolution is what actually deletes the duplicate card on
+    the client: the store row goes terminal and the channel hears the same
+    `task.input_reply.accepted` event the reply ack sends."""
+    runtime = build_runtime(tmp_path, route="haiku")
+    runtime._redis = FakeRedis()
+    delivered: list = []
+
+    async def record_delivery(event, channel=None, **kwargs):
+        delivered.append({"event": event, "channel": channel})
+
+    runtime._deliver_or_queue_channel_event = record_delivery
+    await runtime.start()
+    try:
+        session_id = runtime._current_session_id()
+        runtime.session_store.upsert_task_input_request(
+            input_request_id="uir_stale_1",
+            task_id="tsk_stale",
+            session_id=session_id,
+            channel="desktop:desk_input",
+            question="Coppr weekly update?",
+            options=[],
+            agent="cosmic/orchestrator:1.0.0",
+            metadata={},
+            status="pending",
+            created_at=utcnow_iso(),
+        )
+
+        await runtime._handle_task_input_resolution(
+            {
+                "kind": "input_resolution",
+                "input_request_id": "uir_stale_1",
+                "task_id": "tsk_stale",
+                "content": "(replaced by a newer question)",
+                "resolution": "superseded",
+                "channel": "desktop:desk_input",
+                "timestamp": utcnow_iso(),
+            }
+        )
+
+        stored = runtime.session_store.get_task_input_request("uir_stale_1")
+        assert stored is not None
+        assert stored["status"] == "superseded"
+        assert stored["content"] == "(replaced by a newer question)"
+        assert delivered and delivered[0]["event"]["type"] == "task.input_reply.accepted"
+        assert delivered[0]["event"]["input_request_id"] == "uir_stale_1"
+    finally:
+        await runtime.stop()
 
 
 def test_internal_telegram_media_route_uses_internal_token(tmp_path) -> None:

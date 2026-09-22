@@ -700,19 +700,26 @@ class TaskLedger:
             )
             connection.commit()
 
-    def mark_task_input_replied(self, input_request_id: str, *, content: str) -> None:
+    def mark_task_input_replied(
+        self,
+        input_request_id: str,
+        *,
+        content: str,
+        status: str = "answered",
+    ) -> None:
         now = utcnow_iso()
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
                 UPDATE task_input_requests
-                SET status = 'answered',
+                SET status = ?,
                     reply_content = ?,
                     updated_at = ?,
                     replied_at = ?
                 WHERE input_request_id = ?
                 """,
                 (
+                    status,
                     content,
                     now,
                     now,
@@ -720,6 +727,50 @@ class TaskLedger:
                 ),
             )
             connection.commit()
+
+    def list_pending_task_input_requests(
+        self,
+        *,
+        session_id: str | None = None,
+        task_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Open (unanswered) input requests, newest first.
+
+        Feeds one-open-question supersede: a new ask finds whatever card is
+        still open in the same conversation and replaces it instead of
+        stacking a second identical one beside it.
+        """
+        clauses = ["status = 'pending'"]
+        params: list[Any] = []
+        normalized_session = str(session_id or "").strip()
+        normalized_task = str(task_id or "").strip()
+        if normalized_session:
+            clauses.append("session_id = ?")
+            params.append(normalized_session)
+        if normalized_task:
+            clauses.append("task_id = ?")
+            params.append(normalized_task)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT input_request_id, task_id, session_id, question, options_json,
+                       status, created_at, updated_at
+                FROM task_input_requests
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC, updated_at DESC
+                LIMIT 20
+                """,
+                params,
+            ).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["options"] = json.loads(item.pop("options_json") or "[]")
+            except Exception:
+                item["options"] = []
+            results.append(item)
+        return results
 
     def find_answered_input_requests(
         self,

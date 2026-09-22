@@ -123,7 +123,7 @@ interface PendingTaskInput {
   channel?: string | null
   question: string
   options: string[]
-  fields?: Array<{ label: string; placeholder: string | null }>
+  fields?: Array<{ label: string; placeholder: string | null; kind?: string | null; options?: string[] | null }>
   status?: string
   timestamp?: string | null
 }
@@ -5834,20 +5834,35 @@ const normalizePendingTaskInput = (value: any): PendingTaskInput | null => {
 }
 
 // Form-mode rows live top-level on live events and inside metadata on
-// reconnect replays; both shapes land here.
-const normalizePendingTaskInputFields = (value: any): Array<{ label: string; placeholder: string | null }> => {
+// reconnect replays; both shapes land here. Each row carries its input kind
+// (text line, single-select, multi-select) plus the row's own options.
+const normalizePendingTaskInputFields = (value: any): Array<{ label: string; placeholder: string | null; kind: string; options: string[] }> => {
   const raw = Array.isArray(value?.fields)
     ? value.fields
     : Array.isArray(value?.metadata?.fields)
       ? value.metadata.fields
       : []
-  const fields: Array<{ label: string; placeholder: string | null }> = []
+  const fields: Array<{ label: string; placeholder: string | null; kind: string; options: string[] }> = []
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue
-    const label = String((item as any).label || '').trim()
+    const record = item as Record<string, unknown>
+    const label = String(record.label ?? '').trim()
     if (!label) continue
-    const placeholder = String((item as any).placeholder || '').trim()
-    fields.push({ label, placeholder: placeholder || null })
+    const placeholder = String(record.placeholder ?? '').trim()
+    let kind = String(record.kind ?? '').trim().toLowerCase()
+    if (kind !== 'single' && kind !== 'multi') kind = 'text'
+    const options: string[] = []
+    const rawOptions = record.options
+    if (Array.isArray(rawOptions)) {
+      for (const option of rawOptions) {
+        const text = String(option ?? '').trim()
+        if (!text || options.includes(text)) continue
+        options.push(text)
+        if (options.length >= 6) break
+      }
+    }
+    if (kind !== 'text' && options.length === 0) kind = 'text'
+    fields.push({ label, placeholder: placeholder || null, kind, options })
     if (fields.length >= 6) break
   }
   return fields
@@ -6072,7 +6087,9 @@ export default function App() {
   const [modelPulseModel, setModelPulseModel] = useState<GatewayModelSelection | null>(null)
   const [hoverTooltip, setHoverTooltip] = useState<HoverTooltipState | null>(null)
   const [surfaceLaunch, setSurfaceLaunch] = useState<SurfaceLaunchState | null>(null)
-  const [viewportSize, setViewportSize] = useState(() => ({
+  // Viewport tracking exists to force a re-render on resize / display moves
+  // (layout reads window metrics during render); the value itself is not read.
+  const [, setViewportSize] = useState(() => ({
     width: typeof window !== 'undefined' ? window.innerWidth : 1440,
     height: typeof window !== 'undefined' ? window.innerHeight : 900,
   }))
@@ -6146,7 +6163,6 @@ export default function App() {
   const [selectedBackgroundRequestId, setSelectedBackgroundRequestId] = useState<string | null>(null)
   const [backgroundTaskListRetracted, setBackgroundTaskListRetracted] = useState(false)
   const [pendingTaskListRetracted, setPendingTaskListRetracted] = useState(false)
-  const [taskInterruptIndex, setTaskInterruptIndex] = useState(0)
   const [cronResultNotifications, setCronResultNotifications] = useState<CronResultNotification[]>([])
   const [cronResultIndex, setCronResultIndex] = useState(0)
   const [artifactReadyNotifications, setArtifactReadyNotifications] = useState<ProducedArtifactNotification[]>([])
@@ -6948,6 +6964,28 @@ export default function App() {
     scheduleOpenUnreadScan(180, 'smooth')
   }
 
+  // Bring the conversation up and land on the waiting card itself — the
+  // bottom-right beacon's whole job is to be the always-there route back to it.
+  const focusAskCard = (inputRequestId: string) => {
+    modeRef.current = 'chat'
+    setMode('chat')
+    setShowLauncherTray(false)
+    const land = () => {
+      window.setTimeout(() => {
+        const card = document.getElementById(`ask-card-${inputRequestId}`)
+        card?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+        const focusable = card?.querySelector<HTMLElement>('input, button:not([disabled])')
+        focusable?.focus()
+      }, 200)
+    }
+    if (searchStateRef.current !== 'visible') {
+      window.cosmic?.toggle?.()
+    } else {
+      showChatComposer()
+    }
+    land()
+  }
+
   const triggerModelDialPulse = (model: GatewayModelSelection) => {
     if (modelDialPulseTimeoutRef.current !== null) {
       window.clearTimeout(modelDialPulseTimeoutRef.current)
@@ -7528,10 +7566,31 @@ export default function App() {
     setDismissedTaskInterruptIds((prev) => prev.filter((item) => !relatedInputRequestIds.includes(item)))
   }
 
-  const dismissTaskInterrupt = (inputRequestId: string) => {
+  // Skipping a card is a real answer: the orchestrator must hear it so the
+  // waiting turn can move on (the loader unsticks, the card cannot resurrect
+  // on reconnect replay). A local hide alone left the ask open server-side
+  // until its wait timed out — and replaying the still-pending request
+  // brought the card straight back.
+  const dismissTaskInterrupt = (taskInput: PendingTaskInput) => {
+    const inputRequestId = taskInput.inputRequestId
     setDismissedTaskInterruptIds((prev) => (
       prev.includes(inputRequestId) ? prev : [...prev, inputRequestId]
     ))
+    try {
+      void Promise.resolve(
+        window.cosmic?.submitGatewayTaskInputReply({
+          inputRequestId,
+          taskId: taskInput.taskId,
+          content: '',
+          skipped: true,
+        }),
+      ).catch(() => {
+        // Keep the local dismissal even if the bridge is unavailable; a later
+        // reconnect replay can resurface the card if the skip never landed.
+      })
+    } catch {
+      // Same: local dismissal stands on its own.
+    }
   }
 
   const resetDesktopVmSessionState = (detail = 'Signed out from your VM.') => {
@@ -7768,29 +7827,6 @@ export default function App() {
   }, [dismissedTaskInterruptIds.length, pendingTaskInputs])
 
   useEffect(() => {
-    if (visibleTaskInterrupts.length === 0) {
-      if (taskInterruptIndex !== 0) {
-        setTaskInterruptIndex(0)
-      }
-      return
-    }
-    if (taskInterruptIndex > visibleTaskInterrupts.length - 1) {
-      setTaskInterruptIndex(visibleTaskInterrupts.length - 1)
-    }
-  }, [taskInterruptIndex, visibleTaskInterrupts.length])
-
-  useEffect(() => {
-    const container = taskInterruptStackRef.current
-    if (!container || visibleTaskInterrupts.length === 0) {
-      return
-    }
-    const targetLeft = container.clientWidth * taskInterruptIndex
-    if (Math.abs(container.scrollLeft - targetLeft) > 2) {
-      container.scrollTo({ left: targetLeft, behavior: 'smooth' })
-    }
-  }, [taskInterruptIndex, visibleTaskInterrupts.length])
-
-  useEffect(() => {
     const container = cronResultStackRef.current
     if (!container || displayedCronResultNotifications.length === 0) {
       return
@@ -7810,24 +7846,6 @@ export default function App() {
       setCronResultIndex(displayedCronResultNotifications.length - 1)
     }
   }, [cronResultIndex, displayedCronResultNotifications.length])
-
-  const handleTaskInterruptScroll = () => {
-    const container = taskInterruptStackRef.current
-    if (!container) {
-      return
-    }
-    const cardWidth = container.clientWidth
-    if (cardWidth <= 0) {
-      return
-    }
-    const nextIndex = Math.max(
-      0,
-      Math.min(visibleTaskInterrupts.length - 1, Math.round(container.scrollLeft / cardWidth)),
-    )
-    if (nextIndex !== taskInterruptIndex) {
-      setTaskInterruptIndex(nextIndex)
-    }
-  }
 
   const handleCronResultScroll = () => {
     const container = cronResultStackRef.current
@@ -10294,51 +10312,13 @@ export default function App() {
     !showLauncherTray
   const shouldShowPrimarySurface = mode !== 'meeting' && mode !== 'spaces' && !showLauncherTray
   const shouldShowResponseSurface = shouldShowPrimarySurface && (mode === 'task' || messages.length > 0)
-  // The question card docks above the composer instead of squatting on a
-  // right-hand rail, so the chat surface keeps its full width while a
-  // question is pending (--task-rail-reserve stays 0).
-  const [askUserDock, setAskUserDock] = useState<{ left: number; width: number; bottom: number } | null>(null)
-  useLayoutEffect(() => {
-    if (!shouldShowTaskInterrupt || visibleTaskInterrupts.length === 0) {
-      setAskUserDock(null)
-      return undefined
-    }
-    const measure = () => {
-      const rect = readVisibleRect(composerSurfaceRef.current)
-      if (!rect) {
-        setAskUserDock(null)
-        return
-      }
-      // Flush with the composer it belongs to — same left edge, same width —
-      // so the card reads as the textbox asking a question. The old 560px cap
-      // centered above the bar turned it into a floating island the moment the
-      // composer outgrew that (wide mode), which is exactly how it piled onto
-      // the transcript instead of sitting on the input it was docked to.
-      const width = Math.max(300, Math.min(rect.width, window.innerWidth - 32))
-      setAskUserDock({
-        left: rect.x + Math.max(0, (rect.width - width) / 2),
-        width,
-        bottom: Math.max(16, window.innerHeight - rect.y + 16),
-      })
-    }
-    measure()
-    // The composer re-anchors as neighboring surfaces settle (response pane,
-    // wide mode, attachment bar); re-measure once they have laid out, and keep
-    // tracking the bar when it grows or moves under us (attachments, chips).
-    const raf = window.requestAnimationFrame(measure)
-    const timer = window.setTimeout(measure, 240)
-    const composerEl = composerSurfaceRef.current
-    const observer = composerEl ? new ResizeObserver(() => measure()) : null
-    if (composerEl && observer) observer.observe(composerEl)
-    return () => {
-      observer?.disconnect()
-      window.cancelAnimationFrame(raf)
-      window.clearTimeout(timer)
-    }
-  }, [shouldShowTaskInterrupt, visibleTaskInterrupts.length, viewportSize.width, viewportSize.height, chatWideMode, searchState])
   const shouldShowCronResultSurface = displayedCronResultNotifications.length > 0
+  // Bottom-right shells stack upward from the corner. The waiting-ask beacon
+  // owns the lowest slot while an ask is open (it is the only one that blocks
+  // a turn), and the ready-result cards reserve their slots above it.
+  const noticeShellsBase = (searchState === 'visible' ? 112 : 24) + (shouldShowTaskInterrupt ? 148 : 0)
   const cronResultShellStyle = {
-    ['--cron-result-bottom' as string]: searchState === 'visible' ? '112px' : '24px',
+    ['--cron-result-bottom' as string]: `${noticeShellsBase}px`,
   } as React.CSSProperties
   const shouldShowArtifactReadySurface =
     orderedArtifactReadyNotifications.length > 0 &&
@@ -10349,8 +10329,8 @@ export default function App() {
     )
   const artifactReadyShellStyle = {
     ['--artifact-ready-bottom' as string]: shouldShowCronResultSurface
-      ? (searchState === 'visible' ? '424px' : '336px')
-      : (searchState === 'visible' ? '112px' : '24px'),
+      ? `${noticeShellsBase + 312}px`
+      : `${noticeShellsBase}px`,
   } as React.CSSProperties
   const effectivePosition = mode === 'spaces' ? 'bottom' : (messages.length > 0 || mode === 'task') ? 'bottom' : searchPosition
   const overlayClass = [
@@ -10395,14 +10375,9 @@ export default function App() {
   } as React.CSSProperties
   const isMeetingSurfaceActive = mode === 'meeting' && searchState !== 'hidden'
   const isSpacesSurfaceActive = mode === 'spaces' && searchState !== 'hidden'
-  const askUserShellStyle = askUserDock
-    ? ({
-      ['--ask-user-left' as string]: `${askUserDock.left}px`,
-      ['--ask-user-width' as string]: `${askUserDock.width}px`,
-      ['--ask-user-bottom' as string]: `${askUserDock.bottom}px`,
-      ['--ask-user-transform' as string]: 'none',
-    } as React.CSSProperties)
-    : undefined
+  const askNoticeShellStyle = {
+    ['--ask-user-notice-bottom' as string]: searchState === 'visible' ? '112px' : '24px',
+  } as React.CSSProperties
   const hasMultiplePendingTaskInputs = orderedPendingTaskInputs.length > 1
   const composerPlaceholder =
     authState !== 'authenticated'
@@ -10662,6 +10637,50 @@ export default function App() {
         </div>
       )}
 
+      {/* The waiting-ask beacon: while a question is open it lives here, in
+          the bottom-right corner with the other standing cards — so the ask
+          is never more than one click away wherever you are in the app. */}
+      {visibleTaskInterrupts.length > 0 && mode !== 'meeting' && mode !== 'spaces' && (
+        <div className="ask-user-notice-shell" style={askNoticeShellStyle}>
+          <LiquidGlass
+            disableTilt={true}
+            cornerRadius={22}
+            className="ask-user-notice-card"
+            style={{ width: '100%' }}
+            bodyBackground="rgba(15, 16, 20, 0.92)"
+          >
+            <div className="ask-user-notice-body">
+              <div className="ask-user-notice-head">
+                <span className="task-interrupt-kicker">Cosmic asks</span>
+                <div className="task-interrupt-chip-row">
+                  {visibleTaskInterrupts.length > 1 && (
+                    <div className="task-interrupt-chip count">{visibleTaskInterrupts.length} waiting</div>
+                  )}
+                  <div className="task-interrupt-chip">Needs you</div>
+                </div>
+              </div>
+              <div className="ask-user-notice-question">{visibleTaskInterrupts[0].question}</div>
+              <div className="task-interrupt-actions ask-user-notice-actions">
+                <button
+                  type="button"
+                  className="task-interrupt-btn secondary"
+                  onClick={() => dismissTaskInterrupt(visibleTaskInterrupts[0])}
+                >
+                  Skip
+                </button>
+                <button
+                  type="button"
+                  className="task-interrupt-btn primary"
+                  onClick={() => focusAskCard(visibleTaskInterrupts[0].inputRequestId)}
+                >
+                  Answer
+                </button>
+              </div>
+            </div>
+          </LiquidGlass>
+        </div>
+      )}
+
       <div
         className={`overlay ${overlayClass}`}
         onDoubleClick={(e) => {
@@ -10703,70 +10722,9 @@ export default function App() {
           prophetNavigateSignal={prophetNavigateSignal}
         />
 
-        {shouldShowTaskInterrupt && visibleTaskInterrupts.length > 0 && (
-          <div className="ask-user-shell" style={askUserShellStyle}>
-            <div
-              ref={taskInterruptStackRef}
-              className="task-interrupt-stack"
-              role="list"
-              aria-label={`${visibleTaskInterrupts.length} question${visibleTaskInterrupts.length === 1 ? '' : 's'} waiting for you`}
-              onScroll={handleTaskInterruptScroll}
-            >
-              {visibleTaskInterrupts.map((taskInput, index) => (
-                <LiquidGlass
-                  key={taskInput.inputRequestId}
-                  disableTilt={true}
-                  cornerRadius={30}
-                  className="task-interrupt-glass"
-                  style={{ width: '100%' }}
-                  bodyBackground="rgba(17, 17, 19, 0.93)"
-                  bodyBackdropFilter="blur(40px) saturate(160%)"
-                >
-                  <QuestionCard
-                    question={taskInput.question}
-                    options={taskInput.options}
-                    fields={taskInput.fields}
-                    allowCustom={true}
-                    counterLabel={
-                      visibleTaskInterrupts.length > 1
-                        ? `${index + 1} of ${visibleTaskInterrupts.length} waiting`
-                        : null
-                    }
-                    busy={Boolean(submittingTaskInputs[taskInput.inputRequestId])}
-                    error={taskInputErrors[taskInput.inputRequestId] || null}
-                    sent={answeredTaskInputs.includes(taskInput.inputRequestId)}
-                    onContinue={(answer: string) => void submitTaskInputReply(taskInput, answer)}
-                    onSkip={() => dismissTaskInterrupt(taskInput.inputRequestId)}
-                  />
-                </LiquidGlass>
-              ))}
-            </div>
-            {visibleTaskInterrupts.length > 1 && (
-              <div
-                className="task-interrupt-dots"
-                aria-label={`Task card ${taskInterruptIndex + 1} of ${visibleTaskInterrupts.length}`}
-              >
-                {visibleTaskInterrupts.map((taskInput, index) => (
-                  <button
-                    key={taskInput.inputRequestId}
-                    type="button"
-                    className={`task-interrupt-dot ${taskInterruptIndex === index ? 'active' : ''}`}
-                    aria-label={`Show task ${index + 1}`}
-                    aria-current={taskInterruptIndex === index}
-                    onClick={() => {
-                      const container = taskInterruptStackRef.current
-                      if (!container) {
-                        return
-                      }
-                      container.scrollTo({ left: container.clientWidth * index, behavior: 'smooth' })
-                      setTaskInterruptIndex(index)
-                    }}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+        {/* Waiting asks render as internal cards in the conversation (below,
+            with the transcript) plus the bottom-right beacon — never as a
+            slab floating over the screen they are already on. */}
 
         {/* PRIMARY CONTENT AREA */}
         {shouldShowResponseSurface && (
@@ -11592,6 +11550,35 @@ export default function App() {
                           ))}
                         </div>
                       )}
+                    </div>
+                  )}
+                  {shouldShowTaskInterrupt && visibleTaskInterrupts.length > 0 && (
+                    <div
+                      ref={taskInterruptStackRef}
+                      className="ask-card-flow"
+                      role="list"
+                      aria-label={`${visibleTaskInterrupts.length} question${visibleTaskInterrupts.length === 1 ? '' : 's'} waiting for you`}
+                    >
+                      {visibleTaskInterrupts.map((taskInput, index) => (
+                        <QuestionCard
+                          key={taskInput.inputRequestId}
+                          cardId={`ask-card-${taskInput.inputRequestId}`}
+                          question={taskInput.question}
+                          options={taskInput.options}
+                          fields={taskInput.fields}
+                          allowCustom={true}
+                          counterLabel={
+                            visibleTaskInterrupts.length > 1
+                              ? `${index + 1} of ${visibleTaskInterrupts.length} waiting`
+                              : null
+                          }
+                          busy={Boolean(submittingTaskInputs[taskInput.inputRequestId])}
+                          error={taskInputErrors[taskInput.inputRequestId] || null}
+                          sent={answeredTaskInputs.includes(taskInput.inputRequestId)}
+                          onContinue={(answer: string) => void submitTaskInputReply(taskInput, answer)}
+                          onSkip={() => dismissTaskInterrupt(taskInput)}
+                        />
+                      ))}
                     </div>
                   )}
                   <div ref={responseEndRef} />

@@ -294,7 +294,7 @@ class ToolExecutor:
         if mode not in {"choice", "form"}:
             mode = "form" if isinstance(tool_input.get("fields"), list) and tool_input.get("fields") else "choice"
 
-        fields: list[dict[str, str]] = []
+        fields: list[dict[str, Any]] = []
         if mode == "form":
             raw_fields = tool_input.get("fields")
             if isinstance(raw_fields, list):
@@ -305,9 +305,26 @@ class ToolExecutor:
                     if not label:
                         continue
                     placeholder = str(raw.get("placeholder") or "").strip()[:120] or None
-                    entry = {"label": label}
-                    if placeholder:
-                        entry["placeholder"] = placeholder
+                    kind = str(raw.get("kind") or "").strip().lower()
+                    if kind not in {"text", "single", "multi"}:
+                        kind = "text"
+                    row_options: list[str] = []
+                    raw_row_options = raw.get("options")
+                    if isinstance(raw_row_options, list):
+                        for raw_option in raw_row_options:
+                            text = str(raw_option or "").strip()[:120]
+                            if text and text not in row_options:
+                                row_options.append(text)
+                            if len(row_options) >= 6:
+                                break
+                    if kind in {"single", "multi"} and not row_options:
+                        kind = "text"
+                    entry: dict[str, Any] = {"label": label, "kind": kind}
+                    if kind == "text":
+                        if placeholder:
+                            entry["placeholder"] = placeholder
+                    else:
+                        entry["options"] = row_options
                     fields.append(entry)
                 if len(fields) > 6:
                     fields = fields[:6]
@@ -328,14 +345,33 @@ class ToolExecutor:
             return {"error": True, "message": "The question could not be delivered to the user."}
 
         status = str(result.get("status") or "pending")
-        if status == "answered" and isinstance(result.get("reply"), dict):
-            answer = str(result["reply"].get("content") or "").strip()
-            if answer:
-                return {
-                    "status": "answered",
-                    "question": question,
-                    "answer": answer,
-                }
+        reply = result.get("reply") if isinstance(result.get("reply"), dict) else {}
+        reply_content = str(reply.get("content") or "").strip()
+        if status == "answered" and reply_content and not reply.get("skipped") and not reply.get("superseded"):
+            return {
+                "status": "answered",
+                "question": question,
+                "answer": reply_content,
+            }
+        if bool(reply.get("skipped")):
+            return {
+                "status": "skipped",
+                "question": question,
+                "instruction": (
+                    "The user skipped this question. Continue without the answer: invent nothing, "
+                    "do not immediately re-ask the same question, and finish the turn or proceed with "
+                    "what you already have."
+                ),
+            }
+        if bool(reply.get("superseded")):
+            return {
+                "status": "superseded",
+                "question": question,
+                "instruction": (
+                    "This question was replaced by a newer open question in the same conversation. "
+                    "Do not wait for an answer to it and do not re-ask it."
+                ),
+            }
 
         # Still pending: the card stays live in the client. A late answer is
         # not lost — the reply consumer dispatches an agent.resume task into

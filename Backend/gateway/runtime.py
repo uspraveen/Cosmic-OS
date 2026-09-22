@@ -17237,6 +17237,7 @@ class GatewayRuntime:
         task_id: str,
         content: str,
         channel: str,
+        skipped: bool = False,
     ) -> dict[str, Any]:
         if self._redis is None:
             raise RuntimeError("REDIS_URL is not configured on the Gateway VM.")
@@ -17244,6 +17245,8 @@ class GatewayRuntime:
         normalized_task_id = self._safe_text(task_id)
         normalized_content = self._safe_text(content)
         normalized_channel = self._safe_text(channel)
+        if skipped:
+            normalized_content = normalized_content or "(user skipped this question)"
         if (
             not normalized_input_request_id
             or not normalized_task_id
@@ -17266,11 +17269,14 @@ class GatewayRuntime:
         if self._safe_text(resolved.get("channel")) != normalized_channel:
             raise ValueError("channel does not match the pending input request")
 
+        resolution = "skipped" if skipped else "answered"
         reply_payload = {
             "input_request_id": normalized_input_request_id,
             "task_id": normalized_task_id,
             "content": normalized_content,
             "channel": normalized_channel,
+            "resolution": resolution,
+            "skipped": bool(skipped),
             "timestamp": utcnow_iso(),
         }
         await self._redis.xadd(
@@ -17280,6 +17286,7 @@ class GatewayRuntime:
         self.session_store.mark_task_input_request_replied(
             input_request_id=normalized_input_request_id,
             content=normalized_content,
+            status=resolution,
         )
         return reply_payload
 
@@ -17316,6 +17323,9 @@ class GatewayRuntime:
         assert self._redis is not None
         try:
             request = parse_stream_payload(data)
+            if str(request.get("kind") or "").strip() == "input_resolution":
+                await self._handle_task_input_resolution(request)
+                return
             input_request_id = self._safe_text(request.get("input_request_id"))
             task_id = self._safe_text(request.get("task_id"))
             question = self._safe_text(request.get("question"))
@@ -18104,25 +18114,84 @@ class GatewayRuntime:
         return self.active_task_channels.get(task_id)
 
     @staticmethod
-    def _normalize_task_input_fields(raw: Any) -> list[dict[str, str]]:
-        """Form-mode rows (label + optional placeholder) on a task input request."""
+    def _normalize_task_input_fields(raw: Any) -> list[dict[str, Any]]:
+        """Form-mode rows on a task input request.
+
+        Each row is a label plus its input kind: text (one free line with an
+        optional placeholder), single (pick one of its options), or multi
+        (check any of its options).
+        """
         if not isinstance(raw, list):
             return []
-        fields: list[dict[str, str]] = []
+        fields: list[dict[str, Any]] = []
         for item in raw:
             if not isinstance(item, dict):
                 continue
             label = str(item.get("label") or "").strip()[:120]
             if not label:
                 continue
-            placeholder = str(item.get("placeholder") or "").strip()[:120]
-            entry = {"label": label}
-            if placeholder:
-                entry["placeholder"] = placeholder
+            kind = str(item.get("kind") or "").strip().lower()
+            if kind not in {"text", "single", "multi"}:
+                kind = "text"
+            options: list[str] = []
+            raw_options = item.get("options")
+            if isinstance(raw_options, list):
+                for raw_option in raw_options:
+                    text = str(raw_option or "").strip()[:120]
+                    if text and text not in options:
+                        options.append(text)
+                    if len(options) >= 6:
+                        break
+            if kind in {"single", "multi"} and not options:
+                kind = "text"
+            entry: dict[str, Any] = {"label": label, "kind": kind}
+            if kind == "text":
+                placeholder = str(item.get("placeholder") or "").strip()[:120]
+                if placeholder:
+                    entry["placeholder"] = placeholder
+            else:
+                entry["options"] = options
             fields.append(entry)
             if len(fields) >= 6:
                 break
         return fields
+
+    async def _handle_task_input_resolution(self, request: dict[str, Any]) -> None:
+        """Terminal mark for a pending card (superseded by a newer ask).
+
+        Mirrors what the reply-accepted ack does for user answers: the store row
+        goes terminal and the channel hears `task.input_reply.accepted`, the
+        event the desktop client already drops cards on.
+        """
+        input_request_id = self._safe_text(request.get("input_request_id"))
+        task_id = self._safe_text(request.get("task_id"))
+        if not input_request_id:
+            return
+        content = self._safe_text(request.get("content")) or "(replaced by a newer question)"
+        resolution = self._safe_text(request.get("resolution")) or "superseded"
+        existing = self.session_store.get_task_input_request(input_request_id)
+        if existing is not None and self._safe_text(existing.get("status")) == "pending":
+            self.session_store.mark_task_input_request_replied(
+                input_request_id=input_request_id,
+                content=content,
+                status=resolution,
+            )
+        channel = self._safe_text(request.get("channel")) or self._safe_text(
+            (existing or {}).get("channel")
+        )
+        if not channel:
+            return
+        await self._deliver_or_queue_channel_event(
+            {
+                "type": "task.input_reply.accepted",
+                "input_request_id": input_request_id,
+                "task_id": task_id or self._safe_text((existing or {}).get("task_id")),
+                "channel": channel,
+                "resolution": resolution,
+                "timestamp": self._safe_text(request.get("timestamp")) or utcnow_iso(),
+            },
+            channel=channel,
+        )
 
     def _persist_task_input_request(self, event: dict[str, Any]) -> None:
         input_request_id = self._safe_text(event.get("input_request_id"))

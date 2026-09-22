@@ -644,11 +644,12 @@ export class GatewayConnectionManager {
     return effectiveRequestId
   }
 
-  submitTaskInputReply(inputRequestId: string, taskId: string, content: string) {
+  submitTaskInputReply(inputRequestId: string, taskId: string, content: string, skipped = false) {
     const normalizedInputRequestId = String(inputRequestId || '').trim()
     const normalizedTaskId = String(taskId || '').trim()
     const normalizedContent = String(content || '').trim()
-    if (!normalizedInputRequestId || !normalizedTaskId || !normalizedContent) {
+    const isSkip = Boolean(skipped)
+    if (!normalizedInputRequestId || !normalizedTaskId || (!normalizedContent && !isSkip)) {
       throw new Error('inputRequestId, taskId, and content are required to reply to a task.')
     }
     const requestId = `task_input_reply_${crypto.randomUUID()}`
@@ -658,6 +659,7 @@ export class GatewayConnectionManager {
       input_request_id: normalizedInputRequestId,
       task_id: normalizedTaskId,
       content: normalizedContent,
+      skipped: isSkip,
     })
     return { ok: true, requestId }
   }
