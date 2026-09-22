@@ -576,3 +576,217 @@ async def test_agent_email_adapter_suppresses_process_narration_body() -> None:
     await adapter.send(message, channel="agent-email:assistant@example.com")
     assert message["email_delivery_status"] == "suppressed"
     assert message["email_delivery"]["reason"] == "process_narration"
+
+
+def _attachment_adapter(tmp_path):
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+        primary_mailbox_address="assistant@example.com",
+    )
+    adapter.artifacts_root = tmp_path
+    return adapter
+
+
+@pytest.mark.asyncio
+async def test_thread_reply_uploads_deliverable_artifacts_and_leaves_supporting_files(tmp_path) -> None:
+    drawio = tmp_path / "tsk_draw" / "Figure_3.1_Research_Design.drawio"
+    drawio.parent.mkdir(parents=True)
+    drawio.write_bytes(b"<mxfile>diagram</mxfile>")
+    notes = tmp_path / "tsk_draw" / "scrape.md"
+    notes.write_text("internal notes", encoding="utf-8")
+
+    adapter = _attachment_adapter(tmp_path)
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.draft_payload: dict[str, object] | None = None
+            self.uploads: list[tuple[str, str, bytes, str | None]] = []
+            self.sent_draft_id: str | None = None
+
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            return {"id": "mbx_support", "address": "assistant@example.com"}
+
+        async def reply_to_thread(self, thread_id: str, payload):
+            raise AssertionError("text-only reply must not be used when a deliverable file exists")
+
+        async def create_draft(self, payload):
+            self.draft_payload = payload
+            return {"id": "draft_with_file"}
+
+        async def upload_draft_attachment(self, draft_id, *, filename, content, mime_type=None):
+            self.uploads.append((draft_id, filename, content, mime_type))
+            return {"id": "att_drawio"}
+
+        async def send_draft(self, draft_id: str):
+            self.sent_draft_id = draft_id
+            return {"id": "msg_sent_file", "thread_id": "thr_123", "draft_id": draft_id}
+
+    fake_client = FakeClient()
+    adapter.client = fake_client  # type: ignore[assignment]
+    message = {
+        "type": "response.complete",
+        "thread_id": "thr_123",
+        "mailbox_id": "mbx_support",
+        "mailbox_address": "assistant@example.com",
+        "subject": "Fwd: Draw this on draw.io",
+        "internet_message_id": "<draw@example.com>",
+        "message_id": "msg_assistant_row",
+        "content": "The draw.io file is attached.",
+        "trusted_sender": True,
+        "email_thread_reply_eligible": True,
+        "to_recipients": [{"email": "owner@example.com", "name": "Owner"}],
+        "produced_artifacts": [
+            {
+                "artifact_id": "art_drawio",
+                "audience": "deliverable",
+                "filename": "Figure_3.1_Research_Design.drawio",
+                "mime": "application/octet-stream",
+                "path": "runs/artifacts/tsk_draw/Figure_3.1_Research_Design.drawio",
+                "downloadable": True,
+            },
+            {
+                "artifact_id": "art_notes",
+                "audience": "supporting",
+                "filename": "scrape.md",
+                "mime": "text/markdown",
+                "path": "runs/artifacts/tsk_draw/scrape.md",
+                "downloadable": True,
+            },
+        ],
+        "supporting_artifacts": [
+            {
+                "artifact_id": "art_notes",
+                "audience": "supporting",
+                "filename": "scrape.md",
+                "path": "runs/artifacts/tsk_draw/scrape.md",
+            }
+        ],
+    }
+
+    await adapter.send(message, channel="agent-email:assistant@example.com")
+
+    assert fake_client.sent_draft_id == "draft_with_file"
+    assert fake_client.draft_payload is not None
+    assert fake_client.draft_payload["thread_id"] == "thr_123"
+    assert fake_client.draft_payload["subject"] == "Re: Fwd: Draw this on draw.io"
+    assert fake_client.draft_payload["reply_to_message_id"] == "<draw@example.com>"
+    assert fake_client.draft_payload["text_body"] == "The draw.io file is attached."
+    assert fake_client.uploads == [
+        (
+            "draft_with_file",
+            "Figure_3.1_Research_Design.drawio",
+            b"<mxfile>diagram</mxfile>",
+            "application/octet-stream",
+        )
+    ]
+    assert message["email_delivery_status"] == "sent"
+    assert message["email_delivery"]["attachments"]["uploaded"] == [
+        {
+            "artifact_id": "art_drawio",
+            "filename": "Figure_3.1_Research_Design.drawio",
+            "mime": "application/octet-stream",
+        }
+    ]
+    assert message["email_delivery"]["attachments"]["failed"] == []
+
+
+@pytest.mark.asyncio
+async def test_thread_reply_without_a_readable_file_stays_on_the_text_reply(tmp_path) -> None:
+    adapter = _attachment_adapter(tmp_path)
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.replied = False
+
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            return {"id": "mbx_support", "address": "assistant@example.com"}
+
+        async def reply_to_thread(self, thread_id: str, payload):
+            self.replied = True
+            assert thread_id == "thr_123"
+            assert "produced_artifacts" not in payload
+            return {"id": "msg_text_only"}
+
+        async def create_draft(self, payload):
+            raise AssertionError("missing deliverables must not open an attachment draft")
+
+        async def send_draft(self, draft_id: str):
+            raise AssertionError("missing deliverables must not send a draft")
+
+    adapter.client = FakeClient()  # type: ignore[assignment]
+    message = {
+        "type": "response.complete",
+        "thread_id": "thr_123",
+        "mailbox_id": "mbx_support",
+        "mailbox_address": "assistant@example.com",
+        "content": "No file on disk.",
+        "trusted_sender": True,
+        "email_thread_reply_eligible": True,
+        "to_recipients": [{"email": "owner@example.com", "name": "Owner"}],
+        "produced_artifacts": [
+            {
+                "artifact_id": "art_missing",
+                "audience": "deliverable",
+                "filename": "missing.drawio",
+                "path": "runs/artifacts/missing.drawio",
+            }
+        ],
+    }
+
+    await adapter.send(message, channel="agent-email:assistant@example.com")
+
+    assert message["email_delivery_status"] == "sent"
+    assert message["email_delivery"]["attachments"]["uploaded"] == []
+    assert message["email_delivery"]["attachments"]["failed"][0]["reason"] == "artifact_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_new_email_uploads_deliverables_before_send(tmp_path) -> None:
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF-1.4")
+    adapter = _attachment_adapter(tmp_path)
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.uploads: list[str] = []
+            self.sent = False
+
+        async def resolve_mailbox(self, *, mailbox_id=None, mailbox_address=None):
+            return {"id": "mbx_primary", "address": "assistant@example.com"}
+
+        async def create_draft(self, payload):
+            assert payload["subject"] == "Morning update"
+            assert "thread_id" not in payload
+            return {"id": "draft_new"}
+
+        async def upload_draft_attachment(self, draft_id, *, filename, content, mime_type=None):
+            assert draft_id == "draft_new"
+            assert self.sent is False
+            self.uploads.append(filename)
+            assert content == b"%PDF-1.4"
+            return {"id": "att_pdf"}
+
+        async def send_draft(self, draft_id: str):
+            assert self.uploads == ["report.pdf"]
+            self.sent = True
+            return {"id": "msg_new", "draft_id": draft_id}
+
+    adapter.client = FakeClient()  # type: ignore[assignment]
+    await adapter.send(
+        {
+            "subject": "Morning update",
+            "content": "Report attached.",
+            "to": [{"email": "owner@example.com", "name": "Owner"}],
+            "produced_artifacts": [
+                {
+                    "artifact_id": "art_pdf",
+                    "audience": "deliverable",
+                    "filename": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "path": "runs/artifacts/report.pdf",
+                }
+            ],
+        },
+        channel="agent-email",
+    )

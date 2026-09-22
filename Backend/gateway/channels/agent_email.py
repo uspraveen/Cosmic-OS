@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from shared import (
@@ -21,6 +23,10 @@ from .base import ChannelAdapter, ChannelUnavailableError, MessageCallback, Perm
 # excerpt, so a long email looked silently cut off with no indication why.
 MODEL_BODY_EXCERPT_CHARS = 800
 STORED_BODY_CHARS = 20000
+_MAX_EMAIL_ATTACHMENT_BYTES = 20 * 1024 * 1024
+_ARTIFACTS_ROOT = Path(__file__).resolve().parents[2] / "runs" / "artifacts"
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_text(value: Any) -> str:
@@ -181,6 +187,7 @@ class AgentEmailAdapter(ChannelAdapter):
         self.primary_mailbox_address = _safe_text(primary_mailbox_address)
         self.webhook_secret = _safe_text(webhook_secret)
         self.webhook_signature_header = _safe_text(webhook_signature_header) or "X-Cosmic-Mail-Signature"
+        self.artifacts_root = _ARTIFACTS_ROOT
         self._inbound_callback: MessageCallback | None = None
         self._auth_context: dict[str, Any] | None = None
 
@@ -455,8 +462,60 @@ class AgentEmailAdapter(ChannelAdapter):
             cc_recipients = self._normalize_contact_field(message, "cc_recipients", "cc")
             if cc_recipients:
                 reply_payload["cc_recipients"] = cc_recipients
+            ready_attachments, skipped_attachments = self._collect_deliverable_attachments(message)
+            if ready_attachments:
+                draft_payload = {
+                    **reply_payload,
+                    "thread_id": reply_context["thread_id"],
+                    "subject": self._thread_reply_subject(message),
+                }
+                reply_to_message_id = _safe_text(message.get("internet_message_id"))
+                if reply_to_message_id:
+                    draft_payload["reply_to_message_id"] = reply_to_message_id
+                try:
+                    draft = await self.client.create_draft(draft_payload)
+                except CosmicMailClientError as exc:
+                    logger.warning(
+                        "agent_email.attachment_reply_draft_failed thread_id=%s error=%s",
+                        reply_context["thread_id"],
+                        exc,
+                    )
+                    draft = {}
+                draft_id = _safe_text(draft.get("id"))
+                if draft_id:
+                    upload_summary = await self._upload_draft_attachments(draft_id, ready_attachments)
+                    upload_summary["failed"] = [*skipped_attachments, *upload_summary["failed"]]
+                    send_result = await self.client.send_draft(draft_id)
+                    delivery = _normalize_email_delivery(
+                        payload=send_result,
+                        fallback_thread_id=reply_context["thread_id"],
+                        fallback_draft_id=draft_id,
+                    )
+                    delivery["attachments"] = upload_summary
+                    record_delivery(
+                        delivery,
+                        subject=draft_payload["subject"],
+                        recipients=to_recipients,
+                        cc_recipients=cc_recipients,
+                        mailbox_address=_safe_text(mailbox.get("address"))
+                        or reply_context["mailbox_address"],
+                    )
+                    return
+                skipped_attachments = [
+                    *skipped_attachments,
+                    *(
+                        {
+                            "artifact_id": item.get("artifact_id"),
+                            "filename": item.get("filename"),
+                            "reason": "draft_unavailable",
+                        }
+                        for item in ready_attachments
+                    ),
+                ]
             reply_result = await self.client.reply_to_thread(reply_context["thread_id"], reply_payload)
             delivery = _normalize_email_delivery(payload=reply_result, fallback_thread_id=reply_context["thread_id"])
+            if skipped_attachments:
+                delivery["attachments"] = {"uploaded": [], "failed": skipped_attachments}
             record_delivery(
                 delivery,
                 subject=self._build_subject(message),
@@ -489,8 +548,15 @@ class AgentEmailAdapter(ChannelAdapter):
         draft_id = _safe_text(draft.get("id"))
         if not draft_id:
             raise PermanentDeliveryError("Cosmic Mail draft creation did not return an id.")
+        ready_attachments, skipped_attachments = self._collect_deliverable_attachments(message)
+        upload_summary = None
+        if ready_attachments or skipped_attachments:
+            upload_summary = await self._upload_draft_attachments(draft_id, ready_attachments)
+            upload_summary["failed"] = [*skipped_attachments, *upload_summary["failed"]]
         send_result = await self.client.send_draft(draft_id)
         delivery = _normalize_email_delivery(payload=send_result, fallback_draft_id=draft_id)
+        if upload_summary is not None:
+            delivery["attachments"] = upload_summary
         record_delivery(
             delivery,
             subject=subject,
@@ -653,6 +719,192 @@ class AgentEmailAdapter(ChannelAdapter):
 
     def _build_html_body(self, text_body: str) -> str:
         return render_markdown_email_html(text_body)
+
+    def _thread_reply_subject(self, message: dict[str, Any]) -> str:
+        subject = _safe_text(message.get("thread_subject")) or _safe_text(message.get("subject"))
+        if not subject:
+            subject = self._build_subject(message)
+        if subject.casefold().startswith("re:"):
+            return subject[:200]
+        return f"Re: {subject}"[:200]
+
+    def _collect_deliverable_attachments(
+        self, message: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Files the orchestrator already marked deliverable, ready to upload.
+
+        Supporting and debug files stay off the email. A missing deliverable is
+        reported and does not block the text reply.
+        """
+        raw = message.get("produced_artifacts")
+        if not isinstance(raw, list):
+            return [], []
+        ready: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in raw:
+            if not isinstance(item, dict) or len(ready) >= 12:
+                continue
+            audience = _safe_text(item.get("audience")).lower() or "deliverable"
+            if audience != "deliverable":
+                continue
+            artifact_id = _safe_text(item.get("artifact_id")) or None
+            filename = Path(_safe_text(item.get("filename"))).name if _safe_text(item.get("filename")) else ""
+            if item.get("downloadable") is False:
+                failed.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": filename or None,
+                        "reason": "not_downloadable",
+                    }
+                )
+                continue
+            path = self._resolve_produced_artifact_path(_safe_text(item.get("path")))
+            display_name = filename or (path.name if path is not None else "") or "attachment"
+            dedupe_key = (artifact_id or "", str(path) if path is not None else display_name)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            if path is None:
+                failed.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": display_name,
+                        "reason": "artifact_unavailable",
+                    }
+                )
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                failed.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": display_name,
+                        "reason": "artifact_unavailable",
+                    }
+                )
+                continue
+            if size <= 0:
+                failed.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": display_name,
+                        "reason": "artifact_empty",
+                    }
+                )
+                continue
+            if size > _MAX_EMAIL_ATTACHMENT_BYTES:
+                failed.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": display_name,
+                        "reason": "artifact_too_large",
+                    }
+                )
+                continue
+            try:
+                content = path.read_bytes()
+            except OSError:
+                failed.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": display_name,
+                        "reason": "artifact_unavailable",
+                    }
+                )
+                continue
+            if not content:
+                failed.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "filename": display_name,
+                        "reason": "artifact_empty",
+                    }
+                )
+                continue
+            ready.append(
+                {
+                    "artifact_id": artifact_id,
+                    "filename": display_name,
+                    "content": content,
+                    "mime_type": _safe_text(item.get("mime_type"))
+                    or _safe_text(item.get("mime"))
+                    or None,
+                }
+            )
+        return ready, failed
+
+    def _resolve_produced_artifact_path(self, logical_path: str) -> Path | None:
+        normalized = _safe_text(logical_path)
+        if not normalized:
+            return None
+        root = self.artifacts_root.resolve()
+        relative = Path(normalized)
+        if relative.is_absolute():
+            candidate = relative.resolve()
+        else:
+            parts = relative.parts
+            if len(parts) >= 2 and parts[0] == "runs" and parts[1] == "artifacts":
+                relative = Path(*parts[2:])
+            candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return None
+        if not candidate.is_file():
+            return None
+        return candidate
+
+    async def _upload_draft_attachments(
+        self,
+        draft_id: str,
+        attachments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        uploaded: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for item in attachments:
+            filename = _safe_text(item.get("filename")) or "attachment"
+            try:
+                content = item.get("content")
+                if not isinstance(content, (bytes, bytearray)) or not content:
+                    failed.append(
+                        {
+                            "artifact_id": item.get("artifact_id"),
+                            "filename": filename,
+                            "reason": "artifact_empty",
+                        }
+                    )
+                    continue
+                await self.client.upload_draft_attachment(
+                    draft_id,
+                    filename=filename,
+                    content=bytes(content),
+                    mime_type=_safe_text(item.get("mime_type")) or None,
+                )
+            except CosmicMailClientError as exc:
+                logger.warning(
+                    "agent_email.upload_draft_attachment_failed draft_id=%s filename=%s error=%s",
+                    draft_id,
+                    filename,
+                    exc,
+                )
+                failed.append(
+                    {
+                        "artifact_id": item.get("artifact_id"),
+                        "filename": filename,
+                        "reason": "upload_failed",
+                    }
+                )
+                continue
+            uploaded.append(
+                {
+                    "artifact_id": item.get("artifact_id"),
+                    "filename": filename,
+                    "mime": _safe_text(item.get("mime_type")) or None,
+                }
+            )
+        return {"uploaded": uploaded, "failed": failed}
 
     def _normalize_attachments(self, raw: Any, *, message_id: str) -> list[dict[str, Any]]:
         if not isinstance(raw, list):

@@ -1801,6 +1801,15 @@ class GatewayRuntime:
             prepared["mailbox_id"] = mailbox_id
         if message_id:
             prepared["message_id"] = message_id
+        internet_message_id = first_text(
+            prepared.get("internet_message_id"),
+            process_output.get("internet_message_id"),
+            message_meta.get("internet_message_id"),
+            user_meta.get("internet_message_id"),
+            session_meta.get("internet_message_id"),
+        )
+        if internet_message_id:
+            prepared["internet_message_id"] = internet_message_id
         if from_address:
             prepared["from_address"] = from_address
         if from_name:
@@ -16444,11 +16453,16 @@ class GatewayRuntime:
         known_task_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         session_id = self._resolve_session_id(requested_session_id)
-        # Fetch full day's history so the desktop shows the complete conversation
-        history = [
+        # Bookkeeping stays on the day session. Email threads are a side
+        # session on purpose, and folding them in here would let a thread
+        # reply suppress a desktop failure notice or pose as a background task.
+        day_history = [
             self._hydrate_history_message_for_client(item)
             for item in self.session_store.get_history(session_id)
         ]
+        # What the desktop actually reloads. Already the client view — the
+        # same merge the session endpoint uses — so do not hydrate it again.
+        history_tail = self.get_session_history_for_client(session_id)
         self._prune_recent_foreground_terminal_streams()
         pending_inputs = self._pending_inputs_for_channel(
             channel, session_id=session_id
@@ -16535,7 +16549,7 @@ class GatewayRuntime:
                 if isinstance(item.get("metadata"), dict)
                 else None
             )
-            for item in history
+            for item in day_history
             if item.get("role") == "assistant"
         }
         for snapshot in self._recent_foreground_terminal_streams.values():
@@ -16583,7 +16597,7 @@ class GatewayRuntime:
             )
         # Completed background tasks reconstructed from session history
         running_request_ids = {t["request_id"] for t in background_tasks}
-        for msg in history:
+        for msg in day_history:
             if msg.get("role") != "assistant":
                 continue
             meta = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
@@ -16595,7 +16609,7 @@ class GatewayRuntime:
             running_request_ids.add(reply_to)
             # Find the matching user message excerpt
             user_excerpt = ""
-            for umsg in history:
+            for umsg in day_history:
                 if umsg.get("role") == "user" and umsg.get("request_id") == reply_to:
                     user_excerpt = (self._safe_text(umsg.get("content")) or "")[
                         :120
@@ -16626,7 +16640,7 @@ class GatewayRuntime:
             "session_id": session_id,
             "channel": channel,
             "user_timezone": self.current_user_timezone(),
-            "history_tail": history,
+            "history_tail": history_tail,
             "heartbeat_consumptions": self.scheduler_store.list_heartbeat_consumptions(
                 session_id=session_id,
                 limit=500,
@@ -16656,6 +16670,7 @@ class GatewayRuntime:
         session_id: str,
         *,
         message_id: str | None = None,
+        request_id: str | None = None,
         role: str,
         content: str,
         channel: str,
@@ -16714,6 +16729,8 @@ class GatewayRuntime:
             event["email_thread_subject"] = thread_subject
         if message_id:
             event["message_id"] = message_id
+        if request_id:
+            event["request_id"] = request_id
         if source:
             event["source"] = source
         if source_id:
@@ -22762,6 +22779,7 @@ class GatewayRuntime:
                     self._broadcast_cross_channel_to_realtime_clients(
                         session_id,
                         message_id=assistant_message_id,
+                        request_id=request_id,
                         role="assistant",
                         content=str(event.get("content") or ""),
                         channel=event_channel,
@@ -22880,6 +22898,93 @@ class GatewayRuntime:
             self._refresh_active_working_set(session_id)
 
         await send(event)
+        # A desktop that isn't watching must never fail the email turn itself.
+        try:
+            await self._mirror_email_turn_to_desktop(event)
+        except Exception:
+            logger.exception(
+                "gateway.email_desktop_stream_failed request_id=%s",
+                request_id,
+            )
+
+    _EMAIL_DESKTOP_STREAM_KINDS = {
+        "response.chunk": "chunk",
+        "response.thinking.chunk": "thinking",
+        "task.progress": "progress",
+        "response.blocks.snapshot": "blocks",
+    }
+
+    def _email_desktop_stream_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        """A desktop-facing copy of one live email-turn event.
+
+        The email channel skips chunks (it only sends the finished reply), and
+        the desktop is not subscribed to the `email-thread:` session. This
+        carries the same tokens the desktop chat already renders, tagged so
+        they land in that thread's card instead of claiming the desktop's own
+        stream. Model context is untouched.
+        """
+        session_id = self._safe_text(event.get("session_id"))
+        channel = self._safe_text(event.get("channel"))
+        if not self._is_email_thread_session(session_id):
+            return None
+        if self._channel_platform(channel) != "agent-email":
+            return None
+        event_type = self._safe_text(event.get("type")) or ""
+        kind = self._EMAIL_DESKTOP_STREAM_KINDS.get(event_type)
+        if not kind:
+            return None
+        if kind == "progress":
+            progress_state = event.get("tabular_progress") or event.get("docs_progress")
+            content = (
+                self._safe_text(progress_state.get("label"))
+                if isinstance(progress_state, dict)
+                else None
+            ) or self._safe_text(event.get("message")) or self._safe_text(event.get("activity"))
+        else:
+            content = self._safe_text(event.get("content"))
+        blocks = (
+            event.get("response_blocks")
+            if isinstance(event.get("response_blocks"), list)
+            else event.get("blocks")
+            if isinstance(event.get("blocks"), list)
+            else None
+        )
+        if kind == "blocks":
+            if not blocks and not content:
+                return None
+        elif not content:
+            return None
+        client_session_id = self._current_session_id()
+        if not client_session_id or client_session_id == session_id:
+            return None
+        payload: dict[str, Any] = {
+            "type": "crosschannel.stream",
+            "session_id": client_session_id,
+            "email_thread_id": session_id,
+            "email_thread_subject": self._email_thread_subject(session_id),
+            "channel": channel,
+            "request_id": self._safe_text(event.get("request_id")) or None,
+            "task_id": self._safe_text(event.get("task_id")) or None,
+            "stream": kind,
+            "timestamp": utcnow_iso(),
+        }
+        if content:
+            payload["content"] = content
+        if kind == "blocks" and blocks:
+            payload["response_blocks"] = blocks
+        return payload
+
+    async def _mirror_email_turn_to_desktop(self, event: dict[str, Any]) -> None:
+        payload = self._email_desktop_stream_event(event)
+        if payload is None:
+            return
+        client_session_id = self._safe_text(payload.get("session_id"))
+        if not client_session_id:
+            return
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            await adapter.broadcast_to_session(client_session_id, payload)
 
     def _normalize_orchestrator_event(
         self,

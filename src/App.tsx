@@ -102,6 +102,8 @@ interface Message {
   createdAt?: string | null
   /** Set only on messages from a per-thread email session; groups a thread. */
   emailThreadId?: string | null
+  /** An email reply still arriving token by token inside its card. */
+  live?: boolean
   emailThreadSubject?: string | null
   /** Inbound email display fields, kept apart from the model's excerpt. */
   emailFromName?: string | null
@@ -9192,6 +9194,74 @@ export default function App() {
         return
       }
 
+      // An inbound email's reply, token by token, inside its thread card.
+      // This is not the desktop's own stream: it must not lock the composer
+      // or claim the active-turn slot.
+      if (eventType === 'crosschannel.stream') {
+        const threadId = typeof (event as any).email_thread_id === 'string'
+          ? (event as any).email_thread_id.trim()
+          : ''
+        const requestId = typeof event.request_id === 'string' ? event.request_id.trim() : ''
+        const kind = typeof (event as any).stream === 'string' ? (event as any).stream.trim() : ''
+        if (!threadId || !requestId || !kind) return
+        const subject = typeof (event as any).email_thread_subject === 'string'
+          ? (event as any).email_thread_subject
+          : null
+        const channel = typeof event.channel === 'string' ? event.channel : null
+        setMessages((prev) => {
+          const alreadyFinal = prev.some((message) => (
+            message.role === 'assistant'
+            && message.emailThreadId === threadId
+            && message.requestId === requestId
+            && !message.live
+          ))
+          if (alreadyFinal) return prev
+          const index = prev.findIndex((message) => (
+            message.role === 'assistant'
+            && message.emailThreadId === threadId
+            && message.requestId === requestId
+          ))
+          const apply = (message: Message): Message => {
+            if (kind === 'chunk') {
+              return { ...message, content: appendStreamText(message.content, event.content), live: true }
+            }
+            if (kind === 'thinking') {
+              return { ...message, thinking: appendStreamText(message.thinking, event.content), live: true }
+            }
+            if (kind === 'progress') {
+              const activity = String(event.content || '').trim()
+              return activity ? { ...message, activity, live: true } : message
+            }
+            if (kind === 'blocks') {
+              const blocks = normalizeResponseBlocks((event as any).response_blocks)
+              return {
+                ...message,
+                responseBlocks: blocks ?? message.responseBlocks,
+                live: true,
+              }
+            }
+            return message
+          }
+          if (index >= 0) {
+            const next = [...prev]
+            next[index] = apply(next[index])
+            return next
+          }
+          return [...prev, apply({
+            id: `email-live-${requestId}`,
+            role: 'assistant',
+            content: '',
+            channel,
+            requestId,
+            emailThreadId: threadId,
+            emailThreadSubject: subject,
+            live: true,
+            createdAt: new Date().toISOString(),
+          })]
+        })
+        return
+      }
+
       // Cross-channel sync: messages from WhatsApp/Telegram arriving while desktop is open
       if (eventType === 'crosschannel.message') {
         const role = String(event.role || '').trim()
@@ -9280,12 +9350,39 @@ export default function App() {
             emailFromName: typeof (event as any).from_name === 'string' ? (event as any).from_name : null,
             emailFromAddress: typeof (event as any).from_address === 'string' ? (event as any).from_address : null,
             emailBody: typeof (event as any).body_text === 'string' ? (event as any).body_text : null,
+            live: false,
+          }
+          const eventRequestId = typeof event.request_id === 'string' ? event.request_id.trim() : ''
+          if (role === 'assistant' && eventThreadId && eventRequestId) {
+            const liveIndex = prev.findIndex((message) => (
+              message.role === 'assistant'
+              && message.live
+              && message.emailThreadId === eventThreadId
+              && message.requestId === eventRequestId
+            ))
+            if (liveIndex >= 0) {
+              const next = [...prev]
+              next[liveIndex] = { ...next[liveIndex], ...newMsg, live: false }
+              return next
+            }
           }
           if (eventMessageId) {
             const existingIndex = prev.findIndex((message) => message.id === eventMessageId)
             if (existingIndex >= 0) {
               const next = [...prev]
-              next[existingIndex] = { ...next[existingIndex], ...newMsg }
+              next[existingIndex] = { ...next[existingIndex], ...newMsg, live: false }
+              return next
+            }
+          }
+          if (role === 'user' && eventThreadId) {
+            const liveIndex = prev.findIndex((message) => (
+              message.live
+              && message.role === 'assistant'
+              && message.emailThreadId === eventThreadId
+            ))
+            if (liveIndex >= 0) {
+              const next = [...prev]
+              next.splice(liveIndex, 0, newMsg)
               return next
             }
           }
@@ -11237,7 +11334,39 @@ export default function App() {
                                     />
                                   ) : (
                                     <div key={threadMsg.id} className="message-row assistant" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
-                                      {threadMsg.responseBlocks && threadMsg.responseBlocks.length > 0 ? (
+                                      {threadMsg.thinking && (
+                                        <AssistantCollapsibleSection
+                                          title="Thinking"
+                                          accent="thinking"
+                                          streaming={Boolean(threadMsg.live)}
+                                          preview={threadMsg.live ? thinkingPreview(threadMsg.thinking) : undefined}
+                                        >
+                                          <div className="thinking-block">
+                                            <div className="thinking-text">{threadMsg.thinking}</div>
+                                          </div>
+                                        </AssistantCollapsibleSection>
+                                      )}
+                                      {threadMsg.live && threadMsg.activity && !String(threadMsg.content || '').trim() && (
+                                        <div className="streaming-now">
+                                          <span className="streaming-status">{threadMsg.activity}</span>
+                                        </div>
+                                      )}
+                                      {threadMsg.live ? (
+                                        <>
+                                          {String(threadMsg.content || '').trim() ? (
+                                            <AssistantMarkdownBlock content={threadMsg.content} />
+                                          ) : !threadMsg.activity ? (
+                                            <div className="streaming-dots" aria-hidden>
+                                              {[0, 1, 2, 3, 4].map((i) => (
+                                                <span key={i} className="streaming-dot-pix" style={{ animationDelay: `${i * 0.09}s` }} />
+                                              ))}
+                                            </div>
+                                          ) : null}
+                                          {threadMsg.responseBlocks && threadMsg.responseBlocks.length > 0 && (
+                                            <AssistantResponseBlocks blocks={threadMsg.responseBlocks} />
+                                          )}
+                                        </>
+                                      ) : threadMsg.responseBlocks && threadMsg.responseBlocks.length > 0 ? (
                                         <AssistantResponseBlocks blocks={threadMsg.responseBlocks} />
                                       ) : (
                                         <AssistantMarkdownBlock content={threadMsg.content} />

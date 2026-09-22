@@ -1548,6 +1548,112 @@ async def test_runtime_broadcasts_cross_channel_attachment_metadata_to_desktop(t
 
 
 @pytest.mark.asyncio
+async def test_resume_transcript_keeps_email_threads_out_of_model_history(tmp_path) -> None:
+    """Opening the desktop reloads history_tail. That snapshot has to include
+    the email thread or the card flashes and vanishes, and the day session
+    the model reads must stay without it."""
+    runtime = build_runtime(tmp_path)
+    await runtime.start()
+    try:
+        day = runtime._current_session_id()
+        runtime.session_store.append_message(
+            day,
+            role="user",
+            content="desktop hello",
+            channel="desktop:desk_a",
+        )
+        thread = "email-thread:iamcosmic001@mail.thelearnchain.com:thr_resume"
+        runtime.session_store.append_message(
+            thread,
+            role="user",
+            content="draw this",
+            channel="agent-email:iamcosmic001@mail.thelearnchain.com",
+            metadata={"subject": "Fwd: Draw this on draw.io"},
+        )
+        runtime.session_store.append_message(
+            thread,
+            role="assistant",
+            content="Here is the file",
+            channel="agent-email:iamcosmic001@mail.thelearnchain.com",
+        )
+        payload = await runtime.build_resume_payload(channel="desktop:desk_a")
+        contents = [item["content"] for item in payload["history_tail"]]
+        assert "desktop hello" in contents
+        assert "draw this" in contents
+        assert "Here is the file" in contents
+        threaded = [
+            item for item in payload["history_tail"]
+            if item.get("email_thread_id") == thread
+        ]
+        assert len(threaded) == 2
+        assert threaded[0]["email_thread_subject"] == "Fwd: Draw this on draw.io"
+        assert [item["content"] for item in runtime.get_session_history(day)] == ["desktop hello"]
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_email_turn_streams_into_the_desktop_day_session(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    await runtime.start()
+    try:
+        desktop_adapter = CapturingDesktopAdapter()
+        runtime.registry.register(desktop_adapter)
+        day = runtime._current_session_id()
+        thread = "email-thread:box@example.com:thr_1"
+        await runtime._mirror_email_turn_to_desktop(  # noqa: SLF001 - intentional unit seam
+            {
+                "type": "response.chunk",
+                "session_id": thread,
+                "channel": "agent-email:box@example.com",
+                "request_id": "req_email",
+                "content": "Hello",
+            }
+        )
+        await runtime._mirror_email_turn_to_desktop(  # noqa: SLF001 - intentional unit seam
+            {
+                "type": "response.chunk",
+                "session_id": thread,
+                "channel": "agent-email:box@example.com",
+                "request_id": "req_email",
+                "content": "",
+            }
+        )
+        await runtime._mirror_email_turn_to_desktop(  # noqa: SLF001 - intentional unit seam
+            {
+                "type": "task.progress",
+                "session_id": thread,
+                "channel": "agent-email:box@example.com",
+                "request_id": "req_email",
+                "message": "Reading the figure",
+            }
+        )
+        await runtime._mirror_email_turn_to_desktop(  # noqa: SLF001 - intentional unit seam
+            {
+                "type": "response.chunk",
+                "session_id": day,
+                "channel": "desktop:desk_a",
+                "request_id": "req_desktop",
+                "content": "not an email",
+            }
+        )
+        assert [event["stream"] for _session_id, event in desktop_adapter.events] == [
+            "chunk",
+            "progress",
+        ]
+        session_id, chunk = desktop_adapter.events[0]
+        assert session_id == day
+        assert chunk["type"] == "crosschannel.stream"
+        assert chunk["session_id"] == day
+        assert chunk["email_thread_id"] == thread
+        assert chunk["content"] == "Hello"
+        assert chunk["request_id"] == "req_email"
+        assert desktop_adapter.events[1][1]["content"] == "Reading the figure"
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_runtime_broadcasts_desktop_messages_to_mobile_clients(tmp_path) -> None:
     runtime = build_runtime(tmp_path)
     await runtime.start()
@@ -1978,6 +2084,7 @@ async def test_email_thread_response_delivery_is_enriched_for_trusted_sender_rep
                     "subject": "Need help",
                     "from_address": "owner@example.com",
                     "from_name": "Owner",
+                    "internet_message_id": "<need-help@example.com>",
                     "session_scope": "email_thread",
                     "rollover_exempt": True,
                 },
@@ -2010,6 +2117,8 @@ async def test_email_thread_response_delivery_is_enriched_for_trusted_sender_rep
         assert prepared["email_thread_reply"] is True
         assert prepared["email_thread_reply_eligible"] is True
         assert prepared["to_recipients"] == [{"email": "owner@example.com", "name": "Owner"}]
+        assert prepared["internet_message_id"] == "<need-help@example.com>"
+        assert prepared["message_id"] != "<need-help@example.com>"
     finally:
         await runtime.stop()
 
