@@ -92,6 +92,22 @@ export function questionKeyRow(
   return null
 }
 
+/**
+ * Split `Lead — tail` option copy into a bold lead and a dim tail so listed
+ * choices read like the reference card (name, then description). The tail keeps
+ * its separator; rows without one stay all-lead. Purely presentational — the
+ * answer submitted is always the untouched row string.
+ */
+export function splitOptionLabel(label: string): { lead: string; tail: string | null } {
+  const text = String(label ?? '').trim()
+  const match = /\s[—–-]\s/.exec(text)
+  if (!match || match.index <= 0) return { lead: text, tail: null }
+  const lead = text.slice(0, match.index).trim()
+  const tail = text.slice(match.index).trim()
+  if (!lead || !tail) return { lead: text, tail: null }
+  return { lead, tail }
+}
+
 // ── Form mode: the user fills in one line per field ──────────
 
 export interface QuestionField {

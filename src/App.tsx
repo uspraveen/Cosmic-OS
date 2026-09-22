@@ -10309,19 +10309,29 @@ export default function App() {
         setAskUserDock(null)
         return
       }
-      const width = Math.max(300, Math.min(560, rect.width))
+      // Flush with the composer it belongs to — same left edge, same width —
+      // so the card reads as the textbox asking a question. The old 560px cap
+      // centered above the bar turned it into a floating island the moment the
+      // composer outgrew that (wide mode), which is exactly how it piled onto
+      // the transcript instead of sitting on the input it was docked to.
+      const width = Math.max(300, Math.min(rect.width, window.innerWidth - 32))
       setAskUserDock({
         left: rect.x + Math.max(0, (rect.width - width) / 2),
         width,
-        bottom: Math.max(16, window.innerHeight - rect.y + 12),
+        bottom: Math.max(16, window.innerHeight - rect.y + 16),
       })
     }
     measure()
     // The composer re-anchors as neighboring surfaces settle (response pane,
-    // wide mode, attachment bar); re-measure once they have laid out.
+    // wide mode, attachment bar); re-measure once they have laid out, and keep
+    // tracking the bar when it grows or moves under us (attachments, chips).
     const raf = window.requestAnimationFrame(measure)
     const timer = window.setTimeout(measure, 240)
+    const composerEl = composerSurfaceRef.current
+    const observer = composerEl ? new ResizeObserver(() => measure()) : null
+    if (composerEl && observer) observer.observe(composerEl)
     return () => {
+      observer?.disconnect()
       window.cancelAnimationFrame(raf)
       window.clearTimeout(timer)
     }
@@ -10390,6 +10400,7 @@ export default function App() {
       ['--ask-user-left' as string]: `${askUserDock.left}px`,
       ['--ask-user-width' as string]: `${askUserDock.width}px`,
       ['--ask-user-bottom' as string]: `${askUserDock.bottom}px`,
+      ['--ask-user-transform' as string]: 'none',
     } as React.CSSProperties)
     : undefined
   const hasMultiplePendingTaskInputs = orderedPendingTaskInputs.length > 1
@@ -10708,6 +10719,8 @@ export default function App() {
                   cornerRadius={30}
                   className="task-interrupt-glass"
                   style={{ width: '100%' }}
+                  bodyBackground="rgba(17, 17, 19, 0.93)"
+                  bodyBackdropFilter="blur(40px) saturate(160%)"
                 >
                   <QuestionCard
                     question={taskInput.question}

@@ -7,6 +7,7 @@ import {
   questionKeyRow,
   resolveFormAnswers,
   resolveQuestionAnswer,
+  splitOptionLabel,
   type QuestionSelection,
 } from './questionCardLogic'
 
@@ -158,116 +159,140 @@ export function QuestionCard({
           </span>
           {counterLabel && <span className="ask-card-counter">{counterLabel}</span>}
         </div>
+        {!sent && onSkip && (
+          <button
+            type="button"
+            className="ask-card-dismiss"
+            aria-label="Dismiss question"
+            disabled={busy}
+            onClick={() => onSkip()}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M6 6l12 12M18 6L6 18"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        )}
       </div>
-      <div className="ask-card-question">{question}</div>
-      {context && <div className="ask-card-context">{context}</div>}
-      {isForm ? (
-        <div className="ask-card-form">
-          {formFields.map((field, index) => (
-            <label key={`${index}-${field.label}`} className="ask-card-form-row">
-              <span className="ask-card-form-label">{field.label}</span>
+      <div className="ask-card-body">
+        <div className="ask-card-question">{question}</div>
+        {context && <div className="ask-card-context">{context}</div>}
+        {isForm ? (
+          <div className="ask-card-form">
+            {formFields.map((field, index) => (
+              <label key={`${index}-${field.label}`} className="ask-card-form-row">
+                <span className="ask-card-form-label">{field.label}</span>
+                <input
+                  className="ask-card-form-input"
+                  type="text"
+                  value={formValues[index] ?? ''}
+                  autoComplete="off"
+                  placeholder={field.placeholder || `Fill in ${field.label.toLowerCase()}…`}
+                  disabled={busy || sent}
+                  spellCheck={false}
+                  maxLength={240}
+                  aria-label={field.label}
+                  onChange={(event) => {
+                    setFormValues((prev) => ({ ...prev, [index]: event.target.value }))
+                    if (localError) setLocalError('')
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      handleContinue()
+                    }
+                  }}
+                />
+              </label>
+            ))}
+          </div>
+        ) : (
+          <>
+            <div className="ask-card-options" role="listbox" aria-label="Answer choices">
+              {rowsInfo.rows.map((option, index) => {
+                const isSelected = selected === index
+                const parts = splitOptionLabel(option)
+                return (
+                  <button
+                    key={`${index}-${option}`}
+                    type="button"
+                    role="option"
+                    aria-selected={isSelected}
+                    className={`ask-card-option${isSelected ? ' is-selected' : ''}`}
+                    disabled={busy || sent}
+                    onClick={() => selectRow(index)}
+                  >
+                    <span className="ask-card-option-key" aria-hidden="true">
+                      {String.fromCharCode(65 + index)}
+                    </span>
+                    <span className="ask-card-option-label">
+                      <span className="ask-card-option-lead">{parts.lead}</span>
+                      {parts.tail && <span className="ask-card-option-tail">{parts.tail}</span>}
+                    </span>
+                  </button>
+                )
+              })}
+              {customAllowed && (
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={selected === custom}
+                  className={`ask-card-option is-custom${selected === custom ? ' is-selected' : ''}`}
+                  disabled={busy || sent}
+                  onClick={() => selectRow(custom)}
+                >
+                  <span className="ask-card-option-key" aria-hidden="true">
+                    {String.fromCharCode(65 + rowsInfo.rows.length)}
+                  </span>
+                  <span className="ask-card-option-label">Custom answer</span>
+                </button>
+              )}
+            </div>
+            {customAllowed && selected === custom && (
               <input
-                className="ask-card-form-input"
+                ref={customInputRef}
+                className="ask-card-custom-input"
                 type="text"
-                value={formValues[index] ?? ''}
+                value={customValue}
                 autoComplete="off"
-                placeholder={field.placeholder || `Fill in ${field.label.toLowerCase()}…`}
+                placeholder="Type your answer…"
                 disabled={busy || sent}
                 spellCheck={false}
-                maxLength={240}
-                aria-label={field.label}
+                maxLength={2000}
+                aria-label="Custom answer"
                 onChange={(event) => {
-                  setFormValues((prev) => ({ ...prev, [index]: event.target.value }))
+                  setCustomValue(event.target.value)
                   if (localError) setLocalError('')
                 }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && !event.shiftKey) {
                     event.preventDefault()
                     event.stopPropagation()
-                    handleContinue()
+                    const result = resolveQuestionAnswer({
+                      rowsInfo,
+                      customAllowed,
+                      selected,
+                      customValue: event.currentTarget.value,
+                    })
+                    if (result.ok) onContinue(result.answer)
+                    else setLocalError(result.error)
+                  }
+                  if (event.key === 'Escape') {
+                    event.stopPropagation()
+                    customInputRef.current?.blur()
                   }
                 }}
               />
-            </label>
-          ))}
-        </div>
-      ) : (
-        <>
-          <div className="ask-card-options" role="listbox" aria-label="Answer choices">
-            {rowsInfo.rows.map((option, index) => {
-              const isSelected = selected === index
-              return (
-                <button
-                  key={`${index}-${option}`}
-                  type="button"
-                  role="option"
-                  aria-selected={isSelected}
-                  className={`ask-card-option${isSelected ? ' is-selected' : ''}`}
-                  disabled={busy || sent}
-                  onClick={() => selectRow(index)}
-                >
-                  <span className="ask-card-option-key" aria-hidden="true">
-                    {String.fromCharCode(65 + index)}
-                  </span>
-                  <span className="ask-card-option-label">{option}</span>
-                </button>
-              )
-            })}
-            {customAllowed && (
-              <button
-                type="button"
-                role="option"
-                aria-selected={selected === custom}
-                className={`ask-card-option is-custom${selected === custom ? ' is-selected' : ''}`}
-                disabled={busy || sent}
-                onClick={() => selectRow(custom)}
-              >
-                <span className="ask-card-option-key" aria-hidden="true">
-                  {String.fromCharCode(65 + rowsInfo.rows.length)}
-                </span>
-                <span className="ask-card-option-label">Custom answer…</span>
-              </button>
             )}
-          </div>
-          {customAllowed && selected === custom && (
-            <input
-              ref={customInputRef}
-              className="ask-card-custom-input"
-              type="text"
-              value={customValue}
-              autoComplete="off"
-              placeholder="Type your answer…"
-              disabled={busy || sent}
-              spellCheck={false}
-              maxLength={2000}
-              aria-label="Custom answer"
-              onChange={(event) => {
-                setCustomValue(event.target.value)
-                if (localError) setLocalError('')
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  const result = resolveQuestionAnswer({
-                    rowsInfo,
-                    customAllowed,
-                    selected,
-                    customValue: event.currentTarget.value,
-                  })
-                  if (result.ok) onContinue(result.answer)
-                  else setLocalError(result.error)
-                }
-                if (event.key === 'Escape') {
-                  event.stopPropagation()
-                  customInputRef.current?.blur()
-                }
-              }}
-            />
-          )}
-        </>
-      )}
-      {resolvedError && <div className="ask-card-error" role="alert">{resolvedError}</div>}
+          </>
+        )}
+        {resolvedError && <div className="ask-card-error" role="alert">{resolvedError}</div>}
+      </div>
       <div className="ask-card-footer">
         {sent ? (
           <div className="ask-card-sent">Answer sent ✓</div>
@@ -291,7 +316,7 @@ export function QuestionCard({
             disabled={busy}
             onClick={handleContinue}
           >
-            {busy ? 'Sending…' : 'Continue'}
+            {busy ? 'Sending…' : 'Done'}
           </button>
         )}
       </div>

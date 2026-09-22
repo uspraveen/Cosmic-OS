@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   customRow,
+  splitOptionLabel,
   normalizeQuestionFields,
   normalizeQuestionRows,
   questionCustomAllowed,
@@ -102,6 +103,25 @@ describe('questionKeyRow', () => {
     expect(questionKeyRow('0', rowCount, true)).toBeNull()
     expect(questionKeyRow('Enter', rowCount, true)).toBeNull()
     expect(questionKeyRow('F1', rowCount, true)).toBeNull()
+  })
+})
+
+describe('splitOptionLabel', () => {
+  it('splits a bold name from a dim description around a spaced dash', () => {
+    expect(splitOptionLabel('Pizza — Classic, cheesy, and endlessly customizable')).toEqual({
+      lead: 'Pizza',
+      tail: '— Classic, cheesy, and endlessly customizable',
+    })
+  })
+
+  it('keeps compact hyphens and unseparated rows whole', () => {
+    expect(splitOptionLabel('Tacos 60-90s')).toEqual({ lead: 'Tacos 60-90s', tail: null })
+    expect(splitOptionLabel('Custom answer')).toEqual({ lead: 'Custom answer', tail: null })
+  })
+
+  it('drops rows that are only a separator', () => {
+    expect(splitOptionLabel('— only a tail')).toEqual({ lead: '— only a tail', tail: null })
+    expect(splitOptionLabel('   ')).toEqual({ lead: '', tail: null })
   })
 })
 
