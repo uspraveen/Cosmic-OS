@@ -13,6 +13,7 @@ store, where only the deterministic CredentialFill action consumes them.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -21,6 +22,7 @@ import re
 import shutil
 import sys
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -152,6 +154,103 @@ _LIVE_FRAME_MIN_INTERVAL_SEC = 0.4
 # gateway are on the same host, so this hop is loopback and can afford it; the
 # expensive leg (gateway to desktop) is a websocket either way.
 _LIVE_FRAME_TAKEOVER_INTERVAL_SEC = 0.06
+# Someone has the expanded live view open but isn't driving: video-cadence
+# frames so the panel reads as a watchable feed instead of a slideshow, while
+# staying under the worst-case link budget (~11fps x ~70KB base64 ≈ 6 Mbps
+# peak on a full-repaint page, far less on typical ones).
+_LIVE_FRAME_WATCHED_INTERVAL_SEC = 0.09
+# If gateway round-trips go soft (slow desktop link), the watched cadence is
+# pushed up to this floor until the link recovers — an adaptive downshift so
+# a starved 10 Mbps connection degrades to "smooth but softer" instead of
+# "stuttering".
+_LIVE_FRAME_SLOW_LINK_FLOOR_SEC = 0.15
+# Run-long ring recording of the live feed (post-throttle), flushed into the
+# run directory when the run ends: every diagnosis that today needs "why did
+# the view look like X at step N" gets a scrubable recording instead of two
+# grounded stills per step. Bounded twice over — frames and bytes — so a
+# 60fps paint flood can never balloon the agent's memory (the VM is a
+# 4-core/7.7GB box that runs 18 other services).
+_LIVE_RECORDING_MAX_FRAMES = 600
+_LIVE_RECORDING_MAX_BYTES = 32 * 1024 * 1024
+
+
+def live_frame_interval(pacing: dict) -> float:
+    """Effective minimum gap between two forwarded live frames.
+
+    Precedence: a human driving (takeover) outranks a watched expanded view,
+    which outranks the idle progress cadence. `floor` is the adaptive
+    slow-link downshift — it can only widen the gap, never speed the feed up.
+    """
+    if pacing.get("takeover"):
+        return _LIVE_FRAME_TAKEOVER_INTERVAL_SEC
+    base = _LIVE_FRAME_WATCHED_INTERVAL_SEC if pacing.get("watching") else _LIVE_FRAME_MIN_INTERVAL_SEC
+    return max(base, float(pacing.get("floor") or 0.0))
+
+
+class LiveFrameRecorder:
+    """Bounded ring of recent live frames, flushed into the run directory.
+
+    Sits after the cadence gate, so it records what was actually shipped to a
+    viewer rather than Chrome's raw paint flood, and is capped twice over —
+    frames and bytes — so a 60fps repaint storm can never balloon this
+    process's memory. Flushing decodes base64 back to JPEG bytes and writes
+    frame_NNNNN_<epoch_ms>.jpg plus a manifest.jsonl (per-frame relative
+    timestamp) so a recording scrubs against the step log.
+    """
+
+    def __init__(
+        self,
+        max_frames: int = _LIVE_RECORDING_MAX_FRAMES,
+        max_bytes: int = _LIVE_RECORDING_MAX_BYTES,
+    ) -> None:
+        self._entries: deque = deque()
+        self._bytes = 0
+        self._max_frames = max_frames
+        self._max_bytes = max_bytes
+
+    def add(self, frame_b64: str, at_epoch: float) -> None:
+        if not frame_b64:
+            return
+        self._entries.append((at_epoch, frame_b64))
+        self._bytes += len(frame_b64)
+        while self._entries and (
+            len(self._entries) > self._max_frames or self._bytes > self._max_bytes
+        ):
+            _, dropped = self._entries.popleft()
+            self._bytes -= len(dropped)
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def flush(self, directory) -> Optional[str]:
+        """Write the ring out; returns the recording dir or None if empty."""
+        if not self._entries:
+            return None
+        try:
+            out = Path(directory) / "live_recording"
+            out.mkdir(parents=True, exist_ok=True)
+            manifest = out / "manifest.jsonl"
+            first_ts = self._entries[0][0]
+            count = 0
+            with manifest.open("w", encoding="utf-8") as mf:
+                for i, (ts, frame_b64) in enumerate(self._entries):
+                    try:
+                        raw = base64.b64decode(frame_b64)
+                    except Exception:
+                        continue
+                    name = f"frame_{i:05d}_{int(ts * 1000)}.jpg"
+                    (out / name).write_bytes(raw)
+                    mf.write(
+                        json.dumps(
+                            {"frame": name, "t": round(ts - first_ts, 3), "bytes": len(raw)}
+                        )
+                        + "\n"
+                    )
+                    count += 1
+            return str(out) if count else None
+        except Exception:
+            logger.debug("browser_agent.live_recording_flush_failed", exc_info=True)
+            return None
 # Redis channel the gateway publishes takeover control on, per task.
 _TAKEOVER_CHANNEL_PREFIX = "browser_takeover:"
 
@@ -288,10 +387,22 @@ class BrowserAgent(AgentRuntime):
                 task, payload, live_state, interrupt_log, commit_gate_state
             )
 
-        live_frame_last_sent = {"at": 0.0, "interval": _LIVE_FRAME_MIN_INTERVAL_SEC}
+        # Live-frame pacing: one dict shared by every writer (takeover edge,
+        # desktop watch signal, the bridge's own slow-link floor) so the
+        # effective cadence is always a single decision, never two flags that
+        # can drift. The recorder hangs off the same handoff.
+        live_frame_pacing: dict = {
+            "at": 0.0,
+            "takeover": False,
+            "watching": False,
+            "floor": 0.0,
+            "in_flight": False,
+            "durations": deque(maxlen=8),
+        }
+        live_frame_recorder = LiveFrameRecorder()
 
         async def on_live_frame(frame_b64: str) -> None:
-            await self._live_frame_bridge(task, frame_b64, live_frame_last_sent)
+            await self._live_frame_bridge(task, frame_b64, live_frame_pacing, live_frame_recorder)
 
         # Human takeover. The session is the library's; this process only
         # relays the desktop onto it and reports the edges back.
@@ -304,9 +415,7 @@ class BrowserAgent(AgentRuntime):
             # both happen on this edge rather than on the next step - there
             # may not be a next step for many minutes.
             paused = phase == "paused"
-            live_frame_last_sent["interval"] = (
-                _LIVE_FRAME_TAKEOVER_INTERVAL_SEC if paused else _LIVE_FRAME_MIN_INTERVAL_SEC
-            )
+            live_frame_pacing["takeover"] = paused
             live_state["takeover"] = "active" if paused else ""
             if not paused:
                 entry = record.to_dict() if hasattr(record, "to_dict") else {}
@@ -318,7 +427,7 @@ class BrowserAgent(AgentRuntime):
             )
 
         takeover_watch = asyncio.ensure_future(
-            self._watch_for_takeover(task.task_id, takeover_session)
+            self._watch_for_takeover(task.task_id, takeover_session, live_frame_pacing)
         )
 
         try:
@@ -417,6 +526,19 @@ class BrowserAgent(AgentRuntime):
         needs_credentials = result.get("needs_credentials")
         answer = str(result.get("answer") or "")
         run_dir = str(result.get("run_dir") or "")
+        # Run-long live recording: flush the ring of every frame the feed
+        # shipped into the run directory, so post-run questions ("did the page
+        # actually do X at step N?") get a scrubable recording instead of two
+        # grounded stills per step. Best-effort; never blocks the result.
+        if run_dir and live_frame_recorder is not None and len(live_frame_recorder):
+            flushed = live_frame_recorder.flush(run_dir)
+            if flushed:
+                logger.info(
+                    "browser_agent.live_recording_flushed task_id=%s dir=%s frames=%s",
+                    task.task_id,
+                    flushed,
+                    len(live_frame_recorder),
+                )
         # Anything the run offloaded to its own large-note store becomes a
         # real artifact here, and the dangling pointers the answer may carry
         # are rewritten to name it — see _persist_large_notes.
@@ -1120,23 +1242,32 @@ class BrowserAgent(AgentRuntime):
         self,
         task: TaskEnvelope,
         frame_b64: str,
-        last_sent: dict[str, float],
+        pacing: dict[str, Any],
+        recorder: "LiveFrameRecorder",
     ) -> None:
         """Forwards one CDP screencast frame to the gateway's live-frame relay.
 
-        Throttled client-side (frames arrive on Chrome's own repaint cadence,
-        which can far exceed what's worth shipping over the network) and
-        fire-and-forget: a slow or unreachable gateway just means this frame
-        (and maybe the next few) get dropped, never a stall in the browser
-        loop — start_live_screencast() already acks every CDP frame before
-        this is even called.
+        Paced by `live_frame_interval(pacing)` (idle / watched / takeover, with
+        an adaptive slow-link floor) and recorded into the run-long ring. A
+        frame is shipped only when no previous POST is still in flight — one
+        POST on the wire at a time, so a slow gateway link drops frames at
+        this gate instead of stacking concurrent sends. Fire-and-forget
+        beyond that: a slow or unreachable gateway just means this frame (and
+        maybe the next few) get dropped, never a stall in the browser loop —
+        start_live_screencast() already acks every CDP frame before this is
+        even called.
         """
         if not frame_b64:
             return
         now = time.monotonic()
-        if now - last_sent["at"] < last_sent.get("interval", _LIVE_FRAME_MIN_INTERVAL_SEC):
+        if now - float(pacing.get("at") or 0.0) < live_frame_interval(pacing):
             return
-        last_sent["at"] = now
+        if pacing.get("in_flight"):
+            return
+        pacing["at"] = now
+        recorder.add(frame_b64, time.time())
+        pacing["in_flight"] = True
+        started = time.monotonic()
         try:
             await self._http_client.post(
                 f"{self.gateway_url.rstrip('/')}/internal/browser/live-frame",
@@ -1149,6 +1280,19 @@ class BrowserAgent(AgentRuntime):
             )
         except Exception:
             logger.debug("browser_agent.live_frame_send_failed task_id=%s", task.task_id, exc_info=True)
+        finally:
+            pacing["in_flight"] = False
+            durations = pacing.get("durations")
+            if isinstance(durations, deque):
+                durations.append(time.monotonic() - started)
+                # Adaptive slow-link floor: when round-trips go soft, widen the
+                # watched cadence until they recover. Idle/takeover profiles
+                # are already slow enough not to need this.
+                if len(durations) == durations.maxlen and pacing.get("watching"):
+                    avg = sum(durations) / len(durations)
+                    pacing["floor"] = (
+                        _LIVE_FRAME_SLOW_LINK_FLOOR_SEC if avg > 0.6 else 0.0
+                    )
 
     async def _run_goal_with_cancel_watch(self, task: TaskEnvelope, coro: Any) -> Any:
         """Races `coro` (the run_goal(...) call) against the orchestrator's
@@ -1190,8 +1334,11 @@ class BrowserAgent(AgentRuntime):
                 except (asyncio.CancelledError, Exception):
                     pass
 
-    async def _watch_for_takeover(self, task_id: str, session: Any) -> None:
+    async def _watch_for_takeover(self, task_id: str, session: Any, pacing: dict) -> None:
         """Relay desktop takeover control onto the run's takeover session.
+
+        Also carries the live-view watch signal (expanded panel open/closed),
+        which switches the frame relay between its idle and watched cadences.
 
         Redis pub/sub rather than the 2s polling the cancel flag uses: pausing
         can tolerate a poll, but input cannot - a mouse move that lands a
@@ -1220,6 +1367,18 @@ class BrowserAgent(AgentRuntime):
                     session.request_pause()
                 elif op == "resume":
                     session.resume(str(payload.get("note") or ""))
+                elif op == "watch":
+                    # The desktop's expanded live view opened or closed: the
+                    # feed switches between the 2.5fps progress cadence and
+                    # the video-cadence watched profile. Takeover still wins
+                    # — live_frame_interval gives it precedence.
+                    watching = bool(payload.get("active"))
+                    if pacing.get("watching") != watching:
+                        pacing["watching"] = watching
+                        pacing["floor"] = 0.0
+                        logger.info(
+                            "browser_agent.live_watch task_id=%s watching=%s", task_id, watching
+                        )
                 elif op == "input":
                     events = payload.get("events")
                     if not isinstance(events, list):

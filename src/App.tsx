@@ -2708,6 +2708,29 @@ const BrowserRunCard = ({
   // One condition for both the portal and its exits, so the Escape claim can
   // never outlive the surface that asked for it.
   const lightboxOpen = expanded && Boolean(frame)
+
+  // Live-view watch signal: while the expanded view is actually on screen,
+  // the specialist streams at video cadence; when it closes (or the run
+  // ends) it drops back to the idle progress cadence and the link goes
+  // quiet. Edge-triggered — sent only on flips — and best-effort: a failed
+  // signal just leaves the feed at whatever cadence it was on.
+  const watching = lightboxOpen && live && Boolean(taskId) && !runEnded
+  const lastWatchSignalSent = useRef(false)
+  useEffect(() => {
+    if (!taskId) return
+    if (watching === lastWatchSignalSent.current) return
+    lastWatchSignalSent.current = watching
+    void window.cosmic?.browserWatchRun?.(taskId, watching)
+    return () => {
+      // Dependencies changed or the card unmounted mid-watch: always release
+      // the cadence, or the specialist keeps streaming at video rate to
+      // nobody.
+      if (lastWatchSignalSent.current) {
+        lastWatchSignalSent.current = false
+        void window.cosmic?.browserWatchRun?.(taskId, false)
+      }
+    }
+  }, [watching, taskId, runEnded])
   // The expanded view covers the run card, so the ask panel has to travel to
   // whichever surface is actually on screen — never rendered in both.
   const { askPlacement, showTakeControl, showTakeoverState, showWaitingChip } = resolveBrowserLiveControls({
@@ -6153,6 +6176,15 @@ export default function App() {
   // BrowserRunCard falls back to the coarser step-boundary screenshot
   // artifact (which IS part of message state) once a run stops streaming.
   const [browserLiveFrames, setBrowserLiveFrames] = useState<Record<string, string>>({})
+  // Live frames arrive on the gateway socket and can burst far faster than
+  // the display paints. Rendering every arrival means React re-rendering the
+  // whole card tree several times between two displayed frames — the jank is
+  // the renderer, not the link. So: the ref always holds the newest frame,
+  // and one rAF-coalesced flush paints it, discarding whatever stale frames
+  // queued behind it. Latest-wins, at display rate, regardless of arrival
+  // pattern.
+  const browserLiveFramesRef = useRef<Record<string, string>>({})
+  const browserLiveFramesFlushQueued = useRef(false)
   const [taskInputDrafts, setTaskInputDrafts] = useState<Record<string, string>>({})
   const [submittingTaskInputs, setSubmittingTaskInputs] = useState<Record<string, boolean>>({})
   const [backgroundTaskErrors, setBackgroundTaskErrors] = useState<Record<string, string>>({})
@@ -9085,8 +9117,15 @@ export default function App() {
       if (eventType === 'browser.live_frame') {
         const key = String((event as any).request_id || (event as any).task_id || '').trim()
         const frame = typeof (event as any).frame === 'string' ? (event as any).frame : ''
-        if (key && frame) {
-          setBrowserLiveFrames((prev) => (prev[key] === frame ? prev : { ...prev, [key]: frame }))
+        if (key && frame && browserLiveFramesRef.current[key] !== frame) {
+          browserLiveFramesRef.current[key] = frame
+          if (!browserLiveFramesFlushQueued.current) {
+            browserLiveFramesFlushQueued.current = true
+            requestAnimationFrame(() => {
+              browserLiveFramesFlushQueued.current = false
+              setBrowserLiveFrames({ ...browserLiveFramesRef.current })
+            })
+          }
         }
         return
       }

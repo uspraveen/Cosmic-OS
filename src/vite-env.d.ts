@@ -376,6 +376,7 @@ interface Window {
     browserSkipInterrupt: (requestId: string) => Promise<{ status: string; request_id?: string }>
     browserPauseRun: (taskId: string) => Promise<{ status: string; task_id?: string }>
     browserResumeRun: (taskId: string, note: string) => Promise<{ status: string; task_id?: string }>
+    browserWatchRun: (taskId: string, active: boolean) => Promise<{ status: string; task_id?: string; watching?: boolean }>
     browserSendInput: (taskId: string, events: Record<string, unknown>[]) => void
     onGatewayEvent: (cb: (data: any) => void) => () => void
     onGatewayStatus: (cb: (data: GatewaySocketState['status']) => void) => () => void

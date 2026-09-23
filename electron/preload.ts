@@ -224,6 +224,7 @@ contextBridge.exposeInMainWorld('cosmic', {
   browserSkipInterrupt: (requestId: string) => ipcRenderer.invoke('browser:skip-interrupt', requestId),
   browserPauseRun: (taskId: string) => ipcRenderer.invoke('browser:pause-run', taskId),
   browserResumeRun: (taskId: string, note: string) => ipcRenderer.invoke('browser:resume-run', taskId, note),
+  browserWatchRun: (taskId: string, active: boolean) => ipcRenderer.invoke('browser:watch-run', taskId, active),
   // send, not invoke: fire-and-forget so a burst of mouse events never awaits
   // a round trip through the main process.
   browserSendInput: (taskId: string, events: Record<string, unknown>[]) =>

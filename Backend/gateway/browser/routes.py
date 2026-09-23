@@ -101,6 +101,17 @@ class TakeoverControlRequest(BaseModel):
     note: str = ""
 
 
+class WatchControlRequest(BaseModel):
+    """Live-view watch signal for a live browser run.
+
+    True while the desktop's expanded live view is on screen: the specialist
+    then streams frames at video cadence instead of the 2.5fps progress
+    cadence. One click's worth of traffic when the view opens or closes.
+    """
+
+    active: bool = False
+
+
 def _check_local_token(request: Request) -> None:
     runtime = request.app.state.gateway_runtime
     expected = runtime.config.local_api_token
@@ -297,6 +308,26 @@ async def resume_run(task_id: str, body: TakeoverControlRequest, request: Reques
     if not delivered:
         raise HTTPException(status_code=404, detail="No live browser run for that task.")
     return {"status": "resuming", "task_id": task_id}
+
+
+@router.post("/channels/browser/runs/{task_id}/watch")
+async def watch_run(task_id: str, body: WatchControlRequest, request: Request) -> dict[str, Any]:
+    """Tell a live run whether anyone is actually watching the live view.
+
+    Watched, the specialist's frame relay runs at video cadence so the
+    expanded panel reads as a feed; unwatched it drops back to the 2.5fps
+    progress cadence and the link goes quiet. Rides the same Redis control
+    channel as pause/resume/input.
+    """
+    _check_local_token(request)
+    runtime = request.app.state.gateway_runtime
+    delivered = await runtime.publish_browser_takeover_control(
+        task_id=str(task_id or "").strip(),
+        payload={"op": "watch", "active": bool(body.active)},
+    )
+    if not delivered:
+        raise HTTPException(status_code=404, detail="No live browser run for that task.")
+    return {"status": "ok", "task_id": task_id, "watching": bool(body.active)}
 
 
 @router.post("/channels/browser/interrupts/{request_id}/respond")

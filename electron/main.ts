@@ -2854,6 +2854,25 @@ app.whenReady().then(() => {
     })
   })
 
+  // Live-view watch signal: the expanded browser view opened or closed. The
+  // specialist switches its frame relay between the 2.5fps progress cadence
+  // and video cadence based on this — bandwidth is spent only while someone
+  // is actually looking.
+  ipcMain.handle('browser:watch-run', async (_, taskId: string, active: boolean) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(
+      config,
+      `/channels/browser/runs/${encodeURIComponent(String(taskId || '').trim())}/watch`,
+      {
+        method: 'POST',
+        body: { active: Boolean(active) },
+      },
+    )
+  })
+
   ipcMain.on('browser:input', (_, taskId: string, events: Record<string, unknown>[]) => {
     try {
       gatewayConnectionManager?.sendBrowserInput(taskId, events)
