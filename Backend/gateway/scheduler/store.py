@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -201,6 +203,26 @@ class SchedulerStore:
                 CREATE INDEX IF NOT EXISTS idx_heartbeat_beat_notes_status
                     ON heartbeat_beat_notes(status, created_at DESC);
 
+                CREATE TABLE IF NOT EXISTS orchestrator_learnings (
+                    learning_id TEXT PRIMARY KEY,
+                    lesson TEXT NOT NULL,
+                    applied_to_specialist TEXT NOT NULL DEFAULT 'orchestrator',
+                    dedupe_key TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    stale_reason TEXT,
+                    stale_at TEXT,
+                    stale_by TEXT,
+                    author TEXT NOT NULL DEFAULT 'orchestrator',
+                    request_id TEXT,
+                    session_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    expires_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_orchestrator_learnings_target
+                    ON orchestrator_learnings(applied_to_specialist, status, updated_at DESC);
+
                 CREATE TABLE IF NOT EXISTS heartbeat_consumptions (
                     consumption_id TEXT PRIMARY KEY,
                     session_id TEXT,
@@ -295,6 +317,7 @@ class SchedulerStore:
                   AND (last_delivered_summary IS NULL OR TRIM(last_delivered_summary) = '')
                 """
             )
+            self._ensure_orchestrator_learning_expiry_column(connection)
             connection.commit()
 
     def get_profile(self) -> dict[str, Any]:
@@ -1769,6 +1792,408 @@ class SchedulerStore:
             stamp = self._format_note_stamp(created_at)
             lines.append(f"- [{stamp} | {label}] {content}")
         return "\n".join(lines).strip()
+
+    # ── Orchestrator operational learnings ──────────────────────────────
+    #
+    # Kept out of shared memory and the nightly summary. The orchestrator
+    # writes the rows. Orchestrator-scoped rows are shown on later turns.
+    # Specialist-scoped rows are shown to the orchestrator before it delegates.
+
+    ORCHESTRATOR_LEARNING_TARGET = "orchestrator"
+    ORCHESTRATOR_LEARNING_MAX_CHARS = 480
+    ORCHESTRATOR_LEARNING_ACTIVE_CAP = 12
+
+    def record_orchestrator_learning(
+        self,
+        *,
+        lesson: str,
+        applied_to_specialist: str | None = None,
+        author: str = "orchestrator",
+        request_id: str | None = None,
+        session_id: str | None = None,
+        expires_at: str | None = None,
+        expires_at_set: bool = False,
+    ) -> dict[str, Any]:
+        """Insert one lesson, or return the active row when it already exists.
+
+        expires_at is optional. Unset means the row stays active until it is staled.
+        """
+        normalized_lesson = self._normalize_learning_lesson(lesson)
+        target = self._normalize_learning_target(applied_to_specialist)
+        dedupe_key = self._learning_dedupe_key(target, normalized_lesson)
+        stored_expiry = self._parse_learning_expiry(expires_at) if expires_at_set else None
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            self._ensure_orchestrator_learning_expiry_column(connection)
+            self._expire_due_orchestrator_learnings(connection, now)
+            existing = connection.execute(
+                """
+                SELECT * FROM orchestrator_learnings
+                WHERE status = 'active' AND applied_to_specialist = ? AND dedupe_key = ?
+                LIMIT 1
+                """,
+                (target, dedupe_key),
+            ).fetchone()
+            if existing is not None:
+                expiry_changed = False
+                if expires_at_set and str(existing["expires_at"] or "") != str(stored_expiry or ""):
+                    connection.execute(
+                        """
+                        UPDATE orchestrator_learnings
+                        SET expires_at = ?, updated_at = ?
+                        WHERE learning_id = ?
+                        """,
+                        (stored_expiry, now, existing["learning_id"]),
+                    )
+                    expiry_changed = True
+                    existing = connection.execute(
+                        "SELECT * FROM orchestrator_learnings WHERE learning_id = ?",
+                        (existing["learning_id"],),
+                    ).fetchone()
+                connection.commit()
+                record = self._orchestrator_learning_record(existing)
+                record["duplicate"] = True
+                record["expiry_changed"] = expiry_changed
+                return record
+            active_count = connection.execute(
+                """
+                SELECT COUNT(*) AS n FROM orchestrator_learnings
+                WHERE status = 'active' AND applied_to_specialist = ?
+                """,
+                (target,),
+            ).fetchone()
+            if int(active_count["n"] if active_count is not None else 0) >= self.ORCHESTRATOR_LEARNING_ACTIVE_CAP:
+                raise ValueError(
+                    f"Active learning cap reached for {target}. Stale an older row before adding another."
+                )
+            learning_id = f"oln_{uuid4().hex[:16]}"
+            connection.execute(
+                """
+                INSERT INTO orchestrator_learnings (
+                    learning_id, lesson, applied_to_specialist, dedupe_key, status,
+                    author, request_id, session_id, created_at, updated_at, expires_at
+                ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    learning_id,
+                    normalized_lesson,
+                    target,
+                    dedupe_key,
+                    author or "orchestrator",
+                    request_id,
+                    session_id,
+                    now,
+                    now,
+                    stored_expiry,
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM orchestrator_learnings WHERE learning_id = ?",
+                (learning_id,),
+            ).fetchone()
+        record = self._orchestrator_learning_record(row)
+        record["duplicate"] = False
+        record["expiry_changed"] = bool(stored_expiry)
+        return record
+
+    def update_orchestrator_learning(
+        self,
+        *,
+        learning_id: str,
+        lesson: str | None = None,
+        author: str = "orchestrator",
+        expires_at: str | None = None,
+        expires_at_set: bool = False,
+    ) -> dict[str, Any]:
+        normalized_id = str(learning_id or "").strip()
+        if not normalized_id:
+            raise ValueError("learning_id is required")
+        lesson_text = str(lesson or "").strip()
+        if not lesson_text and not expires_at_set:
+            raise ValueError("lesson or expires_at is required for update")
+        normalized_lesson = self._normalize_learning_lesson(lesson_text) if lesson_text else None
+        stored_expiry = self._parse_learning_expiry(expires_at) if expires_at_set else None
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            self._ensure_orchestrator_learning_expiry_column(connection)
+            self._expire_due_orchestrator_learnings(connection, now)
+            current = connection.execute(
+                "SELECT * FROM orchestrator_learnings WHERE learning_id = ? LIMIT 1",
+                (normalized_id,),
+            ).fetchone()
+            if current is None or str(current["status"]) != "active":
+                raise ValueError("Active learning not found.")
+            next_lesson = normalized_lesson or str(current["lesson"])
+            target = str(current["applied_to_specialist"])
+            dedupe_key = self._learning_dedupe_key(target, next_lesson)
+            clash = connection.execute(
+                """
+                SELECT learning_id FROM orchestrator_learnings
+                WHERE status = 'active' AND applied_to_specialist = ? AND dedupe_key = ?
+                  AND learning_id != ?
+                LIMIT 1
+                """,
+                (target, dedupe_key, normalized_id),
+            ).fetchone()
+            if clash is not None:
+                raise ValueError(
+                    "An active learning with that lesson already exists. Stale one of the two rows."
+                )
+            next_expiry = stored_expiry if expires_at_set else current["expires_at"]
+            connection.execute(
+                """
+                UPDATE orchestrator_learnings
+                SET lesson = ?, dedupe_key = ?, author = ?, updated_at = ?, expires_at = ?
+                WHERE learning_id = ?
+                """,
+                (next_lesson, dedupe_key, author or "orchestrator", now, next_expiry, normalized_id),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM orchestrator_learnings WHERE learning_id = ?",
+                (normalized_id,),
+            ).fetchone()
+        record = self._orchestrator_learning_record(row)
+        record["duplicate"] = False
+        record["expiry_changed"] = expires_at_set
+        return record
+
+    def stale_orchestrator_learning(
+        self,
+        *,
+        learning_id: str | None = None,
+        match: str | None = None,
+        applied_to_specialist: str | None = None,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> int:
+        normalized_id = str(learning_id or "").strip()
+        normalized_match = str(match or "").strip()
+        if not normalized_id and not normalized_match:
+            raise ValueError("learning_id or match is required")
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            self._ensure_orchestrator_learning_expiry_column(connection)
+            self._expire_due_orchestrator_learnings(connection, now)
+            if normalized_id:
+                cursor = connection.execute(
+                    """
+                    UPDATE orchestrator_learnings
+                    SET status = 'stale', stale_reason = ?, stale_at = ?, stale_by = ?, updated_at = ?
+                    WHERE learning_id = ? AND status = 'active'
+                    """,
+                    (
+                        reason or "Staled via orchestrator_learnings",
+                        now,
+                        actor or "orchestrator",
+                        now,
+                        normalized_id,
+                    ),
+                )
+            else:
+                target_clause = ""
+                params: list[Any] = [
+                    reason or "Staled via orchestrator_learnings",
+                    now,
+                    actor or "orchestrator",
+                    now,
+                    normalized_match,
+                ]
+                if applied_to_specialist:
+                    target_clause = " AND applied_to_specialist = ?"
+                    params.append(self._normalize_learning_target(applied_to_specialist))
+                cursor = connection.execute(
+                    f"""
+                    UPDATE orchestrator_learnings
+                    SET status = 'stale', stale_reason = ?, stale_at = ?, stale_by = ?, updated_at = ?
+                    WHERE status = 'active' AND instr(lesson, ?) > 0{target_clause}
+                    """,
+                    params,
+                )
+            connection.commit()
+            return int(cursor.rowcount)
+
+    def list_orchestrator_learnings(
+        self,
+        *,
+        applied_to_specialist: str | None = None,
+        include_stale: bool = False,
+        limit: int = 40,
+    ) -> list[dict[str, Any]]:
+        bounded = max(1, min(int(limit or 40), 200))
+        clauses: list[str] = []
+        params: list[Any] = []
+        if not include_stale:
+            clauses.append("status = 'active'")
+        if applied_to_specialist:
+            clauses.append("applied_to_specialist = ?")
+            params.append(self._normalize_learning_target(applied_to_specialist))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(bounded)
+        now = utcnow_iso()
+        with self._lock, self._connect() as connection:
+            self._ensure_orchestrator_learning_expiry_column(connection)
+            self._expire_due_orchestrator_learnings(connection, now)
+            connection.commit()
+            rows = connection.execute(
+                f"""
+                SELECT * FROM orchestrator_learnings
+                {where}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        records = [self._orchestrator_learning_record(row) for row in rows]
+        records.reverse()
+        return records
+
+    def render_orchestrator_learnings(self, *, limit: int = 80) -> str:
+        """Prompt text for later orchestrator turns. Empty when nothing is active."""
+        items = self.list_orchestrator_learnings(limit=max(1, min(int(limit or 80), 80)))
+        if not items:
+            return ""
+        orchestrator_lines: list[str] = []
+        specialist_lines: list[str] = []
+        for item in items:
+            lesson = " ".join(str(item.get("lesson") or "").split())
+            learning_id = str(item.get("learning_id") or "")
+            target = str(item.get("applied_to_specialist") or self.ORCHESTRATOR_LEARNING_TARGET)
+            expiry = str(item.get("expires_at") or "").strip()
+            expiry_label = f" | until {self._format_note_stamp(expiry)}" if expiry else ""
+            if target == self.ORCHESTRATOR_LEARNING_TARGET:
+                orchestrator_lines.append(f"- [{learning_id}{expiry_label}] {lesson}")
+            else:
+                specialist_lines.append(f"- [{learning_id} | {target}{expiry_label}] {lesson}")
+        parts: list[str] = []
+        if orchestrator_lines:
+            parts.extend(orchestrator_lines)
+        if specialist_lines:
+            parts.append("Before delegating to that specialist:")
+            parts.extend(specialist_lines)
+        return "\n".join(parts).strip()
+
+    @staticmethod
+    def _normalize_learning_lesson(lesson: str) -> str:
+        normalized = " ".join(str(lesson or "").split())
+        if not normalized:
+            raise ValueError("lesson is required")
+        if len(normalized) > SchedulerStore.ORCHESTRATOR_LEARNING_MAX_CHARS:
+            raise ValueError(
+                f"lesson must be at most {SchedulerStore.ORCHESTRATOR_LEARNING_MAX_CHARS} characters"
+            )
+        return normalized
+
+    @classmethod
+    def _normalize_learning_target(cls, value: str | None) -> str:
+        normalized = " ".join(str(value or "").split())
+        if not normalized or normalized.lower() == cls.ORCHESTRATOR_LEARNING_TARGET:
+            return cls.ORCHESTRATOR_LEARNING_TARGET
+        if len(normalized) > 160:
+            raise ValueError("applied_to_specialist is too long")
+        return normalized
+
+    @staticmethod
+    def _learning_dedupe_key(applied_to_specialist: str, lesson: str) -> str:
+        material = f"{applied_to_specialist}\n{lesson.lower()}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def _orchestrator_learning_record(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        record = dict(row)
+        record["lifetime"] = SchedulerStore.learning_lifetime_note(record.get("expires_at"))
+        return record
+
+    @staticmethod
+    def learning_lifetime_note(expires_at: Any) -> str:
+        """Plain statement of the lifetime that was stored, so the model can correct it."""
+        if not str(expires_at or "").strip():
+            return (
+                "This learning stays active until you stale it. "
+                "Pass expires_at on update, such as 48h, if it should end sooner."
+            )
+        stamp = SchedulerStore._format_note_stamp(expires_at)
+        return (
+            f"This learning expires at {stamp}. "
+            "Pass expires_at on update if that time is wrong, or pass expires_at=none to keep it until you stale it."
+        )
+
+    @staticmethod
+    def _parse_learning_expiry(value: str | None) -> str | None:
+        text = " ".join(str(value or "").split())
+        if not text or text.lower() in {"none", "never", "null", "until_stale", "standing"}:
+            return None
+        match = re.fullmatch(
+            r"(?:in\s+)?(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        now = datetime.now(timezone.utc)
+        if match:
+            amount = int(match.group(1))
+            if amount <= 0:
+                raise ValueError("expires_at must be in the future")
+            unit = match.group(2).lower()
+            if unit.startswith("m"):
+                delta = timedelta(minutes=amount)
+            elif unit.startswith("h"):
+                delta = timedelta(hours=amount)
+            else:
+                delta = timedelta(days=amount)
+            if delta > timedelta(days=366):
+                raise ValueError("expires_at must be within 366 days")
+            return (now + delta).isoformat().replace("+00:00", "Z")
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("expires_at must be a duration like 48h or an ISO-8601 time") from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.astimezone(timezone.utc)
+        if parsed <= now:
+            raise ValueError("expires_at must be in the future")
+        return parsed.isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _ensure_orchestrator_learning_expiry_column(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(orchestrator_learnings)").fetchall()
+        }
+        if columns and "expires_at" not in columns:
+            connection.execute("ALTER TABLE orchestrator_learnings ADD COLUMN expires_at TEXT")
+
+    @staticmethod
+    def _expire_due_orchestrator_learnings(connection: sqlite3.Connection, now: str) -> None:
+        rows = connection.execute(
+            """
+            SELECT learning_id, expires_at FROM orchestrator_learnings
+            WHERE status = 'active' AND expires_at IS NOT NULL AND TRIM(expires_at) != ''
+            """
+        ).fetchall()
+        now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        due: list[str] = []
+        for row in rows:
+            try:
+                expires = datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if expires <= now_dt:
+                due.append(str(row["learning_id"]))
+        for learning_id in due:
+            connection.execute(
+                """
+                UPDATE orchestrator_learnings
+                SET status = 'stale', stale_reason = 'Expired', stale_at = ?, stale_by = 'gateway', updated_at = ?
+                WHERE learning_id = ? AND status = 'active'
+                """,
+                (now, now, learning_id),
+            )
 
     # ── internal helpers ────────────────────────────────────────────────
 

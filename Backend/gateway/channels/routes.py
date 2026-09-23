@@ -219,6 +219,20 @@ class HeartbeatNotesMutateRequest(BaseModel):
     source: str | None = Field(default=None, max_length=120)
 
 
+class OrchestratorLearningsMutateRequest(BaseModel):
+    action: str = Field(..., min_length=1, max_length=32)
+    lesson: str | None = Field(default=None, max_length=480)
+    applied_to_specialist: str | None = Field(default=None, max_length=160)
+    learning_id: str | None = Field(default=None, max_length=80)
+    match: str | None = Field(default=None, max_length=480)
+    reason: str | None = Field(default=None, max_length=500)
+    request_id: str | None = Field(default=None, max_length=120)
+    session_id: str | None = Field(default=None, max_length=120)
+    source: str | None = Field(default=None, max_length=120)
+    expires_at: str | None = Field(default=None, max_length=80)
+    expires_at_set: bool = False
+
+
 class HeartbeatWatchpointCreateRequest(BaseModel):
     watchpoint_id: str | None = Field(default=None, max_length=80)
     name: str = Field(default="", max_length=200)
@@ -1789,6 +1803,43 @@ async def mutate_internal_heartbeat_notes(
             request_id=body.request_id,
             session_id=body.session_id,
             actor=body.source or "orchestrator",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/internal/scheduler/orchestrator-learnings")
+async def get_internal_orchestrator_learnings(
+    applied_to_specialist: str | None = None,
+    include_stale: bool = False,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return runtime.orchestrator_learnings_overview(
+        applied_to_specialist=applied_to_specialist,
+        include_stale=include_stale,
+    )
+
+
+@router.post("/internal/scheduler/orchestrator-learnings")
+async def mutate_internal_orchestrator_learnings(
+    body: OrchestratorLearningsMutateRequest,
+    _: None = Depends(require_internal_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return runtime.mutate_orchestrator_learnings(
+            action=body.action,
+            lesson=body.lesson,
+            applied_to_specialist=body.applied_to_specialist,
+            learning_id=body.learning_id,
+            match=body.match,
+            reason=body.reason,
+            request_id=body.request_id,
+            session_id=body.session_id,
+            actor=body.source or "orchestrator",
+            expires_at=body.expires_at,
+            expires_at_set=body.expires_at_set,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

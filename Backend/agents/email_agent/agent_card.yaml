@@ -25,11 +25,11 @@ intents:
       - Use this specialist for almost anything involving reading, understanding, drafting, replying to, or sending email.
       - Pass a compact context_brief and optional draft_seed; do not pass a long raw conversation transcript.
       - If a prior run already produced a draft_id and the next step is to send that same draft, pass the draft_id back so the specialist can continue directly instead of recomposing.
-      - When sending a previously produced file, resolve it first and pass its artifact_id via delegate_to_agent artifact_ids so it arrives here as TaskEnvelope.input_artifacts.
+      - When sending a previously produced file from desktop, cron, heartbeat, or an event automation, resolve it first and pass its artifact_id via delegate_to_agent artifact_ids so it arrives here as TaskEnvelope.input_artifacts. On an `agent-email:` reply to the person who wrote that email, do not do this; `artifact_redeliver` puts the file on the gateway reply.
       - For attachment-specific requests in an email thread, use this to resolve the correct attachment and cached docs bundle first; then continue with the normal docs tools for actual document reading.
       - For new outbound drafts, attached_input_artifact_count is the attachment upload signal; resolved_attachment is only for resolving thread attachments.
       - Any email COSMIC itself is sending to the user — notification, alert, digest, heads-up, follow-up, or a plain "email me X" — goes out from COSMIC's own mailbox through this intent, whatever channel the request arrived on. Do not hand that to the Gmail specialist. Gmail is the user's own account, meant for their correspondence with other people.
-      - Do not call this specialist when the current turn is already being delivered to the user over an `agent-email:` channel. There the response itself is the email, so calling this would send a second copy. That exception is about channel delivery only; on desktop, cron, heartbeat, and event-automation turns this specialist is exactly how COSMIC mails the user.
+      - "Do not call this specialist with send true when the current turn is already being delivered to the user over an `agent-email:` channel and the recipient is the person who wrote that email. There the response itself is the email, so a send is refused. Search and read on that channel are fine. That exception is about channel delivery only; on desktop, cron, heartbeat, and event-automation turns this specialist is exactly how COSMIC mails the user."
       - Cosmic Mail enforces a per-agent approval gate when an outbound mailbox's agent has approval_required enabled. A response with queued_for_approval=true (equivalently delivery_status="queued_for_approval" or a non-null approval_id) means the draft was successfully handed off to a human reviewer — this is a successful outcome, not a stall or failure. Treat the intent as complete, surface the approval_id and the queued status to the user, and do not retry or recompose the draft.
       - The user maintains a trusted-senders allowlist (managed in Spaces > Agent Email > Settings) that is mirrored into Cosmic Mail. Outbound to addresses on that list bypasses the approval gate, so the same agent may return sent=true for a trusted recipient and queued_for_approval=true for an untrusted recipient on the same draft path; this is expected and per-recipient.
 
@@ -39,9 +39,10 @@ intents:
     output_schema: schemas/intents/email.send.output.json
     timeout_sec: 120
     usage_hints:
-      - "Preferred for notifications, alerts, progress updates, and any 'email me X' where COSMIC is the author and the user is the recipient. Pass to_recipients (the user's address), subject, and body explicitly."
+      - "Preferred for notifications, alerts, progress updates, and any 'email me X' where COSMIC is the author and the user is the recipient, on desktop, cron, heartbeat, or an event automation. Pass to_recipients (the user's address), subject, and body explicitly. This intent cannot attach files."
+      - "Do not use this to reply on a turn that arrived on an `agent-email:` channel. That reply is already sent by the gateway, and a send to the person who wrote it is refused. This is not a failed delivery: do not retry it. A prior file for that reply goes through artifact_redeliver."
       - "Pass draft_id to deliver an existing draft; the draft is sent as-is, never recomposed."
-      - "A send request that ends without confirmed delivery returns failed (EMAIL_SEND_NOT_COMPLETED) — retry the same structured call; do not switch to a prose email.handle goal."
+      - "A send request that ends without confirmed delivery returns failed (EMAIL_SEND_NOT_COMPLETED) — retry the same structured call; do not switch to a prose email.handle goal. A refusal with code AGENT_EMAIL_REPLY_IS_THE_EMAIL is not that failure."
       - "Do not hand COSMIC-authored mail to the Gmail specialist; Gmail is the user's own account for their correspondence with other people."
   - name: email.reason
     description: Legacy alias for `email.handle`. Prefer `email.handle` for new work.

@@ -356,6 +356,13 @@ def _heartbeat_notes_progress(tool_input: dict[str, Any]) -> str:
     return "Reading heartbeat notes..."
 
 
+def _orchestrator_learnings_progress(tool_input: dict[str, Any]) -> str:
+    action = str(tool_input.get("action") or "read").strip().lower()
+    if action in {"record", "update", "stale"}:
+        return f"Updating operational learnings ({action})..."
+    return "Reading operational learnings..."
+
+
 def _heartbeat_watchpoints_progress(tool_input: dict[str, Any]) -> str:
     action = str(tool_input.get("action") or "list").strip().lower()
     label = str(tool_input.get("name") or tool_input.get("watchpoint_id") or "").strip()
@@ -2616,6 +2623,64 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         prompt_summary="Private heartbeat self-notes in SQLite. Use during heartbeat turns, and on any turn when the user corrects a note, to read, append, replace, or soft-stale compact judgments without polluting chat history.",
         progress_builder=_heartbeat_notes_progress,
         handler_method="_heartbeat_notes",
+    ),
+    ToolSpec(
+        name="orchestrator_learnings",
+        api_definition={
+            "name": "orchestrator_learnings",
+            "description": (
+                "Record, update, stale, or read a short operational lesson in SQLite "
+                "(scheduler.db table orchestrator_learnings). Use this when a later turn would "
+                "otherwise repeat a mistake, including how a tool or specialist was used. "
+                "These rows stay outside memory_write and the nightly summary. "
+                "applied_to_specialist defaults to orchestrator, and those rows are shown on later turns. "
+                "Set it to one specialist id only when the lesson is about calling that specialist; "
+                "those rows are shown to you before that delegation and are not sent into the specialist. "
+                "Write one short lesson, not a transcript. "
+                "Leave expires_at unset for a standing lesson. Set it, such as 48h, only when the lesson is temporary. "
+                "The result states the lifetime that was stored, and update can change it. "
+                "A duplicate active lesson is returned instead of stored again."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "Operation to perform.",
+                        "enum": ["read", "record", "update", "stale"],
+                        "default": "read",
+                    },
+                    "lesson": {
+                        "type": "string",
+                        "description": "One short operational lesson for record or update. Not a transcript.",
+                    },
+                    "applied_to_specialist": {
+                        "type": "string",
+                        "description": "Who the lesson is for. Defaults to orchestrator. Use a specialist id only when the lesson is about calling that specialist.",
+                    },
+                    "learning_id": {
+                        "type": "string",
+                        "description": "Existing learning_id for update or stale.",
+                    },
+                    "match": {
+                        "type": "string",
+                        "description": "Substring of a lesson to stale when learning_id is not known.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why a learning is being marked stale.",
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "description": "Optional lifetime. Omit it to keep the lesson until you stale it. Use a duration such as 48h or 7d, or an ISO-8601 time, only when the lesson is temporary. Pass none on update to clear an expiry.",
+                    },
+                },
+            },
+        },
+        group="memory",
+        prompt_summary="Record a short operational lesson outside memory. Leave expires_at unset unless the lesson is temporary; the result states the stored lifetime. Orchestrator rows are shown on later turns; specialist rows are shown before delegating and are not sent into the specialist.",
+        progress_builder=_orchestrator_learnings_progress,
+        handler_method="_orchestrator_learnings",
     ),
     ToolSpec(
         name="heartbeat_watchpoints",

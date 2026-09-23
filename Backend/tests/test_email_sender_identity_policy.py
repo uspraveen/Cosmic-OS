@@ -47,6 +47,8 @@ def test_orchestrator_policy_names_the_sender_for_mail_cosmic_writes() -> None:
     assert "does not decide who the sender is" in prompt
     # The one legitimate exception, so the rule cannot be read as "always call it".
     assert "agent-email:" in prompt
+    assert "do not call `email.send`" in prompt
+    assert "artifact_redeliver" in prompt
 
 
 def test_orchestrator_policy_forbids_drafting_cosmics_own_mail_into_user_gmail() -> None:
@@ -97,6 +99,11 @@ def test_email_card_no_longer_disclaims_every_cron_and_heartbeat_turn() -> None:
     # The genuine exception survives, but scoped to channel delivery only.
     assert "already being delivered to the user over an `agent-email:` channel" in hints
     assert "event-automation turns this specialist is exactly how cosmic mails" in hints
+    send_hints = _usage_hints(
+        BACKEND_ROOT / "agents" / "email_agent" / "agent_card.yaml", "email.send"
+    )
+    assert "agent-email:" in send_hints
+    assert "cannot attach files" in send_hints
 
 
 def test_the_two_cards_do_not_both_claim_the_same_job() -> None:

@@ -9756,6 +9756,107 @@ class GatewayRuntime:
         overview["message"] = message
         return overview
 
+    def orchestrator_learnings_prompt(self) -> str:
+        """Active lessons for the next orchestrator turn. Empty when there are none."""
+        try:
+            return self.scheduler_store.render_orchestrator_learnings()
+        except Exception:
+            logger.exception("gateway.orchestrator_learnings_render_failed")
+            return ""
+
+    def orchestrator_learnings_overview(
+        self,
+        *,
+        applied_to_specialist: str | None = None,
+        include_stale: bool = False,
+        limit: int = 40,
+    ) -> dict[str, Any]:
+        learnings = self.scheduler_store.list_orchestrator_learnings(
+            applied_to_specialist=applied_to_specialist,
+            include_stale=include_stale,
+            limit=limit,
+        )
+        rendered = self.scheduler_store.render_orchestrator_learnings()
+        return {
+            "storage": "scheduler.db",
+            "table": "orchestrator_learnings",
+            "content": rendered,
+            "learnings": learnings,
+            "bytes": len(rendered.encode("utf-8")),
+        }
+
+    def mutate_orchestrator_learnings(
+        self,
+        *,
+        action: str,
+        lesson: str | None = None,
+        applied_to_specialist: str | None = None,
+        learning_id: str | None = None,
+        match: str | None = None,
+        reason: str | None = None,
+        request_id: str | None = None,
+        session_id: str | None = None,
+        actor: str | None = None,
+        expires_at: str | None = None,
+        expires_at_set: bool = False,
+    ) -> dict[str, Any]:
+        normalized_action = str(action or "").strip().lower()
+        author = str(actor or "orchestrator").strip() or "orchestrator"
+        updated = False
+        message = "Operational learnings unchanged."
+        learning: dict[str, Any] | None = None
+        if normalized_action == "record":
+            learning = self.scheduler_store.record_orchestrator_learning(
+                lesson=str(lesson or ""),
+                applied_to_specialist=applied_to_specialist,
+                author=author,
+                request_id=request_id,
+                session_id=session_id,
+                expires_at=expires_at,
+                expires_at_set=expires_at_set,
+            )
+            updated = (not bool(learning.get("duplicate"))) or bool(learning.get("expiry_changed"))
+            prefix = (
+                "That operational lesson is already active."
+                if learning.get("duplicate")
+                else "Operational learning recorded."
+            )
+            message = f"{prefix} {learning.get('lifetime') or ''}".strip()
+        elif normalized_action == "update":
+            learning = self.scheduler_store.update_orchestrator_learning(
+                learning_id=str(learning_id or ""),
+                lesson=lesson,
+                author=author,
+                expires_at=expires_at,
+                expires_at_set=expires_at_set,
+            )
+            updated = True
+            message = f"Operational learning updated. {learning.get('lifetime') or ''}".strip()
+        elif normalized_action == "stale":
+            count = self.scheduler_store.stale_orchestrator_learning(
+                learning_id=learning_id,
+                match=match,
+                applied_to_specialist=applied_to_specialist,
+                reason=reason or "Staled via orchestrator_learnings",
+                actor=author,
+            )
+            updated = count > 0
+            message = (
+                "Operational learning marked stale."
+                if updated
+                else "No matching active learning found."
+            )
+        else:
+            raise ValueError(
+                "Unsupported orchestrator_learnings action. Use record, update, or stale."
+            )
+        overview = self.orchestrator_learnings_overview()
+        overview["updated"] = updated
+        overview["message"] = message
+        if learning is not None:
+            overview["learning"] = learning
+        return overview
+
     def create_heartbeat_watchpoint(
         self,
         *,
@@ -19680,6 +19781,29 @@ class GatewayRuntime:
             else {}
         )
         envelope_source = self._task_envelope_source(request_record)
+        task_input: dict[str, Any] = {
+            "query": orchestrator_query,
+            "request_id": request_id,
+            "conversation_context": request_record.get("assembled_conversation_context") or [],
+            "memory_context": self._safe_text(request_record.get("memory_context")),
+            "visual_response_enhancement_enabled": bool(
+                request_record.get("visual_response_enhancement_enabled", True)
+            ),
+            "gateway_preferences": gateway_preferences,
+            "cosmic_orchestrator_model": cosmic_orchestrator_model,
+            "user_timezone": self._safe_text(request_record.get("cron_timezone"))
+            or self.current_user_timezone(),
+        }
+        inbound_sender_email = self._inbound_sender_email_for_task(
+            request_record,
+            session_id=session_id,
+            channel=channel,
+        )
+        if inbound_sender_email:
+            task_input["inbound_sender_email"] = inbound_sender_email
+        orchestrator_learnings = self.orchestrator_learnings_prompt()
+        if orchestrator_learnings:
+            task_input["orchestrator_learnings"] = orchestrator_learnings
 
         task = TaskEnvelope(
             task_id=generate_task_id(),
@@ -19688,22 +19812,7 @@ class GatewayRuntime:
             sender="cosmic/gateway:1.0.0",
             recipient="cosmic/orchestrator:1.0.0",
             intent="orchestrator.process",
-            input={
-                "query": orchestrator_query,
-                "request_id": request_id,
-                "conversation_context": request_record.get(
-                    "assembled_conversation_context"
-                )
-                or [],
-                "memory_context": self._safe_text(request_record.get("memory_context")),
-                "visual_response_enhancement_enabled": bool(
-                    request_record.get("visual_response_enhancement_enabled", True)
-                ),
-                "gateway_preferences": gateway_preferences,
-                "cosmic_orchestrator_model": cosmic_orchestrator_model,
-                "user_timezone": self._safe_text(request_record.get("cron_timezone"))
-                or self.current_user_timezone(),
-            },
+            input=task_input,
             input_artifacts=prepared_input_artifacts,
             idempotency_key=self._safe_text(request_record.get("idempotency_key"))
             or uuid4().hex,
@@ -19718,6 +19827,35 @@ class GatewayRuntime:
         )
         signature = sign_task_envelope(task, self.config.signing_secret)
         return task.model_copy(update={"signature": signature})
+
+    def _inbound_sender_email_for_task(
+        self,
+        request_record: dict[str, Any],
+        *,
+        session_id: str,
+        channel: str,
+    ) -> str:
+        """Who wrote the inbound agent-email. Empty on every other channel."""
+        if self._channel_platform(channel) != "agent-email":
+            return ""
+        message = request_record.get("message") if isinstance(request_record.get("message"), dict) else {}
+        message_meta = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        process_output = (
+            request_record.get("email_process_inbound_output")
+            if isinstance(request_record.get("email_process_inbound_output"), dict)
+            else {}
+        )
+        try:
+            session_meta = self.session_store.get_session_metadata(session_id) if session_id else {}
+        except Exception:
+            session_meta = {}
+        if not isinstance(session_meta, dict):
+            session_meta = {}
+        return (
+            self._safe_text(process_output.get("from_address"))
+            or self._safe_text(message_meta.get("from_address"))
+            or self._safe_text(session_meta.get("from_address"))
+        )
 
     def _task_envelope_source(self, request_record: dict[str, Any]) -> str:
         source = self._safe_text(request_record.get("source")) or "user"

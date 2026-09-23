@@ -686,6 +686,7 @@ class OrchestratorRuntime:
                 else None,
                 trusted_ui_enabled=trusted_ui_enabled,
                 channel=channel,
+                orchestrator_learnings=str(task.input.get("orchestrator_learnings") or "").strip() or None,
             )
             tools = get_model_tool_definitions(self._featured_specialist_agent_ids(), channel=channel)
             max_iterations = self._max_iterations_for_task(task)
@@ -1569,6 +1570,7 @@ class OrchestratorRuntime:
                 else None,
                 trusted_ui_enabled=trusted_ui_enabled,
                 channel=channel,
+                orchestrator_learnings=str(task.input.get("orchestrator_learnings") or "").strip() or None,
             )
             system_prompt = self._with_fireworks_runtime_note(system_prompt)
             openai_messages = [

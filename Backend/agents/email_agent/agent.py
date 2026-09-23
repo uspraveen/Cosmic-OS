@@ -24,6 +24,7 @@ from shared import (
     render_markdown_email_bodies,
     sign_task_envelope,
 )
+from shared.agent_email_reply_guard import blocked_agent_email_reply_send
 from shared.agent_runtime import AgentRuntime
 from shared.contracts import AgentError, AgentResult, ArtifactManifest, TaskEnvelope, utcnow
 from shared.sqlite_client import connect_sync
@@ -642,6 +643,13 @@ class EmailAgent(AgentRuntime):
         recipients = self._apply_notification_recipient_default(
             recipients, send=send, thread_id=thread_id, message_id=message_id
         )
+        suppressed = self._suppressed_agent_email_reply(
+            task,
+            sending=send,
+            recipients=[*recipients, *cc_recipients, *bcc_recipients],
+        )
+        if suppressed is not None:
+            return suppressed
         artifacts: list[ArtifactManifest] = []
         default_docs_tools: list[str] = []
 
@@ -1076,6 +1084,55 @@ class EmailAgent(AgentRuntime):
         )
         return [{"email": self.config.default_notification_recipient, "name": None}]
 
+    def _suppressed_agent_email_reply(
+        self,
+        task: TaskEnvelope,
+        *,
+        sending: bool,
+        recipients: list[dict[str, Any]],
+    ) -> AgentResult | None:
+        """The gateway already mails this reply. Do not transmit a second copy."""
+        artifact_ids = [
+            self._safe_text(item.get("artifact_id"))
+            for item in (task.input_artifacts or [])
+            if isinstance(item, dict) and self._safe_text(item.get("artifact_id"))
+        ]
+        payload = dict(task.input) if isinstance(task.input, dict) else {}
+        if artifact_ids:
+            payload["artifact_ids"] = artifact_ids
+        message = blocked_agent_email_reply_send(
+            channel=task.channel,
+            intent=task.intent,
+            payload=payload,
+            inbound_sender_email=self._safe_text(payload.get("inbound_sender_email")) or None,
+            sending=sending,
+            recipient_addresses=[
+                self._safe_text(item.get("email"))
+                for item in recipients
+                if isinstance(item, dict)
+            ],
+        )
+        if message is None:
+            return None
+        logger.info(
+            "email_agent.reply_send_suppressed intent=%s channel=%s",
+            task.intent,
+            task.channel,
+        )
+        output = {
+            "response": message,
+            "summary": message,
+            "action": "reply_suppressed",
+            "sent": False,
+            "thread_id": self._optional_text(payload, "thread_id"),
+            "message_id": self._optional_text(payload, "message_id"),
+            "draft_id": None,
+            "to_recipients": recipients,
+            "search_results": [],
+            "artifact_ids": artifact_ids,
+        }
+        return AgentResult(status="completed", output=output, artifacts=[], error=None)
+
     _EMAIL_PLAN_ACTIONS = {"send_draft", "compose_and_send", "compose", "search", "other"}
     _EMAIL_ADDRESS_PATTERN = re.compile(
         r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE
@@ -1183,6 +1240,13 @@ class EmailAgent(AgentRuntime):
         mailbox_id = self._optional_text(task.input, "mailbox_id")
         to_recipients = self._normalize_recipient_list(task.input.get("to_recipients"))
         cc_recipients = self._normalize_recipient_list(task.input.get("cc_recipients"))
+        suppressed = self._suppressed_agent_email_reply(
+            task,
+            sending=True,
+            recipients=[*to_recipients, *cc_recipients],
+        )
+        if suppressed is not None:
+            return suppressed
         subject = self._optional_text(task.input, "subject")
         body = self._optional_text(task.input, "body")
         if draft_id:

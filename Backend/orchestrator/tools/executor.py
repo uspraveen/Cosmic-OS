@@ -26,6 +26,7 @@ from shared.content_cards import (
     normalize_content_cards,
     project_specialist_content_cards,
 )
+from shared.agent_email_reply_guard import blocked_agent_email_reply_send, channel_is_agent_email
 from shared.contracts import AgentResult, TaskEnvelope, TaskInProgress
 from shared.scratchpad import truncate_keeping_newest
 from gateway.prophet import prophet_slot_from_source_id
@@ -820,6 +821,20 @@ class ToolExecutor:
             return {"error": True, "message": "input must be an object"}
         payload = dict(payload)
         preferred_agent_id = str(tool_input.get("agent_id") or "").strip() or None
+        refusal = self._agent_email_reply_refusal(
+            intent=intent,
+            payload=payload,
+            tool_input=tool_input,
+            context=context,
+            agent_id=preferred_agent_id,
+        )
+        if refusal is not None:
+            return refusal
+        self._stamp_inbound_sender_for_email_agent(
+            intent=intent,
+            payload=payload,
+            context=context,
+        )
         wait_timeout_value = tool_input.get("wait_timeout_sec")
         wait_timeout_sec: float | None = None
         if wait_timeout_value not in (None, ""):
@@ -870,6 +885,78 @@ class ToolExecutor:
                 context=context,
             )
         return response
+
+    def _agent_email_reply_refusal(
+        self,
+        *,
+        intent: str,
+        payload: dict[str, Any],
+        tool_input: dict[str, Any],
+        context: ToolExecutionContext | None,
+        agent_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Refuse a second send to the person this agent-email turn is already replying to."""
+        parent_input = context.parent_task.input if context and context.parent_task else {}
+        inbound_sender = ""
+        if isinstance(parent_input, dict):
+            inbound_sender = str(parent_input.get("inbound_sender_email") or "").strip()
+        channel = context.channel if context and context.channel else None
+        if not channel and context and context.parent_task:
+            channel = context.parent_task.channel
+        artifact_ids: list[str] = []
+        raw_ids = tool_input.get("artifact_ids")
+        if isinstance(raw_ids, list):
+            artifact_ids.extend(str(item).strip() for item in raw_ids if str(item).strip())
+        message = blocked_agent_email_reply_send(
+            channel=channel,
+            intent=intent,
+            payload={**payload, "artifact_ids": artifact_ids},
+            inbound_sender_email=inbound_sender,
+        )
+        if message is None:
+            return None
+        logger.info(
+            "orchestrator.agent_email_reply_send_refused intent=%s inbound=%s",
+            intent,
+            inbound_sender or "-",
+        )
+        return {
+            "sent": False,
+            "refused": True,
+            "code": "AGENT_EMAIL_REPLY_IS_THE_EMAIL",
+            "message": message,
+            "artifact_ids": artifact_ids,
+            "delegation": {
+                "intent": intent,
+                "agent_id": agent_id,
+                "dispatched": False,
+            },
+        }
+
+    @staticmethod
+    def _stamp_inbound_sender_for_email_agent(
+        *,
+        intent: str,
+        payload: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> None:
+        """Let the email agent see who this reply is already going to.
+
+        The key is read only by the send guard. Search and read ignore it.
+        """
+        if intent not in {"email.send", "email.handle", "email.reason"}:
+            return
+        channel = context.channel if context and context.channel else None
+        if not channel and context and context.parent_task:
+            channel = context.parent_task.channel
+        if not channel_is_agent_email(channel):
+            return
+        parent_input = context.parent_task.input if context and context.parent_task else {}
+        if not isinstance(parent_input, dict):
+            return
+        inbound_sender = str(parent_input.get("inbound_sender_email") or "").strip()
+        if inbound_sender and not str(payload.get("inbound_sender_email") or "").strip():
+            payload["inbound_sender_email"] = inbound_sender
 
     def _attach_slide_workflow_choice(
         self,
@@ -2314,6 +2401,98 @@ class ToolExecutor:
             "bytes": int(payload.get("bytes") or len(content.encode("utf-8"))),
             "storage": "scheduler.db",
         }
+
+    async def _orchestrator_learnings(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        action = str(tool_input.get("action") or "read").strip().lower() or "read"
+        if action not in {"read", "record", "update", "stale"}:
+            return {
+                "error": True,
+                "message": "Unsupported orchestrator_learnings action. Use read, record, update, or stale.",
+            }
+        if not self.gateway_url:
+            return {
+                "error": True,
+                "message": "Operational learnings are stored by the gateway, which is not configured for this turn.",
+            }
+        if action == "read":
+            params: dict[str, Any] = {"include_stale": False}
+            applied_to = str(tool_input.get("applied_to_specialist") or "").strip()
+            if applied_to:
+                params["applied_to_specialist"] = applied_to
+            payload = await self._request_gateway_json(
+                "GET",
+                "/internal/scheduler/orchestrator-learnings",
+                params=params,
+            ) or {}
+            content = str(payload.get("content") or "")
+            return {
+                "updated": False,
+                "message": "Operational learnings read.",
+                "content": content,
+                "learnings": payload.get("learnings") or [],
+                "bytes": int(payload.get("bytes") or len(content.encode("utf-8"))),
+                "storage": "scheduler.db",
+            }
+        body: dict[str, Any] = {"action": action, "source": "orchestrator"}
+        if action in {"record", "update"}:
+            lesson = " ".join(str(tool_input.get("lesson") or "").split())
+            if action == "record" and not lesson:
+                return {"error": True, "message": "lesson is required for record"}
+            if lesson:
+                body["lesson"] = lesson
+        if "expires_at" in tool_input:
+            body["expires_at"] = " ".join(str(tool_input.get("expires_at") or "").split())
+            body["expires_at_set"] = True
+        if action == "update":
+            if not body.get("lesson") and "expires_at" not in tool_input:
+                return {"error": True, "message": "lesson or expires_at is required for update"}
+        if action == "update":
+            learning_id = str(tool_input.get("learning_id") or "").strip()
+            if not learning_id:
+                return {"error": True, "message": "learning_id is required for update"}
+            body["learning_id"] = learning_id
+        elif action == "stale":
+            learning_id = str(tool_input.get("learning_id") or "").strip()
+            match = str(tool_input.get("match") or "").strip()
+            if not learning_id and not match:
+                return {"error": True, "message": "learning_id or match is required for stale"}
+            if learning_id:
+                body["learning_id"] = learning_id
+            if match:
+                body["match"] = match
+        applied_to = str(tool_input.get("applied_to_specialist") or "").strip()
+        if applied_to:
+            body["applied_to_specialist"] = applied_to
+        reason = str(tool_input.get("reason") or "").strip()
+        if reason:
+            body["reason"] = reason
+        if context:
+            if context.request_id:
+                body["request_id"] = context.request_id
+            if context.session_id:
+                body["session_id"] = context.session_id
+        payload = await self._request_gateway_json(
+            "POST",
+            "/internal/scheduler/orchestrator-learnings",
+            json_body=body,
+        ) or {}
+        content = str(payload.get("content") or "")
+        result: dict[str, Any] = {
+            "updated": bool(payload.get("updated")),
+            "message": str(payload.get("message") or "Operational learnings updated."),
+            "content": content,
+            "learnings": payload.get("learnings") or [],
+            "bytes": int(payload.get("bytes") or len(content.encode("utf-8"))),
+            "storage": "scheduler.db",
+        }
+        if isinstance(payload.get("learning"), dict):
+            result["learning"] = payload["learning"]
+        return result
 
     async def _heartbeat_notes_via_markdown(
         self,

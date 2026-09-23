@@ -63,6 +63,7 @@ def build_agentic_system_prompt(
     visual_supported_slot_kinds: list[str] | None = None,
     trusted_ui_enabled: bool = False,
     channel: str | None = None,
+    orchestrator_learnings: str | None = None,
 ) -> str:
     now_utc = datetime.now(timezone.utc)
     date_line = f"Current date and time (UTC): {now_utc.strftime('%A, %B %d, %Y at %H:%M UTC')}."
@@ -88,6 +89,7 @@ def build_agentic_system_prompt(
         build_featured_specialists_prompt(featured_specialists),
         build_tool_prompt_catalog(featured_agent_ids, channel=channel),
         ORCHESTRATOR_POLICIES_PROMPT,
+        build_orchestrator_learnings_prompt(orchestrator_learnings),
         build_visual_response_policy_prompt(
             enabled=visual_response_enhancement_enabled,
             supported_slot_kinds=visual_supported_slot_kinds,
@@ -100,6 +102,22 @@ def build_agentic_system_prompt(
     if not context:
         return prompt
     return f"{prompt}\n\n{ORCHESTRATOR_MEMORY_AUTHORITY_INSTRUCTION}\n\n{context}"
+
+
+def build_orchestrator_learnings_prompt(rendered: str | None) -> str:
+    """Active lessons for this turn. Omitted entirely when the store has none."""
+    body = str(rendered or "").strip()
+    if not body:
+        return ""
+    return "\n".join(
+        [
+            "## Operational Learnings",
+            "",
+            "Exact lessons from earlier turns. Not memory, and not part of the nightly summary.",
+            "",
+            body,
+        ]
+    )
 
 
 def build_visual_response_policy_prompt(
