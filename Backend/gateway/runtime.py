@@ -17866,7 +17866,13 @@ class GatewayRuntime:
             if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
                 continue
             try:
-                if session_id:
+                if isinstance(adapter, DesktopAdapter) and session_id:
+                    # Live frames are the one event where stale is worthless:
+                    # latest-wins, non-blocking delivery (see offer_live_frame)
+                    # so a slow desktop link drops frames instead of stalling
+                    # this publisher — and through it the agent's frame POST.
+                    await adapter.offer_live_frame(session_id, event)
+                elif session_id:
                     await adapter.broadcast_to_session(session_id, event)
                 else:
                     await adapter.broadcast_all(event)

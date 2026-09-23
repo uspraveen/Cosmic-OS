@@ -34,6 +34,13 @@ class DesktopAdapter(ChannelAdapter):
         self._connections: dict[str, DesktopConnection] = {}
         self._primary_channel: str | None = None
         self._lock = asyncio.Lock()
+        # Live-frame latest-wins delivery: one pending slot per connection
+        # plus a pump task that sends whatever is newest. A live frame is the
+        # one event where stale is worthless — when the desktop's link is
+        # slow, dropping the backlog at this hop is correct, and blocking the
+        # publisher (and through it the agent's frame POST) is not.
+        self._live_slots: dict[str, dict[str, Any]] = {}
+        self._live_pumps: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         return
@@ -238,6 +245,7 @@ class DesktopAdapter(ChannelAdapter):
             target = self._connections.pop(channel, None)
             if self._primary_channel == channel:
                 self._primary_channel = next(iter(self._connections), None)
+            self._live_slots.pop(channel, None)
         if target is None:
             return False
         try:
@@ -245,6 +253,53 @@ class DesktopAdapter(ChannelAdapter):
         except Exception:
             pass
         return True
+
+    async def offer_live_frame(self, session_id: str, event: dict[str, Any]) -> None:
+        """Non-blocking latest-wins delivery of a browser live frame.
+
+        Stores the newest frame per desktop connection tracking this session
+        and ensures a pump task exists per connection; the pump sends only
+        the newest pending frame (stale frames are overwritten before they
+        ever reach the wire) with a bounded send, so a slow desktop link
+        drops frames here instead of blocking the publisher. Returns before
+        anything is sent.
+        """
+        async with self._lock:
+            targets = [
+                conn for conn in self._connections.values()
+                if conn.session_id == session_id
+            ]
+            for conn in targets:
+                self._live_slots[conn.channel] = event
+                if not any(
+                    isinstance(p, asyncio.Task) and p.get_name() == f"live-pump:{conn.channel}" and not p.done()
+                    for p in self._live_pumps
+                ):
+                    pump = asyncio.create_task(
+                        self._pump_live_frames(conn), name=f"live-pump:{conn.channel}"
+                    )
+                    self._live_pumps.add(pump)
+                    pump.add_done_callback(self._live_pumps.discard)
+
+    async def _pump_live_frames(self, conn: "DesktopConnection") -> None:
+        """Send at most the newest pending live frame, then exit.
+
+        Re-spawned by the next offer if more frames arrive — a quiet feed
+        costs nothing. A send that times out or fails drops the frame (the
+        receive loop owns connection-death cleanup)."""
+        while True:
+            async with self._lock:
+                event = self._live_slots.pop(conn.channel, None)
+            if event is None:
+                return
+            try:
+                await asyncio.wait_for(conn.websocket.send_json(event), timeout=1.0)
+            except Exception:
+                # Slow consumer or dead socket: drop this frame. Try the
+                # newest one once more in case the send was merely slow; if
+                # the socket is dead, that send fails too and the loop exits
+                # with the slot empty.
+                continue
 
     async def broadcast_to_session(self, session_id: str, event: dict[str, Any]) -> None:
         """Send an event to ALL desktop connections tracking the given session_id.

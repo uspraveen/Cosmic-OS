@@ -223,3 +223,88 @@ class TestBridge:
         pacing, rec = _pacing(), LiveFrameRecorder()
         _bridge(agent, JPEG_FRAME, pacing, rec)  # must not raise
         assert pacing["in_flight"] is False
+
+
+# --------------------------------------------------------------------- #
+# Gateway-side latest-wins delivery
+
+class _FakeWs:
+    """Websocket stand-in whose sends take a while — the slow-desktop-link
+    shape the pump exists for."""
+
+    def __init__(self, delay: float = 0.1) -> None:
+        self.delay = delay
+        self.sent: list[dict] = []
+
+    async def send_json(self, event: dict) -> None:
+        await asyncio.sleep(self.delay)
+        self.sent.append(event)
+
+
+class TestOfferLiveFrame:
+    def _adapter(self, delay: float = 0.1):
+        from gateway.channels.desktop import DesktopAdapter, DesktopConnection
+
+        adapter = DesktopAdapter()
+        ws = _FakeWs(delay)
+        conn = DesktopConnection(
+            channel="desktop-1",
+            device_id="d1",
+            session_id="sess-1",
+            websocket=ws,
+            connected_at="",
+            last_seen_at="",
+        )
+        adapter._connections["desktop-1"] = conn
+        return adapter, ws
+
+    def test_offer_is_non_blocking(self):
+        adapter, ws = self._adapter(delay=0.5)
+
+        async def run():
+            started = time.monotonic()
+            await adapter.offer_live_frame("sess-1", {"frame": "a"})
+            return time.monotonic() - started
+
+        elapsed = asyncio.run(run())
+        assert elapsed < 0.2  # returned long before the 0.5s send finished
+
+    def test_stale_frames_are_dropped_not_queued(self):
+        adapter, ws = self._adapter(delay=0.1)
+
+        async def run():
+            for i in range(5):
+                await adapter.offer_live_frame("sess-1", {"frame": f"f{i}"})
+            await asyncio.sleep(0.6)  # let the pump drain
+            # With a 0.1s send and five near-simultaneous offers, the pump
+            # sends a couple of frames at most — and the LAST one sent is
+            # the newest offered, never a stale one.
+            assert ws.sent, "pump delivered nothing"
+            assert ws.sent[-1]["frame"] == "f4"
+            assert len(ws.sent) <= 5
+
+        asyncio.run(run())
+
+    def test_no_matching_session_sends_nothing(self):
+        adapter, ws = self._adapter(delay=0.01)
+
+        async def run():
+            await adapter.offer_live_frame("other-session", {"frame": "x"})
+            await asyncio.sleep(0.05)
+            assert ws.sent == []
+
+        asyncio.run(run())
+
+    def test_failed_send_drops_the_frame(self):
+        adapter, ws = self._adapter(delay=0.0)
+
+        async def explode(event):
+            raise RuntimeError("socket dead")
+
+        ws.send_json = explode  # type: ignore[method-assign]
+
+        async def run():
+            await adapter.offer_live_frame("sess-1", {"frame": "x"})
+            await asyncio.sleep(0.05)
+
+        asyncio.run(run())  # must not raise; frame dropped silently

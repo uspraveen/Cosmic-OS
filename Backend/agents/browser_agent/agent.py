@@ -398,11 +398,45 @@ class BrowserAgent(AgentRuntime):
             "floor": 0.0,
             "in_flight": False,
             "durations": deque(maxlen=8),
+            # Heartbeat state: the last shipped frame and when, so a watched
+            # view keeps receiving arrivals even while the page is static
+            # (Chrome sends no screencast frame when nothing repaints — a
+            # paused game-over screen would otherwise read as a dead feed).
+            "last_frame": "",
+            "last_ship": 0.0,
         }
         live_frame_recorder = LiveFrameRecorder()
 
         async def on_live_frame(frame_b64: str) -> None:
             await self._live_frame_bridge(task, frame_b64, live_frame_pacing, live_frame_recorder)
+
+        async def live_frame_heartbeat() -> None:
+            """While someone is watching, re-ship the last frame every 2s of
+            page silence. The pixels do not change — the arrival does: it
+            proves the feed is alive and lets the desktop show 'page idle'
+            instead of looking hung. Never fatal."""
+            while True:
+                await asyncio.sleep(2.0)
+                if not live_frame_pacing.get("watching"):
+                    continue
+                last = live_frame_pacing.get("last_frame") or ""
+                if not last:
+                    continue
+                if time.monotonic() - float(live_frame_pacing.get("last_ship") or 0.0) < 2.0:
+                    continue
+                live_frame_pacing["last_ship"] = time.monotonic()
+                try:
+                    await self._http_client.post(
+                        f"{self.gateway_url.rstrip('/')}/internal/browser/live-frame",
+                        json={
+                            "task_id": task.task_id,
+                            "frame": f"data:image/jpeg;base64,{last}",
+                        },
+                        headers={"X-Internal-Token": self.gateway_internal_token},
+                        timeout=1.0,
+                    )
+                except Exception:
+                    pass
 
         # Human takeover. The session is the library's; this process only
         # relays the desktop onto it and reports the edges back.
@@ -429,6 +463,7 @@ class BrowserAgent(AgentRuntime):
         takeover_watch = asyncio.ensure_future(
             self._watch_for_takeover(task.task_id, takeover_session, live_frame_pacing)
         )
+        live_heartbeat = asyncio.ensure_future(live_frame_heartbeat())
 
         try:
             result = await self._run_goal_with_cancel_watch(
@@ -457,6 +492,10 @@ class BrowserAgent(AgentRuntime):
                 ),
             )
         except _BrowserRunCancelled:
+            # Cancelled runs get the recording too — often more than finished
+            # ones, since "why did I stop this?" is exactly the question the
+            # ring exists to answer. No run_dir on this path; fallback dir.
+            self._flush_live_recording(task, live_frame_recorder, "")
             self._record_session_run(
                 task,
                 goal=goal,
@@ -515,10 +554,12 @@ class BrowserAgent(AgentRuntime):
             # One Redis pub/sub connection per run; every exit path above
             # returns, so without this each task would leak one.
             takeover_watch.cancel()
-            try:
-                await takeover_watch
-            except (asyncio.CancelledError, Exception):
-                pass
+            live_heartbeat.cancel()
+            for watch in (takeover_watch, live_heartbeat):
+                try:
+                    await watch
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         self._post_run_usage(task, result)
 
@@ -530,15 +571,7 @@ class BrowserAgent(AgentRuntime):
         # shipped into the run directory, so post-run questions ("did the page
         # actually do X at step N?") get a scrubable recording instead of two
         # grounded stills per step. Best-effort; never blocks the result.
-        if run_dir and live_frame_recorder is not None and len(live_frame_recorder):
-            flushed = live_frame_recorder.flush(run_dir)
-            if flushed:
-                logger.info(
-                    "browser_agent.live_recording_flushed task_id=%s dir=%s frames=%s",
-                    task.task_id,
-                    flushed,
-                    len(live_frame_recorder),
-                )
+        self._flush_live_recording(task, live_frame_recorder, run_dir)
         # Anything the run offloaded to its own large-note store becomes a
         # real artifact here, and the dangling pointers the answer may carry
         # are rewritten to name it — see _persist_large_notes.
@@ -1238,6 +1271,32 @@ class BrowserAgent(AgentRuntime):
             )
             return None
 
+    def _flush_live_recording(
+        self, task: TaskEnvelope, recorder: "LiveFrameRecorder", run_dir: str
+    ) -> None:
+        """Flush the live-frame ring to disk on every run exit.
+
+        With a run_dir (normal completion) the recording lands beside the
+        run's own artifacts. Without one (cancel/failure) it lands under
+        <working_dir_root>/live_recordings/<task_id>/ — the evidence
+        survives even when the run's own result does not. Best-effort."""
+        try:
+            if recorder is None or not len(recorder):
+                return
+            target = run_dir if run_dir else str(
+                Path(self.config.working_dir_root) / "live_recordings" / task.task_id
+            )
+            flushed = recorder.flush(target)
+            if flushed:
+                logger.info(
+                    "browser_agent.live_recording_flushed task_id=%s dir=%s frames=%s",
+                    task.task_id,
+                    flushed,
+                    len(recorder),
+                )
+        except Exception:
+            logger.debug("browser_agent.live_recording_flush_failed", exc_info=True)
+
     async def _live_frame_bridge(
         self,
         task: TaskEnvelope,
@@ -1265,6 +1324,8 @@ class BrowserAgent(AgentRuntime):
         if pacing.get("in_flight"):
             return
         pacing["at"] = now
+        pacing["last_frame"] = frame_b64
+        pacing["last_ship"] = now
         recorder.add(frame_b64, time.time())
         pacing["in_flight"] = True
         started = time.monotonic()
@@ -1276,7 +1337,7 @@ class BrowserAgent(AgentRuntime):
                     "frame": f"data:image/jpeg;base64,{frame_b64}",
                 },
                 headers={"X-Internal-Token": self.gateway_internal_token},
-                timeout=5.0,
+                timeout=1.0,
             )
         except Exception:
             logger.debug("browser_agent.live_frame_send_failed task_id=%s", task.task_id, exc_info=True)

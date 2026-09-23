@@ -2544,6 +2544,24 @@ const BrowserRunCard = ({
   const runEnded = Boolean(progress.phase && progress.phase !== 'running')
   const live = streaming && !runEnded
   const isAwaitingInput = Boolean(interrupt) && localStatus === 'pending' && !runEnded
+  // Feed liveness: Chrome sends a screencast frame only when the page
+  // repaints, so a static screen (game-over, between-steps thinking) is
+  // silence — indistinguishable from a dead feed unless arrivals are
+  // tracked. The specialist heartbeats the last frame while watched, so a
+  // few seconds of silence means the page is still, not the feed is gone.
+  const [liveTick, setLiveTick] = useState(0)
+  useEffect(() => {
+    if (!live) return undefined
+    const timer = window.setInterval(() => setLiveTick(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [live])
+  const lastLiveArrivalRef = useRef(0)
+  useEffect(() => {
+    if (liveFrame) lastLiveArrivalRef.current = Date.now()
+  }, [liveFrame])
+  void liveTick
+  const feedIdle =
+    live && Boolean(liveFrame) && lastLiveArrivalRef.current > 0 && Date.now() - lastLiveArrivalRef.current > 3000
   // A finished run is not necessarily a successful one. Reaching the step
   // ceiling, or stopping short of the goal, both arrive as phase 'finished'.
   const outcome = runEnded ? resolveBrowserOutcome(progress) : null
@@ -2569,22 +2587,10 @@ const BrowserRunCard = ({
     || String(progress.description || '').trim()
     || (isAwaitingInput ? 'Paused until you answer' : live ? 'Working…' : 'Browser run finished')
 
-  // The expanded view samples the live feed instead of following it frame for
-  // frame: a full-viewport lightbox re-decoding a fresh multi-hundred-KB data
-  // URI at up to 1500px on every screencast frame is what made opening it feel
-  // like the app had hung. Still visibly live, at a fraction of the cost.
-  const frameRef = useRef(frame)
-  frameRef.current = frame
-  const [zoomFrame, setZoomFrame] = useState('')
-  useEffect(() => {
-    if (!expanded) {
-      setZoomFrame('')
-      return undefined
-    }
-    setZoomFrame(frameRef.current)
-    const timer = window.setInterval(() => setZoomFrame(frameRef.current), 700)
-    return () => window.clearInterval(timer)
-  }, [expanded])
+  // The expanded view follows the live feed directly. It used to sample the
+  // feed on a 700ms timer — a workaround for per-arrival re-render storms on
+  // a full-viewport image — but arrivals are rAF-coalesced at the root now,
+  // so sampling only added lag and a visible cadence hiccup on every tick.
 
   // Never let the lightbox become a trap. It covers the whole window, so a
   // backdrop click is not enough of an exit:
@@ -2709,12 +2715,14 @@ const BrowserRunCard = ({
   // never outlive the surface that asked for it.
   const lightboxOpen = expanded && Boolean(frame)
 
-  // Live-view watch signal: while the expanded view is actually on screen,
-  // the specialist streams at video cadence; when it closes (or the run
-  // ends) it drops back to the idle progress cadence and the link goes
-  // quiet. Edge-triggered — sent only on flips — and best-effort: a failed
-  // signal just leaves the feed at whatever cadence it was on.
-  const watching = lightboxOpen && live && Boolean(taskId) && !runEnded
+  // Live-view watch signal: while the expanded view is on screen — or the
+  // pointer is resting on the inline live view, which is how most runs get
+  // watched — the specialist streams at video cadence; otherwise it drops
+  // back to the idle progress cadence and the link goes quiet. Edge-triggered
+  // — sent only on flips — and best-effort: a failed signal just leaves the
+  // feed at whatever cadence it was on.
+  const [hoveringLive, setHoveringLive] = useState(false)
+  const watching = (lightboxOpen || hoveringLive) && live && Boolean(taskId) && !runEnded
   const lastWatchSignalSent = useRef(false)
   useEffect(() => {
     if (!taskId) return
@@ -3070,7 +3078,12 @@ const BrowserRunCard = ({
       </div>
       <div className="browser-run-body">
         {Boolean(frame) && (
-          <figure className="browser-run-viewport" onClick={() => setExpanded(true)}>
+          <figure
+            className="browser-run-viewport"
+            onClick={() => setExpanded(true)}
+            onPointerEnter={() => setHoveringLive(true)}
+            onPointerLeave={() => setHoveringLive(false)}
+          >
             {/* The live still is framed as the browser window it actually is,
                 so the URL bar carries the location instead of it being a
                 stray chip in the meta row. */}
@@ -3079,7 +3092,18 @@ const BrowserRunCard = ({
               <span className="browser-run-chrome-url" title={progress.url || ''}>
                 {displayUrl || 'opening…'}
               </span>
-              {Boolean(liveFrame) && live && <span className="browser-run-livetag">Live</span>}
+              {Boolean(liveFrame) && live && (
+                <span
+                  className="browser-run-livetag"
+                  title={
+                    feedIdle
+                      ? 'Feed alive — the page has not repainted in a few seconds (static screen or between steps)'
+                      : undefined
+                  }
+                >
+                  {feedIdle ? 'Live · page idle' : 'Live'}
+                </span>
+              )}
             </div>
             <span className="browser-run-shot">
               <img
@@ -3201,7 +3225,7 @@ const BrowserRunCard = ({
             {takeoverError && <div className="browser-run-takeover-error">{takeoverError}</div>}
             <img
               ref={frameElementRef}
-              src={zoomFrame || frame}
+              src={frame}
               alt={progress.pageTitle || 'Live browser view'}
               className="deck-preview-full"
               decoding="async"
