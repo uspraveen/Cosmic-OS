@@ -5713,7 +5713,7 @@ kbd {
   display: block;
 }
 
-.browser-run-shot img {
+.browser-run-shot canvas {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;

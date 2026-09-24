@@ -37,7 +37,7 @@ export interface TakeoverInputEvent {
 }
 
 export interface FrameGeometry {
-  /** Bounding box of the <img> element. */
+  /** Bounding box of the displayed frame element (image or canvas). */
   rect: { left: number; top: number; width: number; height: number }
   /** Intrinsic size of the frame currently painted. */
   naturalWidth: number

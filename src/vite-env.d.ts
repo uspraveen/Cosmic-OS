@@ -368,7 +368,7 @@ interface Window {
     vaultListPending: () => Promise<{ pending: any[] }>
     vaultApprovePending: (
       requestId: string,
-      payload?: { grant?: 'once' | 'window'; window_seconds?: number },
+      payload?: { grant?: 'once' | 'window' | 'always'; window_seconds?: number },
     ) => Promise<{ status: string; request?: any; entry_id?: string | null }>
     vaultRejectPending: (requestId: string) => Promise<{ status: string; request?: any }>
     vaultProvidePending: (requestId: string, payload: { username: string; password: string; totp_seed?: string; save_to_vault?: boolean }) => Promise<{ status: string; request?: any; entry_id?: string | null }>

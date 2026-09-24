@@ -1,5 +1,5 @@
 import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, KeyRound, Mail, Maximize2, Mic, Minimize2, MousePointerClick, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
-import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -37,6 +37,8 @@ import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPr
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
 import { isEditableCommitField, normalizeInterruptCommit, normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
 import { resolveBrowserLiveControls } from './browserLiveControls'
+import { createLatestFramePump, decodeBrowserFrame, paintBrowserFrame } from './browserFramePump'
+import { browserLiveFrameStore } from './browserLiveFrameStore'
 import { groupAssistantTurns } from './assistantTurnGroups'
 import { groupAssistantFlowEntries } from './assistantFlow'
 import { mergeSheetRunProgress, normalizeSheetProgress, sheetRunVisibleWindow, type SheetProgressState } from './sheetRunPreview'
@@ -49,6 +51,7 @@ import {
   previewNoticeContent,
   shouldDisplayNotice,
   shouldSurfacePendingProphet,
+  type DesktopNoticeKind,
   type LocalProphetSettlement,
 } from './desktopNotifications'
 import {
@@ -2492,17 +2495,20 @@ const BrowserStepTrack = ({
 const BrowserRunCard = ({
   progress,
   streaming = false,
-  liveFrame,
+  fallbackFrameKey = '',
 }: {
   progress: BrowserProgressState
   streaming?: boolean
-  /** Raw data: URI from the CDP screencast relay — true live video, refreshed
-   * several times a second. Preferred over progress.screenshot (a coarser
-   * step-boundary still) whenever present. */
-  liveFrame?: string
+  fallbackFrameKey?: string
 }) => {
+  const frameKey = progress.taskId || fallbackFrameKey
+  const subscribeToFrame = useCallback((listener: () => void) => browserLiveFrameStore.subscribe(frameKey, listener), [frameKey])
+  const getFrame = useCallback(() => browserLiveFrameStore.getSnapshot(frameKey), [frameKey])
+  const liveSnapshot = useSyncExternalStore(subscribeToFrame, getFrame, getFrame)
+  const liveFrame = liveSnapshot.frame
   const [expanded, setExpanded] = useState(false)
-  const [frameFailed, setFrameFailed] = useState(false)
+  const [failedFrameSource, setFailedFrameSource] = useState('')
+  const [hasPaintedFrame, setHasPaintedFrame] = useState(false)
   const [answer, setAnswer] = useState('')
   // Commit card inline corrections, keyed by field index. Only edited values
   // (different from what the card received) travel with the approval.
@@ -2534,34 +2540,25 @@ const BrowserRunCard = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestId])
 
-  useEffect(() => {
-    setFrameFailed(false)
-  }, [liveFrame, progress.screenshot?.previewUrl])
-
   // `streaming` is the whole assistant response's state; `phase` is the run's
   // own. The run almost always ends first, so everything that means "still
   // happening" keys off `live`, not off `streaming`.
   const runEnded = Boolean(progress.phase && progress.phase !== 'running')
   const live = streaming && !runEnded
   const isAwaitingInput = Boolean(interrupt) && localStatus === 'pending' && !runEnded
-  // Feed liveness: Chrome sends a screencast frame only when the page
-  // repaints, so a static screen (game-over, between-steps thinking) is
-  // silence — indistinguishable from a dead feed unless arrivals are
-  // tracked. The specialist heartbeats the last frame while watched, so a
-  // few seconds of silence means the page is still, not the feed is gone.
+  // A repeated heartbeat refreshes receivedAt without replacing painted
+  // pixels. A lack of changed frames means the page may be static; only a
+  // recent signal lets us say the feed itself is still alive.
   const [liveTick, setLiveTick] = useState(0)
   useEffect(() => {
     if (!live) return undefined
     const timer = window.setInterval(() => setLiveTick(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [live])
-  const lastLiveArrivalRef = useRef(0)
-  useEffect(() => {
-    if (liveFrame) lastLiveArrivalRef.current = Date.now()
-  }, [liveFrame])
   void liveTick
   const feedIdle =
-    live && Boolean(liveFrame) && lastLiveArrivalRef.current > 0 && Date.now() - lastLiveArrivalRef.current > 3000
+    live && Boolean(liveFrame) && liveSnapshot.changedAt > 0 && Date.now() - liveSnapshot.changedAt > 3000
+  const feedRecentlySignaled = liveSnapshot.receivedAt > 0 && Date.now() - liveSnapshot.receivedAt < 5000
   // A finished run is not necessarily a successful one. Reaching the step
   // ceiling, or stopping short of the goal, both arrive as phase 'finished'.
   const outcome = runEnded ? resolveBrowserOutcome(progress) : null
@@ -2572,8 +2569,10 @@ const BrowserRunCard = ({
   const statusKey = isAwaitingInput ? 'prepare' : outcome ? outcome.stage : live ? 'render' : 'ready'
   const tone = isAwaitingInput ? 'is-waiting' : live ? 'is-live' : 'is-done'
   const displayUrl = formatBrowserUrl(progress.url)
-  const resolvedFrame = liveFrame || progress.screenshot?.previewUrl || ''
-  const frame = frameFailed && !liveFrame ? '' : resolvedFrame
+  // Terminal progress reuses the previous step screenshot. Keep the last live
+  // frame visible; a restored transcript falls back to its persisted still.
+  const frame = liveFrame || progress.screenshot?.previewUrl || ''
+  const frameAvailable = Boolean(frame) && (hasPaintedFrame || failedFrameSource !== frame)
   const elapsedSeconds = useBrowserElapsed(progress.elapsedSec, live)
   const clock = formatBrowserClock(elapsedSeconds)
   // Only trustworthy while the run is live: on a reloaded transcript the
@@ -2589,8 +2588,8 @@ const BrowserRunCard = ({
 
   // The expanded view follows the live feed directly. It used to sample the
   // feed on a 700ms timer — a workaround for per-arrival re-render storms on
-  // a full-viewport image — but arrivals are rAF-coalesced at the root now,
-  // so sampling only added lag and a visible cadence hiccup on every tick.
+  // a full-viewport image — but arrivals are coalesced by the per-run frame
+  // store now, so sampling only added lag and a visible cadence hiccup.
 
   // Never let the lightbox become a trap. It covers the whole window, so a
   // backdrop click is not enough of an exit:
@@ -2615,7 +2614,36 @@ const BrowserRunCard = ({
   // withdraws the offer — that rule, and the chip that explains the missing
   // button, are resolved together in resolveBrowserLiveControls below.
   const takeoverAvailable = Boolean(taskId) && live
-  const frameElementRef = useRef<HTMLImageElement | null>(null)
+  const inlineFrameRef = useRef<HTMLCanvasElement | null>(null)
+  const frameElementRef = useRef<HTMLCanvasElement | null>(null)
+  const paintedFrameRef = useRef<HTMLImageElement | null>(null)
+  const framePumpRef = useRef<{ offer: (source: string) => void; stop: () => void } | null>(null)
+  const paintDecodedFrame = useCallback((image: HTMLImageElement) => {
+    paintBrowserFrame(inlineFrameRef.current, image, 448)
+    paintBrowserFrame(frameElementRef.current, image)
+    paintedFrameRef.current = image
+    setHasPaintedFrame(true)
+    setFailedFrameSource('')
+  }, [])
+  useEffect(() => {
+    const pump = createLatestFramePump(decodeBrowserFrame, paintDecodedFrame, setFailedFrameSource)
+    framePumpRef.current = pump
+    return () => {
+      pump.stop()
+      framePumpRef.current = null
+    }
+  }, [paintDecodedFrame])
+  useEffect(() => {
+    framePumpRef.current?.offer(frame)
+  }, [frame])
+  const mountInlineFrame = useCallback((canvas: HTMLCanvasElement | null) => {
+    inlineFrameRef.current = canvas
+    if (canvas && paintedFrameRef.current) paintBrowserFrame(canvas, paintedFrameRef.current, 448)
+  }, [])
+  const mountExpandedFrame = useCallback((canvas: HTMLCanvasElement | null) => {
+    frameElementRef.current = canvas
+    if (canvas && paintedFrameRef.current) paintBrowserFrame(canvas, paintedFrameRef.current)
+  }, [])
 
   useEffect(() => {
     // The run ending, or the lightbox closing, always ends the takeover here
@@ -2652,8 +2680,8 @@ const BrowserRunCard = ({
     const rect = element.getBoundingClientRect()
     return {
       rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
-      naturalWidth: element.naturalWidth,
-      naturalHeight: element.naturalHeight,
+      naturalWidth: element.width,
+      naturalHeight: element.height,
     }
   }, [])
 
@@ -2713,7 +2741,7 @@ const BrowserRunCard = ({
 
   // One condition for both the portal and its exits, so the Escape claim can
   // never outlive the surface that asked for it.
-  const lightboxOpen = expanded && Boolean(frame)
+  const lightboxOpen = expanded && frameAvailable && hasPaintedFrame
 
   // Live-view watch signal: while the expanded view is on screen — or the
   // pointer is resting on the inline live view, which is how most runs get
@@ -3077,7 +3105,7 @@ const BrowserRunCard = ({
         <span className={`docs-progress-stage ${statusKey}`}>{statusLabel}</span>
       </div>
       <div className="browser-run-body">
-        {Boolean(frame) && (
+        {frameAvailable && (
           <figure
             className="browser-run-viewport"
             onClick={() => setExpanded(true)}
@@ -3097,7 +3125,9 @@ const BrowserRunCard = ({
                   className="browser-run-livetag"
                   title={
                     feedIdle
-                      ? 'Feed alive — the page has not repainted in a few seconds (static screen or between steps)'
+                      ? feedRecentlySignaled
+                        ? 'Feed alive — the page has not repainted in a few seconds'
+                        : 'No new frames recently — the page may be still or the connection delayed'
                       : undefined
                   }
                 >
@@ -3106,14 +3136,12 @@ const BrowserRunCard = ({
               )}
             </div>
             <span className="browser-run-shot">
-              <img
-                src={frame}
-                alt={progress.pageTitle || 'Live browser view'}
-                draggable={false}
-                decoding="async"
-                // A restored transcript can carry a preview URL whose signature
-                // has expired; drop the frame rather than show a broken image.
-                onError={() => setFrameFailed(true)}
+              <canvas
+                ref={mountInlineFrame}
+                width={1280}
+                height={720}
+                role="img"
+                aria-label={progress.pageTitle || 'Live browser view'}
               />
               <span className="browser-run-expand" aria-hidden="true">
                 <Maximize2 size={13} />
@@ -3124,7 +3152,7 @@ const BrowserRunCard = ({
         <div className="browser-run-stage">
           {/* Before the first still lands there is no URL bar to carry the
               location, so it gets its own line rather than disappearing. */}
-          {!frame && Boolean(displayUrl) && (
+          {!frameAvailable && Boolean(displayUrl) && (
             <div className="browser-run-locus" title={progress.url || ''}>{displayUrl}</div>
           )}
           <div className="browser-run-action">{headline}</div>
@@ -3223,13 +3251,13 @@ const BrowserRunCard = ({
               </button>
             </div>
             {takeoverError && <div className="browser-run-takeover-error">{takeoverError}</div>}
-            <img
-              ref={frameElementRef}
-              src={frame}
-              alt={progress.pageTitle || 'Live browser view'}
+            <canvas
+              ref={mountExpandedFrame}
+              width={1280}
+              height={720}
+              role="img"
+              aria-label={progress.pageTitle || 'Live browser view'}
               className="deck-preview-full"
-              decoding="async"
-              draggable={false}
               // Pointer handlers are always attached but only produce events
               // while the run has actually parked: sending input to a browser
               // the agent is still driving would have the two fighting over the
@@ -5058,7 +5086,7 @@ const VaultPermissionActionBlock = ({ block }: { block: ResponseActionBlock }) =
       const result = kind === 'reject'
         ? await cosmicApi.vaultRejectPending!(block.requestId)
         : await cosmicApi.vaultApprovePending!(block.requestId, {
-            grant: kind,
+            grant: kind === 'approve' ? 'once' : kind,
             window_seconds: kind === 'window' ? VAULT_ALLOW_WINDOW_SECONDS : undefined,
           })
       if (String(result?.status || '').trim() === 'ignored') {
@@ -5715,9 +5743,8 @@ const AssistantAlphaStreamBody = ({
   onStopAlpha,
   browserStreaming = false,
   sheetStreaming = false,
-  browserLiveFrame,
 }: {
-  message: Pick<Message, 'content' | 'responseBlocks' | 'alphaTerminalLog' | 'alphaConsoleAnchors' | 'activityLog' | 'requestId' | 'stopped' | 'browserProgress' | 'browserConsoleAnchors' | 'sheetsProgress' | 'sheetRunAnchors'>
+  message: Pick<Message, 'content' | 'responseBlocks' | 'alphaTerminalLog' | 'alphaConsoleAnchors' | 'activityLog' | 'requestId' | 'sourceId' | 'stopped' | 'browserProgress' | 'browserConsoleAnchors' | 'sheetsProgress' | 'sheetRunAnchors'>
   onStopAlpha: (payload: { requestId?: string; taskId?: string }) => void
   /** Whether this message is the currently-streaming one — passed through to
    * BrowserRunCard for its status pill / live pulse indicator. */
@@ -5725,9 +5752,6 @@ const AssistantAlphaStreamBody = ({
   /** Same, threaded to the SheetRunCard. Kept a separate prop so the two
    * cards' liveness can drift independently if one surface ever needs it. */
   sheetStreaming?: boolean
-  /** Live CDP screencast frame for this message's browser run, if any — kept
-   * out of Message state (see browserLiveFrames), so it's threaded in here. */
-  browserLiveFrame?: string
 }) => {
   const { segments, hasAnchors } = buildAlphaStreamSegments({
     content: message.content,
@@ -5756,7 +5780,7 @@ const AssistantAlphaStreamBody = ({
           />
         )}
         {message.browserProgress && (
-          <BrowserRunCard progress={message.browserProgress} streaming={browserStreaming} liveFrame={browserLiveFrame} />
+          <BrowserRunCard progress={message.browserProgress} streaming={browserStreaming} fallbackFrameKey={message.requestId || message.sourceId || ''} />
         )}
         {message.sheetsProgress && (
           <SheetRunCard progress={message.sheetsProgress} streaming={sheetStreaming} />
@@ -5792,7 +5816,7 @@ const AssistantAlphaStreamBody = ({
               key={`browser-run-${segment.taskId || 'default'}`}
               progress={message.browserProgress}
               streaming={browserStreaming}
-              liveFrame={browserLiveFrame}
+              fallbackFrameKey={message.requestId || message.sourceId || ''}
             />
           ) : null
         }
@@ -5826,7 +5850,7 @@ const AssistantAlphaStreamBody = ({
       {/* Safety net: browserProgress exists but no anchor was stamped for it
           (segments came only from alpha anchors) — never lose the card. */}
       {message.browserProgress && !hasBrowserAnchor && (
-        <BrowserRunCard progress={message.browserProgress} streaming={browserStreaming} liveFrame={browserLiveFrame} />
+        <BrowserRunCard progress={message.browserProgress} streaming={browserStreaming} fallbackFrameKey={message.requestId || message.sourceId || ''} />
       )}
       {message.sheetsProgress && !hasSheetAnchor && (
         <SheetRunCard progress={message.sheetsProgress} streaming={sheetStreaming} />
@@ -6194,21 +6218,8 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [pendingTaskInputs, setPendingTaskInputs] = useState<PendingTaskInput[]>([])
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([])
-  // Live browser-agent screencast frames, keyed by requestId (or taskId as a
-  // fallback). Deliberately NOT part of Message/BackgroundTask state — these
-  // arrive several times a second and must never be persisted to history;
-  // BrowserRunCard falls back to the coarser step-boundary screenshot
-  // artifact (which IS part of message state) once a run stops streaming.
-  const [browserLiveFrames, setBrowserLiveFrames] = useState<Record<string, string>>({})
-  // Live frames arrive on the gateway socket and can burst far faster than
-  // the display paints. Rendering every arrival means React re-rendering the
-  // whole card tree several times between two displayed frames — the jank is
-  // the renderer, not the link. So: the ref always holds the newest frame,
-  // and one rAF-coalesced flush paints it, discarding whatever stale frames
-  // queued behind it. Latest-wins, at display rate, regardless of arrival
-  // pattern.
-  const browserLiveFramesRef = useRef<Record<string, string>>({})
-  const browserLiveFramesFlushQueued = useRef(false)
+  // Browser JPEGs live in a per-run external store. The App and transcript
+  // never rerender or persist on each incoming video frame.
   const [taskInputDrafts, setTaskInputDrafts] = useState<Record<string, string>>({})
   const [submittingTaskInputs, setSubmittingTaskInputs] = useState<Record<string, boolean>>({})
   const [backgroundTaskErrors, setBackgroundTaskErrors] = useState<Record<string, string>>({})
@@ -6753,7 +6764,7 @@ export default function App() {
   }
 
   const enqueueAssistantNotice = (value: {
-    kind: 'cron' | 'heartbeat' | 'response'
+    kind: DesktopNoticeKind
     messageId?: string | null
     requestId?: string | null
     sourceId?: string | null
@@ -8627,6 +8638,9 @@ export default function App() {
           const progressState = tabularProgress ?? docsProgress
           const incomingSlideProgress = normalizeSlideProgress(event.slide_progress ?? event.slideProgress)
           const incomingBrowserProgress = normalizeBrowserProgress(event.browser_progress ?? event.browserProgress)
+          if (incomingBrowserProgress?.phase && incomingBrowserProgress.phase !== 'running') {
+            browserLiveFrameStore.finish(incomingBrowserProgress.taskId || '')
+          }
           const incomingSheetsProgress = normalizeSheetProgress((event as any).sheets_progress ?? (event as any).sheetsProgress)
           const alphaTerminalEntry = normalizeAlphaTerminalEntry((event as any).codex_terminal)
           const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working in the background...'
@@ -8896,6 +8910,9 @@ export default function App() {
         const progressState = tabularProgress ?? docsProgress
         const incomingSlideProgress = normalizeSlideProgress(event.slide_progress ?? event.slideProgress)
         const incomingBrowserProgress = normalizeBrowserProgress(event.browser_progress ?? event.browserProgress)
+        if (incomingBrowserProgress?.phase && incomingBrowserProgress.phase !== 'running') {
+          browserLiveFrameStore.finish(incomingBrowserProgress.taskId || '')
+        }
         const incomingSheetsProgress = normalizeSheetProgress((event as any).sheets_progress ?? (event as any).sheetsProgress)
         const alphaTerminalEntry = normalizeAlphaTerminalEntry((event as any).codex_terminal)
         const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working on your request...'
@@ -9139,18 +9156,11 @@ export default function App() {
       }
 
       if (eventType === 'browser.live_frame') {
-        const key = String((event as any).request_id || (event as any).task_id || '').trim()
-        const frame = typeof (event as any).frame === 'string' ? (event as any).frame : ''
-        if (key && frame && browserLiveFramesRef.current[key] !== frame) {
-          browserLiveFramesRef.current[key] = frame
-          if (!browserLiveFramesFlushQueued.current) {
-            browserLiveFramesFlushQueued.current = true
-            requestAnimationFrame(() => {
-              browserLiveFramesFlushQueued.current = false
-              setBrowserLiveFrames({ ...browserLiveFramesRef.current })
-            })
-          }
-        }
+        browserLiveFrameStore.offer(
+          String((event as any).task_id || '').trim(),
+          String((event as any).request_id || '').trim(),
+          typeof (event as any).frame === 'string' ? (event as any).frame : '',
+        )
         return
       }
 
@@ -11096,7 +11106,7 @@ export default function App() {
                                           <BrowserRunCard
                                             progress={task.browserProgress}
                                             streaming={!task.completed && !task.failed}
-                                            liveFrame={browserLiveFrames[task.requestId || ''] || browserLiveFrames[task.taskId || '']}
+                                            fallbackFrameKey={task.requestId || task.taskId || ''}
                                           />
                                         )}
                                         {task.activity && !task.slideProgress && !task.browserProgress && task.progress?.kind !== 'docs_parse' && task.progress?.kind !== 'tabular_parse' && (
@@ -11665,7 +11675,6 @@ export default function App() {
                             onStopAlpha={handleStopAlphaAgent}
                             browserStreaming={messageIsStreaming}
                             sheetStreaming={messageIsStreaming}
-                            browserLiveFrame={browserLiveFrames[msg.requestId || ''] || browserLiveFrames[msg.sourceId || '']}
                           />
                           <AssistantMessageArtifacts
                             messageId={msg.id}
