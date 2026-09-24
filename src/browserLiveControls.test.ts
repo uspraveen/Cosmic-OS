@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveBrowserLiveControls, type BrowserLiveControlsInput } from './browserLiveControls'
+import { isBrowserRunLive, resolveBrowserLiveControls, type BrowserLiveControlsInput } from './browserLiveControls'
 
 const controls = (overrides: Partial<BrowserLiveControlsInput> = {}) =>
   resolveBrowserLiveControls({
@@ -77,5 +77,22 @@ describe('resolveBrowserLiveControls', () => {
 
   it('keeps the chip out of the collapsed card, which has its own status pill', () => {
     expect(controls({ awaitingInput: true, lightboxOpen: false }).showWaitingChip).toBe(false)
+  })
+})
+
+describe('browser run liveness', () => {
+  it('keeps an explicitly running browser available when the assistant stream moves', () => {
+    expect(isBrowserRunLive('running', false)).toBe(true)
+  })
+
+  it('withdraws takeover on every terminal browser phase even while the assistant writes', () => {
+    for (const phase of ['finished', 'failed', 'cancelled'] as const) {
+      expect(isBrowserRunLive(phase, true)).toBe(false)
+    }
+  })
+
+  it('uses assistant streaming only for older progress without a phase', () => {
+    expect(isBrowserRunLive(undefined, true)).toBe(true)
+    expect(isBrowserRunLive(undefined, false)).toBe(false)
   })
 })

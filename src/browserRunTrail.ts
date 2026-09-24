@@ -26,6 +26,8 @@ export interface BrowserRunProgressLike {
    * that omits it must not leave the card unable to address the run it is
    * showing (pause, resume and takeover input all need it). */
   taskId?: string | null
+  /** A partial patch must not make an active or terminal run lose its phase. */
+  phase?: 'running' | 'finished' | 'failed' | 'cancelled'
 }
 
 /** Enough history for the card (which shows three) plus room to re-render
@@ -71,6 +73,12 @@ export const mergeBrowserRunProgress = <T extends BrowserRunProgressLike>(
   if (!previous) {
     return incoming
   }
+  const sameRun = !previous.taskId || !incoming.taskId || previous.taskId === incoming.taskId
+  const priorPhase = sameRun ? previous.phase : undefined
+  // A delayed running snapshot cannot reopen controls after this task ended.
+  const phase = priorPhase && priorPhase !== 'running' && incoming.phase === 'running'
+    ? priorPhase
+    : incoming.phase ?? priorPhase
   const previousText = cleanText(previous.description)
   const previousStep = cleanStep(previous.step)
   const movedOn = previousText !== cleanText(incoming.description) || previousStep !== cleanStep(incoming.step)
@@ -86,5 +94,6 @@ export const mergeBrowserRunProgress = <T extends BrowserRunProgressLike>(
     trail: trail.length > 0 ? trail : undefined,
     screenshot: incoming.screenshot ?? previous.screenshot ?? null,
     taskId: incoming.taskId ?? previous.taskId,
+    phase,
   } as T
 }

@@ -130,3 +130,34 @@ describe('mergeBrowserRunProgress: run identity', () => {
     expect(merged?.taskId).toBe('task-2')
   })
 })
+
+describe('mergeBrowserRunProgress: phase', () => {
+  it('keeps the lifecycle marker through a partial patch for the same run', () => {
+    const merged = mergeBrowserRunProgress(
+      { taskId: 'task-1', phase: 'running' as const, description: 'Browsing' },
+      { taskId: 'task-1', description: 'Waiting for user' },
+    )
+    expect(merged?.phase).toBe('running')
+    const terminal = mergeBrowserRunProgress(
+      { taskId: 'task-1', phase: 'finished' as const, description: 'Done' },
+      { description: 'Mirrored progress' },
+    )
+    expect(terminal?.phase).toBe('finished')
+  })
+
+  it('does not reopen a finished run after a delayed running snapshot', () => {
+    const merged = mergeBrowserRunProgress(
+      { taskId: 'task-1', phase: 'finished' as const, description: 'Done' },
+      { taskId: 'task-1', phase: 'running' as const, description: 'Stale step' },
+    )
+    expect(merged?.phase).toBe('finished')
+  })
+
+  it('does not carry a previous run phase into a different browser task', () => {
+    const merged = mergeBrowserRunProgress(
+      { taskId: 'task-1', phase: 'finished' as const, description: 'Done' },
+      { taskId: 'task-2', description: 'Opening page' },
+    )
+    expect(merged?.phase).toBeUndefined()
+  })
+})

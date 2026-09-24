@@ -36,7 +36,7 @@ import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
 import { isEditableCommitField, normalizeInterruptCommit, normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
-import { resolveBrowserLiveControls } from './browserLiveControls'
+import { isBrowserRunLive, resolveBrowserLiveControls } from './browserLiveControls'
 import { createLatestFramePump, decodeBrowserFrame, paintBrowserFrame } from './browserFramePump'
 import { browserLiveFrameStore } from './browserLiveFrameStore'
 import { groupAssistantTurns } from './assistantTurnGroups'
@@ -489,12 +489,9 @@ interface BrowserProgressState {
   elapsedSec?: number | null
   screenshot?: BrowserProgressScreenshot | null
   interrupt?: BrowserProgressInterrupt | null
-  /** Terminal marker stamped by the agent when the run itself ends. The card
-   * cannot infer this from `streaming`, which tracks the whole assistant
-   * response — the orchestrator keeps writing long after its specialist
-   * finished, which left the card reading "Running" with a live clock while
-   * the answer was already on screen. Absent on runs that predate it, which
-   * simply falls back to the old streaming-only behaviour. */
+  /** Browser-agent lifecycle: running during the specialist run, then a
+   * terminal phase. The assistant message can stream before and after the
+   * browser run; older progress without a phase uses that stream as a fallback. */
   phase?: 'running' | 'finished' | 'failed' | 'cancelled'
   /** The agent's own verdict on the run. A run that ends is not a run that
    * succeeded: `incomplete` and `step_budget_exhausted` both arrive with
@@ -2540,11 +2537,11 @@ const BrowserRunCard = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestId])
 
-  // `streaming` is the whole assistant response's state; `phase` is the run's
-  // own. The run almost always ends first, so everything that means "still
-  // happening" keys off `live`, not off `streaming`.
+  // The specialist owns the run lifecycle. The assistant can move its
+  // stream to another message while this browser run is still active.
+  // Older progress without a phase retains its former streaming fallback.
   const runEnded = Boolean(progress.phase && progress.phase !== 'running')
-  const live = streaming && !runEnded
+  const live = isBrowserRunLive(progress.phase, streaming)
   const isAwaitingInput = Boolean(interrupt) && localStatus === 'pending' && !runEnded
   // A repeated heartbeat refreshes receivedAt without replacing painted
   // pixels. A lack of changed frames means the page may be static; only a
@@ -2610,9 +2607,8 @@ const BrowserRunCard = ({
   const runPaused = progress.takeover === 'active'
   const [driving, setDriving] = useState(false)
   const [takeoverError, setTakeoverError] = useState('')
-  // Whether the run can be addressed at all. A pending interrupt then
-  // withdraws the offer — that rule, and the chip that explains the missing
-  // button, are resolved together in resolveBrowserLiveControls below.
+  // The run must still be active and addressable. A pending question keeps
+  // takeover available; the expanded card shows its waiting chip alongside it.
   const takeoverAvailable = Boolean(taskId) && live
   const inlineFrameRef = useRef<HTMLCanvasElement | null>(null)
   const frameElementRef = useRef<HTMLCanvasElement | null>(null)
@@ -3207,9 +3203,8 @@ const BrowserRunCard = ({
                 {progress.pageTitle || displayUrl || 'Live browser view'}
               </span>
               <div className="browser-run-lightbox-actions">
-                {/* Stands where Take control would be: a pending question is
-                    what withdrew it, so the rail says so instead of quietly
-                    losing a button over a page that has stopped moving. */}
+                {/* A pending question stays visible beside Take control so
+                    the user can answer it while the page is expanded. */}
                 {showWaitingChip && (
                   <span className="browser-run-ask-chip">
                     <Shield size={12} aria-hidden="true" />
@@ -5746,8 +5741,8 @@ const AssistantAlphaStreamBody = ({
 }: {
   message: Pick<Message, 'content' | 'responseBlocks' | 'alphaTerminalLog' | 'alphaConsoleAnchors' | 'activityLog' | 'requestId' | 'sourceId' | 'stopped' | 'browserProgress' | 'browserConsoleAnchors' | 'sheetsProgress' | 'sheetRunAnchors'>
   onStopAlpha: (payload: { requestId?: string; taskId?: string }) => void
-  /** Whether this message is the currently-streaming one — passed through to
-   * BrowserRunCard for its status pill / live pulse indicator. */
+  /** Assistant streaming is only a fallback for older browser progress
+   * without an explicit lifecycle phase. */
   browserStreaming?: boolean
   /** Same, threaded to the SheetRunCard. Kept a separate prop so the two
    * cards' liveness can drift independently if one surface ever needs it. */

@@ -16,22 +16,27 @@
  *    no longer stands in for a withdrawn button: Take control stays available
  *    while a question is pending, because questions are exactly when hands on
  *    the page matter (solve this CAPTCHA, finish this login). The run is
- *    already paused by the question; arming a takeover is not asking it to
- *    pause twice.
- *  - takeover suppression and the chip that explains it are one decision, not
- *    two that can drift apart.
+ *    waiting for an answer; takeover queues the handoff at its next safe
+ *    step. The button and waiting chip are resolved together here.
  */
 
 /** Where the interrupt card is mounted for the current view state. */
 export type BrowserAskPlacement = 'none' | 'inline' | 'docked'
+
+/** The browser agent owns this lifecycle. Older stored runs have no phase, so
+ * they retain the assistant-stream fallback until a terminal marker arrives. */
+export const isBrowserRunLive = (
+  phase: 'running' | 'finished' | 'failed' | 'cancelled' | undefined,
+  assistantStreaming: boolean,
+): boolean => phase === 'running' || (phase === undefined && assistantStreaming)
 
 export interface BrowserLiveControlsInput {
   /** An interrupt is on screen and still unanswered. */
   awaitingInput: boolean
   /** The expanded (lightbox) view is actually painted, not merely requested. */
   lightboxOpen: boolean
-  /** Takeover is possible at all: a live run with an addressable task id.
-   * Whether a pending interrupt then withdraws it is decided here. */
+  /** Takeover is possible: an active run with an addressable task id.
+   * A pending interrupt does not withdraw the button. */
   takeoverAvailable: boolean
   /** This client has asked for the wheel, or already holds it. */
   driving: boolean

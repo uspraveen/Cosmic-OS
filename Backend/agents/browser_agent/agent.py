@@ -361,7 +361,7 @@ class BrowserAgent(AgentRuntime):
         # task_id rides along so the desktop card can address pause/resume and
         # input back at this exact run. Without it the card can render a run
         # but has no way to talk to one.
-        live_state: dict[str, Any] = {"task_id": task.task_id}
+        live_state: dict[str, Any] = {"task_id": task.task_id, "phase": "running"}
         # Every AskUser question this run makes, with its outcome — surfaced
         # to the orchestrator in the final result (see `user_interrupts`
         # below) so it has full knowledge of what its specialist needed from
