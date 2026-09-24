@@ -10697,7 +10697,9 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                  <div className="task-interrupt-preview cron-result-preview">{notification.content}</div>
+                  <div className="task-interrupt-preview cron-result-preview">
+                    <span className="cron-result-preview-text">{notification.content}</span>
+                  </div>
                   <div className="task-interrupt-actions">
                     <button
                       type="button"

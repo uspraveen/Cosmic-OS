@@ -1407,12 +1407,6 @@ kbd {
   color: rgba(255, 248, 236, 0.96);
 }
 
-.cron-result-preview {
-  min-height: 72px;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-}
-
 .artifact-ready-card {
   pointer-events: auto;
 }
@@ -1638,6 +1632,26 @@ kbd {
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* Clamp the notice excerpt on an inner node. Padding on the same element
+   as the clamp lets the next line paint into the padding and get sliced
+   off. Height follows the copy: one line when it fits, two when it does not. */
+.task-interrupt-preview.cron-result-preview {
+  display: block;
+  min-height: 0;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  -webkit-box-orient: unset;
+}
+
+.cron-result-preview-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  max-height: calc(2 * 1.45em);
 }
 
 .task-interrupt-actions {
