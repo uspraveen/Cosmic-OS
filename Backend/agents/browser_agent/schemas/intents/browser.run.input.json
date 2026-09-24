@@ -13,6 +13,10 @@
       "type": "string",
       "description": "Optional URL to open before planning. Omit to let the agent navigate itself."
     },
+    "user_timezone": {
+      "type": "string",
+      "description": "IANA timezone copied from the parent task for browser decision context."
+    },
     "max_steps": {
       "type": "integer",
       "minimum": 1,

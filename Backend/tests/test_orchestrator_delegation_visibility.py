@@ -50,6 +50,26 @@ def _parent_task() -> TaskEnvelope:
     return task.model_copy(update={"signature": sign_task_envelope(task, "signing-secret")})
 
 
+@pytest.mark.asyncio
+async def test_browser_dispatch_forwards_parent_timezone_not_model_input() -> None:
+    captured: dict = {}
+
+    async def capture_dispatch(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    parent = _parent_task().model_copy(update={
+        "input": {"query": "find a job", "user_timezone": "America/Chicago"},
+    })
+    executor = ToolExecutor()
+    executor._dispatch_specialist_agent = capture_dispatch
+    await executor._browser_task(
+        {"goal": "Find a job", "user_timezone": "Asia/Tokyo"},
+        context=ToolExecutionContext(parent_task=parent, session_id="sess_parent"),
+    )
+    assert captured["payload"]["user_timezone"] == "America/Chicago"
+
+
 # ── a dispatch that never reaches an agent ──────────────────────────────────
 
 

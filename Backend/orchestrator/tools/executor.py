@@ -1968,6 +1968,12 @@ class ToolExecutor:
         if not goal:
             return {"error": True, "message": "goal is required"}
         payload: dict[str, Any] = {"goal": goal}
+        # The gateway already gives the parent task the user's IANA timezone.
+        # Forward it as trusted task context, not as a model-chosen tool argument.
+        parent_input = context.parent_task.input if context and context.parent_task else {}
+        user_timezone = str(parent_input.get("user_timezone") or "").strip()
+        if user_timezone:
+            payload["user_timezone"] = user_timezone
         initial_url = str(tool_input.get("initial_url") or "").strip()
         if initial_url:
             payload["initial_url"] = initial_url

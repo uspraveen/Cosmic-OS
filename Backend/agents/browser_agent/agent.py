@@ -317,6 +317,7 @@ class BrowserAgent(AgentRuntime):
             return self._failed("INVALID_INPUT", "browser.run requires a goal.")
 
         initial_url = str(task.input.get("initial_url") or "").strip() or None
+        user_timezone = str(task.input.get("user_timezone") or "").strip() or None
         memory_mode = str(task.input.get("memory_mode") or "off").strip().lower()
         if memory_mode not in {"off", "learn", "recall", "auto"}:
             memory_mode = "off"
@@ -471,6 +472,7 @@ class BrowserAgent(AgentRuntime):
                 run_goal(
                     goal,
                     initial_url=initial_url,
+                    user_timezone=user_timezone,
                     max_steps=max_steps,
                     max_step_extensions=max_step_extensions,
                     step_extension_size=step_extension_size,
