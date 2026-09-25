@@ -10518,9 +10518,6 @@ export default function App() {
   // while one is live (it is the only one blocking a turn), and the
   // ready-result cards reserve their slots above it.
   const noticeShellsBase = (searchState === 'visible' ? 112 : 24) + (shouldShowAskNotice ? 148 : 0)
-  const cronResultShellStyle = {
-    ['--cron-result-bottom' as string]: `${noticeShellsBase}px`,
-  } as React.CSSProperties
   const shouldShowArtifactReadySurface =
     orderedArtifactReadyNotifications.length > 0 &&
     (
@@ -10528,10 +10525,8 @@ export default function App() {
       mode !== 'chat' ||
       showLauncherTray
     )
-  const artifactReadyShellStyle = {
-    ['--artifact-ready-bottom' as string]: shouldShowCronResultSurface
-      ? `${noticeShellsBase + 312}px`
-      : `${noticeShellsBase}px`,
+  const desktopNoticeColumnStyle = {
+    ['--desktop-notice-bottom' as string]: `${noticeShellsBase}px`,
   } as React.CSSProperties
   const effectivePosition = mode === 'spaces' ? 'bottom' : (messages.length > 0 || mode === 'task') ? 'bottom' : searchPosition
   const overlayClass = [
@@ -10631,8 +10626,10 @@ export default function App() {
         />
       )}
 
+      {(shouldShowCronResultSurface || shouldShowArtifactReadySurface) && (
+        <div className="desktop-notice-column" style={desktopNoticeColumnStyle}>
       {shouldShowCronResultSurface && (
-        <div className="cron-result-shell" style={cronResultShellStyle}>
+        <div className="cron-result-shell">
           <div
             ref={cronResultStackRef}
             className="cron-result-stack"
@@ -10759,7 +10756,7 @@ export default function App() {
       )}
 
       {shouldShowArtifactReadySurface && (
-        <div className="artifact-ready-shell" style={artifactReadyShellStyle}>
+        <div className="artifact-ready-shell">
           <div className="artifact-ready-stack" role="list" aria-label={`${orderedArtifactReadyNotifications.length} file result${orderedArtifactReadyNotifications.length === 1 ? '' : 's'} ready`}>
             {orderedArtifactReadyNotifications.map((notification) => {
               return (
@@ -10837,6 +10834,8 @@ export default function App() {
               )
             })}
           </div>
+        </div>
+      )}
         </div>
       )}
 

@@ -1328,6 +1328,31 @@ kbd {
   text-transform: uppercase;
 }
 
+.desktop-notice-column {
+  position: fixed;
+  right: 24px;
+  bottom: var(--desktop-notice-bottom, 24px);
+  width: min(340px, calc(100vw - 32px));
+  max-height: calc(100vh - var(--desktop-notice-bottom, 24px) - 16px);
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-start;
+  align-items: stretch;
+  gap: 12px;
+  pointer-events: none;
+  z-index: 9104;
+}
+
+.desktop-notice-column > .cron-result-shell,
+.desktop-notice-column > .artifact-ready-shell {
+  position: relative;
+  inset: auto;
+  max-height: none;
+  width: 100%;
+  flex: 0 0 auto;
+  z-index: auto;
+}
+
 .cron-result-shell {
   position: fixed;
   right: 24px;
@@ -1375,9 +1400,13 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  overflow-y: auto;
-  scrollbar-width: none;
+  overflow: visible;
   pointer-events: auto;
+}
+
+.artifact-ready-stack > .task-interrupt-glass {
+  flex: 0 0 auto;
+  height: auto;
 }
 
 .artifact-ready-stack::-webkit-scrollbar {
@@ -1432,6 +1461,12 @@ kbd {
   font-weight: 600;
   color: rgba(244, 247, 255, 0.94);
   letter-spacing: -0.01em;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  max-height: calc(2 * 1.45em);
 }
 
 .artifact-ready-list {
@@ -1652,6 +1687,22 @@ kbd {
   line-clamp: 2;
   overflow: hidden;
   max-height: calc(2 * 1.45em);
+}
+
+/* File toasts share the padded preview box. Leave the clamp on the
+   filename summary only, so a third line cannot paint through the padding
+   and the per-file rows underneath are not sliced into that same box. */
+.task-interrupt-preview.artifact-ready-preview {
+  display: block;
+  min-height: 0;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  -webkit-box-orient: unset;
+  overflow: hidden;
+}
+
+.artifact-ready-preview > .artifact-ready-list {
+  display: none;
 }
 
 .task-interrupt-actions {
