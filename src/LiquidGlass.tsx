@@ -9,7 +9,7 @@ interface LiquidGlassProps {
   visualTone?: 'default' | 'stealth'
   /** Override the deep-glass layer's background (see glassTones.ts). */
   bodyBackground?: string
-  /** Override the deep-glass layer's backdrop filter. */
+  /** Optional backdrop filter override (omitted by default to avoid transparent window compositor artifacts on Windows). */
   bodyBackdropFilter?: string
 }
 
@@ -54,9 +54,6 @@ export default function LiquidGlass({
       style={{
         position: 'relative',
         borderRadius: cornerRadius,
-        // A transform here makes Chromium paint the blur as a square behind
-        // the rounded corners. Notice cards never tilt, so they stay flat.
-        // The drop shadow lives here so the blur's clip does not square it off.
         boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.6)',
         ...(disableTilt
           ? {}
@@ -70,12 +67,10 @@ export default function LiquidGlass({
         ...style
       }}
     >
-      {/* 1-2. Deep Glass Body + Specular, clipped by a rounded PARENT.
-          Chromium paints a backdrop-filter layer as a rectangle and ignores
-          the blur element's own border-radius / clip-path / overflow once
-          that layer is composited — the square behind the round card. The
-          only clip that survives compositing is a rounded overflow clip on
-          an ANCESTOR, so the blur (and the blend layer) live inside one. */}
+      {/* 1-2. Glass fill + specular, inside a rounded clip.
+          No backdrop-filter by default. On a transparent Windows window that blur is a
+          native rectangle, and neither border-radius nor a parent overflow
+          clip can cut it — the light gray square behind the round card. */}
       <div
         style={{
           position: 'absolute',
@@ -90,19 +85,24 @@ export default function LiquidGlass({
             inset: 0,
             borderRadius: cornerRadius,
             clipPath: `inset(0 round ${cornerRadius}px)`,
+            WebkitClipPath: `inset(0 round ${cornerRadius}px)`,
             background: bodyBackground
               ? bodyBackground
               : stealth
-                ? 'rgba(10, 10, 12, 0.74)'
-                : 'rgba(20, 20, 22, 0.6)', // Deep dark tint
-            backdropFilter: bodyBackdropFilter ?? 'blur(32px) saturate(220%)', // Heavy blur + high saturation for "liquid" feel
-            WebkitBackdropFilter: bodyBackdropFilter ?? 'blur(32px) saturate(220%)',
+                ? 'rgba(10, 10, 12, 0.92)'
+                : 'rgba(22, 24, 28, 0.9)',
+            ...(bodyBackdropFilter
+              ? {
+                  backdropFilter: bodyBackdropFilter,
+                  WebkitBackdropFilter: bodyBackdropFilter,
+                }
+              : {}),
             boxShadow: `
             inset 0 1px 1px 0 ${stealth ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.2)'},
             inset 0 -1px 1px 0 rgba(0, 0, 0, 0.4),
             inset 0 0 20px 0 rgba(0, 0, 0, 0.2)
           `,
-            border: stealth ? '1px solid rgba(255, 255, 255, 0.05)' : '1px solid rgba(255, 255, 255, 0.08)' // Subtle physical border
+            border: stealth ? '1px solid rgba(255, 255, 255, 0.05)' : '1px solid rgba(255, 255, 255, 0.08)'
           }}
         />
 
@@ -124,24 +124,25 @@ export default function LiquidGlass({
                 135deg, 
                 rgba(255, 255, 255, 0.15) 0%, 
                 rgba(255, 255, 255, 0.02) 20%, 
-                rgba(255, 255, 255, 0.0) 50%,
-                rgba(255, 255, 255, 0.02) 80%,
+                rgba(255, 255, 255, 0.0) 50%, 
+                rgba(255, 255, 255, 0.02) 80%, 
                 rgba(255, 255, 255, 0.08) 100%
               )`,
             pointerEvents: 'none',
             mixBlendMode: 'overlay'
           }}
         />
-      </div>
 
-      {/* 3. Rim Light / Caustics (The "3D Edge" Pop) */}
+      {/* Rim stays inside the rounded clip and carries its own clipPath
+          so a rectangular XOR mask cannot paint unclipped pixels past the corners. */}
       <div
         style={{
           position: 'absolute',
-          inset: -1, // Sits slightly outside to hug the curve
-          borderRadius: cornerRadius + 1,
-          clipPath: `inset(0 round ${cornerRadius + 1}px)`,
-          padding: 1.5, // Thickness of the rim
+          inset: 0,
+          borderRadius: cornerRadius,
+          clipPath: `inset(0 round ${cornerRadius}px)`,
+          WebkitClipPath: `inset(0 round ${cornerRadius}px)`,
+          padding: 1.5,
           background: stealth
             ? `linear-gradient(
                 ${140 + (tiltX * 10)}deg,
@@ -167,6 +168,7 @@ export default function LiquidGlass({
           opacity: stealth ? 0.46 : 0.9
         }}
       />
+      </div>
 
       {/* 4. Top "Curved" Shine (Simulates convex top edge) */}
       <div 

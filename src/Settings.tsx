@@ -14,7 +14,7 @@ import {
 } from 'lucide-react'
 import { CursorMark, OpenAIMark, OpenCodeMark, ZCodeMark } from './brandIcons'
 import LiquidGlass from './LiquidGlass'
-import { SPACES_BLACK_GLASS_BACKGROUND, SPACES_BLACK_GLASS_BACKDROP } from './glassTones'
+import { SPACES_BLACK_GLASS_BACKGROUND } from './glassTones'
 import MonitorSelector from './MonitorSelector'
 import ApiConfiguration from './ApiConfiguration'
 import GoogleIntegrationsSettings from './GoogleIntegrationsSettings'
@@ -338,7 +338,6 @@ export default function Settings({
         <LiquidGlass
           cornerRadius={20}
           bodyBackground={SPACES_BLACK_GLASS_BACKGROUND}
-          bodyBackdropFilter={SPACES_BLACK_GLASS_BACKDROP}
         >
           <div className="settings-content">
             <div className="settings-header">
