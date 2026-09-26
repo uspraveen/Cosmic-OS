@@ -1537,6 +1537,13 @@ kbd {
   pointer-events: auto;
 }
 
+/* The notice carousels scroll on x, which clips y too. An outer shadow gets
+   cut to the card's rectangle and shows as a gray square at the corners. */
+.task-interrupt-glass.glass-root {
+  box-shadow: none !important;
+  filter: none !important;
+}
+
 .task-interrupt-card {
   width: 100%;
   padding: 18px 18px 16px;
