@@ -1538,6 +1538,11 @@ class ProphetStore:
     ) -> dict[str, Any]:
         now = utcnow_iso()
         with self._lock, closing(self._connect()) as connection:
+            # A republish of a paper the user already opened, ignored, or
+            # snoozed is a new paper. Re-arm it with a fresh id so the
+            # desktop raises another "Daily Prophet ready" card. A card that
+            # is still pending or delivered keeps its id, so retries inside
+            # one run do not stack extra cards.
             connection.execute(
                 """
                 INSERT INTO prophet_notifications (
@@ -1546,9 +1551,39 @@ class ProphetStore:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 ON CONFLICT(edition_id) DO UPDATE SET
+                    notification_id = CASE
+                        WHEN prophet_notifications.state IN ('opened', 'ignored', 'snoozed')
+                        THEN excluded.notification_id
+                        ELSE prophet_notifications.notification_id
+                    END,
                     headline = excluded.headline,
                     story_count = excluded.story_count,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    state = CASE
+                        WHEN prophet_notifications.state IN ('opened', 'ignored', 'snoozed')
+                        THEN 'pending'
+                        ELSE prophet_notifications.state
+                    END,
+                    opened_at = CASE
+                        WHEN prophet_notifications.state IN ('opened', 'ignored', 'snoozed')
+                        THEN NULL
+                        ELSE prophet_notifications.opened_at
+                    END,
+                    delivered_at = CASE
+                        WHEN prophet_notifications.state IN ('opened', 'ignored', 'snoozed')
+                        THEN NULL
+                        ELSE prophet_notifications.delivered_at
+                    END,
+                    snoozed_until = CASE
+                        WHEN prophet_notifications.state IN ('opened', 'ignored', 'snoozed')
+                        THEN NULL
+                        ELSE prophet_notifications.snoozed_until
+                    END,
+                    state_reason = CASE
+                        WHEN prophet_notifications.state IN ('opened', 'ignored', 'snoozed')
+                        THEN NULL
+                        ELSE prophet_notifications.state_reason
+                    END
                 """,
                 (
                     f"pnote_{uuid4().hex[:12]}",

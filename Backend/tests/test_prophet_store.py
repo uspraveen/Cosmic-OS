@@ -671,6 +671,36 @@ def test_notification_upsert_on_republish(tmp_path: Path) -> None:
     )
     assert note['notification_id'] == note2['notification_id']
     assert note2['headline'] == 'Updated headline'
+    assert note2['state'] == 'pending'
+
+
+def test_republish_rearms_a_settled_notification(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    published = store.publish_edition(_edition())
+    note = store.create_notification_for_edition(
+        edition_id=published['edition_id'],
+        edition_date='2026-09-11',
+        slot='morning',
+        headline='Original',
+        story_count=5,
+    )
+    opened = store.mark_notification_state(note['notification_id'], state='opened', reason='desktop_open')
+    assert opened is not None
+    assert store.list_pending_notifications(edition_date='2026-09-11') == []
+
+    refreshed = store.create_notification_for_edition(
+        edition_id=published['edition_id'],
+        edition_date='2026-09-11',
+        slot='morning',
+        headline='Fresh evening lead',
+        story_count=8,
+    )
+    assert refreshed['notification_id'] != note['notification_id']
+    assert refreshed['state'] == 'pending'
+    assert refreshed['headline'] == 'Fresh evening lead'
+    assert refreshed['opened_at'] is None
+    pending = store.list_pending_notifications(edition_date='2026-09-11')
+    assert [item['notification_id'] for item in pending] == [refreshed['notification_id']]
 
 
 def test_publish_slot_kwarg_overrides_payload_and_keeps_editions_apart(tmp_path: Path) -> None:
