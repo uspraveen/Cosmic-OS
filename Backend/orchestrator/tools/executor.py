@@ -594,7 +594,7 @@ class ToolExecutor:
             if permission_payload.get("auto_approved") and isinstance(
                 permission_payload.get("result"), dict
             ):
-                return permission_payload["result"]
+                return self._note_agent_email_deliverables(permission_payload["result"], context)
             permission_id = str(permission_payload["permission_id"]).strip()
             receipt = build_sandbox_permission_receipt(
                 permission_id=permission_id,
@@ -630,7 +630,7 @@ class ToolExecutor:
             host_write_paths=tuple(capabilities.get("host_write_paths") or ()),
             allowed_hosts=tuple(capabilities.get("allowed_hosts") or ()),
         )
-        return run_local_code_sandbox(
+        result = run_local_code_sandbox(
             code=code,
             artifacts_root=self.artifacts_root,
             task_id=task_id,
@@ -639,6 +639,36 @@ class ToolExecutor:
             timeout_sec=timeout_sec,
             settings=grant_settings,
         )
+        return self._note_agent_email_deliverables(result, context)
+
+    @staticmethod
+    def _note_agent_email_deliverables(
+        result: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> dict[str, Any]:
+        """Tell the model a sandbox file is already the email attachment.
+
+        The gateway attaches deliverable files on an agent-email turn. Without
+        this sentence the model treats a later resolve miss as a failed send
+        and writes that into the reply.
+        """
+        channel = context.channel if context and context.channel else None
+        if not channel and context and context.parent_task:
+            channel = context.parent_task.channel
+        if not channel_is_agent_email(channel):
+            return result
+        artifacts = result.get("artifacts")
+        if not isinstance(artifacts, list) or not artifacts:
+            return result
+        note = (
+            " These files are deliverable on this response. On this agent-email turn the gateway "
+            "attaches them to the finished answer. Do not draft or send them through the email "
+            "specialist or Alpha, and do not tell the user they failed to attach if a later resolve fails."
+        )
+        updated = dict(result)
+        updated["message"] = (str(result.get("message") or "").rstrip() + note).strip()
+        updated["agent_email_attachments"] = True
+        return updated
 
     @staticmethod
     def _sandbox_permission_presentation_contract(
@@ -1286,12 +1316,33 @@ class ToolExecutor:
                 "artifact_id": artifact_id,
                 "message": str(payload.get("message") or "Artifact could not be re-delivered."),
             }
+        channel = context.channel if context and context.channel else None
+        if not channel and context and context.parent_task:
+            channel = context.parent_task.channel
+        on_agent_email = channel_is_agent_email(channel)
+        surfaced: list[dict[str, Any]] = []
+        for item in artifacts:
+            if not isinstance(item, dict):
+                continue
+            copy = dict(item)
+            copy["audience"] = str(copy.get("audience") or "").strip() or "deliverable"
+            copy["downloadable"] = True
+            surfaced.append(copy)
+        filename = str(surfaced[0].get("filename") or artifact_id).strip() if surfaced else artifact_id
+        message = (
+            f"Re-surfaced {filename} on this response. audience=deliverable, downloadable=true."
+        )
+        if on_agent_email:
+            message += (
+                " On this agent-email turn the gateway attaches it to the finished answer. "
+                "Do not call the email specialist or Alpha to attach it, and do not tell the user the attachment failed."
+            )
         return {
             "found": True,
             "artifact_id": artifact_id,
-            "count": len(artifacts),
-            "message": "Previous produced file re-surfaced.",
-            "artifacts": artifacts,
+            "count": len(surfaced),
+            "message": message,
+            "artifacts": surfaced,
         }
 
     async def _artifact_read(

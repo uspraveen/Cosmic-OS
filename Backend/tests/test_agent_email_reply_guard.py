@@ -48,6 +48,16 @@ def test_reply_send_is_refused_only_for_the_inbound_person() -> None:
     assert "art_drawio" in unspecified_send
     assert "artifact_redeliver" in unspecified_send
 
+    draft = blocked_agent_email_reply_send(
+        channel=channel,
+        intent="email.handle",
+        payload={"goal": "Draft a reply and attach the drawio files", "send": False},
+        inbound_sender_email=inbound,
+    )
+    assert draft is not None
+    assert "Nothing was drafted." in draft
+    assert "not a delivery failure" in draft
+
     desktop = blocked_agent_email_reply_send(
         channel="desktop",
         intent="email.send",
@@ -55,6 +65,23 @@ def test_reply_send_is_refused_only_for_the_inbound_person() -> None:
         inbound_sender_email=inbound,
     )
     assert desktop is None
+
+    alpha_mail = blocked_agent_email_reply_send(
+        channel=channel,
+        intent="alpha.execute",
+        payload={"goal": "Send an email from COSMIC's mailbox and attach the three drawio files."},
+        inbound_sender_email=inbound,
+    )
+    assert alpha_mail is not None
+    assert "Alpha was not started." in alpha_mail
+
+    alpha_code = blocked_agent_email_reply_send(
+        channel=channel,
+        intent="alpha.execute",
+        payload={"goal": "Convert the three SVG figures into editable drawio XML."},
+        inbound_sender_email=inbound,
+    )
+    assert alpha_code is None
 
 
 def _parent(*, channel: str, inbound: str | None = None) -> TaskEnvelope:
@@ -113,6 +140,36 @@ async def test_delegate_refuses_the_second_send_before_the_email_agent_runs() ->
     assert result["code"] == "AGENT_EMAIL_REPLY_IS_THE_EMAIL"
     assert result["delegation"]["dispatched"] is False
     assert "art_drawio" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_delegate_refuses_a_draft_reply_before_the_email_agent_runs() -> None:
+    async def dispatcher(**kwargs):
+        raise AssertionError(f"dispatcher should not run for {kwargs.get('intent')}")
+
+    executor = ToolExecutor(agent_dispatcher=dispatcher)
+    result = json.loads(
+        await executor.execute(
+            "delegate_to_agent",
+            {
+                "intent": "email.handle",
+                "input": {
+                    "goal": "Draft a reply describing the three drawio files",
+                    "send": False,
+                },
+            },
+            context=ToolExecutionContext(
+                parent_task=_parent(channel="agent-email:iamcosmic@example.com", inbound="owner@example.com"),
+                channel="agent-email:iamcosmic@example.com",
+                session_id="email-thread",
+            ),
+        )
+    )
+
+    assert result["sent"] is False
+    assert result.get("error") is not True
+    assert result["code"] == "AGENT_EMAIL_REPLY_IS_THE_EMAIL"
+    assert result["delegation"]["dispatched"] is False
 
 
 @pytest.mark.asyncio

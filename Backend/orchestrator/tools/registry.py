@@ -1105,7 +1105,9 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         api_definition={
             "name": "artifact_redeliver",
             "description": (
-                "Re-surface a previously produced COSMIC file in the current response so the user can download it again."
+                "Re-surface a previously produced COSMIC file in the current response so the user can download it again. "
+                "On an agent-email turn, a successful result means the gateway attaches the file to the finished answer. "
+                "Do not also draft or send it, and do not re-surface a file this turn already produced."
             ),
             "input_schema": {
                 "type": "object",

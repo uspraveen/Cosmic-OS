@@ -643,9 +643,17 @@ class EmailAgent(AgentRuntime):
         recipients = self._apply_notification_recipient_default(
             recipients, send=send, thread_id=thread_id, message_id=message_id
         )
+        composing_reply = (not read_like_goal) and (
+            bool(draft_seed)
+            or mode_hint == "compose"
+            or self._looks_like_reply(goal)
+            or bool(subject)
+            or bool(task.input_artifacts)
+        )
         suppressed = self._suppressed_agent_email_reply(
             task,
             sending=send,
+            composing=composing_reply,
             recipients=[*recipients, *cc_recipients, *bcc_recipients],
         )
         if suppressed is not None:
@@ -1090,8 +1098,9 @@ class EmailAgent(AgentRuntime):
         *,
         sending: bool,
         recipients: list[dict[str, Any]],
+        composing: bool = False,
     ) -> AgentResult | None:
-        """The gateway already mails this reply. Do not transmit a second copy."""
+        """The gateway already mails this reply. Do not transmit or draft a second copy."""
         artifact_ids = [
             self._safe_text(item.get("artifact_id"))
             for item in (task.input_artifacts or [])
@@ -1106,6 +1115,7 @@ class EmailAgent(AgentRuntime):
             payload=payload,
             inbound_sender_email=self._safe_text(payload.get("inbound_sender_email")) or None,
             sending=sending,
+            composing=composing,
             recipient_addresses=[
                 self._safe_text(item.get("email"))
                 for item in recipients
