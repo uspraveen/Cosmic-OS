@@ -588,6 +588,53 @@ def _attachment_adapter(tmp_path):
     return adapter
 
 
+def test_alpha_store_deliverable_resolves_for_email_attachment(tmp_path) -> None:
+    runs_root = tmp_path / "runs" / "artifacts"
+    runs_root.mkdir(parents=True)
+    alpha_root = tmp_path / "alpha" / "artifacts"
+    drawio = alpha_root / "tsk_alpha" / "Figure_bathtub.drawio"
+    drawio.parent.mkdir(parents=True)
+    drawio.write_bytes(b"<mxfile>bathtub</mxfile>")
+    outside = tmp_path / "elsewhere" / "secret.txt"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("no", encoding="utf-8")
+
+    adapter = AgentEmailAdapter(
+        cosmic_mail_base_url="http://cosmic-mail.local",
+        cosmic_mail_api_token="token",
+        primary_mailbox_address="assistant@example.com",
+        extra_artifact_roots=[alpha_root],
+    )
+    adapter.artifacts_root = runs_root
+
+    ready, failed = adapter._collect_deliverable_attachments(
+        {
+            "produced_artifacts": [
+                {
+                    "artifact_id": "art_alpha_bathtub",
+                    "audience": "deliverable",
+                    "filename": "Figure_bathtub.drawio",
+                    "path": str(drawio),
+                    "downloadable": True,
+                },
+                {
+                    "artifact_id": "art_outside",
+                    "audience": "deliverable",
+                    "filename": "secret.txt",
+                    "path": str(outside),
+                    "downloadable": True,
+                },
+            ]
+        }
+    )
+
+    assert [item["artifact_id"] for item in ready] == ["art_alpha_bathtub"]
+    assert ready[0]["content"] == b"<mxfile>bathtub</mxfile>"
+    assert failed == [
+        {"artifact_id": "art_outside", "filename": "secret.txt", "reason": "artifact_unavailable"}
+    ]
+
+
 @pytest.mark.asyncio
 async def test_thread_reply_uploads_deliverable_artifacts_and_leaves_supporting_files(tmp_path) -> None:
     drawio = tmp_path / "tsk_draw" / "Figure_3.1_Research_Design.drawio"

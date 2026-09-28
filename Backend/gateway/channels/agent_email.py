@@ -178,6 +178,7 @@ class AgentEmailAdapter(ChannelAdapter):
         primary_mailbox_address: str = "",
         webhook_secret: str = "",
         webhook_signature_header: str = "X-Cosmic-Mail-Signature",
+        extra_artifact_roots: list[Path] | None = None,
     ) -> None:
         self.client = CosmicMailClient(
             base_url=cosmic_mail_base_url,
@@ -188,6 +189,9 @@ class AgentEmailAdapter(ChannelAdapter):
         self.webhook_secret = _safe_text(webhook_secret)
         self.webhook_signature_header = _safe_text(webhook_signature_header) or "X-Cosmic-Mail-Signature"
         self.artifacts_root = _ARTIFACTS_ROOT
+        # Alpha keeps its files in its own store. Its produced_artifacts carry
+        # absolute paths there, so those roots must be readable here too.
+        self.extra_artifact_roots = list(extra_artifact_roots or [])
         self._inbound_callback: MessageCallback | None = None
         self._auth_context: dict[str, Any] | None = None
 
@@ -843,6 +847,12 @@ class AgentEmailAdapter(ChannelAdapter):
         relative = Path(normalized)
         if relative.is_absolute():
             candidate = relative.resolve()
+            for extra in self.extra_artifact_roots:
+                try:
+                    candidate.relative_to(extra.resolve())
+                except (OSError, ValueError):
+                    continue
+                return candidate if candidate.is_file() else None
         else:
             parts = relative.parts
             if len(parts) >= 2 and parts[0] == "runs" and parts[1] == "artifacts":

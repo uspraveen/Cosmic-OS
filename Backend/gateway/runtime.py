@@ -1316,6 +1316,11 @@ class GatewayRuntime:
             webhook_signature_header=settings.get(
                 "webhook_signature_header", "X-Cosmic-Mail-Signature"
             ),
+            extra_artifact_roots=[
+                self.config.alpha_workspace_root / "artifacts",
+                self.config.alpha_workspace_root / "workspaces",
+                self.config.alpha_workspace_root / "deployments",
+            ],
         )
         await adapter.on_message(self._handle_normalized_incoming_message)
         self.registry.register(adapter)
