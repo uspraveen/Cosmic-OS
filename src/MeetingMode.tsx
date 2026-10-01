@@ -236,6 +236,8 @@ export default function MeetingMode({
 
   const [status, setStatus] = useState<MeetingStatus>('ready')
   const [, setMeetingId] = useState<string | null>(null)
+  const [captureMode, setCaptureMode] = useState<string | null>(null)
+  const [loopbackDevice, setLoopbackDevice] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
   const [meetingError, setMeetingError] = useState<string | null>(null)
 
@@ -315,6 +317,8 @@ export default function MeetingMode({
       const next = String(data?.status || 'ready')
       setStatus(next)
       if (data?.meeting_id) setMeetingId(String(data.meeting_id))
+      if (typeof data?.capture_mode === 'string') setCaptureMode(data.capture_mode)
+      if (typeof data?.loopback_device === 'string') setLoopbackDevice(data.loopback_device)
       if (next === 'error') {
         setMeetingError(String(data?.error || 'Meeting error'))
         return
@@ -637,7 +641,7 @@ export default function MeetingMode({
             Audio stays on-device by default. Web search only sends anonymized snippets when you enable it.
           </p>
           {!keyReady && (
-            <p className="m-warn m-warn-inline">Deepgram + Groq API keys required. Add them in Settings.</p>
+            <p className="m-warn m-warn-inline">Deepgram + Anthropic API keys required. Add them in Settings.</p>
           )}
         </div>
       </div>
@@ -672,7 +676,7 @@ export default function MeetingMode({
             <span>Meeting context</span>
             <div className="m-setup-card-head-right">
               <span className={`m-meta-pill compact ${keyReady ? 'ready' : ''}`}>
-                {keyReady ? 'Deepgram + Groq ready' : 'Keys missing'}
+                {keyReady ? 'Deepgram + Anthropic ready' : 'Keys missing'}
               </span>
               <span className="m-meta-pill compact subtle">Live transcript · Cues · Actions</span>
             </div>
@@ -751,6 +755,22 @@ export default function MeetingMode({
           {running && <span className="m-rec-dot" />}
           <span className="m-timer">{formatDuration(elapsed)}</span>
           <span className="m-badge-status">{paused ? 'Paused' : running ? 'Live' : status}</span>
+          {captureMode === 'dual' && (
+            <span
+              className="m-capture-pill"
+              title={`System audio captured${loopbackDevice ? ` from ${loopbackDevice}` : ''}`}
+            >
+              Mic + System audio
+            </span>
+          )}
+          {captureMode === 'mic_only' && (
+            <span
+              className="m-capture-pill warn"
+              title="No system audio available, so remote voices may not be captured. Install pyaudiowpatch or use speakers instead of headphones."
+            >
+              Mic only
+            </span>
+          )}
         </div>
         <div className="m-topbar-right">
           <button
@@ -991,7 +1011,7 @@ export default function MeetingMode({
       {canAsk && (
         <div className="m-ask-row">
           <div className="m-ask-input-wrap">
-            <span className="m-ask-attachment-tab">Meeting Context atttached</span>
+            <span className="m-ask-attachment-tab">Meeting Context attached</span>
             <span className="m-ask-pill">Ask</span>
             {isAsking && askingText && (
               <span className="m-ask-preview" aria-hidden>

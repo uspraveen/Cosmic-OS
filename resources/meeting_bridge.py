@@ -39,11 +39,17 @@ from database import db
 load_dotenv()
 
 try:
-    import pyaudio
+    # pyaudiowpatch: PyAudio fork with WASAPI loopback support (Windows).
+    # Falls back to plain pyaudio; loopback capture is only available with the fork.
+    import pyaudiowpatch as pyaudio
     HAS_PYAUDIO = True
 except ImportError:
-    pyaudio = None
-    HAS_PYAUDIO = False
+    try:
+        import pyaudio
+        HAS_PYAUDIO = True
+    except ImportError:
+        pyaudio = None
+        HAS_PYAUDIO = False
 
 try:
     import httpx
@@ -51,6 +57,13 @@ try:
 except ImportError:
     httpx = None
     HAS_HTTPX = False
+
+try:
+    from meeting_aec import MicEchoCanceller
+    HAS_AEC = True
+except ImportError:
+    MicEchoCanceller = None
+    HAS_AEC = False
 
 DEBUG = True
 TARGET_SR = 16000
@@ -696,14 +709,22 @@ class MeetingRuntime:
         self.audio_thread: Optional[threading.Thread] = None
         self.audio_loop: Optional[asyncio.AbstractEventLoop] = None
         self.audio_stream = None
-        self.websocket_conn = None
+        # Capture legs: "mic" (always) and "system" (WASAPI loopback when available).
+        self.capture_mode = "mic_only"  # "dual" | "mic_only"
+        self.loopback_stream = None
+        self.loopback_device_name = ""
+        self.loopback_rate = 48000
+        self.loopback_channels = 2
+        self.loopback_ratecv_state = None
+        self.echo_canceller = None  # MicEchoCanceller when dual + AEC available
+        self.websocket_conns: Dict[str, Any] = {}
+        self.pending_interim: Dict[str, Optional[Dict[str, Any]]] = {"mic": None, "system": None}
         self.noise_floor_rms = 120.0
         self.calibration_frames = 0
         self.speech_hold_frames = 0
-        self.deepgram_usage_call: Optional[Dict[str, Any]] = None
-        self.deepgram_audio_bytes_sent = 0
-        self.deepgram_audio_seconds_sent = 0.0
-        self.deepgram_request_id: Optional[str] = None
+        # Per-leg Deepgram usage accounting: leg -> {"metered_call", "bytes", "request_id"}
+        self.dg_usage: Dict[str, Dict[str, Any]] = {}
+        self.loopback_speech_hold_frames = 0
 
     def current_meeting_time(self) -> float:
         elapsed = time.time() - self.start_ts
@@ -1445,26 +1466,35 @@ class MeetingRuntime:
 
         emit_status("running", meeting_id=self.meeting_id, title=self.title)
 
-    def _begin_deepgram_usage(self) -> None:
-        self.deepgram_usage_call = begin_usage_call("meeting_deepgram")
-        self.deepgram_audio_bytes_sent = 0
-        self.deepgram_audio_seconds_sent = 0.0
-        self.deepgram_request_id = None
+    def _begin_deepgram_usage(self, leg: str = "mic") -> None:
+        self.dg_usage[leg] = {
+            "metered_call": begin_usage_call("meeting_deepgram"),
+            "bytes_sent": 0,
+            "seconds_sent": 0.0,
+            "request_id": None,
+        }
 
-    def _record_deepgram_audio_bytes(self, size_bytes: int) -> None:
+    def _record_deepgram_audio_bytes(self, size_bytes: int, leg: str = "mic") -> None:
+        entry = self.dg_usage.get(leg)
+        if not entry:
+            return
         byte_count = max(0, int(size_bytes or 0))
         if byte_count <= 0:
             return
-        self.deepgram_audio_bytes_sent += byte_count
+        entry["bytes_sent"] += byte_count
+        # Both legs stream 16 kHz mono int16 after conversion.
         bytes_per_second = TARGET_SR * CHANNELS * 2
         if bytes_per_second > 0:
-            self.deepgram_audio_seconds_sent += byte_count / float(bytes_per_second)
+            entry["seconds_sent"] += byte_count / float(bytes_per_second)
 
-    def _finish_deepgram_usage(self, *, success: bool = True, error_code: Optional[str] = None) -> None:
-        metered_call = self.deepgram_usage_call
+    def _finish_deepgram_usage(self, *, success: bool = True, error_code: Optional[str] = None, leg: str = "mic") -> None:
+        entry = self.dg_usage.pop(leg, None)
+        if not entry:
+            return
+        metered_call = entry.get("metered_call")
         if not metered_call:
             return
-        audio_seconds = max(0.0, float(self.deepgram_audio_seconds_sent or 0.0))
+        audio_seconds = max(0.0, float(entry.get("seconds_sent") or 0.0))
         estimated_cost = round((audio_seconds / 3600.0) * DG_NOVA3_STREAMING_USD_PER_HOUR, 10)
         emit_usage_event(
             metered_call=metered_call,
@@ -1475,9 +1505,10 @@ class MeetingRuntime:
             model=DG_MODEL,
             raw_usage={
                 "audio_seconds": round(audio_seconds, 3),
-                "audio_bytes": self.deepgram_audio_bytes_sent,
+                "audio_bytes": entry.get("bytes_sent", 0),
+                "leg": leg,
             },
-            provider_request_id=self.deepgram_request_id,
+            provider_request_id=entry.get("request_id"),
             success=success,
             error_code=error_code,
             estimated_cost_usd=estimated_cost,
@@ -1486,25 +1517,22 @@ class MeetingRuntime:
                 "channels": CHANNELS,
                 "frame_ms": FRAME_MS,
                 "streaming_rate_usd_per_hour": DG_NOVA3_STREAMING_USD_PER_HOUR,
+                "leg": leg,
             },
         )
-        self.deepgram_usage_call = None
-        self.deepgram_audio_bytes_sent = 0
-        self.deepgram_audio_seconds_sent = 0.0
-        self.deepgram_request_id = None
 
     def stop(self) -> Dict[str, Any]:
         self.is_running = False
         self.stop_event.set()
         self.new_transcript_event.set()
 
-        if self.websocket_conn and self.audio_loop and self.audio_loop.is_running():
-            ws = self.websocket_conn
-            self.websocket_conn = None
-            try:
-                asyncio.run_coroutine_threadsafe(ws.close(), self.audio_loop)
-            except Exception:
-                pass
+        for conn in list(self.websocket_conns.values()):
+            if conn and self.audio_loop and self.audio_loop.is_running():
+                try:
+                    asyncio.run_coroutine_threadsafe(conn.close(), self.audio_loop)
+                except Exception:
+                    pass
+        self.websocket_conns.clear()
 
         if self.processor_thread and self.processor_thread.is_alive():
             self.processor_thread.join(timeout=2.5)
@@ -1515,7 +1543,7 @@ class MeetingRuntime:
         emit_status("stopped", meeting_id=self.meeting_id)
         return self.build_final_report()
 
-    def add_transcript_segment(self, speaker: str, text: str, is_final: bool, confidence: float = 0.0) -> None:
+    def add_transcript_segment(self, speaker: str, text: str, is_final: bool, confidence: float = 0.0, leg: str = "mic") -> None:
         if not text or not text.strip():
             return
         if self.is_paused:
@@ -1569,7 +1597,7 @@ class MeetingRuntime:
         emit("MEETING_TRANSCRIPT", payload)
 
         if is_final:
-            self.pending_interim = None
+            self.pending_interim[leg] = None
             self.new_transcript_event.set()
 
     # ---- Process loop ----
@@ -2357,18 +2385,39 @@ class MeetingRuntime:
 
     # ---- Speaker identification (Nova v1 response format) ----
 
-    def _identify_speaker(self, data: Dict[str, Any]) -> str:
-        """Extract speaker from Nova v1 diarization data."""
+    def _identify_speaker(self, data: Dict[str, Any], source: str = "mic") -> str:
+        """Label a transcript segment by capture leg.
+
+        In dual-capture mode the two legs come from physically separate paths:
+        the microphone hears this room, the WASAPI loopback hears the remote
+        call. Identity therefore follows the capture path, not a diarization
+        guess. The loopback leg is NEVER labelled "Me" - leaked far-end audio
+        on the mic leg is the AEC's job, not the labeler's.
+
+        mic leg:     diarization speaker 0 -> "Me", others -> "Speaker N"
+                     (mic-only fallback keeps the legacy behaviour, including
+                     the legacy default to "Me" when diarization is missing)
+        system leg:  any diarization speaker -> "Speaker N"; missing -> "Speaker ?"
+        """
         channel = data.get("channel", {})
         alts = channel.get("alternatives", [])
+        dg_speaker = None
         if alts:
             words = alts[0].get("words", [])
             if words and isinstance(words[0], dict):
-                dg_speaker = words[0].get("speaker")
-                if dg_speaker is not None:
-                    if int(dg_speaker) == 0:
-                        return "Me"
-                    return f"Speaker {dg_speaker}"
+                raw = words[0].get("speaker")
+                if raw is not None:
+                    dg_speaker = int(raw)
+
+        if source == "system":
+            if dg_speaker is None:
+                return "Speaker ?"
+            return f"Speaker {dg_speaker}"
+
+        if dg_speaker is not None:
+            if dg_speaker == 0:
+                return "Me"
+            return f"Speaker {dg_speaker}"
         return "Me"
 
     def _filter_audio_frame(self, data: bytes) -> bytes:
@@ -2460,6 +2509,15 @@ class MeetingRuntime:
                 frames_per_buffer=SAMPLES_PER_FRAME,
             )
 
+            loopback_ok = self._open_loopback(p)
+            if loopback_ok:
+                self.capture_mode = "dual"
+                if HAS_AEC:
+                    try:
+                        self.echo_canceller = MicEchoCanceller()
+                    except Exception:
+                        self.echo_canceller = None
+
             async def capture() -> None:
                 ev_loop = asyncio.get_running_loop()
                 while self.is_running and not self.stop_event.is_set():
@@ -2472,6 +2530,17 @@ class MeetingRuntime:
                             lambda: self.audio_stream.read(SAMPLES_PER_FRAME, exception_on_overflow=False),
                         )
                         if data:
+                            # Dual capture: cancel far-end echo (the remote voice
+                            # leaking in through the speakers) BEFORE the noise
+                            # gate, so leaked speech cannot pass the gate and be
+                            # mislabelled "Me".
+                            if self.echo_canceller is not None:
+                                try:
+                                    processed = self.echo_canceller.process(data)
+                                    if processed:
+                                        data = processed
+                                except Exception:
+                                    pass
                             data = self._filter_audio_frame(data)
                             try:
                                 audio_queue.put_nowait(data)
@@ -2515,19 +2584,19 @@ class MeetingRuntime:
                             ),
                             timeout=DG_CONNECT_TIMEOUT,
                         )
-                        self.websocket_conn = ws
-                        self._begin_deepgram_usage()
+                        self.websocket_conns["mic"] = ws
+                        self._begin_deepgram_usage("mic")
                         deepgram_success = True
                         deepgram_error_code: Optional[str] = None
-                        emit_status("listening", meeting_id=self.meeting_id)
-                        dlog(f"Deepgram Nova-3 connected (attempt {attempt + 1})")
+                        emit_status("listening", meeting_id=self.meeting_id, capture_mode=self.capture_mode, loopback_device=self.loopback_device_name)
+                        dlog(f"Deepgram mic leg connected (attempt {attempt + 1})")
 
                         async def sender() -> None:
                             while self.is_running and not self.stop_event.is_set():
                                 try:
                                     data = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
                                     await ws.send(data)
-                                    self._record_deepgram_audio_bytes(len(data))
+                                    self._record_deepgram_audio_bytes(len(data), "mic")
                                 except asyncio.TimeoutError:
                                     continue
                                 except Exception as exc:
@@ -2544,18 +2613,22 @@ class MeetingRuntime:
 
                                     if msg_type == "Metadata":
                                         dlog("Deepgram metadata:", data.get("request_id", ""))
-                                        self.deepgram_request_id = str(data.get("request_id") or "").strip() or self.deepgram_request_id
+                                        mic_entry = self.dg_usage.get("mic")
+                                        request_id = str(data.get("request_id") or "").strip()
+                                        if mic_entry and request_id:
+                                            mic_entry["request_id"] = request_id
                                         continue
                                     if msg_type == "SpeechStarted":
                                         continue
                                     if msg_type == "UtteranceEnd":
-                                        pending = self.pending_interim
+                                        pending = self.pending_interim.get("mic")
                                         if pending:
                                             self.add_transcript_segment(
                                                 str(pending.get("speaker") or "Speaker"),
                                                 str(pending.get("text") or ""),
                                                 True,
                                                 float(pending.get("confidence") or 0.0),
+                                                leg="mic",
                                             )
                                         continue
                                     if msg_type == "Error":
@@ -2576,12 +2649,12 @@ class MeetingRuntime:
 
                                     is_final = bool(data.get("is_final", False))
                                     confidence = float(alts[0].get("confidence", 0.0))
-                                    speaker = self._identify_speaker(data)
+                                    speaker = self._identify_speaker(data, "mic")
 
                                     if is_final:
-                                        self.add_transcript_segment(speaker, transcript, True, confidence)
+                                        self.add_transcript_segment(speaker, transcript, True, confidence, leg="mic")
                                     else:
-                                        self.pending_interim = {
+                                        self.pending_interim["mic"] = {
                                             "speaker": speaker,
                                             "text": transcript,
                                             "confidence": confidence,
@@ -2608,8 +2681,8 @@ class MeetingRuntime:
                         try:
                             await asyncio.gather(sender(), receiver(), keepalive())
                         finally:
-                            self.websocket_conn = None
-                            self._finish_deepgram_usage(success=deepgram_success, error_code=deepgram_error_code)
+                            self.websocket_conns.pop("mic", None)
+                            self._finish_deepgram_usage(success=deepgram_success, error_code=deepgram_error_code, leg="mic")
                             try:
                                 await ws.send(json.dumps({"type": "CloseStream"}))
                             except Exception:
@@ -2628,12 +2701,15 @@ class MeetingRuntime:
                             emit_status("error", meeting_id=self.meeting_id,
                                         error=f"Deepgram connection failed after {DG_MAX_RETRIES} attempts")
 
-            await asyncio.gather(capture(), stream_to_deepgram())
+            tasks: List[Any] = [capture(), stream_to_deepgram()]
+            if loopback_ok:
+                tasks.append(self._loopback_pipeline())
+            await asyncio.gather(*tasks)
 
         except Exception as exc:
             emit_status("error", meeting_id=self.meeting_id, error=f"Deepgram stream error: {exc}")
         finally:
-            self.websocket_conn = None
+            self.websocket_conns.pop("mic", None)
             stream = self.audio_stream
             self.audio_stream = None
             if stream:
@@ -2642,10 +2718,296 @@ class MeetingRuntime:
                     stream.close()
                 except Exception:
                     pass
+            loopback_stream = self.loopback_stream
+            self.loopback_stream = None
+            if loopback_stream:
+                try:
+                    loopback_stream.stop_stream()
+                    loopback_stream.close()
+                except Exception:
+                    pass
             try:
                 p.terminate()
             except Exception:
                 pass
+
+    # ---- Far-end capture leg (WASAPI loopback, ported from cosmicV2) ----
+
+    def _open_loopback(self, p) -> bool:
+        """Open the WASAPI loopback stream for the default output device.
+
+        Requires the pyaudiowpatch fork. On any failure the meeting degrades
+        to mic-only capture (the legacy behaviour) with a debug note; the UI
+        is told which mode is active via the capture_mode status field.
+        """
+        if not hasattr(p, "get_loopback_device_info_generator"):
+            dlog("Loopback capture unavailable: pyaudiowpatch not installed")
+            return False
+        try:
+            wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+            default_output = p.get_device_info_by_index(wasapi["defaultOutputDevice"])
+            prefix = str(default_output.get("name", ""))[:12]
+            loopback = None
+            for cand in p.get_loopback_device_info_generator():
+                if str(cand.get("name", "")).startswith(prefix):
+                    loopback = cand
+                    break
+            if loopback is None:
+                loopback = next(p.get_loopback_device_info_generator(), None)
+            if loopback is None:
+                dlog("Loopback capture unavailable: no loopback device")
+                return False
+            rate = int(loopback.get("defaultSampleRate") or 48000)
+            channels = min(int(loopback.get("maxInputChannels") or 2), 2)
+            if rate <= 0 or channels <= 0:
+                return False
+            self.loopback_stream = p.open(
+                format=pyaudio.paInt16,
+                channels=channels,
+                rate=rate,
+                input=True,
+                input_device_index=loopback["index"],
+                frames_per_buffer=max(1, int(rate * FRAME_MS / 1000)),
+            )
+            self.loopback_device_name = str(loopback.get("name", ""))[:80]
+            self.loopback_rate = rate
+            self.loopback_channels = channels
+            self.loopback_ratecv_state = None
+            self.loopback_speech_hold_frames = 0
+            dlog("Loopback capture:", self.loopback_device_name, f"@ {rate}Hz x{channels}")
+            return True
+        except Exception as exc:
+            dlog("Loopback capture failed:", exc)
+            self.loopback_stream = None
+            return False
+
+    def _convert_loopback_frame(self, frame: bytes) -> bytes:
+        """Device-rate (typically 48 kHz stereo) int16 -> 16 kHz mono int16."""
+        data = frame
+        if self.loopback_channels == 2:
+            data = audioop.tomono(data, 2, 0.5, 0.5)
+        converted, self.loopback_ratecv_state = audioop.ratecv(
+            data, 2, 1, self.loopback_rate, TARGET_SR, self.loopback_ratecv_state
+        )
+        return converted
+
+    def _filter_loopback_frame(self, data: bytes) -> bytes:
+        """Presence gate for the clean far-end leg.
+
+        Remote audio arrives already mixed and clean, so unlike the mic gate
+        this never shapes content: a low threshold plus a ~2 s hold only
+        suppresses dead silence to keep Deepgram stream timing stable.
+        """
+        if not data:
+            return data
+        try:
+            rms = float(audioop.rms(data, 2))
+        except Exception:
+            return data
+        if rms >= 40.0:
+            self.loopback_speech_hold_frames = 20
+            return data
+        if self.loopback_speech_hold_frames > 0:
+            self.loopback_speech_hold_frames -= 1
+            return data
+        return b"\x00" * len(data)
+
+    async def _loopback_pipeline(self) -> None:
+        """Independent far-end leg: WASAPI loopback -> 16 kHz mono -> Deepgram.
+
+        Runs on the same event loop as the mic leg but with its own websocket,
+        retry loop, interim slot, and usage accounting, so a failure in one
+        leg mutes only that leg. Segments from this leg are labelled by
+        diarization alone and are never "Me".
+        """
+        loopback_stream = self.loopback_stream
+        if loopback_stream is None:
+            return
+        loop_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
+
+        async def capture() -> None:
+            ev_loop = asyncio.get_running_loop()
+            while self.is_running and not self.stop_event.is_set():
+                if self.is_paused:
+                    await asyncio.sleep(0.05)
+                    continue
+                try:
+                    frame = await ev_loop.run_in_executor(
+                        None,
+                        lambda: loopback_stream.read(
+                            max(1, int(self.loopback_rate * FRAME_MS / 1000)),
+                            exception_on_overflow=False,
+                        ),
+                    )
+                    if frame:
+                        converted = self._convert_loopback_frame(frame)
+                        if self.echo_canceller is not None:
+                            try:
+                                self.echo_canceller.push_far(converted)
+                            except Exception:
+                                pass
+                        converted = self._filter_loopback_frame(converted)
+                        try:
+                            loop_queue.put_nowait(converted)
+                        except asyncio.QueueFull:
+                            try:
+                                loop_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                            loop_queue.put_nowait(converted)
+                except Exception:
+                    break
+
+        async def stream_to_deepgram() -> None:
+            from urllib.parse import urlencode
+            params = {
+                "model": DG_MODEL,
+                "encoding": "linear16",
+                "sample_rate": str(TARGET_SR),
+                "channels": "1",
+                "interim_results": "true",
+                "punctuate": "true",
+                "smart_format": "true",
+                "diarize": "true",
+                "utterances": "true",
+                "timestamps": "true",
+            }
+            url = f"{DG_WS}?{urlencode(params)}"
+            auth_header = [("Authorization", f"Token {self.deepgram_key}")]
+
+            for attempt in range(DG_MAX_RETRIES):
+                if not self.is_running or self.stop_event.is_set():
+                    return
+                try:
+                    ws = await asyncio.wait_for(
+                        websockets.connect(
+                            url,
+                            extra_headers=auth_header,
+                            ping_interval=DG_WS_PING_INTERVAL,
+                            ping_timeout=DG_WS_PING_TIMEOUT,
+                            max_size=DG_WS_MAX_SIZE,
+                        ),
+                        timeout=DG_CONNECT_TIMEOUT,
+                    )
+                    self.websocket_conns["system"] = ws
+                    self._begin_deepgram_usage("system")
+                    deepgram_success = True
+                    deepgram_error_code: Optional[str] = None
+                    emit_status("listening", meeting_id=self.meeting_id, capture_mode=self.capture_mode, loopback_device=self.loopback_device_name)
+                    dlog(f"Deepgram loopback leg connected (attempt {attempt + 1})")
+
+                    async def sender() -> None:
+                        while self.is_running and not self.stop_event.is_set():
+                            try:
+                                data = await asyncio.wait_for(loop_queue.get(), timeout=0.5)
+                                await ws.send(data)
+                                self._record_deepgram_audio_bytes(len(data), "system")
+                            except asyncio.TimeoutError:
+                                continue
+                            except Exception as exc:
+                                dlog("Loopback sender error:", exc)
+                                break
+
+                    async def receiver() -> None:
+                        nonlocal deepgram_success, deepgram_error_code
+                        while self.is_running and not self.stop_event.is_set():
+                            try:
+                                message = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                                data = json.loads(message)
+                                msg_type = data.get("type", "")
+
+                                if msg_type == "Metadata":
+                                    dlog("Deepgram loopback metadata:", data.get("request_id", ""))
+                                    entry = self.dg_usage.get("system")
+                                    request_id = str(data.get("request_id") or "").strip()
+                                    if entry and request_id:
+                                        entry["request_id"] = request_id
+                                    continue
+                                if msg_type == "SpeechStarted":
+                                    continue
+                                if msg_type == "UtteranceEnd":
+                                    pending = self.pending_interim.get("system")
+                                    if pending:
+                                        self.add_transcript_segment(
+                                            str(pending.get("speaker") or "Speaker"),
+                                            str(pending.get("text") or ""),
+                                            True,
+                                            float(pending.get("confidence") or 0.0),
+                                            leg="system",
+                                        )
+                                    continue
+                                if msg_type == "Error":
+                                    err = data.get("message", data.get("description", "Unknown error"))
+                                    dlog("Deepgram loopback error:", err)
+                                    deepgram_success = False
+                                    deepgram_error_code = str(data.get("variant") or data.get("error") or "DEEPGRAM_ERROR").strip() or "DEEPGRAM_ERROR"
+                                    # Far-leg errors are non-fatal: the mic leg keeps running.
+                                    continue
+
+                                channel = data.get("channel", {})
+                                alts = channel.get("alternatives", [])
+                                if not alts:
+                                    continue
+                                transcript = (alts[0].get("transcript") or "").strip()
+                                if not transcript:
+                                    continue
+
+                                is_final = bool(data.get("is_final", False))
+                                confidence = float(alts[0].get("confidence", 0.0))
+                                speaker = self._identify_speaker(data, "system")
+
+                                if is_final:
+                                    self.add_transcript_segment(speaker, transcript, True, confidence, leg="system")
+                                else:
+                                    self.pending_interim["system"] = {
+                                        "speaker": speaker,
+                                        "text": transcript,
+                                        "confidence": confidence,
+                                        "timestamp": time.time(),
+                                    }
+
+                            except asyncio.TimeoutError:
+                                continue
+                            except websockets.exceptions.ConnectionClosed as exc:
+                                dlog(f"Deepgram loopback WebSocket closed: code={exc.code} reason={exc.reason}")
+                                break
+                            except Exception as exc:
+                                dlog("Loopback receiver error:", exc)
+                                break
+
+                    async def keepalive() -> None:
+                        while self.is_running and not self.stop_event.is_set():
+                            try:
+                                await asyncio.sleep(DG_KEEPALIVE_INTERVAL)
+                                await ws.send(json.dumps({"type": "KeepAlive"}))
+                            except Exception:
+                                break
+
+                    try:
+                        await asyncio.gather(sender(), receiver(), keepalive())
+                    finally:
+                        self.websocket_conns.pop("system", None)
+                        self._finish_deepgram_usage(success=deepgram_success, error_code=deepgram_error_code, leg="system")
+                        try:
+                            await ws.send(json.dumps({"type": "CloseStream"}))
+                        except Exception:
+                            pass
+                        try:
+                            await ws.close()
+                        except Exception:
+                            pass
+                    return
+
+                except (asyncio.TimeoutError, OSError, websockets.exceptions.WebSocketException) as exc:
+                    dlog(f"Deepgram loopback connect attempt {attempt + 1}/{DG_MAX_RETRIES} failed:", exc)
+                    if attempt < DG_MAX_RETRIES - 1:
+                        await asyncio.sleep(2 ** attempt)
+                    else:
+                        # Far-leg failure mutes only the far leg; the mic leg
+                        # keeps running. The UI already knows the capture mode.
+                        dlog("Loopback leg giving up after retries; continuing mic-only")
+
+        await asyncio.gather(capture(), stream_to_deepgram())
 
 
 CURRENT_MEETING: Optional[MeetingRuntime] = None

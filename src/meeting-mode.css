@@ -347,6 +347,29 @@
   letter-spacing: 0.06em;
 }
 
+/* Capture-mode disclosure pill (dual vs mic-only) in the meeting topbar */
+.m-capture-pill {
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.m-capture-pill.warn {
+  background: rgba(255, 176, 32, 0.12);
+  border-color: rgba(255, 176, 32, 0.35);
+  color: rgba(255, 200, 96, 0.9);
+}
+
 /* ── Content split (horizontal) ── */
 
 .m-content-split {
