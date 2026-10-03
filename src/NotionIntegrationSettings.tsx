@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, ChevronDown, LogIn, RefreshCw, Trash2 } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ExternalLink, LogIn, RefreshCw, Trash2 } from 'lucide-react'
 import { NotionMark } from './brandIcons'
+
+// Where a user changes which pages Cosmic may access: Notion → Settings →
+// Connections. The connection's page grant is chosen there, not here.
+const NOTION_CONNECTIONS_URL = 'https://www.notion.so/settings/connections'
 
 interface NotionIntegrationSettingsProps {
   active: boolean
@@ -154,6 +158,15 @@ export default function NotionIntegrationSettings({ active }: NotionIntegrationS
       setError(err instanceof Error ? err.message : 'Unable to disconnect this workspace.')
     } finally {
       setDisconnectingId('')
+    }
+  }
+
+  const openInNotion = async (url?: string) => {
+    if (!url) return
+    try {
+      await window.cosmic?.openExternal(url)
+    } catch {
+      // A dead browser is not worth an error banner on top of a settings page.
     }
   }
 
@@ -356,6 +369,18 @@ export default function NotionIntegrationSettings({ active }: NotionIntegrationS
                           <small className="cosmic-agents-detail-chip-note">
                             granted at connect, scoped to the pages you shared
                           </small>
+                        </div>
+
+                        <div className="cosmic-agents-detail-acct-foot">
+                          <button
+                            type="button"
+                            className="cosmic-agents-detail-btn ghost sm"
+                            onClick={() => openInNotion(NOTION_CONNECTIONS_URL)}
+                            title="Change which pages Cosmic may access"
+                          >
+                            <ExternalLink size={12} />
+                            Manage on Notion
+                          </button>
                         </div>
                       </div>
                     </div>

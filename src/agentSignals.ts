@@ -21,6 +21,7 @@ export type GlyphId =
   | 'firecrawl'
   | 'gdocs'
   | 'gsheets'
+  | 'notion'
   // Neutral functional marks.
   | 'web'
   | 'search'
@@ -177,6 +178,7 @@ const DOMAIN_GLYPHS: Array<[RegExp, GlyphId]> = [
   [/(^|\.)calendar\.google\.com$/, 'calendar'],
   [/(^|\.)docs\.google\.com$/, 'gdocs'],
   [/(^|\.)sheets\.google\.com$/, 'gsheets'],
+  [/(^|\.)notion\.(so|site)$/, 'notion'],
 ]
 
 const glyphForDomain = (domain: string): GlyphId | null => {
@@ -237,6 +239,7 @@ const INTENT_GLYPHS: Array<[RegExp, GlyphId, string]> = [
 const LABEL_GLYPHS: Array<[RegExp, GlyphId, string]> = [
   [/\bcode sandbox\b/, 'sandbox', 'Code sandbox'],
   [/\bfirecrawl\b/, 'firecrawl', 'Firecrawl'],
+  [/\bnotion\b/, 'notion', 'Notion'],
   [/\bweb search(es)?\b|\bsearched the web\b|\bperplexity\b|\bresearch(ed)?\b/, 'search', 'Research'],
   [/\bsession (history|state|turns)\b|\brevisit(ed|ing)?\b|\bnotebook\b|\bexact history\b|\bdetailed session history\b/, 'recall', 'Session'],
   [/\bsearched memory\b|\bmemory block\b|\bcore fact\b|\bremember(ed)?\b|\bfull memory\b/, 'memory', 'Memory'],

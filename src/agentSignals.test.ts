@@ -101,6 +101,19 @@ describe('resolveAgentSignal', () => {
     expect(resolveAgentSignal({ label: 'Firecrawl pulled the listing' }).glyph).toBe('firecrawl')
   })
 
+  it('gives Notion its own mark for tool sentences and notion.so URLs', () => {
+    // The orchestrator's local notion_* tools produce these exact progress
+    // sentences, with no agent id to key off.
+    expect(resolveAgentSignal({ label: 'Searching the connected Notion workspace: roadmap' }).glyph).toBe('notion')
+    expect(resolveAgentSignal({ label: 'Reading Notion page roadmap...' }).glyph).toBe('notion')
+    expect(resolveAgentSignal({ label: 'Preparing Notion write for approval: Weekly notes' }).glyph).toBe('notion')
+    // A line naming a notion.so page is Notion work whatever wrote it.
+    const byDomain = resolveAgentSignal({
+      label: 'Appended the summary to https://www.notion.so/Weekly-notes-8ba5a435b7c2460fa8e0f2e2a0b6c9d1',
+    })
+    expect(byDomain.glyph).toBe('notion')
+  })
+
   it('still falls back to the plain globe for web work that is not Firecrawl', () => {
     expect(resolveAgentSignal({ label: 'opened the vendor portal at example.com' }).glyph).toBe('web')
   })
