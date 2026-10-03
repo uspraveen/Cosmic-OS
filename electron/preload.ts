@@ -148,6 +148,13 @@ contextBridge.exposeInMainWorld('cosmic', {
   syncGitHubRepositories: (accountId?: string) =>
     ipcRenderer.invoke('gateway:github-repositories-sync', { accountId: accountId || undefined }),
   getGitHubAuthHealth: () => ipcRenderer.invoke('gateway:github-auth-health'),
+  getNotionAccounts: () => ipcRenderer.invoke('gateway:notion-accounts'),
+  connectNotionAccount: (payload?: { accountLabel?: string }) =>
+    ipcRenderer.invoke('gateway:notion-connect', payload || {}),
+  cancelNotionConnect: () => ipcRenderer.send('gateway:notion-connect-cancel'),
+  disconnectNotionAccount: (accountId: string) =>
+    ipcRenderer.invoke('gateway:notion-disconnect', accountId),
+  getNotionAuthHealth: () => ipcRenderer.invoke('gateway:notion-auth-health'),
   getGatewayCursorStatus: () => ipcRenderer.invoke('gateway:get-cursor-status'),
   saveGatewayCursorConfig: (payload: any) => ipcRenderer.invoke('gateway:save-cursor-config', payload),
   startGatewayCursorLogin: () => ipcRenderer.invoke('gateway:start-cursor-login'),

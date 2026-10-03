@@ -48,6 +48,11 @@ class ConnectGitHubRequest(BaseModel):
     is_primary: bool | None = None
 
 
+class ConnectNotionRequest(BaseModel):
+    account_label: str | None = None
+    is_primary: bool | None = None
+
+
 class ResolveRequest(BaseModel):
     provider: str = "google"
     required_scopes: list[str] = Field(default_factory=list)
@@ -339,7 +344,7 @@ async def github_oauth_callback(
         # is not a failure worth showing as one.
         if setup_action and installation_id:
             return HTMLResponse(
-                content=_github_result_page(
+                content=_oauth_result_page(
                     "Repositories Updated",
                     "Cosmic's repository access has been updated.",
                 ),
@@ -373,7 +378,7 @@ async def github_oauth_callback(
         or "Your GitHub account"
     )
     return HTMLResponse(
-        content=_github_result_page(
+        content=_oauth_result_page(
             "GitHub Connected",
             f"{subtitle} is now available in COSMIC. You can return to the app.",
         ),
@@ -381,7 +386,68 @@ async def github_oauth_callback(
     )
 
 
-def _github_result_page(title: str, subtitle: str) -> str:
+@router.post("/auth/connect/notion")
+async def start_notion_connect(body: ConnectNotionRequest, request: Request):
+    """Start Notion OAuth. Returns authorize_url for the desktop to open.
+
+    Unlike GitHub there is no install page: the Notion consent screen is
+    where the user picks the workspace and the pages to share, so every
+    connect goes straight to the authorize endpoint.
+    """
+    _check_local_token(request)
+    mgr = _get_manager(request)
+    if not mgr.notion_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Notion OAuth client credentials are not configured on the Gateway.",
+        )
+    result = mgr.start_oauth_flow(
+        provider="notion",
+        metadata={
+            "account_label": body.account_label,
+            "is_primary": body.is_primary,
+        },
+    )
+    result["flow"] = "authorize"
+    return result
+
+
+@router.get("/auth/callback/notion")
+async def notion_oauth_callback(
+    request: Request,
+    code: str = Query(""),
+    state: str = Query(""),
+    error: str = Query(""),
+):
+    """Handle the Notion callback relayed by the desktop's loopback listener."""
+    if error:
+        # Notion sends the user back with error=access_denied when they
+        # cancel; that is a choice, not a malfunction.
+        raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing code or state.")
+    mgr = _get_manager(request)
+    try:
+        account = await mgr.handle_oauth_callback(code=code, state=state)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Notion OAuth callback failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+    subtitle = (
+        str(account.get("display_name") or account.get("account_label") or "").strip()
+        or "Your Notion workspace"
+    )
+    return HTMLResponse(
+        content=_oauth_result_page(
+            "Notion Connected",
+            f"{subtitle} is now available in COSMIC. You can return to the app.",
+        ),
+        status_code=200,
+    )
+
+
+def _oauth_result_page(title: str, subtitle: str) -> str:
     return f"""<!doctype html>
 <html>
   <head>
@@ -1586,6 +1652,67 @@ async def github_auth_health(request: Request):
         "healthy": overall == "healthy",
         "available": any(item.get("status") == "healthy" for item in account_results),
         "provider": "github",
+        "account_count": len(account_results),
+        "accounts": account_results,
+    }
+
+
+@router.post("/internal/credentials/notion/auth-health")
+async def notion_auth_health(request: Request):
+    """Probe Notion auth health for every connected account, actively.
+
+    The Notion counterpart of the GitHub and Google probes: each account's
+    credential is resolved and verified with one ``GET /users/me`` call, so a
+    grant withdrawn on Notion's side is reported as ``reauth_required``
+    before a user-visible task hits it.
+    """
+    _check_local_or_internal_token(request)
+    mgr = _get_manager(request)
+    accounts = [
+        account
+        for account in mgr.list_accounts("notion")
+        if account.get("status") != "revoked"
+    ]
+    if not accounts:
+        return {
+            "status": "healthy",
+            "healthy": True,
+            "available": False,
+            "provider": "notion",
+            "reason": "no_connected_accounts",
+            "account_count": 0,
+            "accounts": [],
+        }
+    account_results: list[dict[str, Any]] = []
+    for account in accounts:
+        account_id = str(account.get("account_id") or "").strip()
+        try:
+            account_results.append(await mgr.probe_notion_account_health(account_id))
+        except Exception as exc:
+            logger.exception(
+                "notion_auth_health.probe_failed account_id=%s", account_id
+            )
+            account_results.append(
+                {
+                    "account_id": account_id,
+                    "workspace": "",
+                    "status": "provider_error",
+                    "needs_reconnect": False,
+                    "error": str(exc)[:300] or "Health probe failed.",
+                }
+            )
+    statuses = {str(item.get("status") or "") for item in account_results}
+    if "reauth_required" in statuses:
+        overall = "reauth_required"
+    elif "provider_error" in statuses or "unknown" in statuses:
+        overall = "provider_error"
+    else:
+        overall = "healthy"
+    return {
+        "status": overall,
+        "healthy": overall == "healthy",
+        "available": any(item.get("status") == "healthy" for item in account_results),
+        "provider": "notion",
         "account_count": len(account_results),
         "accounts": account_results,
     }

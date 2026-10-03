@@ -267,7 +267,7 @@ interface IntegrationToastState {
   tone: IntegrationToastTone
   provider: string
   /** Stable provider id the Cancel routing and settings reopen key off. */
-  providerId?: 'google' | 'github' | 'cosmic'
+  providerId?: 'google' | 'github' | 'notion' | 'cosmic'
   title: string
   message: string
   statusLabel: string
@@ -561,7 +561,7 @@ export default function DynamicIsland({
   const integrationToastIdRef = useRef(0)
   // Cancel routing needs the in-flight provider without rebuilding the callback
   // on every toast change.
-  const integrationToastProviderIdRef = useRef<'google' | 'github' | 'cosmic'>('google')
+  const integrationToastProviderIdRef = useRef<'google' | 'github' | 'notion' | 'cosmic'>('google')
   integrationToastProviderIdRef.current = integrationToast?.providerId ?? 'cosmic'
   const integrationDotsTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const burstPlayedRef = useRef(false)
@@ -1374,22 +1374,28 @@ export default function DynamicIsland({
       setIntegrationToast(nextToast)
     }
 
-    const scheduleSettingsReopen = (reopenProviderId: 'google' | 'github') => {
+    const scheduleSettingsReopen = (reopenProviderId: 'google' | 'github' | 'notion') => {
       if (!reopenSettingsAfterAuthRef.current) return
       reopenSettingsAfterAuthRef.current = false
       if (reopenSettingsTimerRef.current) clearTimeout(reopenSettingsTimerRef.current)
       reopenSettingsTimerRef.current = setTimeout(() => {
         reopenSettingsTimerRef.current = null
-        setSettingsInitialView(reopenProviderId === 'github' ? 'integrations-github' : 'integrations-google')
+        setSettingsInitialView(
+          reopenProviderId === 'github'
+            ? 'integrations-github'
+            : reopenProviderId === 'notion'
+              ? 'integrations-notion'
+              : 'integrations-google',
+        )
         setShowSettings(true)
       }, SETTINGS_REOPEN_AFTER_AUTH_MS)
     }
 
     const off = window.cosmic?.onIntegrationEvent((event: IntegrationToastEvent) => {
       const providerId = String(event.provider || '').trim().toLowerCase()
-      if (providerId !== 'google' && providerId !== 'github') return
+      if (providerId !== 'google' && providerId !== 'github' && providerId !== 'notion') return
       const accountName = getIntegrationAccountName(event)
-      const provider = providerId === 'github' ? 'GitHub' : 'Google'
+      const provider = providerId === 'github' ? 'GitHub' : providerId === 'notion' ? 'Notion' : 'Google'
       const t = event.type
       if (t === 'auth_started') {
         const timeoutSeconds = Number(event.timeout_seconds)
@@ -2548,6 +2554,8 @@ export default function DynamicIsland({
   const cancelIntegrationAuth = useCallback(() => {
     if (integrationToastProviderIdRef.current === 'github') {
       window.cosmic?.cancelGitHubConnect?.()
+    } else if (integrationToastProviderIdRef.current === 'notion') {
+      window.cosmic?.cancelNotionConnect?.()
     } else {
       window.cosmic?.cancelGoogleAccountConnect?.()
     }

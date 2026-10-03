@@ -613,6 +613,9 @@ class GatewayRuntime:
             github_client_secret=config.github_client_secret,
             github_redirect_uri=config.github_redirect_uri,
             github_app_slug=config.github_app_slug,
+            notion_client_id=config.notion_client_id,
+            notion_client_secret=config.notion_client_secret,
+            notion_redirect_uri=config.notion_redirect_uri,
         )
         self.memory_client = CosmicMemoryClient(
             base_url=config.cosmic_memory_url,

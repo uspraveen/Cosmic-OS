@@ -277,6 +277,13 @@ class GatewayConfig:
     github_client_id: str = ""
     github_client_secret: str = ""
     github_redirect_uri: str = "http://localhost:8086/"
+    # Notion public connection (user-scoped OAuth). Same loopback story as
+    # GitHub's: the desktop bridge listens on the user's machine, catches the
+    # code, and relays it to whichever gateway that desktop is paired with.
+    # Port 8087 keeps the three provider listeners from ever colliding.
+    notion_client_id: str = ""
+    notion_client_secret: str = ""
+    notion_redirect_uri: str = "http://localhost:8087/"
     # Needed for the first-time install URL (github.com/apps/<slug>/installations/new),
     # which is not derivable from the client id.
     github_app_slug: str = ""
@@ -965,4 +972,10 @@ class GatewayConfig:
             or "http://localhost:8086/",
             github_app_slug=os.getenv("GITHUB_APP_SLUG", "").strip(),
             github_webhook_secret=os.getenv("GITHUB_WEBHOOK_SECRET", "").strip(),
+            notion_client_id=os.getenv("NOTION_CLIENT_ID", "").strip(),
+            notion_client_secret=os.getenv("NOTION_CLIENT_SECRET", "").strip(),
+            notion_redirect_uri=os.getenv(
+                "NOTION_REDIRECT_URI", "http://localhost:8087/"
+            ).strip()
+            or "http://localhost:8087/",
         )

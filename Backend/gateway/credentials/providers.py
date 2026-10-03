@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -82,6 +83,17 @@ class ProviderAdapter:
             "avatar_url": str(raw.get("picture") or ""),
             "hosted_domain": str(raw.get("hd") or ""),
         }
+
+    def enrich_profile_from_token(self, profile: dict[str, Any], token_raw: dict[str, Any]) -> dict[str, Any]:
+        """Fold token-response facts into the profile before normalization.
+
+        Some providers announce account facts at exchange time that the
+        userinfo endpoint does not repeat (Notion's workspace_name only ships
+        with the token). The default is a no-op: the profile endpoint is
+        authoritative for Google and GitHub.
+        """
+        del token_raw
+        return profile
 
 
 class GoogleAdapter(ProviderAdapter):
@@ -342,9 +354,199 @@ class GitHubAdapter(ProviderAdapter):
         }
 
 
+class NotionAdapter(ProviderAdapter):
+    """Notion public-connection OAuth (user-scoped).
+
+    Notion differs from Google and GitHub in ways that each fail silently if
+    misread, so this class pins them:
+
+    - Capabilities (read/update/insert content, read user info) are configured
+      on the connection in Notion's dashboard, not requested at authorize
+      time. There is no `scope` parameter and the token response carries no
+      scope list - which is why ``provider_scopes_satisfy`` exempts Notion the
+      way it exempts GitHub.
+    - The token endpoint authenticates with HTTP Basic (client_id:client_secret)
+      and takes a JSON body, unlike the form-encoded Google/GitHub posts.
+    - PKCE is not supported; the `code_verifier` is accepted for interface
+      symmetry and dropped.
+    - Access tokens do not expire (a `refresh_token` may still be returned).
+      Defaulting `expires_in` low would put every resolve through a pointless
+      refresh round trip, so non-expiring tokens get a long horizon.
+    - There is no programmatic revoke endpoint: users withdraw access from
+      Notion's side (Settings → Connections, or per page). Cosmic's disconnect
+      is therefore local-only, and a 401 at use time means the grant died on
+      Notion's side and the account needs a reconnect.
+    """
+
+    provider = "notion"
+    authorize_url = "https://api.notion.com/v1/oauth/authorize"
+    token_url = "https://api.notion.com/v1/oauth/token"
+    revoke_url = None
+    userinfo_url = "https://api.notion.com/v1/users/me"
+    # Notion pins clients to a version header; omitting it fails requests.
+    api_version = "2022-06-28"
+
+    def get_authorize_params(
+        self,
+        scopes: list[str],
+        state: str,
+        code_challenge: str,
+        redirect_uri: str,
+        client_id: str,
+    ) -> dict[str, str]:
+        del scopes, code_challenge
+        return {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "owner": "user",
+            "state": state,
+        }
+
+    @staticmethod
+    def _basic_auth(client_id: str, client_secret: str) -> str:
+        return base64.b64encode(
+            f"{client_id}:{client_secret}".encode("utf-8")
+        ).decode("ascii")
+
+    @staticmethod
+    def _token_response(data: dict[str, Any], fallback_refresh: str | None = None) -> TokenResponse:
+        if data.get("error"):
+            # Defensive: Notion returns OAuth failures with proper HTTP status
+            # codes, but an error key on any response must never be stored as
+            # a successful token.
+            raise httpx.HTTPStatusError(
+                f"Notion OAuth error: {data.get('error')}",
+                request=httpx.Request("POST", "https://api.notion.com/v1/oauth/token"),
+                response=httpx.Response(400, json=data),
+            )
+        return TokenResponse(
+            access_token=str(data.get("access_token") or ""),
+            refresh_token=str(data.get("refresh_token") or "") or fallback_refresh,
+            # Non-expiring tokens omit expires_in; a long horizon keeps them
+            # out of the refresh path instead of refreshing on every resolve.
+            expires_in=int(data.get("expires_in") or 30 * 86400),
+            scopes=[],  # Notion grants capabilities, not scope strings
+            raw=data,
+        )
+
+    async def exchange_code(
+        self,
+        code: str,
+        code_verifier: str,
+        redirect_uri: str,
+        client_id: str,
+        client_secret: str,
+    ) -> TokenResponse:
+        del code_verifier
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                self.token_url,
+                json={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                },
+                headers={"Authorization": f"Basic {self._basic_auth(client_id, client_secret)}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        return self._token_response(data)
+
+    async def refresh_token(
+        self,
+        refresh_token: str,
+        client_id: str,
+        client_secret: str,
+    ) -> TokenResponse:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                self.token_url,
+                json={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                },
+                headers={"Authorization": f"Basic {self._basic_auth(client_id, client_secret)}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        return self._token_response(data, fallback_refresh=refresh_token)
+
+    async def revoke_token(
+        self, token: str, client_id: str, client_secret: str
+    ) -> bool:
+        # Notion offers no token-revoke API. Returning True makes the manager's
+        # disconnect path complete locally; the user withdraws access from
+        # Notion's side, and until then the token simply keeps working - which
+        # is Notion's model, not a gap in ours.
+        del token, client_id, client_secret
+        return True
+
+    async def get_user_info(self, access_token: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                self.userinfo_url,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Notion-Version": self.api_version,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    def enrich_profile_from_token(self, profile: dict[str, Any], token_raw: dict[str, Any]) -> dict[str, Any]:
+        # The workspace facts ride the token response only; /users/me repeats
+        # them for bot connections but not for user-scoped ones.
+        merged = dict(profile)
+        for key in ("workspace_name", "workspace_icon", "workspace_id", "bot_id", "owner"):
+            if key in token_raw and key not in merged:
+                merged[key] = token_raw[key]
+        return merged
+
+    def normalize_profile(self, raw: dict[str, Any]) -> dict[str, str]:
+        # /users/me returns either the bot user (workspace connections) or the
+        # signed-in person (user-scoped connections), each spelling identity
+        # differently. The token response may contribute workspace facts on
+        # top via enrich_profile_from_token.
+        bot = raw.get("bot") if isinstance(raw.get("bot"), dict) else {}
+        owner = bot.get("owner") if isinstance(bot.get("owner"), dict) else {}
+        owner_user = owner.get("user") if isinstance(owner.get("user"), dict) else {}
+        token_owner = raw.get("owner") if isinstance(raw.get("owner"), dict) else {}
+        token_owner_user = (
+            token_owner.get("user") if isinstance(token_owner.get("user"), dict) else {}
+        )
+
+        def person_email(user: dict[str, Any]) -> str:
+            person = user.get("person") if isinstance(user.get("person"), dict) else {}
+            return str(person.get("email") or "").strip()
+
+        email = (
+            person_email(owner_user)
+            or person_email(token_owner_user)
+            or person_email(raw)
+        )
+        workspace_name = str(
+            bot.get("workspace_name") or raw.get("workspace_name") or ""
+        ).strip()
+        display_name = workspace_name or str(raw.get("name") or "").strip()
+        avatar = str(bot.get("workspace_icon") or raw.get("workspace_icon") or "").strip()
+        if not avatar.startswith("http"):
+            # Notion workspace icons are often emoji or character glyphs; only
+            # real URLs work in an <img>.
+            avatar = str(raw.get("avatar_url") or "").strip()
+        return {
+            "provider_account_id": str(raw.get("bot_id") or raw.get("id") or ""),
+            "email": email,
+            "display_name": display_name,
+            "avatar_url": avatar,
+            "hosted_domain": "",
+        }
+
+
 _REGISTRY: dict[str, ProviderAdapter] = {
     "google": GoogleAdapter(),
     "github": GitHubAdapter(),
+    "notion": NotionAdapter(),
 }
 
 

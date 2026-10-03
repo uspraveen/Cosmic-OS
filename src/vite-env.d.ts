@@ -285,6 +285,21 @@ interface Window {
       available?: boolean
       accounts?: any[]
     }>
+    getNotionAccounts: () => Promise<{ accounts?: any[] }>
+    connectNotionAccount: (payload?: { accountLabel?: string }) => Promise<{
+      success: boolean
+      error?: string
+      message?: string
+      flow?: string
+    }>
+    cancelNotionConnect: () => void
+    disconnectNotionAccount: (accountId: string) => Promise<any>
+    getNotionAuthHealth: () => Promise<{
+      status?: string
+      healthy?: boolean
+      available?: boolean
+      accounts?: any[]
+    }>
     getGatewayCursorStatus: () => Promise<any>
     saveGatewayCursorConfig: (payload: {
       preferredModel?: string

@@ -122,6 +122,18 @@ function sendGithubIslandEvent(type: GithubIslandEventType, message: string, ext
 // it once the flow settles.
 let activeGithubConnectCancel: (() => void) | null = null
 
+// Notion sign-in shares the island's story: same channel, same event shapes,
+// different provider tag, so DynamicIsland renders it from the same code path.
+function sendNotionIslandEvent(type: GithubIslandEventType, message: string, extra: Record<string, unknown> = {}): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) {
+      window.webContents.send('integration:event', { provider: 'notion', type, message, ...extra })
+    }
+  }
+}
+
+let activeNotionConnectCancel: (() => void) | null = null
+
 function zoomCenterCropPngToOriginalSize(img: Electron.NativeImage, zoom: number): Electron.NativeImage {
   if (zoom <= 1) return img
   const { width, height } = img.getSize()
@@ -3521,6 +3533,223 @@ app.whenReady().then(() => {
       throw new Error('Gateway connection is not configured.')
     }
     return callGatewayJson(config, '/internal/credentials/github/auth-health', {
+      method: 'POST',
+      body: {},
+      timeoutMs: 30000,
+    })
+  })
+
+  // ── Notion connect ──────────────────────────────────────────────────────
+  //
+  // Same loopback-plus-relay shape as GitHub's: the Notion connection
+  // exact-matches its registered redirect URL (http://localhost:8087/), so
+  // the browser comes back to THIS machine and we hand the code to whichever
+  // gateway this desktop is paired with. Tokens only ever live on the VM.
+  // Unlike GitHub there is no install page — the Notion consent screen is
+  // where the user picks the workspace and the pages to share.
+  ipcMain.handle('gateway:notion-accounts', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/internal/credentials/accounts?provider=notion', {
+      timeoutMs: 20000,
+    })
+  })
+
+  // Best-effort: only used to name the account in the island's success toast.
+  async function newestNotionAccountLabel(config: GatewayConnectionConfig): Promise<string> {
+    try {
+      const payload = (await callGatewayJson(config, '/internal/credentials/accounts?provider=notion', {
+        timeoutMs: 10000,
+      })) as {
+        accounts?: Array<{
+          account_display_label?: string
+          account_label?: string
+          display_name?: string
+          email?: string
+          last_connected_at?: number
+          updated_at?: number
+        }>
+      }
+      const accounts = Array.isArray(payload?.accounts) ? payload.accounts : []
+      const newest = accounts
+        .slice()
+        .sort(
+          (a, b) =>
+            Number(b.last_connected_at || b.updated_at || 0) - Number(a.last_connected_at || a.updated_at || 0),
+        )[0]
+      return String(
+        newest?.account_display_label || newest?.account_label || newest?.display_name || newest?.email || '',
+      ).trim()
+    } catch {
+      return ''
+    }
+  }
+
+  ipcMain.handle('gateway:notion-connect', async (_, payload: { accountLabel?: string } = {}) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+
+    const start = (await callGatewayJson(config, '/auth/connect/notion', {
+      method: 'POST',
+      body: { account_label: payload?.accountLabel ?? null },
+      timeoutMs: 20000,
+    })) as { authorize_url?: string; state?: string; flow?: string }
+
+    const authorizeUrl = String(start?.authorize_url || '').trim()
+    if (!authorizeUrl) {
+      throw new Error('Gateway did not return a Notion authorize URL.')
+    }
+
+    let settle: (value: { ok: boolean; error?: string }) => void = () => {}
+    const outcome = new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      settle = resolve
+    })
+    let settled = false
+    const finish = (result: { ok: boolean; error?: string }) => {
+      if (settled) return
+      settled = true
+      settle(result)
+    }
+
+    const server = createServer((req, res) => {
+      const requestUrl = new URL(req.url || '/', 'http://127.0.0.1:8087')
+      const code = requestUrl.searchParams.get('code') || ''
+      const state = requestUrl.searchParams.get('state') || ''
+      const error = requestUrl.searchParams.get('error') || ''
+
+      const relay = async () => {
+        const params = new URLSearchParams({ code, state, error })
+        try {
+          // The gateway renders the success/failure page; pass it straight
+          // through so the user sees one consistent screen.
+          const baseUrl = normalizeGatewayBaseUrl(config.baseUrl || '')
+          const relayUrl = `${baseUrl}/auth/callback/notion?${params.toString()}`
+          const response = await fetch(relayUrl, {
+            headers: { Authorization: `Bearer ${String(config.apiToken || '').trim()}` },
+          })
+          const body = await response.text()
+          res.writeHead(response.status, {
+            'Content-Type': response.headers.get('content-type') || 'text/html; charset=utf-8',
+          })
+          res.end(body)
+          finish(
+            response.ok
+              ? { ok: true }
+              : { ok: false, error: `Gateway HTTP ${response.status}` },
+          )
+        } catch (e: any) {
+          res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' })
+          res.end('Could not complete Notion sign-in with the COSMIC Gateway.')
+          finish({ ok: false, error: e?.message || 'relay_failed' })
+        }
+      }
+      void relay()
+    })
+
+    const closeServer = async () => {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+
+    try {
+      await new Promise<void>((resolveListen, rejectListen) => {
+        server.once('error', rejectListen)
+        server.listen(8087, '127.0.0.1', () => resolveListen())
+      })
+    } catch (e: any) {
+      // Fixed port means "already in use" is a real, reportable state rather
+      // than something to silently work around.
+      const detail = e?.code === 'EADDRINUSE'
+        ? 'Port 8087 is already in use on this machine. Close whatever is using it and try again.'
+        : e?.message || 'Could not start the local Notion sign-in listener.'
+      return { success: false, error: 'listener_failed', message: detail }
+    }
+
+    const timeout = setTimeout(() => finish({ ok: false, error: 'timeout' }), 300_000)
+    const cancelHook = () => finish({ ok: false, error: 'cancelled' })
+    activeNotionConnectCancel = cancelHook
+    try {
+      sendNotionIslandEvent('auth_started', 'Finish Notion sign-in in your browser.', {
+        cancelable: true,
+        timeout_seconds: 300,
+        ...(String(payload?.accountLabel || '').trim()
+          ? { account_label: String(payload.accountLabel).trim() }
+          : {}),
+      })
+      await openExternalAndAnnounce(authorizeUrl)
+      const result = await outcome
+      if (!result.ok) {
+        if (result.error === 'cancelled') {
+          sendNotionIslandEvent('auth_cancelled', 'Notion sign-in cancelled.')
+          return { success: false, error: 'cancelled', message: 'Notion sign-in cancelled.' }
+        }
+        const message =
+          result.error === 'timeout'
+            ? 'Notion sign-in did not finish before the timeout window closed.'
+            : result.error || 'Notion sign-in failed.'
+        sendNotionIslandEvent('auth_error', message)
+        return {
+          success: false,
+          error: result.error === 'timeout' ? 'oauth_timeout' : 'oauth_failed',
+          message,
+        }
+      }
+      // The gateway stores the account before it renders the success page, so
+      // the newest `last_connected_at` is the account that just finished.
+      const accountLabel = await newestNotionAccountLabel(config)
+      sendNotionIslandEvent(
+        'auth_success',
+        'Notion workspace connected.',
+        accountLabel ? { account_label: accountLabel } : {},
+      )
+      return { success: true, flow: start?.flow || 'authorize' }
+    } finally {
+      if (activeNotionConnectCancel === cancelHook) {
+        activeNotionConnectCancel = null
+      }
+      clearTimeout(timeout)
+      await closeServer()
+    }
+  })
+
+  // Ends a Notion sign-in that is still waiting on the browser — the island's
+  // Cancel button routes here, mirroring gateway:github-connect-cancel.
+  ipcMain.on('gateway:notion-connect-cancel', () => {
+    activeNotionConnectCancel?.()
+  })
+
+  ipcMain.handle('gateway:notion-disconnect', async (_, accountId: string) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    sendNotionIslandEvent('disconnect_started', 'Disconnecting Notion workspace.')
+    try {
+      const result = await callGatewayJson(
+        config,
+        `/internal/credentials/accounts/${encodeURIComponent(String(accountId || ''))}`,
+        { method: 'DELETE', timeoutMs: 25000 },
+      )
+      sendNotionIslandEvent('disconnect_success', 'Notion workspace disconnected.')
+      return result
+    } catch (err) {
+      sendNotionIslandEvent(
+        'disconnect_error',
+        err instanceof Error && err.message ? err.message : 'We could not disconnect this Notion workspace.',
+      )
+      throw err
+    }
+  })
+
+  ipcMain.handle('gateway:notion-auth-health', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/internal/credentials/notion/auth-health', {
       method: 'POST',
       body: {},
       timeoutMs: 30000,

@@ -23,6 +23,8 @@ from secrets import token_urlsafe
 from typing import Any
 from urllib.parse import urlencode
 
+import httpx
+
 from .github_client import GitHubApiClient, GitHubScopeError
 from .providers import GoogleAdapter, ProviderAdapter, get_provider_adapter
 from .store import CredentialStore
@@ -146,12 +148,34 @@ def _account_display_label(account: dict[str, Any]) -> str:
     stored_label = str(account.get("account_label") or "").strip()
     if stored_label and not _is_generic_account_label(stored_label):
         return stored_label
+    # Notion's meaningful identity is the workspace name; the email is a
+    # person inbox that can back several workspace connections, so it ranks
+    # second there and first everywhere else.
+    if str(account.get("provider") or "").strip() == "notion":
+        return (
+            str(account.get("display_name") or "").strip()
+            or str(account.get("email") or "").strip()
+            or stored_label
+            or "Connected account"
+        )
     return (
         str(account.get("email") or "").strip()
         or str(account.get("display_name") or "").strip()
         or stored_label
-        or "Google account"
+        or "Connected account"
     )
+
+
+def _initial_account_label(provider: str, email: str, display_name: str) -> str:
+    """The label an account is born with, before the user renames it.
+
+    Google accounts are best addressed by their email; a Notion connection's
+    stable identity is the workspace it granted, and the email is just the
+    person who consented.
+    """
+    if str(provider or "").strip() == "notion":
+        return display_name or email
+    return email or display_name
 
 
 def _normalized_hint_value(value: str | None) -> str:
@@ -202,9 +226,10 @@ def provider_scopes_satisfy(
     at install time, and its user-to-server tokens legitimately come back with
     an empty scope list - so Google's rule (which treats "no scopes" as "no
     access") rejects every healthy GitHub credential, and the caller sees a
-    connected account that can do nothing.
+    connected account that can do nothing. Notion is exempt for the same
+    reason: capabilities are fixed on the connection, not granted as scopes.
     """
-    if str(provider or "").strip() == "github":
+    if str(provider or "").strip() in {"github", "notion"}:
         return True
     return google_scopes_satisfy(granted_scopes, required_scopes)
 
@@ -253,6 +278,16 @@ GOOGLE_DEFAULT_SCOPES = (
 # identifies the account so it can be labelled in Settings.
 GITHUB_DEFAULT_SCOPES = ("read:user",)
 
+# Notion grants capabilities (read/update/insert content) on the connection
+# itself, configured in Notion's dashboard - there is no scope parameter in
+# the authorize URL and the token response carries no scope list.
+NOTION_DEFAULT_SCOPES: tuple[str, ...] = ()
+
+# Providers whose tokens may be non-expiring and ship without a refresh token.
+# resolve_credential must accept an unexpired stored access token for these
+# instead of demanding a refresh token that will never exist.
+_REFRESH_OPTIONAL_PROVIDERS = {"github", "notion"}
+
 
 class OAuthFlowState:
     """Transient PKCE + state for an in-progress OAuth flow."""
@@ -290,6 +325,9 @@ class CredentialManager:
         github_redirect_uri: str = "",
         github_app_slug: str = "",
         github_api_client: Any = None,
+        notion_client_id: str = "",
+        notion_client_secret: str = "",
+        notion_redirect_uri: str = "",
     ) -> None:
         self._store = store
         self._google_client_id = google_client_id
@@ -300,6 +338,9 @@ class CredentialManager:
         self._github_redirect_uri = github_redirect_uri
         self._github_app_slug = (github_app_slug or "").strip()
         self._github_api = github_api_client
+        self._notion_client_id = notion_client_id
+        self._notion_client_secret = notion_client_secret
+        self._notion_redirect_uri = notion_redirect_uri
         # In-flight OAuth flows: state -> OAuthFlowState
         self._pending_flows: dict[str, OAuthFlowState] = {}
         # Webhook-free registry freshness bookkeeping.
@@ -338,6 +379,12 @@ class CredentialManager:
                 self._github_client_secret,
                 self._github_redirect_uri,
             )
+        if provider == "notion":
+            return (
+                self._notion_client_id,
+                self._notion_client_secret,
+                self._notion_redirect_uri,
+            )
         raise ValueError(f"No OAuth client credentials configured for provider: {provider}")
 
     @property
@@ -347,6 +394,10 @@ class CredentialManager:
     @property
     def github_configured(self) -> bool:
         return bool(self._github_client_id and self._github_client_secret)
+
+    @property
+    def notion_configured(self) -> bool:
+        return bool(self._notion_client_id and self._notion_client_secret)
 
     def provider_configured(self, provider: str) -> bool:
         try:
@@ -372,6 +423,10 @@ class CredentialManager:
             if not self.github_configured:
                 raise ValueError("GitHub OAuth client credentials are not configured.")
             effective_scopes = scopes or GITHUB_DEFAULT_SCOPES
+        elif provider == "notion":
+            if not self.notion_configured:
+                raise ValueError("Notion OAuth client credentials are not configured.")
+            effective_scopes = scopes or list(NOTION_DEFAULT_SCOPES)
         else:
             effective_scopes = scopes or []
 
@@ -417,8 +472,11 @@ class CredentialManager:
         )
 
         # Fetch user profile. The adapter maps its own field names; see
-        # ProviderAdapter.normalize_profile.
+        # ProviderAdapter.normalize_profile. Some providers (Notion) also
+        # announce account facts at exchange time that the profile endpoint
+        # does not repeat, so the adapter folds the token payload in.
         profile = await adapter.get_user_info(token_resp.access_token)
+        profile = adapter.enrich_profile_from_token(profile, token_resp.raw)
         identity = adapter.normalize_profile(profile)
         provider_account_id = identity["provider_account_id"]
         email = identity["email"]
@@ -478,7 +536,8 @@ class CredentialManager:
                 provider_account_id=provider_account_id,
                 email=email,
                 display_name=display_name,
-                account_label=requested_label or email or display_name,
+                account_label=requested_label
+                or _initial_account_label(flow.provider, email, display_name),
                 is_primary=len(self._store.list_accounts(flow.provider)) == 0,
                 metadata=metadata_patch,
             )
@@ -1270,6 +1329,124 @@ class CredentialManager:
         result.update({"login": login or result["login"], "status": "healthy"})
         return result
 
+    async def probe_notion_account_health(self, account_id: str) -> dict[str, Any]:
+        """Actively verify one Notion account's credential against the API.
+
+        Mirrors probe_github_account_health: resolve (which uses the stored
+        token directly for non-expiring Notion credentials), then one
+        ``GET /users/me``. Notion has no push mechanism for revocation - users
+        withdraw access from Notion's side silently - so this probe is the
+        only thing that can surface a dead grant before a task hits it.
+        """
+        acct = self._store.get_account(account_id)
+        if acct is None or acct.get("provider") != "notion":
+            return {
+                "account_id": account_id,
+                "workspace": "",
+                "status": "unknown",
+                "needs_reconnect": False,
+                "error": "No such Notion account.",
+            }
+        metadata = acct.get("_metadata") if isinstance(acct.get("_metadata"), dict) else {}
+        result: dict[str, Any] = {
+            "account_id": account_id,
+            "workspace": str(metadata.get("notion_workspace_name") or "").strip(),
+            "status": "unknown",
+            "needs_reconnect": False,
+            "error": "",
+        }
+        if acct.get("status") == "needs_auth" and acct.get("has_refresh_token"):
+            # Same throttled self-heal the GitHub probe grants: settle whether
+            # needs_auth was a real revocation or a transient condemnation.
+            try:
+                if await self.attempt_account_recovery(account_id):
+                    acct = self._store.get_account(account_id) or acct
+            except Exception:
+                logger.exception(
+                    "notion_auth_health.recovery_failed account_id=%s", account_id
+                )
+        if acct.get("status") != "active":
+            result.update(
+                {
+                    "status": "reauth_required",
+                    "needs_reconnect": True,
+                    "error": "Notion account is not active. Reconnect it in Cosmic settings.",
+                }
+            )
+            return result
+        try:
+            resolved = await self.resolve_credential(
+                provider="notion",
+                required_scopes=[],
+                account_id=account_id,
+                allow_primary_fallback=True,
+            )
+        except Exception as exc:
+            result.update(
+                {
+                    "status": "reauth_required",
+                    "needs_reconnect": True,
+                    "error": str(exc)[:300] or "Unable to resolve the Notion credential.",
+                }
+            )
+            return result
+        token = str((resolved or {}).get("access_token") or "")
+        if not token:
+            result.update(
+                {
+                    "status": "reauth_required",
+                    "needs_reconnect": True,
+                    "error": "No usable Notion credential. Reconnect in Cosmic settings.",
+                }
+            )
+            return result
+        adapter = get_provider_adapter("notion")
+        try:
+            user = await adapter.get_user_info(token)
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status in (401, 403):
+                # Notion rejected the credential: the grant was withdrawn on
+                # Notion's side (there is no other way a valid token dies).
+                message = (
+                    "Notion rejected this connection. Reconnect, or re-share the "
+                    "pages from Notion → Settings → Connections."
+                )
+                self.mark_account_auth_error(account_id, message)
+                result.update(
+                    {
+                        "status": "reauth_required",
+                        "needs_reconnect": True,
+                        "error": message,
+                    }
+                )
+                return result
+            result.update(
+                {
+                    "status": "provider_error",
+                    "needs_reconnect": False,
+                    "error": str(exc)[:300] or "Notion API call failed.",
+                }
+            )
+            return result
+        except Exception as exc:
+            result.update(
+                {
+                    "status": "provider_error",
+                    "needs_reconnect": False,
+                    "error": str(exc)[:300] or "Notion API call failed.",
+                }
+            )
+            return result
+        identity = adapter.normalize_profile(user)
+        workspace = identity.get("display_name") or ""
+        if workspace:
+            self.update_account_metadata(
+                account_id, {"notion_workspace_name": workspace}
+            )
+        result.update({"workspace": workspace or result["workspace"], "status": "healthy"})
+        return result
+
     def github_git_identity(self, account_id: str) -> dict[str, str] | None:
         """The commit identity Alpha must use for this account's checkouts.
 
@@ -1431,13 +1608,29 @@ class CredentialManager:
 
         # 5. Get credential and ensure access token is fresh
         cred = self._store.get_active_credential(account_id)
-        if cred is None or not cred["refresh_token"]:
+        if cred is None:
             self._store.log_audit(
                 action="resolve",
                 provider=provider,
                 result="failed",
             )
             return None
+        if not cred["refresh_token"]:
+            # Non-expiring provider tokens (GitHub Apps without expiring
+            # tokens, Notion) may legitimately have no refresh token. An
+            # unexpired stored access token is then usable as-is; demanding
+            # a refresh token here would condemn a perfectly healthy grant.
+            expires_at = cred.get("access_token_expires_at")
+            token_usable = bool(cred["access_token"]) and (
+                not expires_at or float(expires_at) > time.time() + 90
+            )
+            if provider not in _REFRESH_OPTIONAL_PROVIDERS or not token_usable:
+                self._store.log_audit(
+                    action="resolve",
+                    provider=provider,
+                    result="failed",
+                )
+                return None
 
         # 6. Check scope coverage
         if not provider_scopes_satisfy(

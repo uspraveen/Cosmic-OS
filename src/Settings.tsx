@@ -21,6 +21,8 @@ import GoogleIntegrationsSettings from './GoogleIntegrationsSettings'
 import WhatsAppIntegrationSettings from './WhatsAppIntegrationSettings'
 import TelegramIntegrationSettings from './TelegramIntegrationSettings'
 import GitHubIntegrationSettings from './GitHubIntegrationSettings'
+import NotionIntegrationSettings from './NotionIntegrationSettings'
+import { NotionMark } from './brandIcons'
 import MobileDevicesSettings from './MobileDevicesSettings'
 import PasswordVaultSettings from './PasswordVaultSettings'
 import GatewayPreferencesSettings from './GatewayPreferencesSettings'
@@ -175,6 +177,7 @@ export type SettingsView =
   | 'integrations-whatsapp'
   | 'integrations-telegram'
   | 'integrations-github'
+  | 'integrations-notion'
 
 export default function Settings({
   isOpen,
@@ -279,16 +282,19 @@ export default function Settings({
                 ? 'WhatsApp'
                 : currentView === 'integrations-telegram'
                   ? 'Telegram'
-                : currentView === 'integrations-github'
-                  ? 'GitHub'
-                : 'Google'
+            : currentView === 'integrations-github'
+              ? 'GitHub'
+            : currentView === 'integrations-notion'
+              ? 'Notion'
+            : 'Google'
 
   const handleBack = () => {
     if (
       currentView === 'integrations-google' ||
       currentView === 'integrations-whatsapp' ||
       currentView === 'integrations-telegram' ||
-      currentView === 'integrations-github'
+      currentView === 'integrations-github' ||
+      currentView === 'integrations-notion'
     ) {
       setCurrentView('integrations')
       return
@@ -493,6 +499,19 @@ export default function Settings({
                   <div className="prx-provider-info">
                     <strong>GitHub</strong>
                     <span>Let Alpha work in the repositories you choose — commit, push, open PRs.</span>
+                  </div>
+                  <div className="prx-provider-arrow">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
+                  </div>
+                </button>
+
+                <button className="prx-provider-card" onClick={() => setCurrentView('integrations-notion')} style={{ marginTop: '12px' }}>
+                  <div className="prx-provider-icon" style={{ background: '#ffffff', color: '#111111' }}>
+                    <NotionMark size={22} />
+                  </div>
+                  <div className="prx-provider-info">
+                    <strong>Notion</strong>
+                    <span>Share the pages you choose — search, read, and draft docs and databases.</span>
                   </div>
                   <div className="prx-provider-arrow">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6" /></svg>
@@ -753,6 +772,10 @@ export default function Settings({
 
             {currentView === 'integrations-github' && (
               <GitHubIntegrationSettings active={currentView === 'integrations-github'} />
+            )}
+
+            {currentView === 'integrations-notion' && (
+              <NotionIntegrationSettings active={currentView === 'integrations-notion'} />
             )}
 
             {currentView === 'devices' && (

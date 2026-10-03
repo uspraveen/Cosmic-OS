@@ -75,3 +75,18 @@ export function XMark({ size = 20 }: { size?: number }) {
     </svg>
   )
 }
+
+export function NotionMark({ size = 20 }: { size?: number }) {
+  // Notion's page glyph: the outlined page with its signature serif "N",
+  // reduced to clean geometry that holds up at 16-28px. Drawn with
+  // currentColor so tiles and pills recolor it like the other marks.
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2.8" stroke="currentColor" strokeWidth="1.7" />
+      <path
+        d="M8.1 16.9V7.1h2.1l4 6V7.1h1.9v9.8h-2.1l-4-6v6H8.1Z"
+        fill="currentColor"
+      />
+    </svg>
+  )
+}
