@@ -17,6 +17,7 @@ from .credentials.routes import router as credential_router
 from .gmail_routes import router as gmail_router
 from .github_routes import router as github_router
 from .memory.routes import router as memory_router
+from .notion_routes import router as notion_router
 from .preferences.routes import router as preferences_router
 from .runtime import GatewayRuntime
 from .usage.routes import router as usage_router
@@ -99,6 +100,7 @@ app.include_router(credential_router)
 app.include_router(gmail_router)
 app.include_router(github_router)
 app.include_router(memory_router)
+app.include_router(notion_router)
 app.include_router(preferences_router)
 app.include_router(usage_router)
 app.include_router(vault_router)

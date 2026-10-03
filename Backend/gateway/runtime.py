@@ -45,6 +45,7 @@ from .credentials.store import CredentialStore
 from .delivery.queue_store import DeliveryQueueStore, utcnow_iso
 from .event_automation_store import EventAutomationStore
 from .gmail_approval_store import GmailApprovalStore
+from .notion_approval_store import NotionApprovalStore
 from .gmail_context_store import GmailContextStore
 from .sandbox_permission_store import SandboxPermissionStore
 from .vault.store import POLICY_ALWAYS_ALLOW, POLICY_WINDOW, VaultStore, decrypt_entry_secrets
@@ -591,6 +592,8 @@ class GatewayRuntime:
         self.delivery_queue_store = DeliveryQueueStore(config.delivery_queue_db_path)
         self.gmail_context_store = GmailContextStore(config.gmail_context_db_path)
         self.gmail_approval_store = GmailApprovalStore(config.gmail_approvals_db_path)
+        self.notion_approval_store = NotionApprovalStore(config.notion_approvals_db_path)
+        self.notion_approval_store.initialize()
         self.sandbox_permission_store = SandboxPermissionStore(config.sandbox_permissions_db_path)
         self.vault_store = VaultStore(config.vault_db_path)
         self.browser_interrupts = BrowserInterruptManager()
@@ -697,6 +700,9 @@ class GatewayRuntime:
         # block id. Merged into the next assistant message persisted for that
         # session so the cards survive reloads; pruned after a few hours.
         self._session_vault_action_blocks: dict[str, dict[str, dict[str, Any]]] = {}
+        # Notion write approval cards proposed mid-turn, folded into the turn's
+        # assistant message when it persists (same mechanism as the vault's).
+        self._session_notion_approval_blocks: dict[str, dict[str, dict[str, Any]]] = {}
         self.started = False
         self.adapter_errors: dict[str, str] = {}
         self.active_task_channels: dict[str, str] = {}
@@ -4743,6 +4749,185 @@ class GatewayRuntime:
                 status="rejected",
             ),
             name=f"gmail-approval-update-{approval_id}",
+        )
+        return {"status": "rejected", "approval": rejected}
+
+    # ── Notion write approvals ───────────────────────────────────
+
+    def _notion_approval_response_block(self, approval: dict[str, Any]) -> dict[str, Any]:
+        approval_id = self._safe_text(approval.get("approval_id"))
+        operation = self._safe_text(approval.get("operation")) or "create_page"
+        content_text = self._safe_text(approval.get("content_text"))
+        result = approval.get("result") if isinstance(approval.get("result"), dict) else {}
+        return {
+            key: value
+            for key, value in {
+                "id": f"notion_approval:{approval_id}",
+                "type": "notion_write_approval",
+                "approval_id": approval_id,
+                "status": self._safe_text(approval.get("status")) or "pending",
+                "operation": operation,
+                "account_id": self._safe_text(approval.get("account_id")),
+                "workspace": self._safe_text(approval.get("workspace")),
+                "parent_page_id": self._safe_text(approval.get("parent_page_id")),
+                "parent_database_id": self._safe_text(approval.get("parent_database_id")),
+                "parent_title": self._safe_text(approval.get("parent_title")),
+                "page_id": self._safe_text(approval.get("page_id")),
+                "page_title": self._safe_text(approval.get("page_title")),
+                "content_text": content_text,
+                "content_preview": self._safe_text(approval.get("content_preview"))
+                or self._bounded_excerpt(content_text, limit=700),
+                "page_url": self._safe_text(result.get("url")),
+                "session_id": self._safe_text(approval.get("session_id")),
+                "created_at": self._safe_text(approval.get("created_at")),
+            }.items()
+            if value not in (None, "", [], {})
+        }
+
+    async def create_notion_pending_and_notify(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Park a Notion write behind an approval card and tell every desktop.
+
+        Mirrors the vault flow: the card is published mid-turn (patched onto
+        any message that already exists, tracked so the turn's own assistant
+        message picks it up when it persists), and the propose response hands
+        the orchestrator just the receipt — never the impression that the
+        write already happened.
+        """
+        pending, _created = self.notion_approval_store.upsert_pending(payload)
+        block = self._notion_approval_response_block(pending)
+        session_id = self._safe_text(pending.get("session_id"))
+        patched = 0
+        if session_id:
+            patched = self.session_store.update_response_action_block(
+                block_id=self._safe_text(block.get("id")),
+                block_type=self._safe_text(block.get("type")) or "notion_write_approval",
+                patch=block,
+            )
+        if session_id:
+            tracked = self._session_notion_approval_blocks.setdefault(session_id, {})
+            tracked[self._safe_text(block.get("id"))] = {
+                "block": dict(block),
+                "recorded_at": time.time(),
+            }
+        logger.info(
+            "notion.approval_proposed approval=%s operation=%s workspace=%s title=%s session=%s patched=%s",
+            self._safe_text(pending.get("approval_id")),
+            self._safe_text(pending.get("operation")),
+            self._safe_text(pending.get("workspace")),
+            self._safe_text(pending.get("page_title")),
+            session_id,
+            patched,
+        )
+        await self._publish_response_action_update(response_block=block)
+        return pending
+
+    def list_notion_approvals(self, *, include_terminal: bool = True) -> dict[str, Any]:
+        approvals = self.notion_approval_store.list(include_terminal=include_terminal)
+        return {
+            "status": "ok",
+            "approvals": approvals,
+            "pending_count": sum(
+                1 for item in approvals if self._safe_text(item.get("status")) == "pending"
+            ),
+        }
+
+    async def approve_notion_approval(self, approval_id: str) -> dict[str, Any]:
+        """Execute an approved Notion write with the stored payload.
+
+        The stored proposal is the source of truth: whatever the card showed
+        is what gets written, never a re-render from model memory.
+        """
+        from . import notion_client as notion
+
+        approval = self.notion_approval_store.get(approval_id)
+        if not approval:
+            raise ValueError("Notion approval not found.")
+        status = self._safe_text(approval.get("status"))
+        if status not in {"pending"}:
+            return {"status": "ignored", "approval": approval, "reason": f"approval_is_{status or 'unknown'}"}
+
+        self.notion_approval_store.mark_executing(approval_id)
+        try:
+            resolved = await self.credential_manager.resolve_credential(
+                provider="notion",
+                required_scopes=[],
+                account_id=self._safe_text(approval.get("account_id")) or None,
+                operation_mode="write",
+                allow_primary_fallback=True,
+            )
+            token = str((resolved or {}).get("access_token") or "")
+            if not token:
+                raise RuntimeError(
+                    "Unable to resolve the Notion credential. Reconnect the workspace in Cosmic settings."
+                )
+            operation = self._safe_text(approval.get("operation"))
+            blocks = notion.markdown_to_notion_blocks(self._safe_text(approval.get("content_text")))
+            title = self._safe_text(approval.get("page_title"))
+            if operation == "create_page":
+                if self._safe_text(approval.get("parent_database_id")):
+                    parent = {"database_id": self._safe_text(approval.get("parent_database_id"))}
+                else:
+                    parent = {"page_id": self._safe_text(approval.get("parent_page_id"))}
+                page = await notion.create_page(token, parent=parent, title=title, blocks=blocks)
+            else:
+                page_id = self._safe_text(approval.get("page_id"))
+                page = None
+                if title:
+                    page = await notion.update_page_title(token, page_id, title)
+                if blocks:
+                    await notion.append_blocks(token, page_id, blocks)
+                page = page or {"id": page_id, "url": f"https://www.notion.so/{page_id.replace('-', '')}"}
+            result = {
+                "page_id": self._safe_text(page.get("id")),
+                "url": notion.page_url(page)
+                or f"https://www.notion.so/{self._safe_text(page.get('id')).replace('-', '')}",
+                "title": notion.page_title(page) or title,
+            }
+            completed = self.notion_approval_store.mark_completed(approval_id, result) or approval
+            block = self._notion_approval_response_block(completed)
+            self._persist_response_action_block(block)
+            await self._publish_response_action_update(response_block=block)
+            return {"status": "completed", "approval": completed, "page": result}
+        except PermissionError as exc:
+            message = str(exc) or "Notion rejected the credential."
+            self.notion_approval_store.mark_failed(approval_id, message)
+            self._persist_response_action_status(
+                approval_id=approval_id,
+                block_type="notion_write_approval",
+                status="failed",
+            )
+            await self._publish_response_action_update(
+                approval_id=approval_id,
+                block_type="notion_write_approval",
+                status="failed",
+            )
+            raise RuntimeError(message) from exc
+        except Exception as exc:
+            message = str(exc)[:300] or "The Notion write failed."
+            # Back to pending so Approve is a real retry, not a dead card.
+            self.notion_approval_store.mark_failed(approval_id, message)
+            raise RuntimeError(message) from exc
+
+    def reject_notion_approval(self, approval_id: str, *, note: str | None = None) -> dict[str, Any]:
+        approval = self.notion_approval_store.get(approval_id)
+        if not approval:
+            raise ValueError("Notion approval not found.")
+        status = self._safe_text(approval.get("status"))
+        if status not in {"pending", "executing", "failed"}:
+            return {"status": "ignored", "approval": approval, "reason": f"approval_is_{status or 'unknown'}"}
+        rejected = self.notion_approval_store.mark_rejected(approval_id, note) or approval
+        self._persist_response_action_status(
+            approval_id=approval_id,
+            block_type="notion_write_approval",
+            status="rejected",
+        )
+        self._schedule_background_task(
+            self._publish_response_action_update(
+                approval_id=approval_id,
+                block_type="notion_write_approval",
+                status="rejected",
+            ),
+            name=f"notion-approval-update-{approval_id}",
         )
         return {"status": "rejected", "approval": rejected}
 
@@ -13065,6 +13250,51 @@ class GatewayRuntime:
         base["response_blocks"] = blocks
         return base
 
+    def _merge_session_notion_approval_blocks(
+        self,
+        session_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Fold tracked Notion approval cards into a persisted assistant message.
+
+        Same story as the vault merge: the card is published mid-turn via
+        response.action.updated, so the turn's final snapshot usually lacks
+        it; without this merge the card would vanish on reload. Blocks already
+        persisted in the session are skipped so the card is not duplicated.
+        """
+        tracked = self._session_notion_approval_blocks.get(session_id)
+        if not tracked:
+            return metadata
+        cutoff = time.time() - 6 * 3600
+        for block_id, entry in list(tracked.items()):
+            if not isinstance(entry, dict) or float(entry.get("recorded_at") or 0.0) < cutoff:
+                tracked.pop(block_id, None)
+        if not tracked:
+            return metadata
+        base = dict(metadata) if isinstance(metadata, dict) else {}
+        blocks = list(base.get("response_blocks")) if isinstance(base.get("response_blocks"), list) else []
+        known = {
+            self._safe_text(item.get("id"))
+            for item in blocks
+            if isinstance(item, dict) and self._safe_text(item.get("id"))
+        }
+        for block_id, entry in tracked.items():
+            if block_id in known:
+                continue
+            if self.session_store.response_action_block_persisted(
+                session_id=session_id,
+                block_id=block_id,
+            ):
+                continue
+            block = entry.get("block")
+            if isinstance(block, dict):
+                blocks.append(dict(block))
+                known.add(block_id)
+        if not blocks:
+            return metadata
+        base["response_blocks"] = blocks
+        return base
+
     def _append_session_message(
         self,
         session_id: str,
@@ -13079,6 +13309,7 @@ class GatewayRuntime:
     ) -> str | None:
         if role == "assistant":
             metadata = self._merge_session_vault_action_blocks(session_id, metadata)
+            metadata = self._merge_session_notion_approval_blocks(session_id, metadata)
         if not content:
             renderable_payload = False
             if isinstance(metadata, dict):

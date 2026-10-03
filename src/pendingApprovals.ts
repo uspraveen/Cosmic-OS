@@ -25,6 +25,7 @@ const APPROVAL_BLOCK_TYPES = new Set([
   'browser_credential_request',
   'gmail_draft_approval',
   'agent_email_draft_approval',
+  'notion_write_approval',
   'calendar_event',
   'slide_workflow_choice',
 ])

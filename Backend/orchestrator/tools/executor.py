@@ -1487,6 +1487,161 @@ class ToolExecutor:
             )
         return payload
 
+    # ── Notion ──────────────────────────────────────────────────
+
+    async def _notion_search(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        try:
+            payload = await self._request_gateway_json(
+                "POST",
+                "/internal/notion/search",
+                json_body={
+                    "query": str(tool_input.get("query") or "").strip(),
+                    "filter": str(tool_input.get("filter") or "").strip(),
+                    "limit": min(max(1, self._coerce_int(tool_input.get("limit"), 8)), 20),
+                    "account_id": str(tool_input.get("account_id") or "").strip() or None,
+                    "account_hint": str(tool_input.get("account_hint") or "").strip() or None,
+                },
+            )
+        except ToolHTTPError as exc:
+            return {"error": True, "message": exc.message}
+        if not isinstance(payload, dict):
+            return {"error": True, "message": "Gateway returned an invalid Notion search response."}
+        results = payload.get("results") if isinstance(payload.get("results"), list) else []
+        if not results:
+            payload["scope_note"] = (
+                "No shared pages matched. The workspace's visible scope is exactly the "
+                "pages shared at connect time — say so plainly and suggest the user share "
+                "more pages from Notion (page ··· → Connections) if this looks wrong."
+            )
+        return payload
+
+    async def _notion_fetch(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        del context
+        page = str(tool_input.get("page") or tool_input.get("page_id") or "").strip()
+        if not page:
+            return {"error": True, "message": "page is required (an id or URL from notion_search results)."}
+        try:
+            payload = await self._request_gateway_json(
+                "POST",
+                "/internal/notion/fetch",
+                json_body={
+                    "page": page,
+                    "account_id": str(tool_input.get("account_id") or "").strip() or None,
+                    "account_hint": str(tool_input.get("account_hint") or "").strip() or None,
+                },
+            )
+        except ToolHTTPError as exc:
+            return {"error": True, "message": exc.message}
+        if not isinstance(payload, dict):
+            return {"error": True, "message": "Gateway returned an invalid Notion fetch response."}
+        return payload
+
+    async def _notion_create_page(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        return await self._notion_propose_write(
+            {
+                "operation": "create_page",
+                "parent_page_id": str(tool_input.get("parent_page_id") or tool_input.get("parent") or "").strip(),
+                "parent_database_id": str(tool_input.get("parent_database_id") or "").strip(),
+                "parent_title": str(tool_input.get("parent_title") or "").strip(),
+                "title": str(tool_input.get("title") or "").strip(),
+                "content": str(tool_input.get("content") or ""),
+                "account_id": str(tool_input.get("account_id") or "").strip() or None,
+                "account_hint": str(tool_input.get("account_hint") or "").strip() or None,
+                "purpose": str(tool_input.get("purpose") or "").strip() or None,
+            },
+            context=context,
+        )
+
+    async def _notion_update_page(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        return await self._notion_propose_write(
+            {
+                "operation": "update_page",
+                "page_id": str(tool_input.get("page_id") or tool_input.get("page") or "").strip(),
+                "title": str(tool_input.get("title") or "").strip(),
+                "content": str(tool_input.get("content") or ""),
+                "account_id": str(tool_input.get("account_id") or "").strip() or None,
+                "account_hint": str(tool_input.get("account_hint") or "").strip() or None,
+                "purpose": str(tool_input.get("purpose") or "").strip() or None,
+            },
+            context=context,
+        )
+
+    async def _notion_propose_write(
+        self,
+        body: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None,
+    ) -> dict[str, Any]:
+        body["task_id"] = self._coerce_task_id(body, context)
+        body["session_id"] = context.session_id if context else None
+        body["channel"] = context.channel if context else None
+        try:
+            payload = await self._request_gateway_json(
+                "POST",
+                "/internal/notion/pages/propose",
+                json_body=body,
+            )
+        except ToolHTTPError as exc:
+            return {"error": True, "message": exc.message}
+        if not isinstance(payload, dict):
+            return {"error": True, "message": "Gateway returned an invalid Notion proposal response."}
+        if payload.get("status") == "approval_required":
+            presentation = self._notion_write_presentation_contract(context)
+            if presentation:
+                payload["_cosmic_ui"] = presentation
+        return payload
+
+    @staticmethod
+    def _notion_write_presentation_contract(
+        context: ToolExecutionContext | None,
+    ) -> dict[str, Any] | None:
+        channel = str(context.channel if context else "").strip().lower()
+        channel_platform = channel.split(":", 1)[0]
+        if channel_platform not in {"desktop", "mobile"}:
+            return None
+        return {
+            "version": 1,
+            "render": "trusted_inline_block",
+            "block_type": "notion_write_approval",
+            "covers": [
+                "write status",
+                "target workspace",
+                "destination page",
+                "page title",
+                "content",
+                "approval actions",
+            ],
+            "response_mode": "brief_acknowledgement",
+            "instruction": (
+                "The client will render the complete Notion write proposal with approval "
+                "controls beside your final response. Briefly confirm what is queued and "
+                "where it will land. Do not repeat the content or approval instructions in "
+                "Markdown, and never say the page is already written — it is waiting for "
+                "the user's approval."
+            ),
+        }
+
     async def _custom_tool_opportunity_capture(
         self,
         tool_input: dict[str, Any],

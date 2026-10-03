@@ -300,6 +300,13 @@ interface Window {
       available?: boolean
       accounts?: any[]
     }>
+    getNotionApprovals: () => Promise<{ approvals?: any[]; pending_count?: number }>
+    approveNotionApproval: (payload: { approvalId: string }) => Promise<{
+      status?: string
+      approval?: any
+      page?: any
+    }>
+    rejectNotionApproval: (payload: { approvalId: string; note?: string }) => Promise<any>
     getGatewayCursorStatus: () => Promise<any>
     saveGatewayCursorConfig: (payload: {
       preferredModel?: string

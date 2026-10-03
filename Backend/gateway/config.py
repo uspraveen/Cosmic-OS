@@ -195,6 +195,7 @@ class GatewayConfig:
     gmail_agent_id: str = "cosmic/gmail-agent:1.0.0"
     gmail_context_db_path: Path = BACKEND_ROOT / "gateway" / "gmail_context.db"
     gmail_approvals_db_path: Path = BACKEND_ROOT / "gateway" / "gmail_approvals.db"
+    notion_approvals_db_path: Path = BACKEND_ROOT / "gateway" / "notion_approvals.db"
     sandbox_permissions_db_path: Path = BACKEND_ROOT / "gateway" / "sandbox_permissions.db"
     vault_db_path: Path = BACKEND_ROOT / "gateway" / "vault.db"
     slide_workflow_choices_db_path: Path = BACKEND_ROOT / "gateway" / "slide_workflow_choices.db"
@@ -710,6 +711,12 @@ class GatewayConfig:
                 os.getenv(
                     "GATEWAY_GMAIL_APPROVALS_DB_PATH",
                     str(BACKEND_ROOT / "gateway" / "gmail_approvals.db"),
+                )
+            ).expanduser(),
+            notion_approvals_db_path=Path(
+                os.getenv(
+                    "GATEWAY_NOTION_APPROVALS_DB_PATH",
+                    str(BACKEND_ROOT / "gateway" / "notion_approvals.db"),
                 )
             ).expanduser(),
             sandbox_permissions_db_path=Path(

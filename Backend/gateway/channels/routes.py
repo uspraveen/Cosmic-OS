@@ -75,6 +75,10 @@ class GmailApprovalRejectRequest(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
 
 
+class NotionApprovalRejectRequest(BaseModel):
+    note: str | None = Field(default=None, max_length=1000)
+
+
 class SandboxPermissionCreateRequest(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
     network: bool = False
@@ -2604,6 +2608,45 @@ async def update_gmail_approval_draft(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.get("/channels/notion/approvals")
+async def list_notion_approvals(
+    include_terminal: bool = Query(default=True),
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    return runtime.list_notion_approvals(include_terminal=include_terminal)
+
+
+@router.post("/channels/notion/approvals/{approval_id}/approve")
+async def approve_notion_approval(
+    approval_id: str,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return await runtime.approve_notion_approval(approval_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.post("/channels/notion/approvals/{approval_id}/reject")
+async def reject_notion_approval(
+    approval_id: str,
+    body: NotionApprovalRejectRequest | None = None,
+    _: None = Depends(require_local_api_token),
+    runtime: GatewayRuntime = Depends(get_runtime),
+) -> dict[str, Any]:
+    try:
+        return runtime.reject_notion_approval(
+            approval_id,
+            note=body.note if body is not None else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.get("/channels/slide/choices")

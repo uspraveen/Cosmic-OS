@@ -4273,6 +4273,50 @@ app.whenReady().then(() => {
     })
   })
 
+  ipcMain.handle('gateway:get-notion-approvals', async () => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    return callGatewayJson(config, '/channels/notion/approvals', {
+      method: 'GET',
+      timeoutMs: 20000,
+    })
+  })
+
+  ipcMain.handle('gateway:approve-notion-approval', async (_, payload: { approvalId?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const approvalId = String(payload?.approvalId || '').trim()
+    if (!approvalId) {
+      throw new Error('Notion approval id is required.')
+    }
+    // The write itself runs on the gateway against the Notion API, so this
+    // gets the same long leash as the Gmail send.
+    return callGatewayJson(config, `/channels/notion/approvals/${encodeURIComponent(approvalId)}/approve`, {
+      method: 'POST',
+      timeoutMs: 60000,
+    })
+  })
+
+  ipcMain.handle('gateway:reject-notion-approval', async (_, payload: { approvalId?: string; note?: string }) => {
+    const config = getStoredGatewayTransportConfig()
+    if (!config) {
+      throw new Error('Gateway connection is not configured.')
+    }
+    const approvalId = String(payload?.approvalId || '').trim()
+    if (!approvalId) {
+      throw new Error('Notion approval id is required.')
+    }
+    return callGatewayJson(config, `/channels/notion/approvals/${encodeURIComponent(approvalId)}/reject`, {
+      method: 'POST',
+      body: { note: String(payload?.note || '').trim() || null },
+      timeoutMs: 30000,
+    })
+  })
+
   ipcMain.handle('gateway:reject-gmail-approval', async (_, payload: { approvalId?: string; note?: string }) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {

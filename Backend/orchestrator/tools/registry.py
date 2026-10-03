@@ -177,6 +177,21 @@ def _github_repo_search_progress(tool_input: dict[str, Any]) -> str:
     return f"Looking up connected GitHub repositories: {query}" if query else "Looking up connected GitHub repositories..."
 
 
+def _notion_search_progress(tool_input: dict[str, Any]) -> str:
+    query = str(tool_input.get("query") or "").strip()
+    return f"Searching the connected Notion workspace: {query}" if query else "Searching the connected Notion workspace..."
+
+
+def _notion_fetch_progress(tool_input: dict[str, Any]) -> str:
+    page = str(tool_input.get("page") or "").strip()
+    return f"Reading Notion page {page[:40]}..." if page else "Reading Notion page..."
+
+
+def _notion_write_progress(tool_input: dict[str, Any]) -> str:
+    title = str(tool_input.get("title") or "").strip()
+    return f"Preparing Notion write for approval: {title}" if title else "Preparing Notion write for approval..."
+
+
 def _docs_browse_progress(tool_input: dict[str, Any]) -> str:
     bundle_id = str(tool_input.get("bundle_id") or "").strip()
     index_kind = str(tool_input.get("index_kind") or "documents").strip() or "documents"
@@ -1601,6 +1616,180 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_github_repo_search_progress,
         handler_method="_github_repo_search",
         read_only=True,
+    ),
+    ToolSpec(
+        name="notion_search",
+        api_definition={
+            "name": "notion_search",
+            "description": (
+                "Search the pages and databases the user shared from their connected Notion "
+                "workspace. Returns each result's id, title, URL, type (page or database), and "
+                "last-edited time. ALWAYS search before fetching, creating, or updating anything: "
+                "the other notion_* tools require an id or URL from these results, and scope is "
+                "limited to exactly the pages shared at connect time — anything else is invisible. "
+                "Use it whenever the user asks what is in their Notion, wants to find or read a "
+                "doc, or names a Notion page as the destination for new content."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Words to match against page titles and content. Empty lists recently edited shared pages.",
+                    },
+                    "filter": {
+                        "type": "string",
+                        "enum": ["", "page", "database"],
+                        "description": "Restrict results to pages or databases. Empty searches both.",
+                        "default": "",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results to return. Default 8.",
+                        "default": 8,
+                    },
+                    "account_hint": {
+                        "type": "string",
+                        "description": "Workspace name, when the user has several Notion workspaces connected. Omit when only one is connected or the user did not name one.",
+                    },
+                },
+            },
+        },
+        group="integrations",
+        prompt_summary="Search pages/databases shared from the connected Notion workspace; returns ids, titles, and URLs for the other notion_* tools.",
+        progress_builder=_notion_search_progress,
+        handler_method="_notion_search",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="notion_fetch",
+        api_definition={
+            "name": "notion_fetch",
+            "description": (
+                "Read the full text of one Notion page or database the user shared, given its id "
+                "or URL (take both from notion_search results — do not guess ids). Returns the "
+                "page title, URL, and content as text with headings, bullets, to-dos, and code "
+                "blocks preserved in markdown-ish form. Use for reading a specific doc the user "
+                "named; for quotes in your answer, cite the page URL."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "page": {
+                        "type": "string",
+                        "description": "Page or database id, or the page URL, from notion_search results.",
+                    },
+                    "account_hint": {
+                        "type": "string",
+                        "description": "Workspace name, when several Notion workspaces are connected.",
+                    },
+                },
+                "required": ["page"],
+            },
+        },
+        group="integrations",
+        prompt_summary="Read one shared Notion page or database as text (id or URL from notion_search).",
+        progress_builder=_notion_fetch_progress,
+        handler_method="_notion_fetch",
+        read_only=True,
+    ),
+    ToolSpec(
+        name="notion_create_page",
+        api_definition={
+            "name": "notion_create_page",
+            "description": (
+                "Create a new page in the user's connected Notion workspace under a parent you "
+                "choose. The parent page or database MUST come from a notion_search result in "
+                "this turn — search first, pick the destination the user means, and pass its id. "
+                "Content supports headings (#..####), bullets (-), numbered lists, to-dos "
+                "(- [ ] / - [x]), quotes (>), and fenced code blocks. The write does NOT happen "
+                "immediately: it lands behind an approval card the user confirms first, so the "
+                "result will say approval_required — acknowledge that the page is ready for "
+                "approval and never claim it is already in Notion."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "parent_page_id": {
+                        "type": "string",
+                        "description": "Id (or URL) of the parent page from notion_search. Required unless parent_database_id is set.",
+                    },
+                    "parent_database_id": {
+                        "type": "string",
+                        "description": "Id of a shared database from notion_search, to create a database entry instead of a sub-page.",
+                    },
+                    "parent_title": {
+                        "type": "string",
+                        "description": "Optional parent name for the approval card, when you also want it readable without a lookup.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "The new page's title.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Full page content as markdown-ish text (headings, bullets, to-dos, quotes, code fences).",
+                    },
+                    "account_hint": {
+                        "type": "string",
+                        "description": "Workspace name, when several Notion workspaces are connected.",
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": "One line on why this page is being created, shown with the approval.",
+                    },
+                },
+                "required": ["title", "content"],
+            },
+        },
+        group="integrations",
+        prompt_summary="Create a Notion page under a searched parent; lands behind an approval card before it is written.",
+        progress_builder=_notion_write_progress,
+        handler_method="_notion_create_page",
+    ),
+    ToolSpec(
+        name="notion_update_page",
+        api_definition={
+            "name": "notion_update_page",
+            "description": (
+                "Append content to (and optionally retitle) a page in the user's connected Notion "
+                "workspace. The page MUST come from a notion_search or notion_fetch result in this "
+                "turn. Content is APPENDED to the end of the page — this tool cannot rewrite or "
+                "delete existing blocks, so say 'append' honestly when the user asks to edit "
+                "mid-page. Like notion_create_page it lands behind an approval card: the result "
+                "will say approval_required, and the write only happens after the user approves."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "page_id": {
+                        "type": "string",
+                        "description": "Id (or URL) of the page from notion_search or notion_fetch results.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional new title for the page.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to append at the end of the page (same markdown-ish forms as notion_create_page).",
+                    },
+                    "account_hint": {
+                        "type": "string",
+                        "description": "Workspace name, when several Notion workspaces are connected.",
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": "One line on why this page is being updated, shown with the approval.",
+                    },
+                },
+                "required": ["page_id"],
+            },
+        },
+        group="integrations",
+        prompt_summary="Append content to (or retitle) a shared Notion page; lands behind an approval card before it is written.",
+        progress_builder=_notion_write_progress,
+        handler_method="_notion_update_page",
     ),
     ToolSpec(
         name="docs_browse",

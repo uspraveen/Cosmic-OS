@@ -1,4 +1,5 @@
 import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, KeyRound, Mail, Maximize2, Mic, Minimize2, MousePointerClick, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
+import { NotionMark } from './brandIcons'
 import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from 'react-markdown'
@@ -320,7 +321,7 @@ interface ResponseSlotBlock {
 
 interface ResponseActionBlock {
   id: string
-  type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event' | 'sandbox_permission_request' | 'slide_workflow_choice' | 'vault_permission_request' | 'browser_credential_request'
+  type: 'gmail_draft_approval' | 'agent_email_draft_approval' | 'calendar_event' | 'sandbox_permission_request' | 'slide_workflow_choice' | 'vault_permission_request' | 'browser_credential_request' | 'notion_write_approval'
   status?: string | null
   approvalId?: string | null
   permissionId?: string | null
@@ -364,6 +365,11 @@ interface ResponseActionBlock {
   usernameHint?: string | null
   username?: string | null
   purpose?: string | null
+  workspace?: string | null
+  parentTitle?: string | null
+  pageTitle?: string | null
+  pageId?: string | null
+  pageUrl?: string | null
 }
 
 type ResponseBlock =
@@ -765,7 +771,7 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
       if (card) normalized.push(card)
       continue
     }
-    if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event' || type === 'sandbox_permission_request' || type === 'slide_workflow_choice' || type === 'vault_permission_request' || type === 'browser_credential_request') {
+    if (type === 'gmail_draft_approval' || type === 'agent_email_draft_approval' || type === 'calendar_event' || type === 'sandbox_permission_request' || type === 'slide_workflow_choice' || type === 'vault_permission_request' || type === 'browser_credential_request' || type === 'notion_write_approval') {
       const stringList = (raw: unknown) => Array.isArray(raw)
         ? raw.map((value) => String(value || '').trim()).filter(Boolean)
         : []
@@ -790,8 +796,16 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
         accountId: typeof (item as any).account_id === 'string' ? (item as any).account_id.trim() : null,
         subject: typeof (item as any).subject === 'string' ? (item as any).subject.trim() : null,
         summary: typeof (item as any).summary === 'string' ? (item as any).summary.trim() : null,
-        bodyText: typeof (item as any).body_text === 'string' ? (item as any).body_text : null,
-        bodyPreview: typeof (item as any).body_preview === 'string' ? (item as any).body_preview.trim() : null,
+        bodyText: typeof (item as any).body_text === 'string'
+          ? (item as any).body_text
+          : type === 'notion_write_approval' && typeof (item as any).content_text === 'string'
+            ? (item as any).content_text
+            : null,
+        bodyPreview: typeof (item as any).body_preview === 'string'
+          ? (item as any).body_preview.trim()
+          : type === 'notion_write_approval' && typeof (item as any).content_preview === 'string'
+            ? (item as any).content_preview.trim()
+            : null,
         to: stringList((item as any).to),
         cc: stringList((item as any).cc),
         recipients,
@@ -830,6 +844,11 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
         usernameHint: typeof (item as any).username_hint === 'string' ? (item as any).username_hint.trim() : null,
         username: typeof (item as any).username === 'string' ? (item as any).username.trim() : null,
         purpose: typeof (item as any).purpose === 'string' ? (item as any).purpose.trim() : null,
+        workspace: typeof (item as any).workspace === 'string' ? (item as any).workspace.trim() : null,
+        parentTitle: typeof (item as any).parent_title === 'string' ? (item as any).parent_title.trim() : null,
+        pageTitle: typeof (item as any).page_title === 'string' ? (item as any).page_title.trim() : null,
+        pageId: typeof (item as any).page_id === 'string' ? (item as any).page_id.trim() : null,
+        pageUrl: typeof (item as any).page_url === 'string' ? (item as any).page_url.trim() : null,
       })
       continue
     }
@@ -4592,16 +4611,22 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
   const [description, setDescription] = useState(block.description || '')
   const [responseStatus, setResponseStatus] = useState(block.responseStatus || '')
   const isCalendar = block.type === 'calendar_event'
+  const isNotion = block.type === 'notion_write_approval'
+  const isCreatePage = isNotion && block.operation === 'create_page'
   const invitationNeedsResponse = Boolean(block.canRespond) && (!responseStatus || responseStatus === 'needsAction')
   const isPending = ['pending', 'failed'].includes(status.toLowerCase())
   const title = isCalendar
     ? block.summary || 'Calendar event'
-    : block.subject || (block.type === 'gmail_draft_approval' ? 'Gmail draft' : 'Agent Email draft')
+    : isNotion
+      ? block.pageTitle || block.subject || 'Notion write'
+      : block.subject || (block.type === 'gmail_draft_approval' ? 'Gmail draft' : 'Agent Email draft')
   const recipients = formatInlineActionRecipients(block)
   const visibleBody = block.bodyText ?? block.bodyPreview ?? ''
   const canEdit = isCalendar
     ? Boolean(block.eventId)
-    : Boolean(block.approvalId && isPending && block.bodyText !== null && block.bodyText !== undefined)
+    : isNotion
+      ? false
+      : Boolean(block.approvalId && isPending && block.bodyText !== null && block.bodyText !== undefined)
 
   useEffect(() => {
     setStatus(block.status || 'pending')
@@ -4695,7 +4720,19 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
     setBusy(kind)
     setError('')
     try {
-      if (block.type === 'gmail_draft_approval') {
+      if (block.type === 'notion_write_approval') {
+        if (kind === 'approve') {
+          if (!window.cosmic?.approveNotionApproval) throw new Error('Notion approval action is unavailable.')
+          await window.cosmic.approveNotionApproval({ approvalId: block.approvalId })
+        } else {
+          if (!window.cosmic?.rejectNotionApproval) throw new Error('Notion rejection action is unavailable.')
+          await window.cosmic.rejectNotionApproval({
+            approvalId: block.approvalId,
+            note: 'Rejected from inline response.',
+          })
+        }
+        setStatus(kind === 'approve' ? 'completed' : 'rejected')
+      } else if (block.type === 'gmail_draft_approval') {
         if (kind === 'approve') {
           if (!window.cosmic?.approveGatewayGmailApproval) throw new Error('Gmail approval action is unavailable.')
           await window.cosmic.approveGatewayGmailApproval({ approvalId: block.approvalId })
@@ -4706,6 +4743,7 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
             note: 'Rejected from inline response.',
           })
         }
+        setStatus(kind === 'approve' ? 'sent' : 'rejected')
       } else {
         if (kind === 'approve') {
           if (!window.cosmic?.approveGatewayAgentEmailApproval) throw new Error('Agent Email approval action is unavailable.')
@@ -4717,8 +4755,8 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
             note: 'Rejected from inline response.',
           })
         }
+        setStatus(kind === 'approve' ? 'sent' : 'rejected')
       }
-      setStatus(kind === 'approve' ? 'sent' : 'rejected')
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : 'Action failed.')
     } finally {
@@ -4753,15 +4791,17 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
       <div className="assistant-action-card-head">
         <div className="assistant-action-card-heading">
           <span className="assistant-action-card-icon" aria-hidden="true">
-            {isCalendar ? <CalendarDays size={15} /> : <Mail size={15} />}
+            {isCalendar ? <CalendarDays size={15} /> : isNotion ? <NotionMark size={14} /> : <Mail size={15} />}
           </span>
           <div className="assistant-action-card-heading-copy">
             <div className="assistant-action-card-kicker">
             {isCalendar
               ? `${block.operation || 'calendar'} event`
-              : block.type === 'gmail_draft_approval'
-                ? 'Gmail draft'
-                : 'Agent Email draft'}
+              : isNotion
+                ? isCreatePage ? 'Notion page' : 'Notion update'
+                : block.type === 'gmail_draft_approval'
+                  ? 'Gmail draft'
+                  : 'Agent Email draft'}
             </div>
             {editing ? (
               <input
@@ -4812,6 +4852,38 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
             </>
           )}
         </div>
+      ) : isNotion ? (
+        <>
+          <div className="assistant-action-card-details">
+            {block.workspace && <div><span>Workspace</span>{block.workspace}</div>}
+            <div>
+              <span>{isCreatePage ? 'Destination' : 'Page'}</span>
+              {isCreatePage
+                ? (block.parentTitle || 'your workspace')
+                : (block.pageTitle || block.parentTitle || 'shared page')}
+            </div>
+            {block.purpose && <div><span>Why</span>{block.purpose}</div>}
+          </div>
+          {(visibleBody || editing) && (
+            <div className="assistant-action-card-body">
+              <div className="assistant-action-card-body-head">
+                <span>Content</span>
+                {visibleBody && !editing && (
+                  <button
+                    type="button"
+                    className="assistant-action-icon-button"
+                    onClick={() => void copyBody()}
+                    title="Copy content"
+                    aria-label="Copy content"
+                  >
+                    {copied ? <Check size={13} /> : <Copy size={13} />}
+                  </button>
+                )}
+              </div>
+              <div className="assistant-action-card-preview">{visibleBody}</div>
+            </div>
+          )}
+        </>
       ) : (
         <>
           <div className="assistant-action-card-details">
@@ -4918,10 +4990,21 @@ const AssistantActionBlock = ({ block }: { block: ResponseActionBlock }) => {
               disabled={Boolean(busy)}
               onClick={() => act('approve')}
             >
-              {busy === 'approve' ? 'Sending…' : 'Approve & send'}
+              {isNotion
+                ? (busy === 'approve' ? 'Publishing…' : 'Approve & publish')
+                : (busy === 'approve' ? 'Sending…' : 'Approve & send')}
             </button>
           </>
         ) : null}
+        {isNotion && !isPending && block.pageUrl && (
+          <button
+            type="button"
+            className="assistant-action-button"
+            onClick={() => window.cosmic?.openExternal?.(block.pageUrl || '')}
+          >
+            Open in Notion
+          </button>
+        )}
       </div>
     </section>
   )
@@ -5599,7 +5682,7 @@ const AssistantResponseBlocks = memo(({
             </div>
           )
         }
-        if (block.type === 'gmail_draft_approval' || block.type === 'agent_email_draft_approval' || block.type === 'calendar_event') {
+        if (block.type === 'gmail_draft_approval' || block.type === 'agent_email_draft_approval' || block.type === 'calendar_event' || block.type === 'notion_write_approval') {
           return <AssistantActionBlock key={block.id} block={block} />
         }
         if (block.type === 'sandbox_permission_request') {
@@ -9209,6 +9292,7 @@ export default function App() {
           || normalizedBlock.type === 'slide_workflow_choice'
           || normalizedBlock.type === 'vault_permission_request'
           || normalizedBlock.type === 'browser_credential_request'
+          || normalizedBlock.type === 'notion_write_approval'
         )) {
           setMessages((prev) => {
             const exists = prev.some((message) =>
