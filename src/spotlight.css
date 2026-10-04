@@ -2962,6 +2962,20 @@ kbd {
   width: 100%;
 }
 
+/* Anchored action cards render in their own blocks column. Its internal gap
+   cannot separate it from the prose/progress siblings outside that column. */
+.assistant-response-blocks:has(> .assistant-action-card:only-child) {
+  margin-block: 16px;
+}
+
+.assistant-action-card[data-kind="vault_permission_request"] .assistant-action-card-details > div {
+  grid-template-columns: 72px minmax(0, 1fr);
+}
+
+.assistant-action-card[data-kind="vault_permission_request"] .assistant-action-card-details > div > span:first-child {
+  white-space: nowrap;
+}
+
 /* A specialist card that follows the blocks column is a sibling of that
    column, not a child of it: the column's 18px gap never reaches the card,
    and its last paragraph carries the p:last-child margin reset, so the card
