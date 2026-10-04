@@ -62,6 +62,8 @@ def infer_model_provider(base_url: str | None, model: str | None) -> str:
     model_text = str(model or "").strip().lower()
     if "api.openai.com" in normalized or model_text.startswith("gpt-"):
         return "openai"
+    if "openrouter.ai" in normalized:
+        return "openrouter"
     if "fireworks.ai" in normalized:
         return "fireworks"
     if "api.x.ai" in normalized:

@@ -235,7 +235,10 @@ class OrchestratorConfig:
     anthropic_max_input_images: int = 10
     anthropic_max_staged_input_files: int = 4
     anthropic_max_staged_input_file_bytes: int = 20 * 1024 * 1024
-    orchestrator_default_provider: str = "fireworks_glm"
+    orchestrator_default_provider: str = "openrouter_mimo"
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_mimo_model: str = "xiaomi/mimo-v2.6-pro"
     fireworks_api_key: str = ""
     fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
     fireworks_kimi_model: str = "accounts/fireworks/models/kimi-k2p6"
@@ -381,9 +384,15 @@ class OrchestratorConfig:
                 _env_int("ANTHROPIC_MAX_STAGED_INPUT_FILE_BYTES", 20 * 1024 * 1024),
             ),
             orchestrator_default_provider=(
-                os.getenv("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER", "fireworks_glm").strip().lower()
-                or "fireworks_glm"
+                os.getenv("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER", "openrouter_mimo").strip().lower()
+                or "openrouter_mimo"
             ),
+            openrouter_api_key=(os.getenv("ORCHESTRATOR_OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY") or "").strip(),
+            openrouter_base_url=_normalize_openai_like_base_url(
+                os.getenv("ORCHESTRATOR_OPENROUTER_BASE_URL") or os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
+                default="https://openrouter.ai/api/v1",
+            ),
+            openrouter_mimo_model=(os.getenv("ORCHESTRATOR_OPENROUTER_MIMO_MODEL") or "xiaomi/mimo-v2.6-pro").strip(),
             fireworks_api_key=(
                 os.getenv("ORCHESTRATOR_FIREWORKS_API_KEY")
                 or os.getenv("FIREWORKS_API_KEY")

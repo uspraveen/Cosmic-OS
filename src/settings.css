@@ -8042,3 +8042,85 @@
   cursor: default;
   opacity: 0.6;
 }
+
+/* The primary brains use readable cards with a consistent metadata hierarchy. */
+.preferences-provider-control--primary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0;
+  gap: 10px;
+  background: transparent;
+  border: 0;
+}
+.preferences-model-card {
+  padding: 16px;
+  border-color: rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.025);
+}
+.preferences-model-card.active {
+  border-color: rgba(126, 191, 255, 0.38);
+  background: rgba(118, 167, 255, 0.08);
+}
+.preferences-model-card:focus-visible {
+  outline: 2px solid #7ebfff;
+  outline-offset: 3px;
+}
+.preferences-provider-option .preferences-model-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.preferences-provider-option .preferences-model-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(126, 191, 255, 0.12);
+  color: #a9cfff;
+  font-size: 9px;
+  font-weight: 600;
+}
+.preferences-provider-option .preferences-model-description {
+  margin-top: 13px;
+  color: rgba(255, 255, 255, 0.70);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.preferences-provider-option .preferences-model-capabilities {
+  margin-top: 7px;
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.preferences-provider-option .preferences-model-price {
+  margin-top: 15px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.80);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+.preferences-model-footnote {
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 11px;
+  line-height: 1.6;
+}
+@media (max-width: 560px) {
+  .preferences-provider-control--primary { grid-template-columns: 1fr; }
+}
+
+.preferences-provider-option .preferences-model-selection {
+  margin-top: 12px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.preferences-provider-option.active .preferences-model-selection {
+  color: #a9cfff;
+}

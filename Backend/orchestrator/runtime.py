@@ -593,7 +593,10 @@ class OrchestratorRuntime:
             raise RuntimeError("TaskEnvelope.input.query is required for orchestrator.process")
         model_selection = self._select_initial_orchestrator_model(task)
         orchestrator_provider = model_selection.effective_provider
-        if self._is_fireworks_provider(orchestrator_provider):
+        if orchestrator_provider == "openrouter_mimo":
+            if not self.config.openrouter_api_key:
+                raise RuntimeError("OPENROUTER_API_KEY is not configured in orchestrator.env.")
+        elif self._is_fireworks_provider(orchestrator_provider):
             if not self.config.fireworks_api_key:
                 raise RuntimeError("FIREWORKS_API_KEY is not configured in orchestrator.env.")
         elif not self.config.anthropic_api_key:
@@ -639,7 +642,7 @@ class OrchestratorRuntime:
             created_event["model_fallback_reason"] = model_selection.fallback_reason
         yield created_event
 
-        if self._is_fireworks_provider(orchestrator_provider):
+        if self._is_openai_compatible_provider(orchestrator_provider):
             async for event in self._stream_fireworks_task(
                 task=task,
                 ev=ev,
@@ -2421,7 +2424,7 @@ class OrchestratorRuntime:
 
     def _select_initial_orchestrator_model(self, task: TaskEnvelope) -> OrchestratorModelSelection:
         preferred_provider, preferred_model = self._select_preferred_orchestrator_model(task)
-        if self._is_fireworks_provider(preferred_provider):
+        if self._is_openai_compatible_provider(preferred_provider):
             return self._effective_fireworks_selection_for_images(
                 preferred_provider=preferred_provider,
                 preferred_model=preferred_model,
@@ -2446,15 +2449,26 @@ class OrchestratorRuntime:
             if provider:
                 model = str(raw_preference.get("model") or "").strip()
                 return provider, model or self._default_model_for_orchestrator_provider(provider)
-        provider = self._normalize_orchestrator_provider(self.config.orchestrator_default_provider) or "fireworks_glm"
+        provider = self._normalize_orchestrator_provider(self.config.orchestrator_default_provider) or "openrouter_mimo"
         return provider, self._default_model_for_orchestrator_provider(provider)
 
     def _default_model_for_orchestrator_provider(self, provider: str) -> str:
+        if provider == "openrouter_mimo":
+            return self.config.openrouter_mimo_model
         if provider == "fireworks_kimi":
             return self.config.fireworks_kimi_model
         if provider == "fireworks_glm":
             return self.config.fireworks_glm_model
         return self.config.anthropic_model
+
+    @staticmethod
+    def _is_openai_compatible_provider(provider: str) -> bool:
+        return provider in {"fireworks_kimi", "fireworks_glm", "openrouter_mimo"}
+
+    def _openai_endpoint_for_model(self, model: str) -> tuple[str, str, str]:
+        if model == self.config.openrouter_mimo_model or model.startswith("xiaomi/"):
+            return "openrouter", self.config.openrouter_base_url.rstrip("/"), self.config.openrouter_api_key
+        return "fireworks", self.config.fireworks_base_url.rstrip("/"), self.config.fireworks_api_key
 
     @staticmethod
     def _is_fireworks_provider(provider: str) -> bool:
@@ -2467,6 +2481,14 @@ class OrchestratorRuntime:
         preferred_model: str,
         has_images: bool,
     ) -> OrchestratorModelSelection:
+        # MiMo accepts images natively, including images returned by tools.
+        # Text-only Fireworks escalation remains scoped to that provider.
+        if preferred_provider == "openrouter_mimo":
+            model = preferred_model or self.config.openrouter_mimo_model
+            return OrchestratorModelSelection(
+                preferred_provider=preferred_provider, preferred_model=model,
+                effective_provider=preferred_provider, effective_model=model,
+            )
         normalized_provider = (
             preferred_provider
             if self._is_fireworks_provider(preferred_provider)
@@ -2572,6 +2594,8 @@ class OrchestratorRuntime:
             return "fireworks_kimi"
         if normalized in {"fireworks_glm", "glm", "glm_5p2", "glm_5_2", "glm52"}:
             return "fireworks_glm"
+        if normalized in {"openrouter", "openrouter_mimo", "mimo", "xiaomi"}:
+            return "openrouter_mimo"
         if normalized in {"anthropic", "claude", "opus", "sonnet"}:
             return "anthropic"
         # Unknown provider tags fall through to the configured default brain
@@ -2745,19 +2769,16 @@ class OrchestratorRuntime:
         usage_context: dict[str, Any] | None,
         reasoning_effort: str | int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        base_url = self.config.fireworks_base_url.rstrip("/")
+        provider, base_url, api_key = self._openai_endpoint_for_model(model_name)
         body: dict[str, Any] = {
             "model": model_name,
             "messages": messages,
             "stream": True,
-            "temperature": self.config.fireworks_kimi_temperature,
+            "temperature": 1.0 if provider == "openrouter" else self.config.fireworks_kimi_temperature,
             "stream_options": {"include_usage": True},
         }
-        if self.config.fireworks_kimi_max_tokens is not None:
+        if provider == "fireworks" and self.config.fireworks_kimi_max_tokens is not None:
             body["max_tokens"] = self.config.fireworks_kimi_max_tokens
-        effective_reasoning_effort = (
-            reasoning_effort if reasoning_effort is not None else self.config.fireworks_reasoning_effort
-        )
         effective_reasoning_effort = (
             reasoning_effort if reasoning_effort is not None else self.config.fireworks_reasoning_effort
         )
@@ -2769,7 +2790,7 @@ class OrchestratorRuntime:
             body["tools"] = tools
             body["tool_choice"] = "auto"
         headers = {
-            "Authorization": f"Bearer {self.config.fireworks_api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         for attempt in range(3):
@@ -2811,7 +2832,7 @@ class OrchestratorRuntime:
                         yield parsed
                 await self._record_internal_usage_event(
                     metered_call=metered_call,
-                    model_key=build_model_key("fireworks", model_name),
+                    model_key=build_model_key(provider, model_name),
                     usage_context=usage_context,
                     provider_request_id=provider_request_id,
                     raw_usage=usage,
@@ -2827,7 +2848,7 @@ class OrchestratorRuntime:
             except (httpx.HTTPError, RuntimeError, ValueError) as exc:
                 await self._record_internal_usage_event(
                     metered_call=metered_call,
-                    model_key=build_model_key("fireworks", model_name),
+                    model_key=build_model_key(provider, model_name),
                     usage_context=usage_context,
                     provider_request_id=provider_request_id,
                     raw_usage=usage,
@@ -3669,7 +3690,7 @@ class OrchestratorRuntime:
 
     def _interrupt_resolver_model(self) -> str | None:
         provider = self._normalize_orchestrator_provider(self.config.orchestrator_default_provider)
-        if not self._is_fireworks_provider(provider):
+        if not self._is_openai_compatible_provider(provider):
             return None
         return self._default_model_for_orchestrator_provider(provider) or None
 
@@ -3708,6 +3729,7 @@ class OrchestratorRuntime:
         model = self._interrupt_resolver_model()
         if not model:
             return None
+        provider, base_url, api_key = self._openai_endpoint_for_model(model)
         body: dict[str, Any] = {
             "model": model,
             "messages": [
@@ -3720,7 +3742,7 @@ class OrchestratorRuntime:
         if "glm" in model.lower():
             body["reasoning_effort"] = "low"
         headers = {
-            "Authorization": f"Bearer {self.config.fireworks_api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         usage_context = {
@@ -3732,7 +3754,7 @@ class OrchestratorRuntime:
         raw_usage: dict[str, Any] = {}
         try:
             response = await self._client.post(
-                f"{self.config.fireworks_base_url.rstrip('/')}/chat/completions",
+                f"{base_url}/chat/completions",
                 headers=headers,
                 json=body,
                 timeout=timeout_sec or self._INTERRUPT_RESOLVER_TIMEOUT_SEC,
@@ -3760,7 +3782,7 @@ class OrchestratorRuntime:
         except Exception:
             await self._record_internal_usage_event(
                 metered_call=metered_call,
-                model_key=build_model_key("fireworks", model),
+                model_key=build_model_key(provider, model),
                 usage_context=usage_context,
                 provider_request_id=provider_request_id,
                 raw_usage=raw_usage,
@@ -3774,7 +3796,7 @@ class OrchestratorRuntime:
             return None
         await self._record_internal_usage_event(
             metered_call=metered_call,
-            model_key=build_model_key("fireworks", model),
+            model_key=build_model_key(provider, model),
             usage_context=usage_context,
             provider_request_id=provider_request_id,
             raw_usage=raw_usage,

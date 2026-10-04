@@ -126,7 +126,7 @@ def _model_response(content: str, *, status: int = 200, calls: list | None = Non
 def _runtime_with_client(tmp_path, handler, **config_overrides) -> OrchestratorRuntime:
     import httpx
 
-    config = OrchestratorConfig(
+    config = OrchestratorConfig(orchestrator_default_provider=config_overrides.pop("orchestrator_default_provider", "fireworks_glm"),
         internal_token="internal-token",
         signing_secret="signing-secret",
         fireworks_api_key=config_overrides.pop("fireworks_api_key", "test-key"),
@@ -262,7 +262,7 @@ def test_runtime_resolver_escalates_on_low_model_confidence(tmp_path) -> None:
     assert decision["status"] == "escalate"
 
 
-def test_runtime_resolver_never_calls_a_non_fireworks_provider(tmp_path) -> None:
+def test_runtime_resolver_does_not_call_anthropic(tmp_path) -> None:
     calls: list = []
     runtime = _runtime_with_client(
         tmp_path,

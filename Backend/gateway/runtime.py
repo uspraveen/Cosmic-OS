@@ -16219,6 +16219,7 @@ class GatewayRuntime:
             ("fireworks", "accounts/fireworks/models/kimi-k2p6"),
             ("fireworks", "accounts/fireworks/models/glm-5p3"),
             ("fireworks", "accounts/fireworks/models/glm-5p3-flash"),
+            ("openrouter", "xiaomi/mimo-v2.6-pro"),
         ]
         try:
             cosmic_model = self.preference_store.get_cosmic_orchestrator_model()
@@ -16229,6 +16230,8 @@ class GatewayRuntime:
             model = str(cosmic_model.get("model") or "").strip()
             if provider in {"fireworks_kimi", "fireworks_glm"} and model:
                 candidates.append(("fireworks", model))
+            elif provider == "openrouter_mimo" and model:
+                candidates.append(("openrouter", model))
         seen: set[str] = set()
         for provider, model in candidates:
             spec = lookup_model_spec(provider, model)
@@ -24244,8 +24247,8 @@ class GatewayRuntime:
                 "gateway.cosmic_orchestrator_preference_snapshot_failed; using runtime fallback defaults"
             )
             cosmic_orchestrator_model = {
-                "provider": "fireworks_glm",
-                "model": "accounts/fireworks/models/glm-5p3-flash",
+                "provider": "openrouter_mimo",
+                "model": "xiaomi/mimo-v2.6-pro",
                 "revision": 1,
                 "updated_at": utcnow_iso(),
                 "updated_source": "runtime_fallback",

@@ -6,10 +6,11 @@ type GatewayConnectionState = {
   detail?: string
 }
 
-type CosmicOrchestratorProvider = 'anthropic' | 'fireworks_kimi' | 'fireworks_glm'
+type CosmicOrchestratorProvider = 'anthropic' | 'fireworks_kimi' | 'fireworks_glm' | 'openrouter_mimo'
 
 const GLM_53_MODEL = 'accounts/fireworks/models/glm-5p3'
 const GLM_53_FLASH_MODEL = 'accounts/fireworks/models/glm-5p3-flash'
+const MIMO_MODEL = 'xiaomi/mimo-v2.6-pro'
 
 interface GatewayPreferencesSettingsProps {
   active: boolean
@@ -95,7 +96,9 @@ function normalizeCosmicProvider(value: unknown): CosmicOrchestratorProvider {
   ) {
     return 'fireworks_glm'
   }
-  return 'anthropic'
+  if (['openrouter', 'openrouter_mimo', 'mimo', 'xiaomi'].includes(normalized)) return 'openrouter_mimo'
+  if (['anthropic', 'claude', 'opus', 'sonnet'].includes(normalized)) return 'anthropic'
+  return 'openrouter_mimo'
 }
 
 function normalizePreferences(payload: unknown): GatewayPreferenceSnapshot | null {
@@ -323,6 +326,7 @@ export default function GatewayPreferencesSettings({
   const isGlmFlashSelected =
     preferences?.cosmic.provider === 'fireworks_glm' &&
     (!cosmicModel || cosmicModel === GLM_53_FLASH_MODEL)
+  const isMimoSelected = preferences?.cosmic.provider === 'openrouter_mimo'
   const isGlm53Selected =
     preferences?.cosmic.provider === 'fireworks_glm' && cosmicModel === GLM_53_MODEL
   const statusLabel = !isAuthenticated
@@ -471,7 +475,7 @@ export default function GatewayPreferencesSettings({
         <div className="preferences-card-copy">
           <div className="preferences-card-title">Cosmic Brain</div>
           <div className="preferences-card-note">
-            Choose the model behind Cosmic's orchestrator. Smart uses Claude; GLM and Kimi run on Fireworks. GLM 5.3 Flash is natively multimodal, so image turns stay on it. GLM 5.3 has no vision — when a turn needs images, Cosmic temporarily routes that turn through Kimi without changing your preference.
+            Choose how Cosmic reasons, uses tools, and coordinates specialists. MiMo is the default, with native vision and a 1M token context window.
           </div>
           {preferences?.cosmic.model && (
             <div className="preferences-card-detail">
@@ -485,37 +489,41 @@ export default function GatewayPreferencesSettings({
           )}
         </div>
 
-        <div className="preferences-provider-control" aria-label="Cosmic orchestrator model">
+        <div className="preferences-provider-control preferences-provider-control--primary" aria-label="Cosmic orchestrator model">
           <button
             type="button"
-            className={`preferences-provider-option ${preferences?.cosmic.provider === 'anthropic' ? 'active smart' : ''}`}
-            onClick={() => { void handleSelectModel('anthropic') }}
+            className={`preferences-provider-option preferences-model-card ${isMimoSelected ? 'active' : ''}`}
+            onClick={() => { void handleSelectModel('openrouter_mimo', MIMO_MODEL) }}
             disabled={!canSave}
-            aria-pressed={preferences?.cosmic.provider === 'anthropic'}
+            aria-pressed={isMimoSelected}
           >
-            <span>Smart</span>
-            <small>Claude</small>
+            <span className="preferences-model-heading">MiMo V2.6 Pro <span className="preferences-model-badge">Default</span></span>
+            <small>Xiaomi · OpenRouter</small>
+            <span className="preferences-model-description">Deep reasoning and specialist coordination</span>
+            <span className="preferences-model-capabilities">Native vision · 1M context</span>
+            <span className="preferences-model-price">$0.435 input / $0.87 output</span>
+            <small>per 1M tokens · cache reads from $0.0036</small>
+            <span className="preferences-model-selection">{isMimoSelected ? '✓ Selected' : 'Choose model'}</span>
           </button>
           <button
             type="button"
-            className={`preferences-provider-option ${isGlmFlashSelected ? 'active' : ''}`}
+            className={`preferences-provider-option preferences-model-card ${isGlmFlashSelected ? 'active' : ''}`}
             onClick={() => { void handleSelectModel('fireworks_glm', GLM_53_FLASH_MODEL) }}
             disabled={!canSave}
             aria-pressed={isGlmFlashSelected}
           >
-            <span>GLM Flash</span>
-            <small>Fireworks 5.3 Flash</small>
+            <span className="preferences-model-heading">GLM 5.3 Flash</span>
+            <small>Z.ai · Fireworks</small>
+            <span className="preferences-model-description">Fast everyday reasoning and tool use</span>
+            <span className="preferences-model-capabilities">Native vision · 1M context</span>
+            <span className="preferences-model-price">Fast alternative</span>
+            <small>Keep your preferred model for each turn</small>
+            <span className="preferences-model-selection">{isGlmFlashSelected ? '✓ Selected' : 'Choose model'}</span>
           </button>
-          <button
-            type="button"
-            className={`preferences-provider-option ${isGlm53Selected ? 'active' : ''}`}
-            onClick={() => { void handleSelectModel('fireworks_glm', GLM_53_MODEL) }}
-            disabled={!canSave}
-            aria-pressed={isGlm53Selected}
-          >
-            <span>GLM</span>
-            <small>Fireworks 5.3</small>
-          </button>
+        </div>
+        <div className="preferences-model-footnote">
+          Images stay on MiMo and GLM Flash. Text-only GLM 5.3 temporarily uses Kimi for visual input.
+          OpenRouter pricing varies by provider.
         </div>
         <button
           type="button"
@@ -527,6 +535,18 @@ export default function GatewayPreferencesSettings({
         </button>
         {showMoreModels && (
           <div className="preferences-provider-control preferences-provider-control--more" aria-label="More orchestrator models">
+            <button type="button"
+              className={`preferences-provider-option ${preferences?.cosmic.provider === 'anthropic' ? 'active smart' : ''}`}
+              onClick={() => { void handleSelectModel('anthropic') }} disabled={!canSave}
+              aria-pressed={preferences?.cosmic.provider === 'anthropic'}>
+              <span>Claude</span><small>Anthropic · Smart</small>
+            </button>
+            <button type="button"
+              className={`preferences-provider-option ${isGlm53Selected ? 'active' : ''}`}
+              onClick={() => { void handleSelectModel('fireworks_glm', GLM_53_MODEL) }} disabled={!canSave}
+              aria-pressed={isGlm53Selected}>
+              <span>GLM 5.3</span><small>Fireworks · Vision via Kimi</small>
+            </button>
             <button
               type="button"
               className={`preferences-provider-option ${preferences?.cosmic.provider === 'fireworks_kimi' ? 'active' : ''}`}

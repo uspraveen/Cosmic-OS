@@ -206,7 +206,7 @@ interface Window {
     getGatewayPreferences: () => Promise<any>
     saveGatewayPreferences: (payload: {
       visualResponseEnhancementEnabled?: boolean
-      cosmicOrchestratorProvider?: 'anthropic' | 'fireworks_kimi' | 'fireworks_glm'
+      cosmicOrchestratorProvider?: 'anthropic' | 'fireworks_kimi' | 'fireworks_glm' | 'openrouter_mimo'
       cosmicOrchestratorModel?: string
       cosmicHeartbeatEnabled?: boolean
     }) => Promise<any>

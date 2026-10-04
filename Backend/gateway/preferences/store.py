@@ -19,7 +19,8 @@ _FIREWORKS_GLM_FLASH_MODEL = "accounts/fireworks/models/glm-5p3-flash"
 # The shipped default brain. Missing or unrecognized provider tags resolve
 # here rather than to any hardwired provider — the orchestrator is the
 # component; the model behind it can be anything.
-_DEFAULT_ORCHESTRATOR_PROVIDER = "fireworks_glm"
+_OPENROUTER_MIMO_MODEL = "xiaomi/mimo-v2.6-pro"
+_DEFAULT_ORCHESTRATOR_PROVIDER = "openrouter_mimo"
 # GLM 5.2 was removed from the catalog; a stored selection of it falls back to
 # the current default rather than routing to a model we no longer offer.
 _RETIRED_GLM_MODELS = {"accounts/fireworks/models/glm-5p2"}
@@ -414,8 +415,8 @@ class GatewayPreferenceStore:
             _COSMIC_HEARTBEAT_KEY: {"enabled": True},
             _ALPHA_EXECUTION_PROVIDER_KEY: {"preferred_harness": "opencode"},
             _COSMIC_ORCHESTRATOR_MODEL_KEY: {
-                "provider": "fireworks_glm",
-                "model": _FIREWORKS_GLM_FLASH_MODEL,
+                "provider": _DEFAULT_ORCHESTRATOR_PROVIDER,
+                "model": _OPENROUTER_MIMO_MODEL,
             },
         }
         for key, value in defaults.items():
@@ -581,6 +582,8 @@ class GatewayPreferenceStore:
             "glm53",
         }:
             return "fireworks_glm"
+        if normalized in {"openrouter", "openrouter_mimo", "mimo", "xiaomi"}:
+            return "openrouter_mimo"
         if normalized in {"anthropic", "claude", "opus", "sonnet"}:
             return "anthropic"
         # Unknown tags resolve to the shipped default brain, not to any
@@ -605,6 +608,8 @@ class GatewayPreferenceStore:
         """
         normalized_provider = self._normalize_cosmic_orchestrator_provider(provider)
         normalized_model = str(model or "").strip()
+        if normalized_provider == "openrouter_mimo":
+            return normalized_model or _OPENROUTER_MIMO_MODEL
         if normalized_provider == "fireworks_kimi":
             return normalized_model or _FIREWORKS_KIMI_MODEL
         if normalized_provider == "fireworks_glm":

@@ -5424,7 +5424,7 @@ def build_service_env_overrides(
         orchestrator_external.get("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"),
         orchestrator_existing.get("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"),
         orchestrator_data.get("COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER"),
-        "fireworks_glm",
+        "openrouter_mimo",
     )
     memory_url = first_meaningful_value(
         gateway_external.get("COSMIC_MEMORY_URL"),
@@ -5603,7 +5603,25 @@ def build_service_env_overrides(
             "ANTHROPIC_API_KEY": shared_anthropic_api_key or "<anthropic-api-key>",
             "ANTHROPIC_MODEL": opus_model or "claude-opus-4-6",
             "COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER": cosmic_orchestrator_default_provider
-            or "fireworks_glm",
+            or "openrouter_mimo",
+            "ORCHESTRATOR_OPENROUTER_API_KEY": first_meaningful_value(
+                orchestrator_external.get("ORCHESTRATOR_OPENROUTER_API_KEY"),
+                orchestrator_external.get("OPENROUTER_API_KEY"),
+                orchestrator_existing.get("ORCHESTRATOR_OPENROUTER_API_KEY"),
+                orchestrator_existing.get("OPENROUTER_API_KEY"),
+                orchestrator_data.get("ORCHESTRATOR_OPENROUTER_API_KEY"),
+                orchestrator_data.get("OPENROUTER_API_KEY"),
+            ) or "",
+            "ORCHESTRATOR_OPENROUTER_BASE_URL": first_meaningful_value(
+                orchestrator_external.get("ORCHESTRATOR_OPENROUTER_BASE_URL"),
+                orchestrator_existing.get("ORCHESTRATOR_OPENROUTER_BASE_URL"),
+                orchestrator_data.get("ORCHESTRATOR_OPENROUTER_BASE_URL"),
+            ) or "https://openrouter.ai/api/v1",
+            "ORCHESTRATOR_OPENROUTER_MIMO_MODEL": first_meaningful_value(
+                orchestrator_external.get("ORCHESTRATOR_OPENROUTER_MIMO_MODEL"),
+                orchestrator_existing.get("ORCHESTRATOR_OPENROUTER_MIMO_MODEL"),
+                orchestrator_data.get("ORCHESTRATOR_OPENROUTER_MIMO_MODEL"),
+            ) or "xiaomi/mimo-v2.6-pro",
             "ORCHESTRATOR_FIREWORKS_API_KEY": orchestrator_fireworks_api_key or "",
             "ORCHESTRATOR_FIREWORKS_BASE_URL": orchestrator_fireworks_base_url
             or "https://api.fireworks.ai/inference/v1",
