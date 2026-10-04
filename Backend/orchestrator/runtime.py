@@ -1574,7 +1574,7 @@ class OrchestratorRuntime:
                 channel=channel,
                 orchestrator_learnings=str(task.input.get("orchestrator_learnings") or "").strip() or None,
             )
-            system_prompt = self._with_fireworks_runtime_note(system_prompt)
+            system_prompt = self._with_fireworks_runtime_note(system_prompt, mimo=preferred_provider == "openrouter_mimo")
             openai_messages = [
                 {"role": "system", "content": system_prompt},
                 *self._messages_to_openai_chat(messages),
@@ -1612,6 +1612,8 @@ class OrchestratorRuntime:
                     if reasoning_effort_override is not None
                     else self.config.fireworks_reasoning_effort
                 )
+                if preferred_provider == "openrouter_mimo":
+                    current_reasoning_effort = None
                 turn_selection = self._effective_fireworks_selection_for_images(
                     preferred_provider=preferred_provider,
                     preferred_model=preferred_model,
@@ -2612,7 +2614,7 @@ class OrchestratorRuntime:
         return None
 
     @staticmethod
-    def _with_fireworks_runtime_note(system_prompt: str) -> str:
+    def _with_fireworks_runtime_note(system_prompt: str, *, mimo: bool = False) -> str:
         note = (
             "## COSMIC Runtime Provider\n"
             "You are running on COSMIC's Fireworks OpenAI-compatible orchestrator path. "
@@ -2627,6 +2629,20 @@ class OrchestratorRuntime:
             "Do not say a capability is unavailable until you have considered the available COSMIC specialist/local tools."
             " Your default reasoning budget is lean. Answer directly for routine turns, and when you hit something genuinely hard — surprising tool results, tricky debugging, conflicting constraints — call `think_deeper` once to raise your reasoning budget for the rest of the turn instead of writing long unstructured deliberation."
         )
+        if mimo:
+            note = note.replace(
+                "You are running on COSMIC's Fireworks OpenAI-compatible orchestrator path. "
+                "The preferred model may be GLM 5.2 or Kimi; COSMIC will automatically scope a Kimi fallback for any turn or follow-up that needs direct visual input when the preferred model lacks image support. ",
+                "You are running as Xiaomi MiMo on OpenRouter with native image support. ",
+            )
+            note = note.split(" Your default reasoning budget is lean.", 1)[0]
+            note += (
+                " Keep planning concise and proportional to the task. For routine requests, identify the next useful action and proceed. "
+                "After a tool result, focus on what changed and the next unresolved decision; reuse established facts and avoid repeating the entire plan. "
+                "Use deeper analysis when complexity or conflicting evidence requires it. Once enough evidence is available, answer or take the next action promptly. "
+                "Native thinking is enabled; this guidance does not impose a time or token limit. "
+                "This model has no configurable reasoning-effort tier; do not claim that calling think_deeper changes its provider reasoning budget."
+            )
         base = str(system_prompt or "").rstrip()
         return f"{base}\n\n{note}" if base else note
 
@@ -2786,6 +2802,8 @@ class OrchestratorRuntime:
             "temperature": 1.0 if provider == "openrouter" else self.config.fireworks_kimi_temperature,
             "stream_options": {"include_usage": True},
         }
+        if provider == "openrouter" and model_name == self.config.openrouter_mimo_model:
+            body["reasoning"] = {"enabled": True}
         if provider == "fireworks" and self.config.fireworks_kimi_max_tokens is not None:
             body["max_tokens"] = self.config.fireworks_kimi_max_tokens
         effective_reasoning_effort = (

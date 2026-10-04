@@ -81,6 +81,7 @@ async def test_mimo_stream_uses_openrouter_key_and_usage_with_images_and_tools()
         body = json.loads(request.content)
         assert body["model"] == "xiaomi/mimo-v2.6-pro"
         assert "reasoning_effort" not in body
+        assert body["reasoning"] == {"enabled": True}
         assert body["tools"]
         assert body["messages"][0]["content"][1]["type"] == "image_url"
         return httpx.Response(200, stream=Stream())
@@ -110,6 +111,11 @@ async def test_default_mimo_runs_full_orchestrator_image_turn(tmp_path):
             requests.append(request)
             body = json.loads(request.content)
             assert body["model"] == "xiaomi/mimo-v2.6-pro"
+            system = body["messages"][0]["content"]
+            assert "Keep planning concise" in system
+            assert "Xiaomi MiMo on OpenRouter with native image support" in system
+            assert "call `think_deeper` once to raise" not in system
+            assert body["reasoning"] == {"enabled": True}
             assert request.url.host == "openrouter.ai"
             assert request.headers["authorization"] == "Bearer openrouter-test-key"
             assert any(isinstance(m.get("content"), list) and any(p.get("type") == "image_url" for p in m["content"] if isinstance(p, dict)) for m in body["messages"])
