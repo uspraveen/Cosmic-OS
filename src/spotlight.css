@@ -5144,7 +5144,7 @@ kbd {
   color: rgba(255, 255, 255, 0.58);
 }
 
-/* Inline progress rows — the ZCode-style transcript steps that sit inside the
+/* Inline progress rows -- the ZCode-style transcript steps that sit inside the
    message body at the stream position where they happened. Deliberately
    smaller and quieter than the Flow section: they are waymarks between the
    prose, not a panel. */

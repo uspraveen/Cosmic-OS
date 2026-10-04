@@ -402,7 +402,7 @@ interface ActivityLogEntry {
   /** Visible stream length when this entry arrived, stamped client-side on
    * first merge. Places the entry inline in the message body between the
    * prose it produced. Null on history-rehydrated or post-completion entries
-   * — those stay Flow-only. */
+   * -- those stay Flow-only. */
   streamOffset?: number | null
 }
 
@@ -1129,7 +1129,7 @@ const mergeActivityLogEntries = (
 
 // Inline-placement stamps: applied at merge time in the task.progress handler,
 // where the target message's own stream length is known. Entries already
-// carrying an offset — a backend stamp, or a previous pass — keep it; dedup on
+// carrying an offset -- a backend stamp, or a previous pass -- keep it; dedup on
 // merge then preserves the first stamp an entry ever received.
 const stampActivityLogEntryOffsets = <T extends { streamOffset?: number | null }>(
   entries: T[] | undefined,
@@ -3830,7 +3830,7 @@ AssistantFlowTimeline.displayName = 'AssistantFlowTimeline'
 // One progress step inline in the message body, at the stream position where
 // it happened. Delegation roots carry a muted step count with their children
 // folded into it; the newest root unfolds its children live while the turn
-// streams — the Flow section above keeps the full unfolded record either way.
+// streams -- the Flow section above keeps the full unfolded record either way.
 const InlineActivityRow = memo(({
   entry,
   childEntries,
@@ -3949,7 +3949,7 @@ const getAlphaEntryTaskId = (entry: ActivityLogEntry) => {
 }
 
 // Kinds whose story already has a dedicated inline surface (SlideBuildCard,
-// DocsProgressCard, TabularProgressCard) — a row for them would sit right
+// DocsProgressCard, TabularProgressCard) -- a row for them would sit right
 // next to the card telling the same story.
 const INLINE_ACTIVITY_EXCLUDED_KINDS = new Set([
   'slide_build',
@@ -5950,7 +5950,7 @@ const AssistantAlphaStreamBody = ({
    * the unfolded child tail on its inline activity rows. */
   streaming?: boolean
 }) => {
-  // Roots and their children among the stamped entries — roots become inline
+  // Roots and their children among the stamped entries -- roots become inline
   // anchors at their own stream offsets, children fold under their root.
   const inlineActivity = useMemo(() => {
     const roots: ActivityLogEntry[] = []
@@ -10686,7 +10686,7 @@ export default function App() {
     return () => { ipc.off?.('cosmic:display-changed', handler) }
   }, [])
 
-  // Whether the newest assistant message has produced anything visible yet —
+  // Whether the newest assistant message has produced anything visible yet --
   // prose, response blocks, or an inline progress row. The bare dots under the
   // transcript hold the screen only until one of those lands.
   const activeStreamQuiet = useMemo(() => {

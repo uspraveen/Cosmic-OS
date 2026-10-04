@@ -5,7 +5,7 @@ export interface AlphaConsoleAnchor {
 
 /** One inline progress row, anchored where it arrived in the stream. Unlike
  * console anchors these are per-entry (not deduped per task) and several may
- * share an offset — a burst of steps between two prose segments. */
+ * share an offset -- a burst of steps between two prose segments. */
 export interface ActivityAnchor {
   id: string
   offset: number
@@ -174,7 +174,7 @@ export const buildAlphaStreamSegments = (options: {
   let remainingContent = options.content || ''
   let remainingBlocks = usesBlocks ? [...(options.responseBlocks || [])] : []
   // Anchor offsets are absolute in the original stream, but each split works
-  // on what's left of it — so every anchor must be re-based by everything
+  // on what's left of it -- so every anchor must be re-based by everything
   // already split off, or the second and later anchors land early.
   let consumed = 0
 
