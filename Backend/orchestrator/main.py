@@ -100,11 +100,6 @@ async def health(request: Request) -> dict[str, object]:
         "status": "ok" if runtime.started else "starting",
         "model": runtime.config.anthropic_model,
         "anthropic_configured": bool(runtime.config.anthropic_api_key),
-        "mimo_thinking": {
-            "mode": "bounded",
-            "planning_timeout_sec": runtime.config.openrouter_mimo_thinking_timeout_sec,
-            "fallback": "disabled",
-        },
         "anthropic_prompt_cache_enabled": runtime.config.anthropic_prompt_cache_enabled,
         "ledger_path": str(runtime.config.task_ledger_db_path),
         "task_input_relay": {

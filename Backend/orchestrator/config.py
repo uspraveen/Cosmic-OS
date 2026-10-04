@@ -239,8 +239,6 @@ class OrchestratorConfig:
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_mimo_model: str = "xiaomi/mimo-v2.6-pro"
-    # MiMo exposes thinking on/off, not effort tiers. Bound the planning window.
-    openrouter_mimo_thinking_timeout_sec: float = 30.0
     fireworks_api_key: str = ""
     fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
     fireworks_kimi_model: str = "accounts/fireworks/models/kimi-k2p6"
@@ -395,7 +393,6 @@ class OrchestratorConfig:
                 default="https://openrouter.ai/api/v1",
             ),
             openrouter_mimo_model=(os.getenv("ORCHESTRATOR_OPENROUTER_MIMO_MODEL") or "xiaomi/mimo-v2.6-pro").strip(),
-            openrouter_mimo_thinking_timeout_sec=min(120.0, max(1.0, _env_float("ORCHESTRATOR_MIMO_THINKING_TIMEOUT_SEC", 30.0))),
             fireworks_api_key=(
                 os.getenv("ORCHESTRATOR_FIREWORKS_API_KEY")
                 or os.getenv("FIREWORKS_API_KEY")

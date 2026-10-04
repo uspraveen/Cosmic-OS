@@ -1619,8 +1619,6 @@ class OrchestratorRuntime:
                 )
                 effective_provider = turn_selection.effective_provider
                 effective_model = turn_selection.effective_model
-                if effective_provider == "openrouter_mimo":
-                    current_reasoning_effort = None
                 effective_model_keys.add(f"{effective_provider}:{effective_model}")
                 selection_key = f"{effective_provider}:{effective_model}"
                 if (
@@ -1666,7 +1664,6 @@ class OrchestratorRuntime:
                 turn_text_parts: list[str] = []
                 turn_reasoning_parts: list[str] = []
                 turn_reasoning_details: list[dict[str, Any]] = []
-                turn_reasoning_replay_parts: list[str] = []
                 turn_tool_calls: dict[int, dict[str, Any]] = {}
                 turn_usage: dict[str, int] = {}
                 turn_finish_reason: str | None = None
@@ -1679,7 +1676,6 @@ class OrchestratorRuntime:
                     if not reasoning_text:
                         return []
                     turn_reasoning_parts.append(reasoning_text)
-                    turn_reasoning_replay_parts.append(reasoning_text)
                     events: list[dict[str, Any]] = []
                     if not reasoning_announced:
                         reasoning_announced = True
@@ -1786,12 +1782,6 @@ class OrchestratorRuntime:
                     },
                     reasoning_effort=current_reasoning_effort,
                 ):
-                    if payload.get("_cosmic_thinking_budget_exceeded"):
-                        turn_reasoning_replay_parts.clear()
-                        turn_reasoning_details.clear()
-                        yield {**ev, "type": "task.progress", "status": "reasoning_budget",
-                               "message": "Thinking time limit reached. Continuing without extended thinking."}
-                        continue
                     usage_batch = self._extract_openai_usage(payload)
                     if usage_batch:
                         turn_usage = self._merge_stream_usage(turn_usage, usage_batch)
@@ -1887,9 +1877,8 @@ class OrchestratorRuntime:
                     }
                     if effective_provider == "openrouter_mimo":
                         # Preserve the original OpenRouter reasoning through tool rounds.
-                        replay_reasoning = "".join(turn_reasoning_replay_parts)
-                        if replay_reasoning:
-                            assistant_message["reasoning"] = replay_reasoning
+                        if turn_reasoning:
+                            assistant_message["reasoning"] = turn_reasoning
                         if turn_reasoning_details:
                             assistant_message["reasoning_details"] = turn_reasoning_details
                     openai_messages.append(assistant_message)
@@ -2243,14 +2232,11 @@ class OrchestratorRuntime:
                     "effective_models": sorted(effective_model_keys),
                     "max_request_context_chars": max_request_context_chars,
                     "max_request_message_count": max_request_message_count,
-                    "reasoning_effort": None if effective_provider == "openrouter_mimo" else (
+                    "reasoning_effort": (
                         reasoning_effort_override
                         if reasoning_effort_override is not None
                         else self.config.fireworks_reasoning_effort
                     ),
-                    "thinking_mode": "bounded" if effective_provider == "openrouter_mimo" else None,
-                    "thinking_timeout_sec": self.config.openrouter_mimo_thinking_timeout_sec
-                        if effective_provider == "openrouter_mimo" else None,
                     "reasoning_escalations": reasoning_escalations,
                 },
             }
@@ -2280,14 +2266,11 @@ class OrchestratorRuntime:
                     "effective_models": sorted(effective_model_keys),
                     "max_request_context_chars": max_request_context_chars,
                     "max_request_message_count": max_request_message_count,
-                    "reasoning_effort": None if effective_provider == "openrouter_mimo" else (
+                    "reasoning_effort": (
                         reasoning_effort_override
                         if reasoning_effort_override is not None
                         else self.config.fireworks_reasoning_effort
                     ),
-                    "thinking_mode": "bounded" if effective_provider == "openrouter_mimo" else None,
-                    "thinking_timeout_sec": self.config.openrouter_mimo_thinking_timeout_sec
-                        if effective_provider == "openrouter_mimo" else None,
                     "reasoning_escalations": reasoning_escalations,
                     **cumulative_usage,
                 },
@@ -2786,45 +2769,6 @@ class OrchestratorRuntime:
             )
         return converted
 
-    async def _stream_mimo_with_thinking_budget(
-        self, *, model_name: str, messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]], usage_context: dict[str, Any] | None,
-    ) -> AsyncIterator[dict[str, Any]]:
-        """Bound pre-answer planning using MiMo's supported thinking on/off switch.
-
-        Stop timing as soon as visible text or a tool call starts, so this never
-        abandons a partly streamed answer or replays a partly emitted tool call.
-        """
-        deadline = time.monotonic() + self.config.openrouter_mimo_thinking_timeout_sec
-        output_started = False
-        stream = self._stream_openai_chat_events(
-            model_name=model_name, messages=messages, tools=tools,
-            usage_context=usage_context, _mimo_thinking_enabled=True,
-        )
-        try:
-            while True:
-                remaining = None if output_started else max(0.0, deadline - time.monotonic())
-                try:
-                    payload = await asyncio.wait_for(stream.__anext__(), timeout=remaining)
-                except StopAsyncIteration:
-                    return
-                for choice in payload.get("choices") or []:
-                    delta = choice.get("delta") or {}
-                    if delta.get("content") or delta.get("tool_calls") or delta.get("function_call"):
-                        output_started = True
-                yield payload
-        except asyncio.TimeoutError:
-            logger.info("orchestrator.mimo.thinking_budget_exceeded seconds=%s", self.config.openrouter_mimo_thinking_timeout_sec)
-        finally:
-            await stream.aclose()
-        yield {"_cosmic_thinking_budget_exceeded": True}
-        # One fallback with the same tools/images/context and thinking disabled.
-        async for payload in self._stream_openai_chat_events(
-            model_name=model_name, messages=messages, tools=tools,
-            usage_context=usage_context, _mimo_thinking_enabled=False,
-        ):
-            yield payload
-
     async def _stream_openai_chat_events(
         self,
         *,
@@ -2833,16 +2777,8 @@ class OrchestratorRuntime:
         tools: list[dict[str, Any]],
         usage_context: dict[str, Any] | None,
         reasoning_effort: str | int | None = None,
-        _mimo_thinking_enabled: bool | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         provider, base_url, api_key = self._openai_endpoint_for_model(model_name)
-        is_mimo = provider == "openrouter" and model_name == self.config.openrouter_mimo_model
-        if is_mimo and _mimo_thinking_enabled is None:
-            async for payload in self._stream_mimo_with_thinking_budget(
-                model_name=model_name, messages=messages, tools=tools, usage_context=usage_context,
-            ):
-                yield payload
-            return
         body: dict[str, Any] = {
             "model": model_name,
             "messages": messages,
@@ -2850,8 +2786,6 @@ class OrchestratorRuntime:
             "temperature": 1.0 if provider == "openrouter" else self.config.fireworks_kimi_temperature,
             "stream_options": {"include_usage": True},
         }
-        if is_mimo:
-            body["reasoning"] = {"enabled": bool(_mimo_thinking_enabled)}
         if provider == "fireworks" and self.config.fireworks_kimi_max_tokens is not None:
             body["max_tokens"] = self.config.fireworks_kimi_max_tokens
         effective_reasoning_effort = (
@@ -2920,15 +2854,6 @@ class OrchestratorRuntime:
                     },
                 )
                 return
-            except asyncio.CancelledError:
-                await self._record_internal_usage_event(
-                    metered_call=metered_call, model_key=build_model_key(provider, model_name),
-                    usage_context=usage_context, provider_request_id=provider_request_id,
-                    raw_usage=usage, success=False, error_code="stream_cancelled",
-                    metadata_json={"attempt": attempt + 1, "streaming": True,
-                                   "yielded_any": yielded_any, "thinking_enabled": _mimo_thinking_enabled},
-                )
-                raise
             except (httpx.HTTPError, RuntimeError, ValueError) as exc:
                 await self._record_internal_usage_event(
                     metered_call=metered_call,
