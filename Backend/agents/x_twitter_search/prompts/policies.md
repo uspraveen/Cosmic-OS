@@ -12,7 +12,7 @@
 - Search X first; do not drift into generic web synthesis.
 - Prefer a compact, evidence-grounded briefing over a vague narrative.
 - Capture notable posts only when they materially support the answer.
-- Do not invent handles, timestamps, or post URLs if the provider response does not support them.
+- Copy each notable post's permalink into `post_url` verbatim from the provider's search results or citations. That is a required copy, not an invention; the prohibition is only against constructing or guessing URLs the provider did not return.
 
 ## Storage Rules
 - Persist the raw provider response and a normalized report for every successful search.

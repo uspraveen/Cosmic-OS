@@ -348,3 +348,83 @@ async def test_x_search_agent_usage_cost_includes_x_search_tool_calls(tmp_path: 
 
     event = captured["event"]
     assert event.estimated_cost_usd == pytest.approx(0.01572, rel=1e-6)
+
+
+# ── Post-URL backfill (sync tests: runnable on the VM, which has no pytest-asyncio) ──
+
+
+def _post(handle: str | None, url: str | None = None):
+    from agents.x_twitter_search.agent import NotablePost
+
+    return NotablePost(
+        author_handle=handle,
+        post_url=url,
+        excerpt="Composer 2 is live.",
+        why_it_matters="Primary announcement from the vendor.",
+    )
+
+
+def test_handle_from_post_url_reads_x_and_twitter_permalinks() -> None:
+    read = XTwitterSearchAgent._handle_from_post_url
+    assert read("https://x.com/Ryan_Resolution/status/184") == "ryan_resolution"
+    assert read("https://www.twitter.com/FDOTinc/status/9") == "fdotinc"
+    assert read("x.com/foo/status/1") == "foo"
+    # Not a permalink: no handle to join on.
+    assert read("https://example.com/foo/status/1") == ""
+    assert read("https://x.com") == ""
+    assert read("") == ""
+
+
+def test_backfill_joins_citation_permalinks_to_url_less_posts() -> None:
+    agent = object.__new__(XTwitterSearchAgent)
+    posts = [
+        _post("Ryan_Resolution"),
+        _post("kanishkpaul", "https://x.com/kanishkpaul/status/77"),
+    ]
+    citations = [
+        {"title": "X Source", "url": "https://x.com/Ryan_Resolution/status/184"},
+        {"title": "X Source", "url": "https://x.com/kanishkpaul/status/77"},
+    ]
+    filled = agent._backfill_post_urls(posts, citations)
+    assert filled == 1
+    assert posts[0].post_url == "https://x.com/Ryan_Resolution/status/184"
+    # An existing URL is never overwritten, even when a citation differs.
+    assert posts[1].post_url == "https://x.com/kanishkpaul/status/77"
+
+
+def test_backfill_never_invents_without_a_matching_citation() -> None:
+    agent = object.__new__(XTwitterSearchAgent)
+    posts = [_post("somebody"), _post(None)]
+    citations = [{"title": "X Source", "url": "https://x.com/unrelated/status/5"}]
+    assert agent._backfill_post_urls(posts, citations) == 0
+    assert posts[0].post_url is None
+    assert posts[1].post_url is None
+
+
+def test_markdown_report_carries_post_links() -> None:
+    agent = object.__new__(XTwitterSearchAgent)
+    report = agent._render_markdown_report(
+        query="Blueprint II sentiment",
+        normalized_output={
+            "summary": "Positive.",
+            "key_findings": [],
+            "notable_posts": [
+                {
+                    "author_handle": "Ryan_Resolution",
+                    "post_url": "https://x.com/Ryan_Resolution/status/184",
+                    "excerpt": "Can't beat a Founders Inc boat tour.",
+                    "why_it_matters": "Participant post.",
+                },
+                {
+                    "author_handle": "quiet",
+                    "post_url": "",
+                    "excerpt": "No permalink returned.",
+                    "why_it_matters": "",
+                },
+            ],
+            "citations": [],
+        },
+    )
+    assert "Link: https://x.com/Ryan_Resolution/status/184" in report
+    # A post without a URL renders without a Link line rather than an empty one.
+    assert "Link: \n" not in report

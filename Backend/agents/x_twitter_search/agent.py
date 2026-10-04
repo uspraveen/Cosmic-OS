@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -274,8 +275,16 @@ class XTwitterSearchAgent(AgentRuntime):
             },
         )
 
+        normalized_citations = self._normalize_citations(getattr(response, "citations", None))
+        backfilled = self._backfill_post_urls(structured.notable_posts, normalized_citations)
+        if backfilled:
+            logger.info(
+                "x_search_agent.post_urls_backfilled task_id=%s count=%d",
+                task.task_id,
+                backfilled,
+            )
         citations = self._merge_citations(
-            self._normalize_citations(getattr(response, "citations", None)),
+            normalized_citations,
             self._citations_from_notable_posts(structured.notable_posts),
         )
         provider_response_id = str(getattr(response, "id", "") or "").strip() or None
@@ -497,7 +506,8 @@ class XTwitterSearchAgent(AgentRuntime):
             prompt_assets.get("learnings", ""),
             (
                 "Return only valid JSON matching the response schema. "
-                "Ground the answer in X search evidence. Prefer concise key findings and only include notable posts that materially support the result."
+                "Ground the answer in X search evidence. Prefer concise key findings and only include notable posts that materially support the result. "
+                "Every notable post must carry post_url, copied verbatim from the permalink the search results or citations provide for that post; omit the field only when no permalink exists in the evidence."
             ),
         ]
         return "\n\n".join(part for part in parts if part).strip()
@@ -565,7 +575,10 @@ class XTwitterSearchAgent(AgentRuntime):
             lines.extend(["## Notable Posts", ""])
             for post in posts:
                 handle = post.get("author_handle") or "unknown"
+                post_url = str(post.get("post_url") or "").strip()
                 lines.append(f"- @{handle}: {post.get('excerpt') or ''}")
+                if post_url:
+                    lines.append(f"  Link: {post_url}")
                 why = str(post.get("why_it_matters") or "").strip()
                 if why:
                     lines.append(f"  Why it matters: {why}")
@@ -606,6 +619,42 @@ class XTwitterSearchAgent(AgentRuntime):
                     }
                 )
         return citations[:20]
+
+    @staticmethod
+    def _handle_from_post_url(url: str) -> str:
+        """The handle a permalink belongs to, or empty when it is not one.
+
+        xAI citations carry the exact permalinks the model was supposed to
+        copy; this is the join key for the backfill below.
+        """
+        match = re.search(r"(?:https?://)?(?:www\.)?(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/status/", str(url or ""))
+        return match.group(1).lower() if match else ""
+
+    def _backfill_post_urls(self, posts: list[NotablePost], citations: list[dict[str, str]]) -> int:
+        """Join provider citation permalinks onto posts the model left URL-less.
+
+        The prompt now demands post_url on every notable post, but a model
+        that plays extra-safe with the no-invention policy can still omit
+        them. xAI's citations carry the exact permalinks, so a citation whose
+        URL names the post's handle is that post's permalink — a grounded
+        join, never an invention. Returns how many posts were filled.
+        """
+        by_handle: dict[str, str] = {}
+        for citation in citations:
+            url = str(citation.get("url") or "").strip()
+            handle = self._handle_from_post_url(url)
+            if handle and handle not in by_handle:
+                by_handle[handle] = url
+        filled = 0
+        for post in posts:
+            if str(post.post_url or "").strip():
+                continue
+            handle = str(post.author_handle or "").strip().lstrip("@").lower()
+            url = by_handle.get(handle)
+            if url:
+                post.post_url = url
+                filled += 1
+        return filled
 
     def _citations_from_notable_posts(self, posts: list[NotablePost]) -> list[dict[str, str]]:
         citations: list[dict[str, str]] = []
