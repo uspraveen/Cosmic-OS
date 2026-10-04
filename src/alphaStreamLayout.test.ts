@@ -16,6 +16,78 @@ describe('alphaStreamLayout', () => {
     ])
   })
 
+  it('rebases the second and later anchors against what is already split off', () => {
+    const { segments } = buildAlphaStreamSegments({
+      content: 'One two three four five six.',
+      alphaConsoleAnchors: [
+        { taskId: 'tsk_one', offset: 8 },
+        { taskId: 'tsk_two', offset: 19 },
+      ],
+    })
+
+    expect(segments).toEqual([
+      { kind: 'content', content: 'One two ' },
+      { kind: 'alpha_console', taskId: 'tsk_one' },
+      { kind: 'content', content: 'three four ' },
+      { kind: 'alpha_console', taskId: 'tsk_two' },
+      { kind: 'content', content: 'five six.' },
+    ])
+  })
+
+  it('rebases later anchors in response-blocks mode too', () => {
+    const { segments } = buildAlphaStreamSegments({
+      responseBlocks: [
+        { id: 'markdown_1', type: 'markdown', text: 'One two ' },
+        { id: 'markdown_2', type: 'markdown', text: 'three four five six.' },
+      ],
+      alphaConsoleAnchors: [
+        { taskId: 'tsk_one', offset: 8 },
+        { taskId: 'tsk_two', offset: 19 },
+      ],
+    })
+
+    expect(segments).toEqual([
+      { kind: 'content', blocks: [{ id: 'markdown_1', type: 'markdown', text: 'One two ' }] },
+      { kind: 'alpha_console', taskId: 'tsk_one' },
+      { kind: 'content', blocks: [{ id: 'markdown_2', type: 'markdown', text: 'three four ' }] },
+      { kind: 'alpha_console', taskId: 'tsk_two' },
+      { kind: 'content', blocks: [{ id: 'markdown_2_tail', type: 'markdown', text: 'five six.' }] },
+    ])
+  })
+
+  it('emits one activity segment per anchor, preserving same-offset arrival order', () => {
+    const { segments, hasAnchors } = buildAlphaStreamSegments({
+      content: 'Hello world.',
+      activityAnchors: [
+        { id: 'activity_a', offset: 0 },
+        { id: 'activity_b', offset: 0 },
+      ],
+    })
+
+    expect(hasAnchors).toBe(true)
+    expect(segments).toEqual([
+      { kind: 'activity', anchorId: 'activity_a' },
+      { kind: 'activity', anchorId: 'activity_b' },
+      { kind: 'content', content: 'Hello world.' },
+    ])
+  })
+
+  it('interleaves activity anchors with console anchors at their own offsets', () => {
+    const { segments } = buildAlphaStreamSegments({
+      content: 'One two three.',
+      alphaConsoleAnchors: [{ taskId: 'tsk_alpha', offset: 8 }],
+      activityAnchors: [{ id: 'activity_a', offset: 4 }],
+    })
+
+    expect(segments).toEqual([
+      { kind: 'content', content: 'One ' },
+      { kind: 'activity', anchorId: 'activity_a' },
+      { kind: 'content', content: 'two ' },
+      { kind: 'alpha_console', taskId: 'tsk_alpha' },
+      { kind: 'content', content: 'three.' },
+    ])
+  })
+
   it('measures response block length for anchor placement', () => {
     expect(measureAssistantStreamLength('', [
       { id: 'markdown_1', type: 'markdown', text: 'hello' },

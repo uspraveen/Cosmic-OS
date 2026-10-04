@@ -399,6 +399,11 @@ interface ActivityLogEntry {
   specialistEventType?: string | null
   previewUrl?: string | null
   slideNumber?: number | null
+  /** Visible stream length when this entry arrived, stamped client-side on
+   * first merge. Places the entry inline in the message body between the
+   * prose it produced. Null on history-rehydrated or post-completion entries
+   * — those stay Flow-only. */
+  streamOffset?: number | null
 }
 
 interface AlphaTerminalEntry {
@@ -1099,6 +1104,11 @@ const normalizeActivityLog = (value: unknown): ActivityLogEntry[] | undefined =>
         && Number((item as any).slide_number ?? (item as any).slideNumber) > 0
         ? Number((item as any).slide_number ?? (item as any).slideNumber)
         : null,
+      streamOffset: typeof (item as any).stream_offset === 'number' && Number.isFinite((item as any).stream_offset)
+        ? Math.max(0, Math.floor((item as any).stream_offset))
+        : typeof (item as any).streamOffset === 'number' && Number.isFinite((item as any).streamOffset)
+          ? Math.max(0, Math.floor((item as any).streamOffset))
+          : null,
     }
     const deduped = appendActivityLogEntry(normalized, entry)
     normalized.splice(0, normalized.length, ...deduped)
@@ -1115,6 +1125,23 @@ const mergeActivityLogEntries = (
     merged = appendActivityLogEntry(merged, entry)
   }
   return merged
+}
+
+// Inline-placement stamps: applied at merge time in the task.progress handler,
+// where the target message's own stream length is known. Entries already
+// carrying an offset — a backend stamp, or a previous pass — keep it; dedup on
+// merge then preserves the first stamp an entry ever received.
+const stampActivityLogEntryOffsets = <T extends { streamOffset?: number | null }>(
+  entries: T[] | undefined,
+  offset: number,
+): T[] | undefined => {
+  if (!entries || entries.length <= 0) {
+    return entries
+  }
+  const safeOffset = Math.max(0, Math.floor(offset))
+  return entries.map((entry) => (
+    entry.streamOffset == null ? { ...entry, streamOffset: safeOffset } : entry
+  ))
 }
 
 const normalizeAlphaTerminalEntry = (value: unknown): AlphaTerminalEntry | null => {
@@ -3800,6 +3827,57 @@ const AssistantFlowTimeline = memo(({
 })
 AssistantFlowTimeline.displayName = 'AssistantFlowTimeline'
 
+// One progress step inline in the message body, at the stream position where
+// it happened. Delegation roots carry a muted step count with their children
+// folded into it; the newest root unfolds its children live while the turn
+// streams — the Flow section above keeps the full unfolded record either way.
+const InlineActivityRow = memo(({
+  entry,
+  childEntries,
+  showChildren,
+  streaming,
+  isLast,
+}: {
+  entry: ActivityLogEntry
+  childEntries: ActivityLogEntry[]
+  showChildren: boolean
+  streaming: boolean
+  isLast: boolean
+}) => {
+  const signal = resolveAgentSignal(entry)
+  const live = streaming && isLast
+  const active = live && (!showChildren || childEntries.length === 0)
+  return (
+    <div className="assistant-inline-activity">
+      <div className={`assistant-inline-activity-row${active ? ' is-active' : ''}`}>
+        <AgentGlyph signal={signal} size={16} iconSize={14} active={active} />
+        <span className="assistant-inline-activity-label">
+          {scrubAssistantProse(stripActorPrefix(entry.label, signal))}
+        </span>
+        {!showChildren && childEntries.length > 0 && (
+          <span className="assistant-inline-activity-count">
+            · {childEntries.length} {childEntries.length === 1 ? 'step' : 'steps'}
+          </span>
+        )}
+        <DomainCluster domains={signal.domains} size={12} />
+      </div>
+      {live && showChildren && childEntries.map((child, childIndex) => {
+        const childSignal = resolveAgentSignal(child)
+        const childActive = childIndex === childEntries.length - 1
+        return (
+          <div key={child.id} className={`assistant-inline-activity-row child${childActive ? ' is-active' : ''}`}>
+            <AgentGlyph signal={childSignal} size={14} iconSize={12} active={childActive} />
+            <span className="assistant-inline-activity-label">
+              {scrubAssistantProse(stripActorPrefix(child.label, childSignal))}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+})
+InlineActivityRow.displayName = 'InlineActivityRow'
+
 type AlphaConsoleStatus = 'running' | 'completed' | 'failed' | 'stopped'
 
 interface AlphaConsoleView {
@@ -3868,6 +3946,43 @@ const getAlphaEntryTaskId = (entry: ActivityLogEntry) => {
     String(entry.delegatedTaskId || '').trim() ||
     null
   )
+}
+
+// Kinds whose story already has a dedicated inline surface (SlideBuildCard,
+// DocsProgressCard, TabularProgressCard) — a row for them would sit right
+// next to the card telling the same story.
+const INLINE_ACTIVITY_EXCLUDED_KINDS = new Set([
+  'slide_build',
+  'docs_parse',
+  'tabular_parse',
+  'browser_run',
+  'sheet_run',
+])
+
+// Specialists whose runs render as their own anchored inline card
+// (BrowserRunCard, TabularProgressCard, DocsProgressCard): their step rows
+// stay in Flow, because inline they would duplicate the card beside them.
+const INLINE_ACTIVITY_EXCLUDED_AGENT_FRAGMENTS = [
+  'browser-agent',
+  'tabular-agent',
+  'docs-parser',
+]
+
+// An entry that earns a row in the message body: it was stamped with the
+// stream position it arrived at, it has no other inline home, and it isn't
+// a child (children render folded under their delegation root).
+const isInlineActivityEntry = (entry: ActivityLogEntry) => {
+  if (entry.streamOffset == null) {
+    return false
+  }
+  if (isAlphaActivityEntry(entry)) {
+    return false
+  }
+  if (INLINE_ACTIVITY_EXCLUDED_KINDS.has(String(entry.kind || '').toLowerCase())) {
+    return false
+  }
+  const agentId = String(entry.agentId || '').toLowerCase()
+  return !INLINE_ACTIVITY_EXCLUDED_AGENT_FRAGMENTS.some((fragment) => agentId.includes(fragment))
 }
 
 const buildAlphaConsoleView = (
@@ -5821,6 +5936,7 @@ const AssistantAlphaStreamBody = ({
   onStopAlpha,
   browserStreaming = false,
   sheetStreaming = false,
+  streaming = false,
 }: {
   message: Pick<Message, 'content' | 'responseBlocks' | 'alphaTerminalLog' | 'alphaConsoleAnchors' | 'activityLog' | 'requestId' | 'sourceId' | 'stopped' | 'browserProgress' | 'browserConsoleAnchors' | 'sheetsProgress' | 'sheetRunAnchors'>
   onStopAlpha: (payload: { requestId?: string; taskId?: string }) => void
@@ -5830,7 +5946,34 @@ const AssistantAlphaStreamBody = ({
   /** Same, threaded to the SheetRunCard. Kept a separate prop so the two
    * cards' liveness can drift independently if one surface ever needs it. */
   sheetStreaming?: boolean
+  /** Whether THIS message is the one streaming: drives the live pulse and
+   * the unfolded child tail on its inline activity rows. */
+  streaming?: boolean
 }) => {
+  // Roots and their children among the stamped entries — roots become inline
+  // anchors at their own stream offsets, children fold under their root.
+  const inlineActivity = useMemo(() => {
+    const roots: ActivityLogEntry[] = []
+    const childrenByRoot = new Map<string, ActivityLogEntry[]>()
+    for (const entry of message.activityLog || []) {
+      if (!isInlineActivityEntry(entry)) {
+        continue
+      }
+      const parentKey = String(entry.parentDelegatedTaskId || '').trim()
+      if (parentKey) {
+        const list = childrenByRoot.get(parentKey)
+        if (list) {
+          list.push(entry)
+        } else {
+          childrenByRoot.set(parentKey, [entry])
+        }
+      } else {
+        roots.push(entry)
+      }
+    }
+    return { roots, childrenByRoot }
+  }, [message.activityLog])
+
   const { segments, hasAnchors } = buildAlphaStreamSegments({
     content: message.content,
     responseBlocks: message.responseBlocks,
@@ -5838,6 +5981,12 @@ const AssistantAlphaStreamBody = ({
     alphaTerminalLog: message.alphaTerminalLog,
     browserConsoleAnchors: message.browserConsoleAnchors,
     sheetRunAnchors: message.sheetRunAnchors,
+    activityAnchors: inlineActivity.roots.length > 0
+      ? inlineActivity.roots.map((entry) => ({
+        id: entry.id,
+        offset: Math.max(0, Math.floor(entry.streamOffset || 0)),
+      }))
+      : undefined,
   })
   const fallbackConsole = buildAlphaConsoleView(message.activityLog, message.alphaTerminalLog, {
     stopped: message.stopped,
@@ -5906,6 +6055,25 @@ const AssistantAlphaStreamBody = ({
               streaming={sheetStreaming}
             />
           ) : null
+        }
+        if (segment.kind === 'activity') {
+          const rootIndex = inlineActivity.roots.findIndex((entry) => entry.id === segment.anchorId)
+          if (rootIndex < 0) {
+            return null
+          }
+          const rootEntry = inlineActivity.roots[rootIndex]
+          const parentKey = String(rootEntry.delegatedTaskId || '').trim()
+          const isLastRoot = rootIndex === inlineActivity.roots.length - 1
+          return (
+            <InlineActivityRow
+              key={`inline-activity-${segment.anchorId}`}
+              entry={rootEntry}
+              childEntries={inlineActivity.childrenByRoot.get(parentKey) || []}
+              showChildren={streaming && isLastRoot}
+              streaming={streaming}
+              isLast={isLastRoot}
+            />
+          )
         }
         if (segment.blocks && segment.blocks.length > 0) {
           return (
@@ -6255,7 +6423,6 @@ export default function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const [downloadingArtifactId, setDownloadingArtifactId] = useState<string | null>(null)
   const [showScrollButton, setShowScrollButton] = useState(false)
-  const [streamingProgress, setStreamingProgress] = useState('')
   // Tracks the cards the user has deliberately collapsed. Inverted on purpose:
   // channel conversations (mobile, WhatsApp, Telegram, email threads) are part
   // of the transcript, so they read expanded by default and collapse only when
@@ -7410,7 +7577,6 @@ export default function App() {
     markStreamStopped(normalizedRequestId, normalizedTaskId)
     setIsStreaming(false)
     clearActiveStreamingRefs()
-    setStreamingProgress('')
     setMessages((prev) => prev.map((message) => {
       if (message.role !== 'assistant') {
         return message
@@ -7462,7 +7628,6 @@ export default function App() {
     if (!usingHistoryTail && streams.length <= 0) {
       if (options.clearIfNone) {
         clearActiveStreamingRefs()
-        setStreamingProgress('')
         setIsStreaming(false)
       }
       return
@@ -7602,7 +7767,6 @@ export default function App() {
     if (activeStream) {
       activeStreamingRequestIdRef.current = String(activeStream.requestId || '').trim() || null
       activeStreamingTaskIdRef.current = String(activeStream.taskId || '').trim() || null
-      setStreamingProgress(String(activeStream.activity || activeStream.progress?.label || '').trim())
       pendingResponseStartScrollRef.current = true
       shouldAutoScrollRef.current = false
       setIsStreaming(true)
@@ -7611,7 +7775,6 @@ export default function App() {
 
     if (options.clearIfNone) {
       clearActiveStreamingRefs()
-      setStreamingProgress('')
       setIsStreaming(false)
     }
   }
@@ -7760,7 +7923,6 @@ export default function App() {
     seenArtifactReadyKeysRef.current.clear()
     prophetSettledRef.current.clear()
     inFlightWhenInactiveRef.current.clear()
-    setStreamingProgress('')
     setMessages([])
     setActiveSessionId(null)
     setPendingTaskInputs([])
@@ -8567,7 +8729,6 @@ export default function App() {
         })
         if (activeStreamingRequestIdRef.current === backgroundTask.requestId) {
           setIsStreaming(false)
-          setStreamingProgress('')
           clearActiveStreamingRefs()
           setMessages((prev) => {
             const requestId = backgroundTask.requestId
@@ -8662,12 +8823,10 @@ export default function App() {
           if (foregroundTask?.taskId) {
             activeStreamingTaskIdRef.current = foregroundTask.taskId
           }
-          setStreamingProgress('')
           pendingResponseStartScrollRef.current = true
           setIsStreaming(true)
         } else if (activeStreamingRequestIdRef.current === requestId) {
           clearActiveStreamingRefs()
-          setStreamingProgress('')
           setIsStreaming(false)
         }
         shouldAutoScrollRef.current = false
@@ -8999,23 +9158,25 @@ export default function App() {
           ? undefined
           : buildProgressActivityEntries(event, activityText, statusMessage, progressState)
         const activityLog = normalizeActivityLog((event as any).activity_log)
-        // The global progress label sits under the active query; progress
-        // from any other stream must stay on its own message only.
-        if (!alphaTerminalEntry && isEventForActiveStream(event)) {
-          setStreamingProgress(activityText)
-        }
         setMessages((prev) => {
           const { messages: nextMessages, messageId } = ensureAssistantMessageForEvent(prev, event)
           return nextMessages.map((message) => {
             if (message.id !== messageId) {
               return message
             }
+            // Inline placement stamps: the stream length this message had when
+            // the event landed, applied to entries that don't carry one yet.
+            // Dedup on merge keeps the first stamp an entry ever got.
+            const streamLength = measureAssistantStreamLength(message.content, message.responseBlocks)
             return {
               ...message,
               activity: alphaTerminalEntry ? message.activity : activityText,
               activityLog: mergeActivityLogEntries(
-                mergeActivityLogEntries(message.activityLog, activityLog),
-                activityEntries,
+                mergeActivityLogEntries(
+                  message.activityLog,
+                  stampActivityLogEntryOffsets(activityLog, streamLength),
+                ),
+                stampActivityLogEntryOffsets(activityEntries, streamLength),
               ),
               alphaTerminalLog: appendAlphaTerminalEntry(message.alphaTerminalLog, alphaTerminalEntry),
               alphaConsoleAnchors: alphaTerminalEntry
@@ -9137,11 +9298,9 @@ export default function App() {
         if (isStreamEventStopped(event)) {
           setIsStreaming(false)
           clearActiveStreamingRefs()
-          setStreamingProgress('')
           return
         }
         markResponseStreamSeen(event)
-        setStreamingProgress('')
         setActiveSessionId((prev) => typeof event.session_id === 'string' ? event.session_id : prev)
         const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
         const supportingArtifacts = normalizeSupportingArtifacts((event as any).supporting_artifacts)
@@ -9562,7 +9721,6 @@ export default function App() {
         if (isEventForActiveStream(event)) {
           setIsStreaming(false)
           clearActiveStreamingRefs()
-          setStreamingProgress('')
         }
         if (event.task_id) {
           removePendingTaskInputsForTask(String(event.task_id))
@@ -9596,7 +9754,6 @@ export default function App() {
         if (isEventForActiveStream(event)) {
           setIsStreaming(false)
           clearActiveStreamingRefs()
-          setStreamingProgress('')
         }
         if (event.task_id) {
           removePendingTaskInputsForTask(String(event.task_id))
@@ -9645,7 +9802,6 @@ export default function App() {
         if (isEventForActiveStream(event)) {
           setIsStreaming(false)
           clearActiveStreamingRefs()
-          setStreamingProgress('')
         }
         if (event.message) {
           setMessages((prev) => {
@@ -9674,7 +9830,6 @@ export default function App() {
       }
       if (status?.state === 'error' || status?.state === 'idle') {
         setIsStreaming(false)
-        setStreamingProgress('')
         clearActiveStreamingRefs()
       }
     })
@@ -9962,10 +10117,8 @@ export default function App() {
     ])
 
     setIsStreaming(true)
-    setStreamingProgress('Working on your request...')
     if (!window.cosmic?.sendGatewayQuery) {
       setIsStreaming(false)
-      setStreamingProgress('')
       activeAssistantMessageByRequestRef.current.delete(requestId)
       setMessages(prev => [...prev, {
         ...createAssistantMessage(),
@@ -9997,7 +10150,6 @@ export default function App() {
       }
     }).catch((error: any) => {
       setIsStreaming(false)
-      setStreamingProgress('')
       clearActiveStreamingRefs()
       activeAssistantMessageByRequestRef.current.delete(requestId)
       setMessages(prev => prev.map((message) => {
@@ -10534,21 +10686,20 @@ export default function App() {
     return () => { ipc.off?.('cosmic:display-changed', handler) }
   }, [])
 
-  // What the footer status line is about right now. The newest flow row is the
-  // best evidence (it carries an agent id); when there is none, the progress
-  // sentence itself is the same wording the flow rows are matched against.
-  const liveSignal = useMemo(() => {
+  // Whether the newest assistant message has produced anything visible yet —
+  // prose, response blocks, or an inline progress row. The bare dots under the
+  // transcript hold the screen only until one of those lands.
+  const activeStreamQuiet = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const candidate = messages[index]
       if (candidate.role !== 'assistant') continue
-      const log = candidate.activityLog
-      if (log && log.length > 0) {
-        return resolveAgentSignal(log[log.length - 1])
-      }
-      break
+      if (String(candidate.content || '').trim()) return false
+      if (candidate.responseBlocks && candidate.responseBlocks.length > 0) return false
+      if ((candidate.activityLog || []).some(isInlineActivityEntry)) return false
+      return true
     }
-    return streamingProgress ? resolveAgentSignal({ label: streamingProgress }) : null
-  }, [messages, streamingProgress])
+    return true
+  }, [messages])
 
   const activeDocsProgressMessage = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -11753,6 +11904,7 @@ export default function App() {
                             onStopAlpha={handleStopAlphaAgent}
                             browserStreaming={messageIsStreaming}
                             sheetStreaming={messageIsStreaming}
+                            streaming={messageIsStreaming}
                           />
                           <AssistantMessageArtifacts
                             messageId={msg.id}
@@ -11848,26 +12000,17 @@ export default function App() {
                     )
                   })}
 
-                  {mode !== 'task' && isStreaming && !activeDocsProgressMessage && (
+                  {/* The dots are only the "just started" affordance: once the
+                      first inline progress row or first prose chunk lands in
+                      the message body above, the transcript itself carries the
+                      live status and the indicator steps aside. */}
+                  {mode !== 'task' && isStreaming && !activeDocsProgressMessage && activeStreamQuiet && (
                     <div className="streaming-indicator">
-                      {streamingProgress ? (
-                        // With a sentence to show, its leading tool mark and its
-                        // position at the live tail carry status on their own;
-                        // the dot row would just say the same thing twice.
-                        <div className="streaming-now">
-                          {liveSignal && <AgentGlyph signal={liveSignal} size={20} iconSize={18} active />}
-                          <span className="streaming-status">
-                            {liveSignal ? stripActorPrefix(streamingProgress, liveSignal) : streamingProgress}
-                          </span>
-                          {liveSignal && <DomainCluster domains={liveSignal.domains} size={14} />}
-                        </div>
-                      ) : (
-                        <div className="streaming-dots" aria-hidden>
-                          {[0, 1, 2, 3, 4].map((i) => (
-                            <span key={i} className="streaming-dot-pix" style={{ animationDelay: `${i * 0.09}s` }} />
-                          ))}
-                        </div>
-                      )}
+                      <div className="streaming-dots" aria-hidden>
+                        {[0, 1, 2, 3, 4].map((i) => (
+                          <span key={i} className="streaming-dot-pix" style={{ animationDelay: `${i * 0.09}s` }} />
+                        ))}
+                      </div>
                     </div>
                   )}
                   {shouldShowTaskInterrupt && visibleTaskInterrupts.length > 0 && (

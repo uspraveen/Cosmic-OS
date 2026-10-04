@@ -5144,6 +5144,62 @@ kbd {
   color: rgba(255, 255, 255, 0.58);
 }
 
+/* Inline progress rows — the ZCode-style transcript steps that sit inside the
+   message body at the stream position where they happened. Deliberately
+   smaller and quieter than the Flow section: they are waymarks between the
+   prose, not a panel. */
+.assistant-inline-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: var(--response-block-width, min(100%, 720px));
+  margin: 6px 0;
+}
+
+.assistant-inline-activity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 6px;
+  margin: 0 -6px;
+  border-radius: var(--response-radius-inner, 9px);
+  transition: background 200ms ease;
+}
+
+.assistant-inline-activity-row.child {
+  margin-left: 12px;
+}
+
+.assistant-inline-activity-row.is-active {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.assistant-inline-activity-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--response-font-xs, 12px);
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.assistant-inline-activity-row.child .assistant-inline-activity-label {
+  color: rgba(255, 255, 255, 0.48);
+}
+
+.assistant-inline-activity-row.is-active .assistant-inline-activity-label {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.assistant-inline-activity-count {
+  flex-shrink: 0;
+  font-size: var(--response-font-xs, 12px);
+  color: rgba(255, 255, 255, 0.38);
+}
+
 .alpha-agent-console {
   --alpha-rail: rgba(255, 255, 255, 0.14);
   position: relative;

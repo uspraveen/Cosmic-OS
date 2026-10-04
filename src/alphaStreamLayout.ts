@@ -3,6 +3,14 @@ export interface AlphaConsoleAnchor {
   offset: number
 }
 
+/** One inline progress row, anchored where it arrived in the stream. Unlike
+ * console anchors these are per-entry (not deduped per task) and several may
+ * share an offset — a burst of steps between two prose segments. */
+export interface ActivityAnchor {
+  id: string
+  offset: number
+}
+
 export interface AlphaTerminalAnchorSource {
   taskId?: string | null
   streamOffset?: number | null
@@ -20,6 +28,7 @@ export type AlphaStreamSegment =
   | { kind: 'alpha_console'; taskId: string | null }
   | { kind: 'browser_run'; taskId: string | null }
   | { kind: 'sheet_run'; taskId: string | null }
+  | { kind: 'activity'; anchorId: string }
 
 const DEFAULT_ALPHA_TASK_KEY = '_default'
 
@@ -117,7 +126,7 @@ export const ensureAlphaConsoleAnchor = (
 }
 
 interface KindedAnchor extends AlphaConsoleAnchor {
-  segmentKind: 'alpha_console' | 'browser_run' | 'sheet_run'
+  segmentKind: 'alpha_console' | 'browser_run' | 'sheet_run' | 'activity'
 }
 
 export const buildAlphaStreamSegments = (options: {
@@ -132,6 +141,10 @@ export const buildAlphaStreamSegments = (options: {
   browserConsoleAnchors?: AlphaConsoleAnchor[]
   // Sheets specialist equivalent, same one-card-per-message story.
   sheetRunAnchors?: AlphaConsoleAnchor[]
+  // Inline progress rows (delegations, tool summaries), one anchor per entry
+  // at the stream offset where the entry arrived. Not deduped: several rows
+  // may sit at the same offset when steps ran between two text chunks.
+  activityAnchors?: ActivityAnchor[]
 }): { segments: AlphaStreamSegment[]; hasAnchors: boolean } => {
   const alphaAnchors: KindedAnchor[] = resolveAlphaConsoleAnchors(options.alphaConsoleAnchors, options.alphaTerminalLog)
     .map((anchor) => ({ ...anchor, segmentKind: 'alpha_console' as const }))
@@ -139,7 +152,11 @@ export const buildAlphaStreamSegments = (options: {
     .map((anchor) => ({ ...anchor, segmentKind: 'browser_run' as const }))
   const sheetAnchors: KindedAnchor[] = (options.sheetRunAnchors || [])
     .map((anchor) => ({ ...anchor, segmentKind: 'sheet_run' as const }))
-  const anchors: KindedAnchor[] = [...alphaAnchors, ...browserAnchors, ...sheetAnchors].sort((a, b) => a.offset - b.offset)
+  const activityKinded = (options.activityAnchors || [])
+    .filter((anchor) => typeof anchor?.id === 'string' && anchor.id.trim()
+      && typeof anchor.offset === 'number' && Number.isFinite(anchor.offset))
+    .map((anchor) => ({ taskId: anchor.id, offset: Math.max(0, Math.floor(anchor.offset)), segmentKind: 'activity' as const }))
+  const anchors: KindedAnchor[] = [...alphaAnchors, ...browserAnchors, ...sheetAnchors, ...activityKinded].sort((a, b) => a.offset - b.offset)
 
   if (anchors.length <= 0) {
     return {
@@ -156,23 +173,37 @@ export const buildAlphaStreamSegments = (options: {
   const usesBlocks = Boolean(options.responseBlocks && options.responseBlocks.length > 0)
   let remainingContent = options.content || ''
   let remainingBlocks = usesBlocks ? [...(options.responseBlocks || [])] : []
+  // Anchor offsets are absolute in the original stream, but each split works
+  // on what's left of it — so every anchor must be re-based by everything
+  // already split off, or the second and later anchors land early.
+  let consumed = 0
 
   anchors.forEach((anchor, index) => {
+    const relativeOffset = Math.max(0, anchor.offset - consumed)
+    let consumedNow = 0
     if (usesBlocks) {
-      const [before, after] = splitResponseBlocksAtOffset(remainingBlocks, anchor.offset)
+      const [before, after] = splitResponseBlocksAtOffset(remainingBlocks, relativeOffset)
       if (before.length > 0) {
         segments.push({ kind: 'content', blocks: before })
+        consumedNow = before.reduce((sum, block) => sum + measureResponseBlockLength(block), 0)
       }
       remainingBlocks = after
     } else {
-      const [before, after] = splitContentAtOffset(remainingContent, anchor.offset)
+      const [before, after] = splitContentAtOffset(remainingContent, relativeOffset)
       if (before) {
         segments.push({ kind: 'content', content: before })
+        consumedNow = before.length
       }
       remainingContent = after
     }
+    consumed += consumedNow
 
-    segments.push({ kind: anchor.segmentKind, taskId: anchor.taskId })
+    if (anchor.segmentKind === 'activity') {
+      // Activity ids are pre-filtered non-empty at the option boundary.
+      segments.push({ kind: 'activity', anchorId: String(anchor.taskId || '') })
+    } else {
+      segments.push({ kind: anchor.segmentKind, taskId: anchor.taskId })
+    }
 
     const isLast = index === anchors.length - 1
     if (isLast) {
