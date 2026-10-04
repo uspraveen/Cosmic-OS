@@ -18,7 +18,7 @@ def request(runtime):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("decision", ["approved", "rejected", "timeout"])
+@pytest.mark.parametrize("decision", ["approved", "approved_window", "approved_always", "rejected", "timeout"])
 async def test_approval_decision_returns_to_original_tool_and_preserves_card(tmp_path, decision):
     runtime = build_runtime(tmp_path)
     runtime.vault_store = VaultStore(tmp_path / "vault.db")
@@ -46,19 +46,24 @@ async def test_approval_decision_returns_to_original_tool_and_preserves_card(tmp
         resume = await runtime.build_resume_payload(channel=state.channel, requested_session_id=state.session_id)
         stream = next(item for item in resume["foreground_streams"] if item["request_id"] == state.request_id)
         assert stream["response_blocks"][0]["stream_offset"] == 9
-        if decision == "approved":
+        if decision.startswith("approved"):
             publish = runtime._publish_vault_request_block
             async def delayed_publish(pending):
                 await publish(pending)
                 await asyncio.sleep(0.3)
             runtime._publish_vault_request_block = delayed_publish
-            await runtime.approve_vault_request(pending["request_id"])
+            await runtime.approve_vault_request(pending["request_id"], grant={"approved": "once", "approved_window": "window", "approved_always": "always"}[decision])
         elif decision == "rejected":
             await runtime.reject_vault_request(pending["request_id"])
         result = await lookup
-        assert result["status"] == {"approved": "ok", "rejected": "denied", "timeout": "permission_required"}[decision]
+        assert result["status"] == {"approved": "ok", "approved_window": "ok", "approved_always": "ok", "rejected": "denied", "timeout": "permission_required"}[decision]
         runtime._continue_turn_after_vault.assert_not_called()
         assert not runtime._vault_inline_waiters
+        if decision in {"approved_window", "approved_always"}:
+            assert result["credential_ref"] == f"vault:{entry['entry_id']}"
+            assert runtime.vault_store.policy_allows_use(entry["entry_id"])
+            again = await internal_lookup(body.model_copy(update={"wait_for_approval_sec": 0}), request(runtime))
+            assert again["status"] == "ok"
         if decision == "approved":
             assert result["credential_ref"] == f"vault:{entry['entry_id']}"
             # The one-use grant survives lookup, but a subsequent use needs a NEW card.

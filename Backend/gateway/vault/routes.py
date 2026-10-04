@@ -480,7 +480,11 @@ async def internal_lookup(body: LookupRequest, request: Request):
                 while pending.get("status") == "pending" and asyncio.get_running_loop().time() < deadline:
                     await asyncio.sleep(min(0.2, max(0, deadline - asyncio.get_running_loop().time())))
                     pending = store.get_pending(pending_id) or pending
-                if pending.get("status") == "approved":
+                if pending.get("status") == "approved" or (
+                    pending.get("status") == "consumed" and store.policy_allows_use(entry_id)
+                ):
+                    # Window approval consumes its one-shot record immediately;
+                    # the active policy, not that record, authorizes lookup.
                     return await internal_lookup(body.model_copy(update={"wait_for_approval_sec": 0}), request)
                 if pending.get("status") == "rejected":
                     return {"status": "denied", "request_id": pending_id, "message": "The user denied vault access. Do not use these credentials."}
