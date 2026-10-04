@@ -74,32 +74,32 @@ describe('alphaStreamLayout', () => {
 
   it('interleaves activity anchors with console anchors at their own offsets', () => {
     const { segments } = buildAlphaStreamSegments({
-      content: 'One two three.',
-      alphaConsoleAnchors: [{ taskId: 'tsk_alpha', offset: 8 }],
-      activityAnchors: [{ id: 'activity_a', offset: 4 }],
+      content: 'One. Two. Three.',
+      alphaConsoleAnchors: [{ taskId: 'tsk_alpha', offset: 10 }],
+      activityAnchors: [{ id: 'activity_a', offset: 5 }],
     })
 
     expect(segments).toEqual([
-      { kind: 'content', content: 'One ' },
+      { kind: 'content', content: 'One. ' },
       { kind: 'activity', anchorId: 'activity_a' },
-      { kind: 'content', content: 'two ' },
+      { kind: 'content', content: 'Two. ' },
       { kind: 'alpha_console', taskId: 'tsk_alpha' },
-      { kind: 'content', content: 'three.' },
+      { kind: 'content', content: 'Three.' },
     ])
   })
 
   it('places an activity row before a card anchored at the same offset', () => {
     const { segments } = buildAlphaStreamSegments({
-      content: 'One two three.',
-      alphaConsoleAnchors: [{ taskId: 'tsk_alpha', offset: 4 }],
-      activityAnchors: [{ id: 'activity_a', offset: 4 }],
+      content: 'One. Two three.',
+      alphaConsoleAnchors: [{ taskId: 'tsk_alpha', offset: 5 }],
+      activityAnchors: [{ id: 'activity_a', offset: 5 }],
     })
 
     expect(segments).toEqual([
-      { kind: 'content', content: 'One ' },
+      { kind: 'content', content: 'One. ' },
       { kind: 'activity', anchorId: 'activity_a' },
       { kind: 'alpha_console', taskId: 'tsk_alpha' },
-      { kind: 'content', content: 'two three.' },
+      { kind: 'content', content: 'Two three.' },
     ])
   })
 
@@ -182,5 +182,30 @@ describe('approval card positions', () => {
     ] })
     expect(result.segments.map((segment) => segment.kind)).toEqual(['content', 'action', 'content'])
     expect(result.segments[2]).toMatchObject({ content: 'After.' })
+  })
+})
+
+
+describe('progress rows preserve complete sentences', () => {
+  const content = "Here's the package.\n\nThat's the complete launch package - both cards are filled in."
+  const offset = content.indexOf("That's the") + "That's the".length
+  it('puts a tool completion before the sentence it arrived during', () => {
+    const { segments } = buildAlphaStreamSegments({ content, activityAnchors: [{ id: 'tool_done', offset }] })
+    expect(segments).toEqual([
+      { kind: 'content', content: "Here's the package.\n\n" },
+      { kind: 'activity', anchorId: 'tool_done' },
+      { kind: 'content', content: "That's the complete launch package - both cards are filled in." },
+    ])
+  })
+  it('uses the same placement before completion, in final blocks, and after reload', () => {
+    const live = buildAlphaStreamSegments({ content: content.slice(0, offset), activityAnchors: [{ id: 'tool_done', offset }] })
+    expect(live.segments[live.segments.length - 1]).toEqual({ kind: 'content', content: "That's the" })
+    const blocks = [{ id: 'answer', type: 'markdown', text: content }]
+    for (const responseBlocks of [blocks, JSON.parse(JSON.stringify(blocks))]) {
+      const result = buildAlphaStreamSegments({ responseBlocks, activityAnchors: [{ id: 'tool_done', offset }] })
+      expect(result.segments[0]).toMatchObject({ blocks: [{ text: "Here's the package.\n\n" }] })
+      expect(result.segments[1]).toEqual({ kind: 'activity', anchorId: 'tool_done' })
+      expect(result.segments[2]).toMatchObject({ blocks: [{ text: "That's the complete launch package - both cards are filled in." }] })
+    }
   })
 })

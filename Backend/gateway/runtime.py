@@ -23881,25 +23881,10 @@ class GatewayRuntime:
 
     @staticmethod
     def _append_stream_text(current: str, incoming: Any) -> str:
-        prev = str(current or "")
-        next_text = str(incoming or "")
-        if not next_text:
-            return prev
-        if not prev:
-            return next_text
-
-        prev_end = prev[-1:]
-        next_start = next_text[:1]
-        if not prev_end or not next_start or prev_end.isspace() or next_start.isspace():
-            return prev + next_text
-        if re.search(r'[\.\!\?:\u2026]', prev_end) and re.search(
-            r'[A-Za-z0-9"\'`\(\[]',
-            next_start,
-        ):
-            return prev + "\n\n" + next_text
-        if re.search(r"[A-Za-z0-9]", prev_end) and re.search(r"[A-Za-z0-9]", next_start):
-            return prev + " " + next_text
-        return prev + next_text
+        # Token deltas can split words, decimals and URLs. The orchestrator
+        # emits turn separators explicitly; guessing whitespace here corrupts
+        # the text and drifts progress offsets away from final response blocks.
+        return str(current or "") + str(incoming or "")
 
     def _contains_document_attachments(self, attachments: Any) -> bool:
         if not isinstance(attachments, list):

@@ -1,26 +1,8 @@
-export const appendStreamText = (current: string | undefined, incoming: unknown): string => {
-  const prev = String(current || '')
-  const next = String(incoming || '')
-  if (!next) {
-    return prev
-  }
-  if (!prev) {
-    return next
-  }
-
-  const prevEnd = prev.slice(-1)
-  const nextStart = next.slice(0, 1)
-  if (!prevEnd || !nextStart || /\s/.test(prevEnd) || /\s/.test(nextStart)) {
-    return `${prev}${next}`
-  }
-  if (/[\.\!\?\:\u2026]/.test(prevEnd) && /[A-Za-z0-9"'`(\[]/.test(nextStart)) {
-    return `${prev}\n\n${next}`
-  }
-  if (/[A-Za-z0-9]/.test(prevEnd) && /[A-Za-z0-9]/.test(nextStart)) {
-    return `${prev} ${next}`
-  }
-  return `${prev}${next}`
-}
+// Response chunks are token deltas, not complete words or sentences. Turn
+// separators arrive explicitly from the orchestrator; guessing here changes
+// the text and invalidates every progress offset measured against it.
+export const appendStreamText = (current: string | undefined, incoming: unknown): string =>
+  String(current || '') + String(incoming || '')
 
 export const mergeCompletedStreamText = (current: string | undefined, completed: unknown): string => {
   const prev = String(current || '')

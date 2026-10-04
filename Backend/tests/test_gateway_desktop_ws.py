@@ -6994,3 +6994,17 @@ async def test_completed_history_keeps_progress_positions_after_reopen(tmp_path)
         assert completed["activity_log"] == assistant["metadata"]["activity_log"]
     finally:
         await runtime.stop()
+
+
+def test_stream_token_fragments_do_not_drift_progress_offsets():
+    runtime = object.__new__(GatewayRuntime)
+    state = ActiveRequest(request_id="req_tokens", session_id="sess_tokens",
+                          channel="desktop:tokens", route="orchestrator")
+    chunks = ["That's", " the", " comp", "lete", " launch", " package", ".\n\n"]
+    for chunk in chunks:
+        runtime._track_partial_stream(state, {"type": "response.chunk", "content": chunk})
+    expected = "That's the complete launch package.\n\n"
+    assert state.partial_content == expected
+    runtime._track_partial_stream(state, {"type": "task.progress", "message": "Completed tool work."})
+    assert state.activity_log[-1]["stream_offset"] == len(expected)
+    assert runtime._append_stream_text("0.", "051") == "0.051"

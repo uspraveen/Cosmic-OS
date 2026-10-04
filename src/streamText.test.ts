@@ -2,29 +2,25 @@ import { describe, expect, it } from 'vitest'
 import { appendStreamText, mergeCompletedStreamText } from './streamText'
 
 describe('appendStreamText', () => {
-  it('inserts a paragraph break after sentence-ending punctuation before a new sentence', () => {
-    expect(appendStreamText('Let me grab the artifact!', 'Got it - firing Alpha now.')).toBe(
-      'Let me grab the artifact!\n\nGot it - firing Alpha now.',
-    )
-    expect(appendStreamText('Let me search it.', 'Found it!')).toBe(
-      'Let me search it.\n\nFound it!',
+  it('joins token fragments without inventing word boundaries', () => {
+    const chunks = ["That's", ' the', ' comp', 'lete', ' launch', ' package', '.']
+    expect(chunks.reduce((text, chunk) => appendStreamText(text, chunk), '')).toBe(
+      "That's the complete launch package.",
     )
   })
-
-  it('inserts a paragraph break when the next sentence starts lowercase', () => {
-    expect(appendStreamText('Let me search it.', 'found the repo.')).toBe(
-      'Let me search it.\n\nfound the repo.',
+  it('preserves decimals and URLs split between token chunks', () => {
+    expect(['0.', '051', ' https://example.', 'com'].reduce((text, chunk) => appendStreamText(text, chunk), '')).toBe(
+      '0.051 https://example.com',
     )
   })
-
-  it('inserts a word boundary between alphanumeric characters', () => {
-    expect(appendStreamText('Hello', 'world')).toBe('Hello world')
-    expect(appendStreamText('Let me search it', 'Found')).toBe('Let me search it Found')
+  it('preserves explicit separators emitted between model turns', () => {
+    expect(['Before.', '\n\n', 'After.'].reduce((text, chunk) => appendStreamText(text, chunk), '')).toBe(
+      'Before.\n\nAfter.',
+    )
   })
-
-  it('preserves existing whitespace', () => {
+  it('preserves whitespace and empty chunks exactly', () => {
     expect(appendStreamText('Hello ', 'world')).toBe('Hello world')
-    expect(appendStreamText('Let me search it.', ' Found it!')).toBe('Let me search it. Found it!')
+    expect(appendStreamText('Hello', '')).toBe('Hello')
   })
 })
 

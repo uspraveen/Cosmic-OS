@@ -166,7 +166,9 @@ export const buildAlphaStreamSegments = (options: {
   const activityKinded = (options.activityAnchors || [])
     .filter((anchor) => typeof anchor?.id === 'string' && anchor.id.trim()
       && typeof anchor.offset === 'number' && Number.isFinite(anchor.offset))
-    .map((anchor) => ({ taskId: anchor.id, offset: Math.max(0, Math.floor(anchor.offset)), segmentKind: 'activity' as const }))
+    .map((anchor) => ({ taskId: anchor.id,
+      offset: resolveActivityAnchorOffset(options.content || '', contentBlocks, anchor.offset),
+      segmentKind: 'activity' as const }))
   // Activity rows sort before card anchors at the same offset: the delegation
   // line is narrated before the specialist it invoked appears, so a tie should
   // read as narration-then-card, not card-then-narration.
@@ -247,6 +249,39 @@ const measureResponseBlockLength = (block: ResponseBlockLike): number => {
     return String(block.code || '').length
   }
   return 1
+}
+
+/** Progress events can arrive between tokens of an unfinished sentence.
+ * Keep the saved event offset, but display its row before that sentence rather
+ * than separating its opening words from the rest. Apply this to the original
+ * text before sorting anchors so multiple rows keep their arrival order. */
+export const snapActivityAnchorOffset = (text: string, offset: number): number => {
+  const safe = Math.max(0, Math.min(Math.floor(offset), text.length))
+  const prefix = text.slice(0, safe)
+  // Preserve complete sentences, headings ending in a colon, and line breaks.
+  if (/[.!?:][*_~`"')\]]*\s*$/.test(prefix) || /\n\s*$/.test(prefix)) return safe
+  let boundary = 0
+  for (const match of prefix.matchAll(/[.!?][*_~`"')\]]*\s+|\n+/g)) {
+    boundary = match.index! + match[0].length
+  }
+  return boundary
+}
+
+const resolveActivityAnchorOffset = (
+  content: string, blocks: ResponseBlockLike[] | undefined, offset: number,
+): number => {
+  if (!blocks?.length) return snapActivityAnchorOffset(content, offset)
+  let cursor = 0
+  for (const block of blocks) {
+    const length = measureResponseBlockLength(block)
+    if (cursor + length >= offset) {
+      return block.type === 'markdown'
+        ? cursor + snapActivityAnchorOffset(String(block.text || ''), offset - cursor)
+        : Math.max(cursor, Math.floor(offset))
+    }
+    cursor += length
+  }
+  return cursor
 }
 
 const MAX_ANCHOR_SNAP_LOOKBACK = 600
