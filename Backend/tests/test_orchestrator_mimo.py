@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -81,6 +82,7 @@ async def test_mimo_stream_uses_openrouter_key_and_usage_with_images_and_tools()
         body = json.loads(request.content)
         assert body["model"] == "xiaomi/mimo-v2.6-pro"
         assert "reasoning_effort" not in body
+        assert body["reasoning"] == {"enabled": True}
         assert body["tools"]
         assert body["messages"][0]["content"][1]["type"] == "image_url"
         return httpx.Response(200, stream=Stream())
@@ -177,3 +179,143 @@ async def test_mimo_keeps_reasoning_through_tool_calls_and_streams_followup_thin
     thoughts = ''.join(e['content'] for e in events if e['type'] == 'response.thinking.chunk')
     assert thoughts == 'Need the stored session.The tool finished; now continue.'
     assert next(e for e in events if e['type'] == 'response.complete')['content'] == 'Finished.'
+
+
+class DelayedStream(httpx.AsyncByteStream):
+    def __init__(self, delta):
+        self.delta = delta
+        self.closed = False
+    async def __aiter__(self):
+        yield ("data: " + json.dumps({"choices": [{"delta": self.delta}]}) + "\n\n").encode()
+        await asyncio.sleep(0.2)
+        yield b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+        yield b'data: [DONE]\n\n'
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_mimo_thinking_deadline_retries_once_with_thinking_disabled():
+    rt = runtime()
+    rt.config.openrouter_mimo_thinking_timeout_sec = 0.05
+    first = DelayedStream({"reasoning": "Still planning"})
+    requests = []
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            assert body['reasoning'] == {'enabled': True}
+            return httpx.Response(200, stream=first)
+        assert body['reasoning'] == {'enabled': False}
+        assert body['messages'] == requests[0]['messages']
+        assert body['tools'] == requests[0]['tools']
+        from test_orchestrator_reasoning_effort import SSEByteStream
+        return httpx.Response(200, stream=SSEByteStream([
+            b'data: {"choices":[{"delta":{"content":"Finished."},"finish_reason":"stop"}]}\n\n',
+            b'data: [DONE]\n\n',
+        ]))
+    rt._record_internal_usage_event = AsyncMock()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        rt._client = client
+        payloads = [p async for p in rt._stream_openai_chat_events(model_name=rt.config.openrouter_mimo_model,
+            messages=[{'role':'user','content':'Test'}], tools=[{'type':'function','function':{'name':'test','parameters':{'type':'object'}}}], usage_context=None)]
+    assert len(requests) == 2
+    assert first.closed
+    assert any(p.get('_cosmic_thinking_budget_exceeded') for p in payloads)
+    assert payloads[-1]['choices'][0]['delta']['content'] == 'Finished.'
+    assert rt._record_internal_usage_event.call_args_list[0].kwargs['error_code'] == 'stream_cancelled'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('delta', [{'content':'An answer already started.'}, {'tool_calls':[{'index':0,'id':'call_one'}]}])
+async def test_mimo_deadline_never_replays_started_text_or_tool_calls(delta):
+    rt = runtime()
+    rt.config.openrouter_mimo_thinking_timeout_sec = 0.05
+    requests = []
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, stream=DelayedStream(delta))
+    rt._record_internal_usage_event = AsyncMock()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        rt._client = client
+        payloads = [p async for p in rt._stream_openai_chat_events(model_name=rt.config.openrouter_mimo_model,
+            messages=[{'role':'user','content':'Test'}], tools=[], usage_context=None)]
+    assert len(requests) == 1
+    assert not any(p.get('_cosmic_thinking_budget_exceeded') for p in payloads)
+
+
+@pytest.mark.asyncio
+async def test_mimo_budget_fallback_reports_progress_and_does_not_replay_abandoned_reasoning(tmp_path):
+    from test_orchestrator_reasoning_effort import _signed_task, SSEByteStream
+    requests = []
+    def handler(request):
+        if not str(request.url).endswith('/chat/completions'):
+            return httpx.Response(204)
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            return httpx.Response(200, stream=DelayedStream({'reasoning':'Abandoned planning'}))
+        if len(requests) == 2:
+            assert body['reasoning'] == {'enabled': False}
+            delta = {'tool_calls':[{'index':0,'id':'call_one','type':'function',
+                'function':{'name':'session_history','arguments':'{}'}}]}
+            reason = 'tool_calls'
+        else:
+            assert body['reasoning'] == {'enabled': True}
+            assistant = next(m for m in body['messages'] if m.get('tool_calls'))
+            assert not assistant.get('reasoning')
+            assert not assistant.get('reasoning_details')
+            delta, reason = {'content':'Finished.'}, 'stop'
+        return httpx.Response(200, stream=SSEByteStream([
+            ('data: '+json.dumps({'choices':[{'delta':delta,'finish_reason':reason}]})+'\n\n').encode(),
+            b'data: [DONE]\n\n',
+        ]))
+    config = OrchestratorConfig(internal_token='internal-token', signing_secret='signing-secret',
+        openrouter_api_key='openrouter-test-key', openrouter_mimo_thinking_timeout_sec=0.05,
+        task_ledger_db_path=tmp_path/'ledger.db')
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        rt = OrchestratorRuntime(config, client=client)
+        await rt.start()
+        try:
+            rt._tool_executor.execute = AsyncMock(return_value='{"messages":[]}')
+            events = [e async for e in rt.stream_task(_signed_task('signing-secret'))]
+        finally:
+            await rt.stop()
+    assert len(requests) == 3
+    assert any(e.get('status') == 'reasoning_budget' for e in events)
+    complete = next(e for e in events if e['type']=='response.complete')
+    assert complete['content'] == 'Finished.'
+    assert complete['metrics']['reasoning_effort'] is None
+    assert complete['metrics']['thinking_mode'] == 'bounded'
+    assert complete['metrics']['thinking_timeout_sec'] == 0.05
+    assert 'Abandoned planning' in complete['thinking_text']
+
+
+def test_mimo_thinking_budget_defaults_and_env(monkeypatch):
+    monkeypatch.delenv('ORCHESTRATOR_MIMO_THINKING_TIMEOUT_SEC', raising=False)
+    assert OrchestratorConfig.from_env().openrouter_mimo_thinking_timeout_sec == 30
+    monkeypatch.setenv('ORCHESTRATOR_MIMO_THINKING_TIMEOUT_SEC','20')
+    assert OrchestratorConfig.from_env().openrouter_mimo_thinking_timeout_sec == 20
+
+
+@pytest.mark.asyncio
+async def test_canceling_mimo_task_does_not_start_a_fallback_request():
+    rt = runtime()
+    requests = []
+    stream = DelayedStream({'reasoning':'Planning'})
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, stream=stream)
+    rt._record_internal_usage_event = AsyncMock()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        rt._client = client
+        async def consume():
+            return [p async for p in rt._stream_openai_chat_events(model_name=rt.config.openrouter_mimo_model,
+                messages=[{'role':'user','content':'Test'}], tools=[], usage_context=None)]
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert len(requests) == 1
+    assert stream.closed
