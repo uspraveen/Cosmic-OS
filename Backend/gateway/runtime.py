@@ -15205,6 +15205,11 @@ class GatewayRuntime:
 
         activity_entry = self._build_task_activity_entry(event)
         if activity_entry:
+            # Completed history is built from this notebook, not state.activity_log.
+            # Stamp this copy at ingestion too, while the prose position is known.
+            request_state = self.active_requests.get(request_id) if request_id else None
+            if request_state is not None and event_type == "task.progress":
+                activity_entry["stream_offset"] = len(request_state.partial_content or "")
             notebook["activity_log"] = self._normalize_activity_log(
                 [
                     *self._normalize_activity_log(notebook.get("activity_log")),

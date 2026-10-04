@@ -1598,7 +1598,7 @@ const mergeHydratedMessages = (
       activity: typeof message.activity === 'string' && message.activity.trim()
         ? message.activity
         : existing.activity,
-      activityLog: message.activityLog ?? existing.activityLog,
+      activityLog: carryActivityLogStamps(existing.activityLog, message.activityLog ?? existing.activityLog),
       alphaTerminalLog: message.alphaTerminalLog ?? existing.alphaTerminalLog,
       alphaConsoleAnchors: message.alphaConsoleAnchors ?? existing.alphaConsoleAnchors,
       browserConsoleAnchors: message.browserConsoleAnchors ?? existing.browserConsoleAnchors,
@@ -7698,7 +7698,7 @@ export default function App() {
     }
 
     const baseMessages = usingHistoryTail
-      ? historyToMessages(options.historyTail || [])
+      ? mergeHydratedMessages(messagesRef.current, historyToMessages(options.historyTail || []))
       : messagesRef.current
     let nextMessages = [...baseMessages]
 

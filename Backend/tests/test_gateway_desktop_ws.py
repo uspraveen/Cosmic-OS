@@ -6936,3 +6936,61 @@ def test_desktop_websocket_cancel_stops_orchestrator_stream(test_client: TestCli
             assert cancelled["task_id"] == created["task_id"]
             assert cancelled["request_id"] == "req_cancel_opus"
             assert cancelled["route"] == "orchestrator"
+
+
+@pytest.mark.asyncio
+async def test_completed_history_keeps_progress_positions_after_reopen(tmp_path) -> None:
+    runtime = build_runtime(tmp_path)
+    await runtime.start()
+    try:
+        state = ActiveRequest(
+            request_id="req_progress_reload", session_id="sess_progress_reload",
+            channel="desktop:progress_reload", route="orchestrator",
+            task_id="tsk_progress_reload",
+        )
+        runtime.active_requests[state.request_id] = state
+        sent = []
+
+        async def send(event):
+            runtime._track_partial_stream(state, event)
+            sent.append(event)
+
+        def store(content, *, awaiting_reply, metadata, channel, route):
+            return runtime.session_store.append_message(
+                state.session_id, role="assistant", content=content,
+                awaiting_reply=awaiting_reply, metadata=metadata,
+                channel=channel, route=route,
+            )
+
+        context = dict(request_id=state.request_id, session_id=state.session_id,
+                       task_id=state.task_id, channel=state.channel)
+        for event in [
+            dict(type="task.progress", message="Reasoning through the request"),
+            dict(type="response.chunk", content="Let me research this.\n\n"),
+            dict(type="task.progress", message="Researching benchmarks", kind="research"),
+            dict(type="response.chunk", content="Here are the results."),
+            dict(type="task.progress", message="Research complete", kind="research"),
+        ]:
+            await runtime._handle_orchestrator_event(
+                {**context, **event}, send=send, store_assistant_message=store,
+            )
+        await runtime._handle_orchestrator_event(
+            {**context, "type": "response.complete", "content": state.partial_content},
+            send=send, store_assistant_message=store,
+        )
+        # Drop all live state: reopening must work from persisted history alone.
+        runtime.active_requests.clear()
+        history = runtime.session_store.get_history(state.session_id)
+        assistant = next(item for item in history if item["role"] == "assistant")
+        rows = {item["label"]: item for item in assistant["metadata"]["activity_log"]}
+        expected = {
+            "Reasoning through the request": 0,
+            "Researching benchmarks": len("Let me research this.\n\n"),
+            "Research complete": len(state.partial_content),
+        }
+        for label, offset in expected.items():
+            assert rows[label]["stream_offset"] == offset
+        completed = next(event for event in sent if event["type"] == "response.complete")
+        assert completed["activity_log"] == assistant["metadata"]["activity_log"]
+    finally:
+        await runtime.stop()
