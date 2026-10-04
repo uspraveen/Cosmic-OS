@@ -64,6 +64,15 @@ describe('resolveAgentSignal', () => {
     expect(resolveAgentSignal({ intent: 'calendar.create_event', label: 'made an event' }).glyph).toBe('calendar')
   })
 
+  it('reads the target specialist out of the delegation narration line', () => {
+    // Orchestrator narration carries no agent id; the intent named in the
+    // sentence is the only identity the row has.
+    expect(resolveAgentSignal({ label: 'Delegating to specialist intent: gmail.search' }).glyph).toBe('gmail')
+    expect(resolveAgentSignal({ label: 'Delegating to specialist intent: x.search' }).glyph).toBe('x')
+    expect(resolveAgentSignal({ label: 'Delegating to specialist intent: alpha.execute' }).glyph).toBe('terminal')
+    expect(resolveAgentSignal({ label: 'Delegating to specialist intent: docs.create', detail: 'handing the doc to the docs agent' }).glyph).toBe('gdocs')
+  })
+
   it('separates the Google Docs agent from the document parser under one prefix', () => {
     expect(resolveAgentSignal({ intent: 'docs.create', label: 'created a doc' }).glyph).toBe('gdocs')
     expect(resolveAgentSignal({ intent: 'docs.read_bundle', label: 'read a bundle' }).glyph).toBe('doc')

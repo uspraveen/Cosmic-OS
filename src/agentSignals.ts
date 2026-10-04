@@ -306,6 +306,17 @@ export const resolveAgentSignal = (entry: FlowEntryLike): AgentSignal => {
     }
   }
 
+  // Delegation narration ("Delegating to specialist intent: gmail.search")
+  // names its target inside the sentence itself and carries no agent id, so
+  // without this it would fall through to the generic specialist mark. Read
+  // the intent out of the wording and let the same table answer it.
+  const narratedIntent = body.toLowerCase().match(/\bintent:\s*([a-z0-9][a-z0-9_.-]*)/)?.[1]
+  if (narratedIntent) {
+    for (const [pattern, glyph, name] of INTENT_GLYPHS) {
+      if (pattern.test(narratedIntent)) return signal(glyph, readAgentLabel(entry) || name, domains)
+    }
+  }
+
   const haystack = body.toLowerCase()
   for (const [pattern, glyph, name] of LABEL_GLYPHS) {
     if (pattern.test(haystack)) return signal(glyph, name, domains)
