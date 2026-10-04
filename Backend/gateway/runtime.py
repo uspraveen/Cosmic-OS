@@ -15431,6 +15431,14 @@ class GatewayRuntime:
             label = self._safe_text(entry.get("label"))
             if not label:
                 continue
+            # Optional: the visible stream length when the step happened (see
+            # the task.progress ingest). Kept off the item entirely when absent
+            # so legacy notebook entries never masquerade as offset 0.
+            coerced_stream_offset = self._coerce_int(
+                entry.get("stream_offset")
+                if entry.get("stream_offset") is not None
+                else entry.get("streamOffset")
+            )
             item = {
                 "id": self._safe_text(entry.get("id")) or f"activity_{uuid4().hex}",
                 "label": label,
@@ -15458,6 +15466,8 @@ class GatewayRuntime:
                 if entry.get("slide_number") not in (None, "", [], {})
                 else entry.get("slideNumber"),
             }
+            if coerced_stream_offset is not None:
+                item["stream_offset"] = max(0, coerced_stream_offset)
             last = normalized[-1] if normalized else None
             if (
                 last
@@ -27011,6 +27021,11 @@ class GatewayRuntime:
             state.activity = progress_label or self._safe_text(event.get("message")) or state.activity
             activity_entry = self._build_task_activity_entry(event)
             if activity_entry:
+                # Same contract as the alpha terminal entries above: the visible
+                # stream length at the moment the step happened, so the desktop
+                # can place the row inline between the prose it produced -- and
+                # keep it there across snapshots, resumes, and reloads.
+                activity_entry["stream_offset"] = len(state.partial_content or "")
                 state.activity_log = self._normalize_activity_log(
                     [*state.activity_log, activity_entry],
                     limit=TASK_ACTIVITY_LOG_LIMIT,

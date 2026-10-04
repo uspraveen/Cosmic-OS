@@ -156,7 +156,10 @@ export const buildAlphaStreamSegments = (options: {
     .filter((anchor) => typeof anchor?.id === 'string' && anchor.id.trim()
       && typeof anchor.offset === 'number' && Number.isFinite(anchor.offset))
     .map((anchor) => ({ taskId: anchor.id, offset: Math.max(0, Math.floor(anchor.offset)), segmentKind: 'activity' as const }))
-  const anchors: KindedAnchor[] = [...alphaAnchors, ...browserAnchors, ...sheetAnchors, ...activityKinded].sort((a, b) => a.offset - b.offset)
+  // Activity rows sort before card anchors at the same offset: the delegation
+  // line is narrated before the specialist it invoked appears, so a tie should
+  // read as narration-then-card, not card-then-narration.
+  const anchors: KindedAnchor[] = [...activityKinded, ...alphaAnchors, ...browserAnchors, ...sheetAnchors].sort((a, b) => a.offset - b.offset)
 
   if (anchors.length <= 0) {
     return {

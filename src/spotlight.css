@@ -5145,35 +5145,46 @@ kbd {
 }
 
 /* Inline progress rows -- the ZCode-style transcript steps that sit inside the
-   message body at the stream position where they happened. Deliberately
-   smaller and quieter than the Flow section: they are waymarks between the
-   prose, not a panel. */
+   message body at the stream position where they happened. Flat on purpose:
+   quiet text, a bare step mark, no background chip behind anything. Liveness
+   is the filled accent dot and brighter text on the one running row. */
 .assistant-inline-activity {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  width: var(--response-block-width, min(100%, 720px));
-  margin: 6px 0;
+  gap: 3px;
+  max-width: 100%;
+  margin: 9px 0;
 }
 
 .assistant-inline-activity-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   min-width: 0;
   max-width: 100%;
-  padding: 2px 6px;
+  padding: 1px 6px;
   margin: 0 -6px;
-  border-radius: var(--response-radius-inner, 9px);
-  transition: background 200ms ease;
 }
 
 .assistant-inline-activity-row.child {
-  margin-left: 12px;
+  margin-left: 13px;
 }
 
-.assistant-inline-activity-row.is-active {
-  background: rgba(255, 255, 255, 0.05);
+/* The bare step mark for rows without a real logo: an outline ring, filled
+   with the accent only while it is the step in progress. */
+.assistant-inline-activity-mark {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin: 0 4px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.34);
+  transition: border-color 200ms ease, background 200ms ease;
+}
+
+.assistant-inline-activity-mark.is-active {
+  border-color: var(--accent);
+  background: var(--accent);
 }
 
 .assistant-inline-activity-label {
@@ -5182,16 +5193,16 @@ kbd {
   white-space: nowrap;
   text-overflow: ellipsis;
   font-size: var(--response-font-xs, 12px);
-  line-height: 1.4;
-  color: rgba(255, 255, 255, 0.58);
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.56);
 }
 
 .assistant-inline-activity-row.child .assistant-inline-activity-label {
-  color: rgba(255, 255, 255, 0.48);
+  color: rgba(255, 255, 255, 0.46);
 }
 
 .assistant-inline-activity-row.is-active .assistant-inline-activity-label {
-  color: rgba(255, 255, 255, 0.9);
+  color: rgba(255, 255, 255, 0.92);
 }
 
 .assistant-inline-activity-count {

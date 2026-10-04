@@ -938,6 +938,25 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
   return normalized.length > 0 ? normalized : undefined
 }
 
+// The identity of a step across replays and rebuilds: the same event re-sent
+// by the gateway (or rehydrated from history) must fold into the entry the
+// live stream already merged, stamps and all.
+const activityEntrySignature = (entry: ActivityLogEntryLike): string => [
+  entry.label || '',
+  entry.detail || '',
+  entry.status || '',
+  entry.stage || '',
+  entry.kind || '',
+  entry.flowRole || '',
+  entry.delegatedTaskId || '',
+  entry.parentDelegatedTaskId || '',
+  entry.specialistTaskId || '',
+  entry.agentId || '',
+  entry.intent || '',
+  entry.specialistEventType || '',
+  String(entry.slideNumber || ''),
+].join('\u241f')
+
 const appendActivityLogEntry = (
   current: ActivityLogEntry[] | undefined,
   entry: ActivityLogEntryLike,
@@ -953,63 +972,19 @@ const appendActivityLogEntry = (
     label,
   }
   const existing = Array.isArray(current) ? current : []
-  const nextSignature = [
-    nextEntry.label,
-    nextEntry.detail || '',
-    nextEntry.status || '',
-    nextEntry.stage || '',
-    nextEntry.kind || '',
-    nextEntry.flowRole || '',
-    nextEntry.delegatedTaskId || '',
-    nextEntry.parentDelegatedTaskId || '',
-    nextEntry.specialistTaskId || '',
-    nextEntry.agentId || '',
-    nextEntry.intent || '',
-    nextEntry.specialistEventType || '',
-    String(nextEntry.slideNumber || ''),
-  ].join('\u241f')
+  const nextSignature = activityEntrySignature(nextEntry)
   const hasDuplicate = existing.some((item) => {
     const itemId = String(item.id || '').trim()
     if (itemId && itemId === nextEntry.id) {
       return true
     }
-    const itemSignature = [
-      item.label,
-      item.detail || '',
-      item.status || '',
-      item.stage || '',
-      item.kind || '',
-      item.flowRole || '',
-      item.delegatedTaskId || '',
-      item.parentDelegatedTaskId || '',
-      item.specialistTaskId || '',
-      item.agentId || '',
-      item.intent || '',
-      item.specialistEventType || '',
-      String(item.slideNumber || ''),
-    ].join('\u241f')
-    return itemSignature === nextSignature
+    return activityEntrySignature(item) === nextSignature
   })
   if (hasDuplicate) {
     return existing.map((item) => {
       const itemId = String(item.id || '').trim()
       const sameId = Boolean(itemId && itemId === nextEntry.id)
-      const itemSignature = [
-        item.label,
-        item.detail || '',
-        item.status || '',
-        item.stage || '',
-        item.kind || '',
-        item.flowRole || '',
-        item.delegatedTaskId || '',
-        item.parentDelegatedTaskId || '',
-        item.specialistTaskId || '',
-        item.agentId || '',
-        item.intent || '',
-        item.specialistEventType || '',
-        String(item.slideNumber || ''),
-      ].join('\u241f')
-      if (!sameId && itemSignature !== nextSignature) {
+      if (!sameId && activityEntrySignature(item) !== nextSignature) {
         return item
       }
       return {
@@ -1020,6 +995,48 @@ const appendActivityLogEntry = (
     })
   }
   return [...existing, nextEntry]
+}
+
+// A snapshot/resume rebuild replaces the live message with one re-derived from
+// gateway state, whose activity entries carry no inline-placement stamps. Any
+// stamps the live turn already earned are re-attached here, matched by id or
+// signature, so hiding and reopening the window (or the turn ending) no longer
+// scatters the rows back into Flow-only.
+const carryActivityLogStamps = (
+  previous: ActivityLogEntry[] | undefined,
+  next: ActivityLogEntry[] | undefined,
+): ActivityLogEntry[] | undefined => {
+  if (!next || next.length <= 0) {
+    return next
+  }
+  if (!previous || previous.length <= 0) {
+    return next
+  }
+  const offsetById = new Map<string, number>()
+  const offsetBySignature = new Map<string, number>()
+  for (const entry of previous) {
+    const offset = entry.streamOffset
+    if (offset == null) {
+      continue
+    }
+    const id = String(entry.id || '').trim()
+    if (id) {
+      offsetById.set(id, offset)
+    }
+    offsetBySignature.set(activityEntrySignature(entry), offset)
+  }
+  if (offsetById.size <= 0 && offsetBySignature.size <= 0) {
+    return next
+  }
+  return next.map((entry) => {
+    if (entry.streamOffset != null) {
+      return entry
+    }
+    const id = String(entry.id || '').trim()
+    const carried = (id ? offsetById.get(id) : undefined)
+      ?? offsetBySignature.get(activityEntrySignature(entry))
+    return carried != null ? { ...entry, streamOffset: carried } : entry
+  })
 }
 
 const normalizeActivityLog = (value: unknown): ActivityLogEntry[] | undefined => {
@@ -3831,6 +3848,14 @@ AssistantFlowTimeline.displayName = 'AssistantFlowTimeline'
 // it happened. Delegation roots carry a muted step count with their children
 // folded into it; the newest root unfolds its children live while the turn
 // streams -- the Flow section above keeps the full unfolded record either way.
+//
+// The look is ZCode's transcript line, not the Flow panel's: a small flat
+// step mark, quiet text, no background chip behind anything. The cosmic-ball
+// marks the Flow uses for orchestrator-level rows read as heavy round
+// containers at this size, so those become a bare ring; real product logos
+// (Gmail, X) stay, since they say in one glance who ran.
+const INLINE_ACTIVITY_FLAT_GLYPHS = new Set(['think', 'brain', 'agent', 'cosmic'])
+
 const InlineActivityRow = memo(({
   entry,
   childEntries,
@@ -3847,10 +3872,13 @@ const InlineActivityRow = memo(({
   const signal = resolveAgentSignal(entry)
   const live = streaming && isLast
   const active = live && (!showChildren || childEntries.length === 0)
+  const leadMark = INLINE_ACTIVITY_FLAT_GLYPHS.has(signal.glyph)
+    ? <span className={`assistant-inline-activity-mark${active ? ' is-active' : ''}`} aria-hidden />
+    : <AgentGlyph signal={signal} size={15} iconSize={13} active={active} />
   return (
     <div className="assistant-inline-activity">
       <div className={`assistant-inline-activity-row${active ? ' is-active' : ''}`}>
-        <AgentGlyph signal={signal} size={16} iconSize={14} active={active} />
+        {leadMark}
         <span className="assistant-inline-activity-label">
           {scrubAssistantProse(stripActorPrefix(entry.label, signal))}
         </span>
@@ -3866,7 +3894,9 @@ const InlineActivityRow = memo(({
         const childActive = childIndex === childEntries.length - 1
         return (
           <div key={child.id} className={`assistant-inline-activity-row child${childActive ? ' is-active' : ''}`}>
-            <AgentGlyph signal={childSignal} size={14} iconSize={12} active={childActive} />
+            {INLINE_ACTIVITY_FLAT_GLYPHS.has(childSignal.glyph)
+              ? <span className={`assistant-inline-activity-mark${childActive ? ' is-active' : ''}`} aria-hidden />
+              : <AgentGlyph signal={childSignal} size={13} iconSize={11} active={childActive} />}
             <span className="assistant-inline-activity-label">
               {scrubAssistantProse(stripActorPrefix(child.label, childSignal))}
             </span>
@@ -7703,7 +7733,10 @@ export default function App() {
         content: String(stream.content || existingMessage?.content || ''),
         thinking: typeof stream.thinking === 'string' ? stream.thinking : existingMessage?.thinking,
         activity: typeof stream.activity === 'string' ? stream.activity : existingMessage?.activity,
-        activityLog: stream.activityLog ?? existingMessage?.activityLog,
+        activityLog: carryActivityLogStamps(
+          liveMessage?.activityLog ?? existingMessage?.activityLog,
+          stream.activityLog ?? existingMessage?.activityLog,
+        ),
         alphaTerminalLog: mergeAlphaTerminalLogs(existingMessage?.alphaTerminalLog, stream.alphaTerminalLog),
         browserConsoleAnchors: stream.browserConsoleAnchors
           ?? existingMessage?.browserConsoleAnchors

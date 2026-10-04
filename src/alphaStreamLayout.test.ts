@@ -88,6 +88,21 @@ describe('alphaStreamLayout', () => {
     ])
   })
 
+  it('places an activity row before a card anchored at the same offset', () => {
+    const { segments } = buildAlphaStreamSegments({
+      content: 'One two three.',
+      alphaConsoleAnchors: [{ taskId: 'tsk_alpha', offset: 4 }],
+      activityAnchors: [{ id: 'activity_a', offset: 4 }],
+    })
+
+    expect(segments).toEqual([
+      { kind: 'content', content: 'One ' },
+      { kind: 'activity', anchorId: 'activity_a' },
+      { kind: 'alpha_console', taskId: 'tsk_alpha' },
+      { kind: 'content', content: 'two three.' },
+    ])
+  })
+
   it('measures response block length for anchor placement', () => {
     expect(measureAssistantStreamLength('', [
       { id: 'markdown_1', type: 'markdown', text: 'hello' },
