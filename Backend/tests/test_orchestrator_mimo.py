@@ -134,3 +134,46 @@ async def test_default_mimo_runs_full_orchestrator_image_turn(tmp_path):
     assert completed["content"] == "A red square."
     assert completed["model"] == "xiaomi/mimo-v2.6-pro"
     assert not any(e.get("status") == "model_switch" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_mimo_keeps_reasoning_through_tool_calls_and_streams_followup_thinking(tmp_path):
+    from test_orchestrator_reasoning_effort import _signed_task, SSEByteStream
+    requests = []
+    details = [{"type": "reasoning.text", "text": "Need the stored session.", "format": "unknown", "index": 0}]
+    def handler(request):
+        if not str(request.url).endswith("/chat/completions"):
+            return httpx.Response(204)
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) == 1:
+            chunks = [
+                {"choices": [{"delta": {"reasoning": "Need the stored session.", "reasoning_details": details}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_history", "type": "function",
+                    "function": {"name": "session_history", "arguments": "{}"}}]}, "finish_reason": "tool_calls"}]},
+            ]
+        else:
+            previous = next(m for m in body["messages"] if m.get("tool_calls"))
+            assert previous["reasoning"] == "Need the stored session."
+            assert previous["reasoning_details"] == details
+            chunks = [
+                {"choices": [{"delta": {"reasoning": "The tool finished; now continue."}}]},
+                {"choices": [{"delta": {"content": "Finished."}, "finish_reason": "stop"}]},
+            ]
+        return httpx.Response(200, stream=SSEByteStream([
+            ("data: " + json.dumps(chunk) + "\n\n").encode() for chunk in chunks
+        ] + [b"data: [DONE]\n\n"]))
+    config = OrchestratorConfig(internal_token="internal-token", signing_secret="signing-secret",
+        openrouter_api_key="openrouter-test-key", task_ledger_db_path=tmp_path / "ledger.db")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        rt = OrchestratorRuntime(config, client=client)
+        await rt.start()
+        try:
+            rt._tool_executor.execute = AsyncMock(return_value='{"messages": []}')
+            events = [event async for event in rt.stream_task(_signed_task("signing-secret"))]
+        finally:
+            await rt.stop()
+    assert len(requests) == 2
+    thoughts = ''.join(e['content'] for e in events if e['type'] == 'response.thinking.chunk')
+    assert thoughts == 'Need the stored session.The tool finished; now continue.'
+    assert next(e for e in events if e['type'] == 'response.complete')['content'] == 'Finished.'

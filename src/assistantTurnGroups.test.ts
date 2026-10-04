@@ -30,14 +30,14 @@ describe('groupAssistantTurns', () => {
     ])
   })
 
-  it('groups a prose question the user answered', () => {
+  it('starts thinking and flow below the user answer', () => {
     expect(shape([user(), assistant(true), user(), assistant()])).toEqual([
-      [1, 1, true, false],
-      [3, 1, false, true],
+      [1, 1, true, true],
+      [3, 3, true, true],
     ])
   })
 
-  it('groups the whole YC shape: one task, three pauses, four messages', () => {
+  it('groups adjacent continuations but separates each typed answer', () => {
     const slots = groupAssistantTurns([
       user(), // "fill the YC application"
       assistant(true), // vault card
@@ -47,10 +47,12 @@ describe('groupAssistantTurns', () => {
       user(), // "give me the options"
       assistant(), // done
     ])
-    expect(slots.get(1)?.members).toEqual([1, 2, 4, 6])
+    expect(slots.get(1)?.members).toEqual([1, 2])
+    expect(slots.get(4)?.members).toEqual([4])
+    expect(slots.get(6)?.members).toEqual([6])
     expect(slots.get(1)?.isStart).toBe(true)
     expect(slots.get(6)?.isTail).toBe(true)
-    expect([...new Set([1, 2, 4, 6].map((i) => slots.get(i)?.groupId))]).toEqual([1])
+    expect([...new Set([1, 2, 4, 6].map((i) => slots.get(i)?.groupId))]).toEqual([1, 4, 6])
   })
 
   it('starts a new group when the previous turn was not awaiting a reply', () => {

@@ -162,3 +162,25 @@ describe('alphaStreamLayout', () => {
     expect(after.content).toBe(' blog post now. Then report back.')
   })
 })
+
+
+describe('approval card positions', () => {
+  it('keeps a card at its invocation position through final snapshots and reload', () => {
+    const card = { id: 'vault:one', type: 'vault_permission_request', streamOffset: 9 }
+    const responseBlocks = [{ id: 'text', type: 'markdown', text: 'Before.\n\nAfter.' }, card]
+    for (const blocks of [responseBlocks, JSON.parse(JSON.stringify(responseBlocks))]) {
+      const result = buildAlphaStreamSegments({ responseBlocks: blocks })
+      expect(result.segments.map((segment) => segment.kind)).toEqual(['content', 'action', 'content'])
+      expect(result.segments[0]).toMatchObject({ blocks: [{ text: 'Before.\n\n' }] })
+      expect(result.segments[1]).toMatchObject({ block: card })
+      expect(result.segments[2]).toMatchObject({ blocks: [{ text: 'After.' }] })
+    }
+  })
+  it('preserves live prose before the first block snapshot', () => {
+    const result = buildAlphaStreamSegments({ content: 'Before.\n\nAfter.', responseBlocks: [
+      { id: 'vault:one', type: 'vault_permission_request', streamOffset: 9 },
+    ] })
+    expect(result.segments.map((segment) => segment.kind)).toEqual(['content', 'action', 'content'])
+    expect(result.segments[2]).toMatchObject({ content: 'After.' })
+  })
+})

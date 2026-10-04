@@ -11,6 +11,7 @@ Two trust surfaces:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -77,6 +78,7 @@ class PolicyRequest(BaseModel):
 
 
 class LookupRequest(BaseModel):
+    wait_for_approval_sec: float = Field(default=0, ge=0, le=600)
     query: str
     task_id: str | None = None
     session_id: str | None = None
@@ -452,61 +454,44 @@ async def internal_lookup(body: LookupRequest, request: Request):
         body.session_id,
     )
     if not allowed:
-        existing = store.get_open_pending_use(entry_id)
-        if existing:
-            store.append_audit(
-                entry_id, "orchestrator", "lookup_denied", body.task_id, result="permission_required"
-            )
-            return {
-                "status": "permission_required",
-                "request_id": existing.get("request_id"),
-                "entry_id": entry_id,
-                "title": entry["title"],
-                "username": entry["username"],
-                "_cosmic_ui": {
-                    "render": "trusted_inline_block",
-                    "block_type": "vault_permission_request",
-                    "request_id": existing.get("request_id"),
-                    "summary": (
-                        f"Vault access needed for {entry['title']} — waiting for user approval."
-                    ),
-                },
-            }
-        pending = await request.app.state.gateway_runtime.create_vault_pending_and_notify(
-            {
-                "action": "use_entry",
-                "entry_id": entry_id,
-                "task_id": body.task_id,
-                "session_id": body.session_id,
-                "channel": body.channel,
-                "purpose": body.purpose,
+        runtime = request.app.state.gateway_runtime
+        pending = store.get_open_pending_use(entry_id)
+        if pending and (pending.get("task_id") != body.task_id or pending.get("session_id") != body.session_id):
+            pending = None
+        if not pending:
+            pending = await runtime.create_vault_pending_and_notify({
+                "action": "use_entry", "entry_id": entry_id,
+                "task_id": body.task_id, "session_id": body.session_id,
+                "channel": body.channel, "purpose": body.purpose,
+                "inline_wait": body.wait_for_approval_sec > 0,
                 "payload": {
-                    "title": entry["title"],
-                    "site_url": entry["site_url"],
-                    "site_domain": entry["site_domain"],
-                    "username": entry["username"],
+                    "title": entry["title"], "site_url": entry["site_url"],
+                    "site_domain": entry["site_domain"], "username": entry["username"],
                     "credential_kind": normalize_credential_kind(entry.get("credential_kind")),
                     "expires_at": normalize_expires_at(entry.get("expires_at")),
                 },
-            }
-        )
-        store.append_audit(
-            entry_id, "orchestrator", "lookup_denied", body.task_id, result="permission_required"
-        )
+            })
+        pending_id = pending["request_id"]
+        if body.wait_for_approval_sec > 0:
+            waiters = runtime._vault_inline_waiters
+            waiters.add(pending_id)
+            try:
+                deadline = asyncio.get_running_loop().time() + body.wait_for_approval_sec
+                while pending.get("status") == "pending" and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(min(0.2, max(0, deadline - asyncio.get_running_loop().time())))
+                    pending = store.get_pending(pending_id) or pending
+                if pending.get("status") == "approved":
+                    return await internal_lookup(body.model_copy(update={"wait_for_approval_sec": 0}), request)
+                if pending.get("status") == "rejected":
+                    return {"status": "denied", "request_id": pending_id, "message": "The user denied vault access. Do not use these credentials."}
+            finally:
+                waiters.discard(pending_id)
+        store.append_audit(entry_id, "orchestrator", "lookup_denied", body.task_id, result="permission_required")
         return {
-            "status": "permission_required",
-            "request_id": pending.get("request_id"),
-            "entry_id": entry_id,
-            "title": entry["title"],
-            "username": entry["username"],
-            "_cosmic_ui": {
-                "render": "trusted_inline_block",
-                "block_type": "vault_permission_request",
-                "request_id": pending.get("request_id"),
-                "summary": (
-                    f"Vault access needed for {entry['title']} — waiting for user approval."
-                ),
-            },
+            "status": "permission_required", "request_id": pending_id,
+            "entry_id": entry_id, "title": entry["title"], "username": entry["username"],
+            "_cosmic_ui": {"render": "trusted_inline_block", "block_type": "vault_permission_request",
+                "request_id": pending_id, "summary": f"Vault access needed for {entry['title']} - waiting for user approval."},
         }
 
     totp_code = None

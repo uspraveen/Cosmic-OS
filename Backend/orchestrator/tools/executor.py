@@ -734,11 +734,13 @@ class ToolExecutor:
                 "/internal/vault/lookup",
                 json_body={
                     "query": query,
+                    "wait_for_approval_sec": min(600, self.ask_user_wait_timeout_sec) if self._vault_permission_presentation_contract(context) else 0,
                     "task_id": self._coerce_task_id(tool_input, context),
                     "session_id": context.session_id if context else None,
                     "channel": context.channel if context else None,
                     "purpose": purpose or None,
                 },
+                timeout=self.ask_user_wait_timeout_sec + 15,
             )
         except ToolHTTPError as exc:
             # 404 → nothing stored yet; 409 → ambiguous match (the gateway

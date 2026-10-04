@@ -709,6 +709,7 @@ class GatewayRuntime:
         self.request_records: dict[str, dict[str, Any]] = {}
         self.active_requests: dict[str, ActiveRequest] = {}
         self.active_requests_by_task: dict[str, str] = {}
+        self._vault_inline_waiters: set[str] = set()
         self._inflight_agent_email_messages: set[str] = set()
         self._memory_write_locks: dict[str, asyncio.Lock] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -943,6 +944,7 @@ class GatewayRuntime:
         self._background_tasks.clear()
         self.active_requests.clear()
         self.active_requests_by_task.clear()
+        self._vault_inline_waiters.clear()
         await self.registry.stop_all()
         await self._stop_codex_login_session()
         await self._stop_cursor_login_session()
@@ -5545,6 +5547,15 @@ class GatewayRuntime:
         block = self._vault_request_response_block(pending)
         request_id = self._safe_text(pending.get("request_id")) or ""
         session_id = self._safe_text(pending.get("session_id")) or ""
+        previous = self._session_vault_action_blocks.get(session_id, {}).get(block["id"], {}).get("block", {})
+        owner_id = self.active_requests_by_task.get(self._safe_text(pending.get("task_id")))
+        owner = self.active_requests.get(owner_id)
+        for key in ("owner_request_id", "task_id", "stream_offset"):
+            if key in previous:
+                block[key] = previous[key]
+        if owner is not None and "stream_offset" not in block:
+            block.update(owner_request_id=owner.request_id, task_id=owner.task_id,
+                         stream_offset=len(owner.partial_content))
         # Patch-only here: the block is published mid-turn, before this turn's
         # assistant message exists, so appending now would stick the card to the
         # PREVIOUS message. Initial insertion happens when the turn's message is
@@ -5634,8 +5645,14 @@ class GatewayRuntime:
 
     async def create_vault_pending_and_notify(self, item: dict[str, Any]) -> dict[str, Any]:
         pending = self.vault_store.create_pending(item)
-        await self._publish_vault_request_block(pending)
-        await self._publish_vault_notification(pending)
+        if item.get("inline_wait"):
+            self._vault_inline_waiters.add(pending["request_id"])
+        try:
+            await self._publish_vault_request_block(pending)
+            await self._publish_vault_notification(pending)
+        except BaseException:
+            self._vault_inline_waiters.discard(pending["request_id"])
+            raise
         return pending
 
     async def approve_vault_request(
@@ -5724,6 +5741,7 @@ class GatewayRuntime:
                 int(seconds),
                 expires_at,
             )
+        inline_waiting = request_id in getattr(self, "_vault_inline_waiters", set())
         approved = self.vault_store.mark_pending(request_id, "approved")
         if action == "use_entry" and entry_id and grant_kind == "window":
             # Policy now covers the window; consume the one-shot grant so it
@@ -5742,10 +5760,11 @@ class GatewayRuntime:
             )
         if approved:
             await self._publish_vault_request_block({**approved, "status": "approved"})
-            self._schedule_background_task(
-                self._continue_turn_after_vault({**approved, "status": "approved", "entry_id": entry_id}),
-                name=f"vault-continuation-{request_id}",
-            )
+            if not inline_waiting:
+                self._schedule_background_task(
+                    self._continue_turn_after_vault({**approved, "status": "approved", "entry_id": entry_id}),
+                    name=f"vault-continuation-{request_id}",
+                )
         return {"status": "approved", "request": approved, "entry_id": entry_id}
 
     async def provide_browser_credentials(
@@ -5918,6 +5937,16 @@ class GatewayRuntime:
         request_id = self._safe_text(pending.get("request_id")) or ""
         if not channel or not session_id:
             return
+        # A lookup waiting on the card resumes the same tool call.
+        if request_id in getattr(self, "_vault_inline_waiters", set()):
+            return
+        owner_id = getattr(self, "active_requests_by_task", {}).get(self._safe_text(pending.get("task_id")))
+        owner = getattr(self, "active_requests", {}).get(owner_id)
+        if owner is not None and owner.worker is not None and not owner.worker.done():
+            # Legacy / timed-out approvals wait for persistence and the foreground slot.
+            await asyncio.shield(owner.worker)
+            if owner.cancel_requested or owner.failed:
+                return
         if self.registry.get_adapter(channel) is None:
             logger.info(
                 "gateway.vault.continuation_skipped channel_unavailable channel=%s request_id=%s",
@@ -13209,6 +13238,7 @@ class GatewayRuntime:
         self,
         session_id: str,
         metadata: dict[str, Any] | None,
+        owner_request_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Fold tracked vault approval cards into a persisted assistant message.
 
@@ -13243,6 +13273,8 @@ class GatewayRuntime:
                 continue
             block = entry.get("block")
             if isinstance(block, dict):
+                if block.get("owner_request_id") and block["owner_request_id"] != owner_request_id:
+                    continue
                 blocks.append(dict(block))
                 known.add(block_id)
         if not blocks:
@@ -13308,7 +13340,7 @@ class GatewayRuntime:
         in_reply_to_request_id: str | None = None,
     ) -> str | None:
         if role == "assistant":
-            metadata = self._merge_session_vault_action_blocks(session_id, metadata)
+            metadata = self._merge_session_vault_action_blocks(session_id, metadata, in_reply_to_request_id)
             metadata = self._merge_session_notion_approval_blocks(session_id, metadata)
         if not content:
             renderable_payload = False
@@ -16850,7 +16882,9 @@ class GatewayRuntime:
                 "slide_progress": state.slide_progress,
                 "browser_progress": state.browser_progress,
                 "sheets_progress": state.sheets_progress,
-                "response_blocks": state.response_blocks_snapshot,
+                "response_blocks": (self._merge_session_vault_action_blocks(
+                    state.session_id, {"response_blocks": state.response_blocks_snapshot}, state.request_id
+                ) or {}).get("response_blocks", []),
                 "snapshot_seq": state.snapshot_seq or None,
                 "backgrounded_at": state.backgrounded_at,
                 "completed": False,
@@ -16868,7 +16902,9 @@ class GatewayRuntime:
                 "route": state.route,
                 "content": state.partial_content,
                 "thinking_text": state.partial_thinking,
-                "response_blocks": state.response_blocks_snapshot,
+                "response_blocks": (self._merge_session_vault_action_blocks(
+                    state.session_id, {"response_blocks": state.response_blocks_snapshot}, state.request_id
+                ) or {}).get("response_blocks", []),
                 "snapshot_seq": state.snapshot_seq or None,
                 "activity": state.activity or "Working on your request...",
                 "activity_log": state.activity_log,

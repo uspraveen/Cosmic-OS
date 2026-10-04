@@ -21,6 +21,7 @@ export interface ResponseBlockLike {
   type: string
   text?: string
   code?: string
+  streamOffset?: number | null
 }
 
 export type AlphaStreamSegment =
@@ -29,6 +30,7 @@ export type AlphaStreamSegment =
   | { kind: 'browser_run'; taskId: string | null }
   | { kind: 'sheet_run'; taskId: string | null }
   | { kind: 'activity'; anchorId: string }
+  | { kind: 'action'; block: ResponseBlockLike }
 
 const DEFAULT_ALPHA_TASK_KEY = '_default'
 
@@ -106,7 +108,8 @@ export const measureAssistantStreamLength = (
   responseBlocks?: ResponseBlockLike[],
 ): number => {
   if (responseBlocks && responseBlocks.length > 0) {
-    return responseBlocks.reduce((sum, block) => sum + measureResponseBlockLength(block), 0)
+    const length = responseBlocks.reduce((sum, block) => sum + measureResponseBlockLength(block), 0)
+    return length || String(content || '').length
   }
   return String(content || '').length
 }
@@ -126,7 +129,7 @@ export const ensureAlphaConsoleAnchor = (
 }
 
 interface KindedAnchor extends AlphaConsoleAnchor {
-  segmentKind: 'alpha_console' | 'browser_run' | 'sheet_run' | 'activity'
+  segmentKind: 'alpha_console' | 'browser_run' | 'sheet_run' | 'activity' | 'action'
 }
 
 export const buildAlphaStreamSegments = (options: {
@@ -146,6 +149,14 @@ export const buildAlphaStreamSegments = (options: {
   // may sit at the same offset when steps ran between two text chunks.
   activityAnchors?: ActivityAnchor[]
 }): { segments: AlphaStreamSegment[]; hasAnchors: boolean } => {
+  const actionBlocks = (options.responseBlocks || []).filter((block) =>
+    (block.type === 'vault_permission_request' || block.type === 'browser_credential_request')
+    && typeof block.streamOffset === 'number' && Number.isFinite(block.streamOffset))
+  const actionIds = new Set(actionBlocks.map((block) => block.id))
+  const contentBlocks = options.responseBlocks?.filter((block) => !actionIds.has(block.id))
+  const actionAnchors: KindedAnchor[] = actionBlocks.map((block) => ({
+    taskId: block.id, offset: Math.max(0, Math.floor(block.streamOffset!)), segmentKind: 'action',
+  }))
   const alphaAnchors: KindedAnchor[] = resolveAlphaConsoleAnchors(options.alphaConsoleAnchors, options.alphaTerminalLog)
     .map((anchor) => ({ ...anchor, segmentKind: 'alpha_console' as const }))
   const browserAnchors: KindedAnchor[] = (options.browserConsoleAnchors || [])
@@ -159,7 +170,7 @@ export const buildAlphaStreamSegments = (options: {
   // Activity rows sort before card anchors at the same offset: the delegation
   // line is narrated before the specialist it invoked appears, so a tie should
   // read as narration-then-card, not card-then-narration.
-  const anchors: KindedAnchor[] = [...activityKinded, ...alphaAnchors, ...browserAnchors, ...sheetAnchors].sort((a, b) => a.offset - b.offset)
+  const anchors: KindedAnchor[] = [...activityKinded, ...alphaAnchors, ...browserAnchors, ...sheetAnchors, ...actionAnchors].sort((a, b) => a.offset - b.offset)
 
   if (anchors.length <= 0) {
     return {
@@ -173,9 +184,9 @@ export const buildAlphaStreamSegments = (options: {
   }
 
   const segments: AlphaStreamSegment[] = []
-  const usesBlocks = Boolean(options.responseBlocks && options.responseBlocks.length > 0)
+  const usesBlocks = Boolean(contentBlocks && contentBlocks.length > 0)
   let remainingContent = options.content || ''
-  let remainingBlocks = usesBlocks ? [...(options.responseBlocks || [])] : []
+  let remainingBlocks = usesBlocks ? [...(contentBlocks || [])] : []
   // Anchor offsets are absolute in the original stream, but each split works
   // on what's left of it -- so every anchor must be re-based by everything
   // already split off, or the second and later anchors land early.
@@ -201,7 +212,10 @@ export const buildAlphaStreamSegments = (options: {
     }
     consumed += consumedNow
 
-    if (anchor.segmentKind === 'activity') {
+    if (anchor.segmentKind === 'action') {
+      const block = actionBlocks.find((item) => item.id === anchor.taskId)
+      if (block) segments.push({ kind: 'action', block })
+    } else if (anchor.segmentKind === 'activity') {
       // Activity ids are pre-filtered non-empty at the option boundary.
       segments.push({ kind: 'activity', anchorId: String(anchor.taskId || '') })
     } else {
@@ -224,6 +238,8 @@ export const buildAlphaStreamSegments = (options: {
 }
 
 const measureResponseBlockLength = (block: ResponseBlockLike): number => {
+  if ((block.type === 'vault_permission_request' || block.type === 'browser_credential_request')
+    && typeof block.streamOffset === 'number') return 0
   if (block.type === 'markdown') {
     return String(block.text || '').length
   }

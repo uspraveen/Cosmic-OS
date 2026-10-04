@@ -359,6 +359,8 @@ interface ResponseActionBlock {
   resultPreview?: string | null
   errorMessage?: string | null
   requestId?: string | null
+  ownerRequestId?: string | null
+  streamOffset?: number | null
   action?: string | null
   siteDomain?: string | null
   site?: string | null
@@ -843,6 +845,9 @@ const normalizeResponseBlocks = (value: unknown): ResponseBlock[] | undefined =>
         resultPreview: typeof (item as any).result_preview === 'string' ? (item as any).result_preview.trim() : null,
         errorMessage: typeof (item as any).error_message === 'string' ? (item as any).error_message.trim() : null,
         requestId: typeof (item as any).request_id === 'string' ? (item as any).request_id.trim() : null,
+        ownerRequestId: typeof (item as any).owner_request_id === 'string' ? (item as any).owner_request_id : null,
+        streamOffset: typeof (item as any).stream_offset === 'number' && Number.isFinite((item as any).stream_offset)
+          ? Math.max(0, Math.floor((item as any).stream_offset)) : null,
         action: typeof (item as any).action === 'string' ? (item as any).action.trim() : null,
         siteDomain: typeof (item as any).site_domain === 'string' ? (item as any).site_domain.trim() : null,
         site: typeof (item as any).site === 'string' ? (item as any).site.trim() : null,
@@ -5758,7 +5763,15 @@ const mergePreservingVaultActionBlocks = <T extends { id: string; type: string }
     (block) => VAULT_ACTION_BLOCK_TYPES.has(block.type)
       && !incoming.some((item) => item.id === block.id),
   )
-  return carried.length > 0 ? [...incoming, ...carried] : incoming
+  const merged = incoming.map((block) => {
+    const prior = existing?.find((item) => item.id === block.id)
+    if (!prior || !VAULT_ACTION_BLOCK_TYPES.has(block.type)) return block
+    const old = prior as T & { status?: string; streamOffset?: number | null }
+    const current = block as T & { status?: string; streamOffset?: number | null }
+    return { ...block, ...(old.status && old.status !== 'pending' && current.status === 'pending' ? prior : {}),
+      streamOffset: current.streamOffset ?? old.streamOffset }
+  })
+  return carried.length > 0 ? [...merged, ...carried] : merged
 }
 
 const AssistantResponseBlocks = memo(({
@@ -6054,6 +6067,9 @@ const AssistantAlphaStreamBody = ({
   return (
     <>
       {segments.map((segment, index) => {
+        if (segment.kind === 'action') {
+          return <AssistantResponseBlocks key={`action-${segment.block.id}`} blocks={[segment.block as ResponseBlock]} />
+        }
         if (segment.kind === 'alpha_console') {
           return (
             <AlphaAgentConsole
@@ -9493,7 +9509,9 @@ export default function App() {
               return prev.map((message) => ({
                 ...message,
                 responseBlocks: message.responseBlocks?.map((block) => (
-                  block.id === normalizedBlock.id ? normalizedBlock : block
+                  block.id === normalizedBlock.id
+                    ? mergePreservingVaultActionBlocks([normalizedBlock], [block])![0]
+                    : block
                 )),
               }))
             }
@@ -9511,10 +9529,14 @@ export default function App() {
             }
             for (let index = prev.length - 1; index >= 0; index -= 1) {
               if (prev[index].role !== 'assistant') continue
+              const ownerRequestId = (normalizedBlock as ResponseActionBlock).ownerRequestId
+              if (ownerRequestId && prev[index].requestId !== ownerRequestId) continue
+              const anchoredBlock = { ...normalizedBlock, streamOffset: (normalizedBlock as ResponseActionBlock).streamOffset
+                ?? measureAssistantStreamLength(prev[index].content, prev[index].responseBlocks) }
               const next = [...prev]
               next[index] = {
                 ...next[index],
-                responseBlocks: [...(next[index].responseBlocks ?? []), normalizedBlock],
+                responseBlocks: [...(next[index].responseBlocks ?? []), anchoredBlock],
               }
               return next
             }

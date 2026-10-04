@@ -910,8 +910,7 @@ class OrchestratorRuntime:
                                     if not reasoning_announced:
                                         reasoning_announced = True
                                         yield {**ev, "type": "task.progress", "status": "thinking", "message": "Cosmic is reasoning through the request."}
-                                    if iteration == 1:
-                                        yield {**ev, "type": "response.thinking.chunk", "content": chunk, "done": False}
+                                    yield {**ev, "type": "response.thinking.chunk", "content": chunk, "done": False}
 
                                 elif dtype == "signature_delta":
                                     sig = str(delta.get("signature") or "")
@@ -1664,6 +1663,7 @@ class OrchestratorRuntime:
 
                 turn_text_parts: list[str] = []
                 turn_reasoning_parts: list[str] = []
+                turn_reasoning_details: list[dict[str, Any]] = []
                 turn_tool_calls: dict[int, dict[str, Any]] = {}
                 turn_usage: dict[str, int] = {}
                 turn_finish_reason: str | None = None
@@ -1691,15 +1691,14 @@ class OrchestratorRuntime:
                                 "preferred_model": preferred_model,
                             }
                         )
-                    if iteration == 1:
-                        events.append(
-                            {
-                                **ev,
-                                "type": "response.thinking.chunk",
-                                "content": reasoning_text,
-                                "done": False,
-                            }
-                        )
+                    events.append(
+                        {
+                            **ev,
+                            "type": "response.thinking.chunk",
+                            "content": reasoning_text,
+                            "done": False,
+                        }
+                    )
                     return events
 
                 def collect_content_events(visible_text: str) -> list[dict[str, Any]]:
@@ -1799,6 +1798,10 @@ class OrchestratorRuntime:
                     if not isinstance(delta, dict):
                         continue
 
+                    details = delta.get("reasoning_details")
+                    if isinstance(details, list):
+                        turn_reasoning_details.extend(dict(item) for item in details if isinstance(item, dict))
+
                     reasoning_chunk = str(
                         delta.get("reasoning_content")
                         or delta.get("reasoning")
@@ -1872,6 +1875,12 @@ class OrchestratorRuntime:
                             for item in normalized_tool_calls
                         ],
                     }
+                    if effective_provider == "openrouter_mimo":
+                        # Preserve the original OpenRouter reasoning through tool rounds.
+                        if turn_reasoning:
+                            assistant_message["reasoning"] = turn_reasoning
+                        if turn_reasoning_details:
+                            assistant_message["reasoning_details"] = turn_reasoning_details
                     openai_messages.append(assistant_message)
 
                     parsed_inputs: list[dict[str, Any]] = []
