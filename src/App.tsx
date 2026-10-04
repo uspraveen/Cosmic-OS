@@ -3879,7 +3879,7 @@ const InlineActivityRow = memo(({
     <div className="assistant-inline-activity">
       <div className={`assistant-inline-activity-row${active ? ' is-active' : ''}`}>
         {leadMark}
-        <span className="assistant-inline-activity-label">
+        <span className="assistant-inline-activity-label" title={scrubAssistantProse(stripActorPrefix(entry.label, signal))}>
           {scrubAssistantProse(stripActorPrefix(entry.label, signal))}
         </span>
         {!showChildren && childEntries.length > 0 && (
@@ -3897,7 +3897,7 @@ const InlineActivityRow = memo(({
             {INLINE_ACTIVITY_FLAT_GLYPHS.has(childSignal.glyph)
               ? <span className={`assistant-inline-activity-mark${childActive ? ' is-active' : ''}`} aria-hidden />
               : <AgentGlyph signal={childSignal} size={13} iconSize={11} active={childActive} />}
-            <span className="assistant-inline-activity-label">
+            <span className="assistant-inline-activity-label" title={scrubAssistantProse(stripActorPrefix(child.label, childSignal))}>
               {scrubAssistantProse(stripActorPrefix(child.label, childSignal))}
             </span>
           </div>
