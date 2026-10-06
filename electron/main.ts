@@ -1035,7 +1035,15 @@ async function callGatewayJson(
         (typeof payload?.error === 'string' && payload.error) ||
         response.statusText ||
         `Gateway request failed (${response.status})`
-      throw new Error(detail)
+      // Structured detail (e.g. the vault same-login conflict) rides on the
+      // error object for main-process handlers; it cannot cross IPC, so a
+      // handler that needs it must catch and translate before returning.
+      const err = new Error(detail) as Error & { gatewayStatus?: number; gatewayDetail?: unknown }
+      err.gatewayStatus = response.status
+      if (payload?.detail && typeof payload.detail === 'object') {
+        err.gatewayDetail = payload.detail
+      }
+      throw err
     }
 
     return payload
@@ -2700,7 +2708,17 @@ app.whenReady().then(() => {
     if (!config) {
       throw new Error('Gateway connection is not configured.')
     }
-    return callGatewayJson(config, '/channels/vault/entries', { method: 'POST', body: payload })
+    try {
+      return await callGatewayJson(config, '/channels/vault/entries', { method: 'POST', body: payload })
+    } catch (err: any) {
+      // The gateway refuses a silent same-login duplicate (409 + the existing
+      // entry). Surface it as data so the settings panel can ask the user to
+      // update the saved entry or explicitly keep both.
+      if (err?.gatewayStatus === 409 && err?.gatewayDetail?.existing_entry) {
+        return { duplicate_conflict: true, existing_entry: err.gatewayDetail.existing_entry }
+      }
+      throw err
+    }
   })
 
   ipcMain.handle('vault:update-entry', async (_, entryId: string, payload: any) => {

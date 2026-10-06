@@ -429,6 +429,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
   const [revealedPassword, setRevealedPassword] = useState('')
   const [totpState, setTotpState] = useState<{ entryId: string; code: string; seconds: number } | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [duplicatePrompt, setDuplicatePrompt] = useState<{ existing: VaultEntry; form: EditorState } | null>(null)
   const [editor, setEditorState] = useState<EditorState | null>(() => getVaultEditorDraft())
   const [saving, setSaving] = useState(false)
   const editorRef = useRef<HTMLDivElement | null>(null)
@@ -541,6 +542,29 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
     }
   }, [totpState])
 
+  // One section per site so a site holding several logins (distinct
+  // usernames) reads as one place with multiple accounts instead of
+  // look-alike cards. Entries without a site cannot be keyed, so they fall
+  // into an unheaded group at the end.
+  const entryGroups = useMemo(() => {
+    const groups = new Map<string, VaultEntry[]>()
+    for (const entry of entries) {
+      const key = String(entry.site_domain || '').trim()
+      const list = groups.get(key)
+      if (list) list.push(entry)
+      else groups.set(key, [entry])
+    }
+    const byNewest = (a: VaultEntry, b: VaultEntry) =>
+      String(b.updated_at || '').localeCompare(String(a.updated_at || ''))
+    return Array.from(groups.entries())
+      .map(([domain, groupEntries]) => ({ domain, entries: [...groupEntries].sort(byNewest) }))
+      .sort((a, b) => {
+        if (!a.domain) return 1
+        if (!b.domain) return -1
+        return byNewest(a.entries[0], b.entries[0])
+      })
+  }, [entries])
+
   const openEditor = useCallback((entry?: VaultEntry) => {
     setConfirmDeleteId(null)
     if (!entry) {
@@ -585,7 +609,7 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
         if (editor.totpSeed) patch.totp_seed = editor.totpSeed
         await window.cosmic?.vaultUpdateEntry?.(editor.entryId, patch)
       } else {
-        await window.cosmic?.vaultCreateEntry?.({
+        const result = await window.cosmic?.vaultCreateEntry?.({
           title: editor.title,
           site_url: editor.siteUrl,
           username: editor.username,
@@ -595,6 +619,12 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
           credential_kind: normalizeVaultCredentialKind(editor.credentialKind),
           expires_at: editor.expiresAt || undefined,
         })
+        if (result && 'duplicate_conflict' in result) {
+          // The gateway refused a silent same-login duplicate; the user picks
+          // between refreshing that entry and explicitly keeping both.
+          setDuplicatePrompt({ existing: result.existing_entry as VaultEntry, form: editor })
+          return
+        }
       }
       setEditor(null)
       await refresh()
@@ -604,6 +634,49 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
       setSaving(false)
     }
   }, [editor, saving, refresh, setEditor])
+
+  const resolveDuplicate = useCallback(async (choice: 'update' | 'keep-both' | 'cancel') => {
+    const prompt = duplicatePrompt
+    if (!prompt) return
+    if (choice === 'cancel') {
+      setDuplicatePrompt(null)
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      if (choice === 'update') {
+        // "Update that entry" means: store these credentials into the login
+        // that already exists. Its title, site, and username stand; only the
+        // secret material and optional extras the user typed move over.
+        const patch: Record<string, unknown> = {}
+        if (prompt.form.password) patch.password = prompt.form.password
+        if (prompt.form.totpSeed) patch.totp_seed = prompt.form.totpSeed
+        if (prompt.form.notes) patch.notes = prompt.form.notes
+        patch.expires_at = prompt.form.expiresAt || ''
+        await window.cosmic?.vaultUpdateEntry?.(prompt.existing.entry_id, patch)
+      } else {
+        await window.cosmic?.vaultCreateEntry?.({
+          title: prompt.form.title,
+          site_url: prompt.form.siteUrl,
+          username: prompt.form.username,
+          password: prompt.form.password,
+          totp_seed: prompt.form.totpSeed,
+          notes: prompt.form.notes,
+          credential_kind: normalizeVaultCredentialKind(prompt.form.credentialKind),
+          expires_at: prompt.form.expiresAt || undefined,
+          allow_duplicate: true,
+        })
+      }
+      setDuplicatePrompt(null)
+      setEditor(null)
+      await refresh()
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, 'Failed to save the vault entry.'))
+    } finally {
+      setSaving(false)
+    }
+  }, [duplicatePrompt, refresh, setEditor])
 
   const handleDelete = useCallback(async (entry: VaultEntry) => {
     if (!window.cosmic?.vaultDeleteEntry) return
@@ -1000,6 +1073,45 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
         </div>
       ) : null}
 
+      {duplicatePrompt ? (
+        <div className="vault-duplicate" role="alertdialog" aria-label="Login already saved">
+          <strong className="vault-duplicate-title">
+            {duplicatePrompt.existing.site_domain || duplicatePrompt.existing.title || 'This site'} already has a saved login
+          </strong>
+          <p className="vault-duplicate-note">
+            {duplicatePrompt.existing.username || 'No username'} · saved {formatTimestamp(duplicatePrompt.existing.updated_at)}
+            {duplicatePrompt.existing.title ? ` as "${duplicatePrompt.existing.title}"` : ''}. A second
+            entry with the same site and username would be a duplicate of this login.
+          </p>
+          <div className="vault-duplicate-actions">
+            <button
+              type="button"
+              className="vault-btn vault-btn--ghost"
+              disabled={saving}
+              onClick={() => void resolveDuplicate('cancel')}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="vault-btn vault-btn--ghost"
+              disabled={saving}
+              onClick={() => void resolveDuplicate('keep-both')}
+            >
+              Keep both anyway
+            </button>
+            <button
+              type="button"
+              className="vault-btn vault-btn--primary"
+              disabled={saving}
+              onClick={() => void resolveDuplicate('update')}
+            >
+              {saving ? 'Saving…' : 'Update that entry'}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {loading && entries.length === 0 ? (
         <div className="vault-loading" aria-live="polite">
           <span className="vault-loading-dot" />
@@ -1018,7 +1130,17 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
       ) : null}
 
       <div className="vault-list">
-        {entries.map((entry) => {
+        {entryGroups.map((group) => (
+          <section key={group.domain || 'vault-group-no-site'} className="vault-site-group">
+            {group.domain && group.entries.length > 1 ? (
+              <div className="vault-site-group-head">
+                <strong>{group.domain}</strong>
+                <span>
+                  {group.entries.length} {group.entries.length === 1 ? 'login' : 'logins'} for this site
+                </span>
+              </div>
+            ) : null}
+            {group.entries.map((entry) => {
           const policy = entry.policy
           const mode = (policy?.mode || 'always_ask') as PolicyMode
           // An expired window no longer grants anything, so the selection must
@@ -1171,8 +1293,10 @@ export default function PasswordVaultSettings({ active }: PasswordVaultSettingsP
                 )}
               </div>
             </article>
-          )
-        })}
+            )
+          })}
+          </section>
+        ))}
       </div>
 
       <div className="vault-audit-section">

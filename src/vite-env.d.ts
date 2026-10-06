@@ -375,7 +375,10 @@ interface Window {
       tags?: string[]
       credential_kind?: string
       expires_at?: string
-    }) => Promise<{ entry: any }>
+      // Deliberate opt-in after the gateway refuses a same-login duplicate;
+      // without it a conflicting create resolves to duplicate_conflict instead.
+      allow_duplicate?: boolean
+    }) => Promise<{ entry: any } | { duplicate_conflict: true; existing_entry: any }>
     vaultUpdateEntry: (entryId: string, payload: Record<string, unknown>) => Promise<{ entry: any }>
     vaultDeleteEntry: (entryId: string) => Promise<{ status: string }>
     vaultRevealPassword: (entryId: string) => Promise<{ password: string }>

@@ -5677,21 +5677,59 @@ class GatewayRuntime:
         entry_id = self._safe_text(pending.get("entry_id")) or None
         task_id = self._safe_text(pending.get("task_id"))
         if action == "add_entry":
-            entry = self.vault_store.add_entry(
-                {
-                    "title": payload.get("title"),
-                    "site_url": payload.get("site_url"),
-                    "username": payload.get("username"),
-                    "password_encrypted": payload.get("password_encrypted"),
-                    "totp_seed_encrypted": payload.get("totp_seed_encrypted"),
-                    "notes_encrypted": payload.get("notes_encrypted"),
-                    "tags": payload.get("tags") or [],
-                    "credential_kind": payload.get("credential_kind") or "login",
-                    "expires_at": payload.get("expires_at"),
-                    "source": "agent",
-                    "created_by_task_id": task_id,
-                }
+            existing = self.vault_store.find_matching_entry(
+                str(payload.get("site_url") or payload.get("site_domain") or ""),
+                str(payload.get("username") or ""),
+                str(payload.get("credential_kind") or "login"),
             )
+            if existing:
+                # The user approved saving a login the vault already holds for
+                # this site + username + kind. Update that entry in place: the
+                # same key can only be the same account with a fresher secret
+                # (a second account would carry a different username), and the
+                # Oct 2026 HackerNews duplicate pair is what filing it twice
+                # produces. Title and notes are user-facing guidance, so an
+                # existing one is only filled when it was empty (a save must
+                # never overwrite usage notes the user wrote for Cosmic).
+                patch: dict[str, Any] = {}
+                for field in ("password_encrypted", "totp_seed_encrypted"):
+                    if payload.get(field):
+                        patch[field] = payload[field]
+                if payload.get("notes_encrypted") and not existing.get("has_notes"):
+                    patch["notes_encrypted"] = payload["notes_encrypted"]
+                if payload.get("site_url") and not existing.get("site_domain"):
+                    patch["site_url"] = payload["site_url"]
+                if payload.get("title") and existing.get("title") in ("", "Untitled entry"):
+                    patch["title"] = payload["title"]
+                entry = self.vault_store.update_entry(existing["entry_id"], patch) or existing
+                self.vault_store.append_audit(
+                    existing["entry_id"],
+                    "user",
+                    "update",
+                    task_id,
+                    detail="approved add_entry updated the existing login instead of filing a duplicate",
+                )
+                logger.info(
+                    "vault.add_entry_updated_existing entry=%s request=%s",
+                    existing["entry_id"],
+                    request_id,
+                )
+            else:
+                entry = self.vault_store.add_entry(
+                    {
+                        "title": payload.get("title"),
+                        "site_url": payload.get("site_url"),
+                        "username": payload.get("username"),
+                        "password_encrypted": payload.get("password_encrypted"),
+                        "totp_seed_encrypted": payload.get("totp_seed_encrypted"),
+                        "notes_encrypted": payload.get("notes_encrypted"),
+                        "tags": payload.get("tags") or [],
+                        "credential_kind": payload.get("credential_kind") or "login",
+                        "expires_at": payload.get("expires_at"),
+                        "source": "agent",
+                        "created_by_task_id": task_id,
+                    }
+                )
             entry_id = entry.get("entry_id")
             if entry_id:
                 # The user just approved saving credentials this task created —
@@ -5807,22 +5845,37 @@ class GatewayRuntime:
 
         entry_id = None
         if save_to_vault:
-            entry = self.vault_store.add_entry(
-                {
-                    "title": title,
-                    "site_url": site_url,
-                    "username": username,
-                    # The store encrypts plaintext secret fields itself.
-                    "password": password,
-                    "totp_seed": totp_seed,
-                    "notes": f"Added via browser agent credential request ({request_id})",
-                    "tags": ["browser-agent"],
-                    "source": "agent",
-                    "created_by_task_id": task_id,
-                }
-            )
-            entry_id = entry.get("entry_id")
-            self.vault_store.append_audit(entry_id, "user", "browser_provide_saved", task_id)
+            existing = self.vault_store.find_matching_entry(site_url, username)
+            if existing:
+                # Same site + username is the same account: refresh the saved
+                # secret in place instead of filing a second entry next to it.
+                patch: dict[str, Any] = {"password": password}
+                if totp_seed:
+                    patch["totp_seed"] = totp_seed
+                if not existing.get("has_notes"):
+                    patch["notes"] = f"Added via browser agent credential request ({request_id})"
+                entry = self.vault_store.update_entry(existing["entry_id"], patch) or existing
+                entry_id = entry.get("entry_id")
+                self.vault_store.append_audit(
+                    entry_id, "user", "browser_provide_updated", task_id
+                )
+            else:
+                entry = self.vault_store.add_entry(
+                    {
+                        "title": title,
+                        "site_url": site_url,
+                        "username": username,
+                        # The store encrypts plaintext secret fields itself.
+                        "password": password,
+                        "totp_seed": totp_seed,
+                        "notes": f"Added via browser agent credential request ({request_id})",
+                        "tags": ["browser-agent"],
+                        "source": "agent",
+                        "created_by_task_id": task_id,
+                    }
+                )
+                entry_id = entry.get("entry_id")
+                self.vault_store.append_audit(entry_id, "user", "browser_provide_saved", task_id)
             if entry_id:
                 # Providing the credentials IS the approval: mint a single-use
                 # grant so the re-dispatched browser run can resolve the ref

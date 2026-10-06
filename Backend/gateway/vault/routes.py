@@ -57,6 +57,10 @@ class CreateEntryRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     credential_kind: str = "login"
     expires_at: str | None = None
+    # Deliberate opt-out for the same-login guard: a 409 names the existing
+    # entry and the settings panel offers to update it instead; keeping both
+    # is possible but must be an explicit choice, never a side effect.
+    allow_duplicate: bool = False
 
 
 class UpdateEntryRequest(BaseModel):
@@ -226,6 +230,19 @@ async def list_entries(request: Request):
 async def create_entry(body: CreateEntryRequest, request: Request):
     _check_local_token(request)
     store = _get_store(request)
+    if not body.allow_duplicate:
+        existing = store.find_matching_entry(body.site_url, body.username, body.credential_kind)
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": (
+                        "A login for this site and username already exists. "
+                        "Update that entry, or save anyway to keep both."
+                    ),
+                    "existing_entry": _entry_summary(store, existing),
+                },
+            )
     entry = store.add_entry(
         {
             "title": body.title,
@@ -420,7 +437,13 @@ async def internal_lookup(body: LookupRequest, request: Request):
         raise HTTPException(
             status_code=409,
             detail={
-                "message": "Multiple vault entries match. Retry with entry_id or a more specific site.",
+                "message": (
+                    "Multiple vault entries match this site; they are usually distinct "
+                    "logins for it. If the task names one of these logins (a username or "
+                    "handle), retry the lookup with that login as the site query. "
+                    "Otherwise ask the user which one to use before retrying with its "
+                    "entry_id; never choose between same-site logins on your own."
+                ),
                 "candidates": [
                     {
                         "entry_id": entry["entry_id"],
@@ -429,6 +452,7 @@ async def internal_lookup(body: LookupRequest, request: Request):
                         "username": entry["username"],
                         "credential_kind": normalize_credential_kind(entry.get("credential_kind")),
                         "expires_at": normalize_expires_at(entry.get("expires_at")),
+                        "updated_at": entry.get("updated_at"),
                     }
                     for entry in matches[:8]
                 ],

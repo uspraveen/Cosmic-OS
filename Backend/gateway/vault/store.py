@@ -284,7 +284,7 @@ class VaultStore:
         return [self._row_to_entry(row) for row in rows]
 
     def find_entries(self, query: str) -> list[dict[str, Any]]:
-        """Match by entry_id, then exact domain, then subdomain, then title."""
+        """Match by entry_id, then exact domain, then subdomain, then username, then title."""
         needle = str(query or "").strip()
         if not needle:
             return []
@@ -316,11 +316,58 @@ class VaultStore:
                 ).fetchall()
                 if suffix:
                     return [self._row_to_entry(row) for row in suffix]
+            # A login name identifies its account directly: a task that names
+            # the username ("log in as praveenrajus") resolves to exactly the
+            # entries holding it, across sites if it is reused. Only logins;
+            # token/api-key username columns hold labels, and matching those
+            # would turn any such word into a vault-wide wildcard.
+            by_username = connection.execute(
+                """
+                SELECT * FROM vault_entries
+                WHERE lower(username) = lower(?) AND credential_kind = ?
+                ORDER BY updated_at DESC
+                """,
+                (lowered, CREDENTIAL_KIND_LOGIN),
+            ).fetchall()
+            if by_username:
+                return [self._row_to_entry(row) for row in by_username]
             by_title = connection.execute(
                 "SELECT * FROM vault_entries WHERE lower(title) LIKE ? ORDER BY updated_at DESC",
                 (f"%{lowered}%",),
             ).fetchall()
         return [self._row_to_entry(row) for row in by_title]
+
+    def find_matching_entry(
+        self,
+        site_url_or_domain: str,
+        username: str,
+        credential_kind: str = CREDENTIAL_KIND_LOGIN,
+    ) -> dict[str, Any] | None:
+        """The entry a new save would duplicate, if any.
+
+        Two entries describe the same login only when the derived site domain
+        AND the username both match (case-insensitive on the username) and the
+        credential kind is the same. An entry missing the site or the username
+        can never be a duplicate: there is nothing to key it by (site-less
+        entries were their own lookup bug, and a blank username cannot tell
+        one account from another).
+        """
+        domain = derive_site_domain(site_url_or_domain)
+        user = str(username or "").strip()
+        if not domain or not user:
+            return None
+        with self._lock, self._connection() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT * FROM vault_entries
+                WHERE site_domain = ? AND lower(username) = lower(?)
+                  AND credential_kind = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (domain, user, normalize_credential_kind(credential_kind)),
+            ).fetchone()
+        return self._row_to_entry(row) if row else None
 
     def update_entry(self, entry_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
         existing = self.get_entry(entry_id)
@@ -339,12 +386,22 @@ class VaultStore:
         if "site_url" in patch and patch["site_url"] is not None:
             assignments.append("site_domain = ?")
             params.append(derive_site_domain(patch["site_url"]))
+        # Pre-encrypted values (the pending-approval payload already holds
+        # ciphertext so plaintext never rests in extra places) land directly
+        # in the column and win over their plaintext twins, so the SET clause
+        # can never receive the same column twice.
+        preencrypted_columns: set[str] = set()
+        for field in ("password_encrypted", "totp_seed_encrypted", "notes_encrypted"):
+            if field in patch and patch[field]:
+                assignments.append(f"{field} = ?")
+                params.append(str(patch[field]).strip())
+                preencrypted_columns.add(field)
         for field, column in (
             ("password", "password_encrypted"),
             ("totp_seed", "totp_seed_encrypted"),
             ("notes", "notes_encrypted"),
         ):
-            if field in patch and patch[field] is not None:
+            if field in patch and patch[field] is not None and column not in preencrypted_columns:
                 assignments.append(f"{column} = ?")
                 params.append(encrypt_token_str(str(patch[field])))
         if "tags" in patch and patch["tags"] is not None:

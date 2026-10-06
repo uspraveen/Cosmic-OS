@@ -964,7 +964,10 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "(for example a key for TypeSafe Jev stored under a project title). If the user "
                 "asks whether a saved credential is for X, answer only from the lookup result's "
                 "credential_kind/domain/notes, or say you could not verify it without an approved "
-                "lookup — never assert identity from the entry's name alone."
+                "lookup — never assert identity from the entry's name alone. A lookup can also "
+                "return multiple candidates for one site; those are distinct logins, so if the "
+                "task names one (a username or handle), retry the lookup using that login as the "
+                "site query, otherwise ask the user which to use instead of picking yourself."
             ),
             "input_schema": {
                 "type": "object",
