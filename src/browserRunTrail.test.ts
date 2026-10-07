@@ -153,6 +153,18 @@ describe('mergeBrowserRunProgress: phase', () => {
     expect(merged?.phase).toBe('finished')
   })
 
+  it('applies a terminal receipt over a running run', () => {
+    // The stop path: the user stopped the stream, the child task was
+    // cancelled, and the only event left is the terminal reading. It must
+    // land (flipping the card to Stopped) rather than be swallowed.
+    const merged = mergeBrowserRunProgress(
+      { taskId: 'task-1', phase: 'running' as const, step: 4, description: 'Typing the username' },
+      { taskId: 'task-1', phase: 'cancelled' as const, description: 'Browser run stopped by the user.' },
+    )
+    expect(merged?.phase).toBe('cancelled')
+    expect(merged?.description).toBe('Browser run stopped by the user.')
+  })
+
   it('does not carry a previous run phase into a different browser task', () => {
     const merged = mergeBrowserRunProgress(
       { taskId: 'task-1', phase: 'finished' as const, description: 'Done' },

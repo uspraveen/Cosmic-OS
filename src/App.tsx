@@ -9184,6 +9184,39 @@ export default function App() {
 
       if (eventType === 'task.progress') {
         if (isStreamEventStopped(event)) {
+          // A stopped stream stays frozen: content, activity log, and anchors
+          // must not move. One exception: the terminal browser reading
+          // (finished/failed/cancelled) is the receipt that the specialist
+          // actually ended. Stopping the turn cancels the child task, but the
+          // gateway stamps that receipt with the stopped turn's own request
+          // and task ids, so this gate used to discard it and the card kept
+          // reporting Running with a ticking clock. Apply the phase to the
+          // card that already exists; create nothing, mutate nothing else,
+          // and never let a late 'running' reading reopen a stopped stream.
+          const stoppedBrowserProgress = normalizeBrowserProgress(event.browser_progress ?? event.browserProgress)
+          if (stoppedBrowserProgress?.phase && stoppedBrowserProgress.phase !== 'running') {
+            browserLiveFrameStore.finish(stoppedBrowserProgress.taskId || '')
+            const { requestId: stoppedRequestId, taskId: stoppedTaskId } = extractEventStreamIds(event)
+            setMessages((prev) => {
+              let changed = false
+              const next = prev.map((message) => {
+                if (message.role !== 'assistant' || !message.browserProgress) {
+                  return message
+                }
+                const matchesRequest = Boolean(stoppedRequestId) && message.requestId === stoppedRequestId
+                const matchesTask = Boolean(stoppedTaskId) && message.sourceId === stoppedTaskId
+                if (!matchesRequest && !matchesTask) {
+                  return message
+                }
+                changed = true
+                return {
+                  ...message,
+                  browserProgress: mergeBrowserProgress(message.browserProgress, stoppedBrowserProgress),
+                }
+              })
+              return changed ? next : prev
+            })
+          }
           return
         }
         if (typeof event.task_id !== 'string' && typeof event.request_id !== 'string') {
