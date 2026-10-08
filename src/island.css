@@ -2845,7 +2845,9 @@
 }
 
 .vault-island-actions {
-  width: 128px;
+  /* Column grows with its widest label ("Provide credentials" needs more
+     room than "Allow once"); the copy column shrinks with ellipsis. */
+  min-width: 128px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -2881,6 +2883,7 @@
   color: #0b0f14;
   font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .vault-island-action--allow:hover {
