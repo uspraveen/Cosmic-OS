@@ -780,6 +780,85 @@ async def test_firecrawl_agent_alexandria_budget_cap_blocks_further_calls(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_firecrawl_agent_alexandria_budget_survives_agent_restart(tmp_path: Path) -> None:
+    # Spend is summed from the session ledger, so a fresh agent instance (simulating
+    # a process restart mid-task) still sees what the previous instance spent.
+    scrape_calls = {"count": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        scrape_calls["count"] += 1
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "alexandria": [
+                        {
+                            "provider": "semanticscholar-org",
+                            "capability": "papers/search_papers",
+                            "creditsCost": 5,
+                            "data": {"papers": [{"paper_id": "p1"}]},
+                        }
+                    ]
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    store_root = tmp_path / "store"
+    runtime_root = tmp_path / "runtime"
+
+    def build_agent() -> FirecrawlWebScrapeAgent:
+        return FirecrawlWebScrapeAgent(
+            redis_client=FakeRedis(),
+            config=FirecrawlWebScrapeConfig(
+                redis_url="redis://unused",
+                gateway_url="http://gateway",
+                gateway_internal_token="internal-token",
+                firecrawl_api_key="firecrawl-key",
+                firecrawl_api_base_url="https://api.firecrawl.dev",
+                alexandria_task_credit_cap=5,
+            ),
+            firecrawl_client=httpx.AsyncClient(transport=transport),
+            store_root=store_root,
+            runtime_root=runtime_root,
+            artifacts_root=tmp_path / "runs" / "artifacts",
+            agent_secret="agent-secret",
+        )
+
+    first_agent = build_agent()
+    await first_agent.on_startup()
+    try:
+        first = await first_agent.execute(
+            _make_task(
+                intent="firecrawl.alexandria",
+                payload={"provider": "semanticscholar-org", "capability": "papers/search_papers"},
+            )
+        )
+    finally:
+        await first_agent.stop()
+    assert first.status == "completed"
+
+    second_agent = build_agent()
+    await second_agent.on_startup()
+    try:
+        second = await second_agent.execute(
+            _make_task(
+                intent="firecrawl.alexandria",
+                payload={"provider": "semanticscholar-org", "capability": "papers/search_papers"},
+            )
+        )
+    finally:
+        await second_agent.stop()
+
+    assert scrape_calls["count"] == 1
+    assert second.status == "failed"
+    assert second.error is not None
+    assert second.error.code == "BUDGET_EXCEEDED"
+    assert "5/5" in second.error.message
+
+
+@pytest.mark.asyncio
 async def test_firecrawl_agent_alexandria_surfaces_per_result_errors(tmp_path: Path) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))

@@ -114,10 +114,6 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
         self.artifacts_root = (
             Path(artifacts_root).expanduser() if artifacts_root else BACKEND_ROOT / "runs" / "artifacts"
         ).resolve()
-        # Cumulative Alexandria execution credits per task_id, enforced against
-        # config.alexandria_task_credit_cap. In-memory on purpose: it is a spend
-        # guardrail for the lifetime of one task, not durable accounting.
-        self._alexandria_spend: dict[str, int] = {}
 
         super().__init__(
             agent_card_path=self.agent_root / "agent_card.yaml",
@@ -821,7 +817,7 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
             )
 
         cap = max(0, int(self.config.alexandria_task_credit_cap or 0))
-        spent = self._alexandria_spend.get(task.task_id, 0)
+        spent = self._alexandria_spend_for_task(task.task_id)
         if cap and spent >= cap:
             raise FirecrawlAgentError(
                 code="BUDGET_EXCEEDED",
@@ -859,7 +855,6 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
         provider_error = entry.get("error") if isinstance(entry.get("error"), dict) else None
         credits_cost = self._coerce_credits(entry.get("creditsCost"))
         spent += credits_cost
-        self._alexandria_spend[task.task_id] = spent
         budget_exceeded = bool(cap and spent >= cap)
 
         requires_action_url = ""
@@ -1122,6 +1117,34 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
                     return len(inner)
             return 1
         return 1 if records not in (None, "", [], {}) else 0
+
+    def _alexandria_spend_for_task(self, task_id: str) -> int:
+        """Durable per-task Alexandria spend, summed from this agent's session ledger
+        (each execution records its credits_cost in details_json). Reading the ledger
+        instead of keeping a process-local counter means a restart mid-task cannot
+        reset the credit cap. Any lookup failure fails open at 0: the cap is a
+        guardrail, not accounting, and must not break tool execution."""
+        try:
+            with connect_sync(self.session_db_path) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT details_json FROM firecrawl_session_runs
+                    WHERE task_id = ? AND intent = ?
+                    """,
+                    (task_id, self.ALEXANDRIA_INTENT),
+                ).fetchall()
+        except Exception:
+            logger.warning("firecrawl_agent.alexandria_spend_lookup_failed task_id=%s", task_id, exc_info=True)
+            return 0
+        total = 0
+        for row in rows:
+            try:
+                details = json.loads(row["details_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(details, dict):
+                total += self._coerce_credits(details.get("credits_cost"))
+        return total
 
     @staticmethod
     def _coerce_credits(value: Any) -> int:

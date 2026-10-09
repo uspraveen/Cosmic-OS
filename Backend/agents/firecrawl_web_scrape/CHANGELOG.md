@@ -3,7 +3,7 @@
 ## 1.4.0 - 2026-10-09
 - Added `firecrawl.search`: web/news/image search with free Alexandria catalogue discovery (`sources: ["alexandria"]`), vertical categories (developer/research/gov/pdf), recency filters (`tbs`), domain include/exclude, and `tool_detail: "full"` so discovered tools carry their executable input contract (options/response/examples).
 - Added `firecrawl.alexandria`: executes a discovered catalogue tool (provider + capability + contract options) and returns typed, sourced records. Surfaces per-result provider errors (`invalid_option` lists valid options; `THIRD_PARTY_DATA_TERMS_REQUIRED` carries `requires_action_url` for the user), and reports `credits_cost` plus running task spend on every call.
-- Added a per-task Alexandria credit cap (`FIRECRAWL_ALEXANDRIA_TASK_CREDIT_CAP`, default 40 credits, 0 disables). Paid catalogue executions stop with a `BUDGET_EXCEEDED` error once the cap is spent; discovery stays free and uncounted.
+- Added a per-task Alexandria credit cap (`FIRECRAWL_ALEXANDRIA_TASK_CREDIT_CAP`, default 40 credits, 0 disables), tracked durably in the agent's session ledger so an agent restart mid-task cannot reset the spend. Paid catalogue executions stop with a `BUDGET_EXCEEDED` error once the cap is spent; discovery stays free and uncounted.
 - Raw search and Alexandria responses persist as `search_response.json` / `alexandria_response.json` / `alexandria_records.json` artifacts; large record payloads are inlined as a bounded JSON excerpt pointing at the full artifact.
 
 ## 1.3.0 - 2026-06-24
