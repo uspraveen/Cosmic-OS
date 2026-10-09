@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 import sys
 import uuid
 from pathlib import Path
@@ -1116,3 +1117,27 @@ async def test_a_caller_supplied_subject_is_never_rewritten_when_detaching() -> 
     assert error is None, error
     assert client.created is not None
     assert client.created["subject"] == "Re: something the caller meant literally"
+
+
+def test_account_info_surfaces_resolver_substitution_notice():
+    """When the credential resolver substitutes a different account because
+    the hinted one needs re-auth, the notice rides on every result so the
+    model never reads wrong-mailbox data as an answer about the requested
+    inbox (Oct 2026: personal Gmail needs_auth, searches served by the
+    learnchain account with no hint of it in the results)."""
+    from agents.gmail_agent.agent import GmailAgent
+
+    agent = GmailAgent(redis_client=MagicMock(), store_root=Path(tempfile.mkdtemp()) / "store")
+    agent.auth = {
+        "access_token": "token",
+        "account_id": "acc_09c817674c12",
+        "account_email": "usp@thelearnchain.com",
+        "account_notice": (
+            "The account hint matched uspraveenraj@gmail.com needs re-authentication. "
+            "Results come from usp@thelearnchain.com (the substituted account) instead."
+        ),
+    }
+    info = agent._account_info()
+    assert info["account_notice"] and "needs re-authentication" in info["account_notice"]
+    attached = agent._attach_account({"message_id": "m1"})
+    assert attached["account_notice"] == info["account_notice"]

@@ -1672,6 +1672,43 @@ class CredentialManager:
 
         account = self._store.get_account(account_id) or {}
 
+        # An explicit account_hint is a promise about WHICH mailbox to use.
+        # When it names an account that exists but cannot be used (needs_auth,
+        # revoked) and the single-active/primary fallback substituted a
+        # different one, say so on the payload: silent wrong-mailbox results
+        # read as authoritative answers about an inbox that was never
+        # searched (Oct 2026: personal Gmail needs_auth, every gmail.search
+        # silently served by the learnchain account).
+        account_notice = None
+        if account_hint and account_id:
+            active_matches = self.account_hint_candidates(
+                provider=provider, account_hint=account_hint, active_only=True,
+            )
+            if not active_matches:
+                hinted = [
+                    a
+                    for a in self.account_hint_candidates(
+                        provider=provider, account_hint=account_hint, active_only=False,
+                    )
+                    if a["account_id"] != account_id
+                ]
+                if hinted:
+                    parts = []
+                    for a in hinted:
+                        email = str(a.get("email") or "").strip() or str(a.get("account_id"))
+                        status = str(a.get("status") or "").strip() or "unavailable"
+                        state = (
+                            "needs re-authentication"
+                            if status == "needs_auth"
+                            else f"is {status}"
+                        )
+                        parts.append(f"{email} {state}")
+                    used = str(account.get("email") or "").strip() or str(account_id)
+                    account_notice = (
+                        f"The account hint matched {'; '.join(parts)}. Results come from "
+                        f"{used} (the substituted account) instead; treat them as its data."
+                    )
+
         return {
             "credential_ref": cred["credential_ref"],
             "access_token": cred["access_token"],
@@ -1684,6 +1721,7 @@ class CredentialManager:
             "account_label": str(account.get("account_label") or "").strip() or None,
             "account_is_primary": bool(account.get("is_primary")),
             "operation_mode": normalized_operation_mode or None,
+            "account_notice": account_notice,
         }
 
     def update_account_preferences(

@@ -1556,6 +1556,11 @@ class GmailAgent(AgentRuntime):
             "account_label": auth.get("account_label") or auth.get("account_display_name") or auth.get("account_email"),
             "account_display_name": auth.get("account_display_name"),
             "account_is_primary": bool(auth.get("account_is_primary")),
+            # Set by the credential resolver when the requested account hint
+            # named an unusable account and a different one was substituted:
+            # without this the model reads wrong-mailbox results as answers
+            # about the inbox it was actually asked for.
+            "account_notice": auth.get("account_notice"),
         }
 
     def _attach_account(self, item: dict[str, Any], task: TaskEnvelope | None = None) -> dict[str, Any]:
