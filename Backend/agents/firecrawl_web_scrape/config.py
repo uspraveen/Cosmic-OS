@@ -72,6 +72,11 @@ class FirecrawlWebScrapeConfig:
     screenshot_full_page: bool = True
     screenshot_quality: int = 80
     screenshot_viewport_width: int = 1280
+    # Alexandria catalogue tool executions are paid (typically 0-5+ credits per call,
+    # priced per tool). This caps the cumulative credits one task may spend executing
+    # them; discovery (search with the alexandria source) is always free and uncounted.
+    # 0 disables the cap.
+    alexandria_task_credit_cap: int = 40
 
     @classmethod
     def from_env(cls) -> "FirecrawlWebScrapeConfig":
@@ -95,4 +100,5 @@ class FirecrawlWebScrapeConfig:
             screenshot_full_page=_env_bool("FIRECRAWL_SCREENSHOT_FULL_PAGE", True),
             screenshot_quality=min(100, max(1, _env_int("FIRECRAWL_SCREENSHOT_QUALITY", 80))),
             screenshot_viewport_width=min(7680, max(320, _env_int("FIRECRAWL_SCREENSHOT_VIEWPORT_WIDTH", 1280))),
+            alexandria_task_credit_cap=max(0, _env_int("FIRECRAWL_ALEXANDRIA_TASK_CREDIT_CAP", 40)),
         )

@@ -74,8 +74,15 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
     EXTRACT_INTENT = "firecrawl.extract"
     AGENT_INTENT = "firecrawl.agent"
     RECALL_SESSION_INTENT = "firecrawl.recall_session"
+    SEARCH_INTENT = "firecrawl.search"
+    ALEXANDRIA_INTENT = "firecrawl.alexandria"
     SCRAPE_FORMATS = frozenset({"markdown", "html", "rawHtml", "links", "images", "screenshot"})
     SCRAPE_PROXY_VALUES = frozenset({"auto", "basic", "enhanced"})
+    SEARCH_SOURCES = frozenset({"web", "news", "images", "alexandria"})
+    SEARCH_CATEGORIES = frozenset({"developer", "gov", "research", "pdf"})
+    SEARCH_TOOL_DETAILS = frozenset({"compact", "summary", "full"})
+    _MAX_SEARCH_DESCRIPTION_CHARS = 600
+    _MAX_INLINE_ALEXANDRIA_JSON_CHARS = 12000
 
     def __init__(
         self,
@@ -107,6 +114,10 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
         self.artifacts_root = (
             Path(artifacts_root).expanduser() if artifacts_root else BACKEND_ROOT / "runs" / "artifacts"
         ).resolve()
+        # Cumulative Alexandria execution credits per task_id, enforced against
+        # config.alexandria_task_credit_cap. In-memory on purpose: it is a spend
+        # guardrail for the lifetime of one task, not durable accounting.
+        self._alexandria_spend: dict[str, int] = {}
 
         super().__init__(
             agent_card_path=self.agent_root / "agent_card.yaml",
@@ -167,6 +178,10 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
                 return await self._handle_agent(task)
             if task.intent == self.RECALL_SESSION_INTENT:
                 return await self._handle_recall_session(task)
+            if task.intent == self.SEARCH_INTENT:
+                return await self._handle_search(task)
+            if task.intent == self.ALEXANDRIA_INTENT:
+                return await self._handle_alexandria(task)
             return self._result_error(
                 code="INVALID_INPUT",
                 message=f"Unsupported intent: {task.intent}",
@@ -642,6 +657,478 @@ class FirecrawlWebScrapeAgent(AgentRuntime):
             },
             artifacts=[],
         )
+
+    async def _handle_search(self, task: TaskEnvelope) -> AgentResult:
+        prompt_assets = self._load_prompt_assets()
+        query = str(task.input.get("query") or "").strip()
+        if len(query) < 2:
+            raise FirecrawlAgentError(
+                code="INVALID_INPUT",
+                message="query must be at least 2 characters.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        query = query[:500]
+        sources = self._normalize_search_sources(task.input.get("sources"))
+        categories = self._normalize_search_categories(task.input.get("categories"))
+        limit = self._optional_int(task.input.get("limit"), minimum=1, maximum=100) or 8
+        tool_detail = str(task.input.get("tool_detail") or "compact").strip().lower() or "compact"
+        if tool_detail not in self.SEARCH_TOOL_DETAILS:
+            raise FirecrawlAgentError(
+                code="INVALID_INPUT",
+                message="tool_detail must be one of: compact, summary, full.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        include_domains = self._normalize_string_list(task.input.get("include_domains"))
+        exclude_domains = self._normalize_string_list(task.input.get("exclude_domains"))
+        if include_domains and exclude_domains:
+            raise FirecrawlAgentError(
+                code="INVALID_INPUT",
+                message="include_domains and exclude_domains are mutually exclusive.",
+                retryable=False,
+                next_action="revise_input",
+            )
+
+        payload: dict[str, Any] = {
+            "query": query,
+            "sources": sources,
+            "limit": limit,
+            "toolDetail": tool_detail,
+        }
+        if categories:
+            payload["categories"] = categories
+        tbs = str(task.input.get("tbs") or "").strip()
+        if tbs:
+            payload["tbs"] = tbs
+        if include_domains:
+            payload["includeDomains"] = include_domains
+        if exclude_domains:
+            payload["excludeDomains"] = exclude_domains
+        if task.input.get("domain_tools") is not None:
+            payload["domainTools"] = self._coerce_bool(task.input.get("domain_tools"), default=False)
+
+        await self._emit_progress(task.task_id, f"Searching via Firecrawl: {query[:80]}")
+        started = time.perf_counter()
+        response_payload = await self._firecrawl_request("POST", "/v2/search", json_body=payload)
+        elapsed_ms = max(1, int((time.perf_counter() - started) * 1000))
+        data = response_payload.get("data")
+        if not isinstance(data, dict):
+            raise FirecrawlAgentError(
+                code="INTERNAL_ERROR",
+                message="Firecrawl search response did not include a data object.",
+                retryable=False,
+                next_action="escalate",
+            )
+
+        manifest = self._write_json_artifact(
+            task=task,
+            filename="search_response.json",
+            payload=response_payload,
+            source_url=None,
+        )
+        artifact_refs = [self._artifact_ref(manifest)]
+        normalized = self._normalize_search_output(data)
+        web_results = normalized["web"]
+        news_results = normalized["news"]
+        image_results = normalized["images"]
+        tools = normalized["tools"]
+        try:
+            credits_used = max(0, int(response_payload.get("creditsUsed") or 0))
+        except (TypeError, ValueError):
+            credits_used = 0
+
+        parts: list[str] = []
+        if web_results:
+            parts.append(f"{len(web_results)} web result{'s' if len(web_results) != 1 else ''}")
+        if news_results:
+            parts.append(f"{len(news_results)} news result{'s' if len(news_results) != 1 else ''}")
+        if image_results:
+            parts.append(f"{len(image_results)} image result{'s' if len(image_results) != 1 else ''}")
+        if tools:
+            parts.append(
+                f"{len(tools)} Alexandria tool{'s' if len(tools) != 1 else ''} (discovery is free; execute via firecrawl.alexandria)"
+            )
+        message = (
+            f"Found {' and '.join(parts)} for '{query}'."
+            if parts else
+            f"No results found for '{query}'."
+        )
+        output = {
+            "response": message,
+            "message": message,
+            "query": query,
+            "web": web_results,
+            "news": news_results,
+            "images": image_results,
+            "tools": tools,
+            "tool_detail": tool_detail,
+            "credits_used": credits_used,
+            "artifacts": artifact_refs,
+        }
+        details = {
+            "message": message,
+            "elapsed_ms": elapsed_ms,
+            "sources": sources,
+            "categories": categories,
+            "web_results": len(web_results),
+            "news_results": len(news_results),
+            "image_results": len(image_results),
+            "tools": len(tools),
+            "prompt_assets_loaded": sorted(key for key, value in prompt_assets.items() if value),
+        }
+        self._record_session_run(
+            task=task,
+            intent=task.intent,
+            target_urls=[],
+            summary=message,
+            artifact_refs=artifact_refs,
+            details=details,
+        )
+        logger.info(
+            "firecrawl_agent.search_completed task_id=%s query=%r web=%d news=%d images=%d tools=%d elapsed_ms=%d",
+            task.task_id,
+            query,
+            len(web_results),
+            len(news_results),
+            len(image_results),
+            len(tools),
+            elapsed_ms,
+        )
+        return AgentResult(status="completed", output=output, artifacts=[manifest])
+
+    async def _handle_alexandria(self, task: TaskEnvelope) -> AgentResult:
+        prompt_assets = self._load_prompt_assets()
+        provider = str(task.input.get("provider") or "").strip()
+        capability = str(task.input.get("capability") or "").strip()
+        if not provider or not capability:
+            raise FirecrawlAgentError(
+                code="INVALID_INPUT",
+                message=(
+                    "provider and capability are required. Discover matching catalogue tools first with "
+                    "firecrawl.search (sources including 'alexandria')."
+                ),
+                retryable=False,
+                next_action="revise_input",
+            )
+        options = task.input.get("options")
+        if options is not None and not isinstance(options, dict):
+            raise FirecrawlAgentError(
+                code="INVALID_INPUT",
+                message="options must be an object matching the tool contract from discovery.",
+                retryable=False,
+                next_action="revise_input",
+            )
+
+        cap = max(0, int(self.config.alexandria_task_credit_cap or 0))
+        spent = self._alexandria_spend.get(task.task_id, 0)
+        if cap and spent >= cap:
+            raise FirecrawlAgentError(
+                code="BUDGET_EXCEEDED",
+                message=(
+                    f"Alexandria credit budget for this task is spent ({spent}/{cap} credits). Finish with the "
+                    "data already gathered, or ask the user to raise FIRECRAWL_ALEXANDRIA_TASK_CREDIT_CAP."
+                ),
+                retryable=False,
+                next_action="escalate",
+            )
+
+        alexandria_payload: dict[str, Any] = {"provider": provider, "capability": capability}
+        if options:
+            alexandria_payload["options"] = options
+
+        await self._emit_progress(task.task_id, f"Querying Alexandria: {provider}/{capability}.")
+        started = time.perf_counter()
+        response_payload = await self._firecrawl_request(
+            "POST",
+            "/v2/scrape",
+            json_body={"alexandria": alexandria_payload},
+        )
+        elapsed_ms = max(1, int((time.perf_counter() - started) * 1000))
+        data = response_payload.get("data")
+        entries = data.get("alexandria") if isinstance(data, dict) else None
+        entry = entries[0] if isinstance(entries, list) and entries and isinstance(entries[0], dict) else None
+        if entry is None:
+            raise FirecrawlAgentError(
+                code="INTERNAL_ERROR",
+                message="Firecrawl response did not include an Alexandria result entry.",
+                retryable=False,
+                next_action="escalate",
+            )
+
+        provider_error = entry.get("error") if isinstance(entry.get("error"), dict) else None
+        credits_cost = self._coerce_credits(entry.get("creditsCost"))
+        spent += credits_cost
+        self._alexandria_spend[task.task_id] = spent
+        budget_exceeded = bool(cap and spent >= cap)
+
+        requires_action_url = ""
+        if provider_error:
+            action = provider_error.get("requiresAction")
+            if isinstance(action, dict):
+                requires_action_url = str(action.get("url") or "").strip()
+
+        records = entry.get("data")
+        has_records = records not in (None, "", [], {})
+        manifests: list[ArtifactManifest] = []
+        manifests.append(
+            self._write_json_artifact(
+                task=task,
+                filename="alexandria_response.json",
+                payload=response_payload,
+                source_url=None,
+            )
+        )
+        if has_records:
+            manifests.append(
+                self._write_json_artifact(
+                    task=task,
+                    filename="alexandria_records.json",
+                    payload={"data": records},
+                    source_url=None,
+                )
+            )
+        artifact_refs = [self._artifact_ref(item) for item in manifests]
+
+        inline_data: Any = None
+        data_truncated = False
+        if has_records:
+            inline_data, data_truncated = self._clip_inline_json(
+                records,
+                limit=self._inline_markdown_limit(),
+            )
+
+        records_count = self._count_alexandria_records(records)
+        if provider_error:
+            error_code = str(provider_error.get("code") or "PROVIDER_ERROR").strip()
+            error_message = str(provider_error.get("message") or "").strip()
+            if requires_action_url:
+                message = (
+                    f"Alexandria provider {provider}/{capability} requires data-terms acceptance before records "
+                    f"flow: the user must review {requires_action_url}. No data was returned."
+                )
+            else:
+                message = (
+                    f"Alexandria tool call {provider}/{capability} was rejected ({error_code}): {error_message}"
+                )
+        else:
+            message = (
+                f"Alexandria returned {records_count} record{'s' if records_count != 1 else ''} from {provider}/{capability}."
+                if has_records else
+                f"Alexandria returned no records from {provider}/{capability}."
+            )
+        budget_note = (
+            f" Credits: {credits_cost} this call, {spent}/{cap} task budget."
+            if cap else
+            f" Credits: {credits_cost} this call, {spent} total (no task cap)."
+        )
+        if budget_exceeded:
+            budget_note += " Task credit cap reached — finish with the data already gathered."
+        message += budget_note
+
+        output = {
+            "response": message,
+            "message": message,
+            "provider": provider,
+            "capability": capability,
+            "success": provider_error is None,
+            "provider_error": provider_error,
+            "requires_action_url": requires_action_url or None,
+            "records_count": records_count,
+            "data": inline_data,
+            "data_truncated": data_truncated,
+            "data_full_artifact": "alexandria_records.json" if (has_records and data_truncated) else None,
+            "credits_cost": credits_cost,
+            "task_credits_spent": spent,
+            "task_credit_cap": cap or None,
+            "budget_exceeded": budget_exceeded,
+            "alexandria_id": str(entry.get("alexandriaId") or "").strip() or None,
+            "provider_request_id": str(entry.get("providerRequestId") or "").strip() or None,
+            "upstream_status": entry.get("upstreamStatus"),
+            "artifacts": artifact_refs,
+        }
+        details = {
+            "message": message,
+            "elapsed_ms": elapsed_ms,
+            "provider": provider,
+            "capability": capability,
+            "records_count": records_count,
+            "credits_cost": credits_cost,
+            "task_credits_spent": spent,
+            "task_credit_cap": cap,
+            "budget_exceeded": budget_exceeded,
+            "provider_error_code": str((provider_error or {}).get("code") or "") or None,
+            "prompt_assets_loaded": sorted(key for key, value in prompt_assets.items() if value),
+        }
+        self._record_session_run(
+            task=task,
+            intent=task.intent,
+            target_urls=[],
+            summary=message,
+            artifact_refs=artifact_refs,
+            details=details,
+        )
+        logger.info(
+            "firecrawl_agent.alexandria_completed task_id=%s provider=%s capability=%s records=%d credits=%d spent=%d elapsed_ms=%d",
+            task.task_id,
+            provider,
+            capability,
+            records_count,
+            credits_cost,
+            spent,
+            elapsed_ms,
+        )
+        return AgentResult(status="completed", output=output, artifacts=manifests)
+
+    def _normalize_search_sources(self, value: Any) -> list[str]:
+        if not isinstance(value, list) or not value:
+            return ["web"]
+        sources: list[str] = []
+        for item in value:
+            normalized = str(item or "").strip().lower()
+            if not normalized:
+                continue
+            if normalized not in self.SEARCH_SOURCES:
+                raise FirecrawlAgentError(
+                    code="INVALID_INPUT",
+                    message="sources entries must be among: web, news, images, alexandria.",
+                    retryable=False,
+                    next_action="revise_input",
+                )
+            sources.append(normalized)
+        ordered = self._dedupe_preserve_order(sources)
+        return ordered or ["web"]
+
+    def _normalize_search_categories(self, value: Any) -> list[str]:
+        if value in (None, "", [], {}):
+            return []
+        if not isinstance(value, list):
+            raise FirecrawlAgentError(
+                code="INVALID_INPUT",
+                message="categories must be a list drawn from: developer, gov, research, pdf.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        categories: list[str] = []
+        for item in value:
+            normalized = str(item or "").strip().lower()
+            if not normalized:
+                continue
+            if normalized not in self.SEARCH_CATEGORIES:
+                raise FirecrawlAgentError(
+                    code="INVALID_INPUT",
+                    message="categories entries must be among: developer, gov, research, pdf.",
+                    retryable=False,
+                    next_action="revise_input",
+                )
+            categories.append(normalized)
+        ordered = self._dedupe_preserve_order(categories)
+        if "gov" in ordered and len(ordered) > 1:
+            raise FirecrawlAgentError(
+                code="INVALID_INPUT",
+                message="The gov category cannot be combined with other search categories.",
+                retryable=False,
+                next_action="revise_input",
+            )
+        return ordered
+
+    def _normalize_search_output(self, data: dict[str, Any]) -> dict[str, Any]:
+        web: list[dict[str, Any]] = []
+        raw_web = data.get("web")
+        if isinstance(raw_web, list):
+            for item in raw_web:
+                if not isinstance(item, dict):
+                    continue
+                web.append(
+                    {
+                        "title": str(item.get("title") or "").strip() or None,
+                        "url": str(item.get("url") or "").strip(),
+                        "description": self._clip_text(
+                            str(item.get("description") or "").strip(),
+                            limit=self._MAX_SEARCH_DESCRIPTION_CHARS,
+                        )
+                        or None,
+                    }
+                )
+        web = [item for item in web if item["url"]]
+
+        news: list[dict[str, Any]] = []
+        raw_news = data.get("news")
+        if isinstance(raw_news, list):
+            for item in raw_news:
+                if not isinstance(item, dict):
+                    continue
+                news.append(
+                    {
+                        "title": str(item.get("title") or "").strip() or None,
+                        "url": str(item.get("url") or "").strip(),
+                        "snippet": self._clip_text(
+                            str(item.get("snippet") or "").strip(),
+                            limit=self._MAX_SEARCH_DESCRIPTION_CHARS,
+                        )
+                        or None,
+                        "date": str(item.get("date") or "").strip() or None,
+                    }
+                )
+        news = [item for item in news if item["url"]]
+
+        images: list[dict[str, Any]] = []
+        raw_images = data.get("images")
+        if isinstance(raw_images, list):
+            for item in raw_images:
+                if not isinstance(item, dict):
+                    continue
+                images.append(
+                    {
+                        "title": str(item.get("title") or "").strip() or None,
+                        "image_url": str(item.get("imageUrl") or "").strip(),
+                        "page_url": str(item.get("url") or "").strip() or None,
+                    }
+                )
+        images = [item for item in images if item["image_url"]]
+
+        tools: list[dict[str, Any]] = []
+        raw_tools = data.get("tools")
+        if isinstance(raw_tools, list):
+            for item in raw_tools:
+                if not isinstance(item, dict):
+                    continue
+                # Tool contracts (options/response/examples with tool_detail=full) are
+                # the discovery payload the orchestrator executes against; keep them
+                # intact rather than re-shaping provider-defined contract fields.
+                tools.append(item)
+
+        return {"web": web, "news": news, "images": images, "tools": tools}
+
+    def _clip_inline_json(self, value: Any, *, limit: int) -> tuple[Any, bool]:
+        """Return (inline_value, truncated). Small payloads pass through whole; large
+        ones become a compact JSON text excerpt pointing at the full artifact."""
+        try:
+            text = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return {"value": str(value)[:limit]}, False
+        if len(text) <= limit:
+            return value, False
+        return {"json_excerpt": self._clip_text(text, limit=limit)}, True
+
+    @staticmethod
+    def _count_alexandria_records(records: Any) -> int:
+        if isinstance(records, list):
+            return len(records)
+        if isinstance(records, dict):
+            for key in ("results", "papers", "records", "items", "filings", "data"):
+                inner = records.get(key)
+                if isinstance(inner, list):
+                    return len(inner)
+            return 1
+        return 1 if records not in (None, "", [], {}) else 0
+
+    @staticmethod
+    def _coerce_credits(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
 
     async def _handle_agent(self, task: TaskEnvelope) -> AgentResult:
         prompt_assets = self._load_prompt_assets()

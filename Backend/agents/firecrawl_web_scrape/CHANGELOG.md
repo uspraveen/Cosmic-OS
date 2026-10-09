@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.0 - 2026-10-09
+- Added `firecrawl.search`: web/news/image search with free Alexandria catalogue discovery (`sources: ["alexandria"]`), vertical categories (developer/research/gov/pdf), recency filters (`tbs`), domain include/exclude, and `tool_detail: "full"` so discovered tools carry their executable input contract (options/response/examples).
+- Added `firecrawl.alexandria`: executes a discovered catalogue tool (provider + capability + contract options) and returns typed, sourced records. Surfaces per-result provider errors (`invalid_option` lists valid options; `THIRD_PARTY_DATA_TERMS_REQUIRED` carries `requires_action_url` for the user), and reports `credits_cost` plus running task spend on every call.
+- Added a per-task Alexandria credit cap (`FIRECRAWL_ALEXANDRIA_TASK_CREDIT_CAP`, default 40 credits, 0 disables). Paid catalogue executions stop with a `BUDGET_EXCEEDED` error once the cap is spent; discovery stays free and uncounted.
+- Raw search and Alexandria responses persist as `search_response.json` / `alexandria_response.json` / `alexandria_records.json` artifacts; large record payloads are inlined as a bounded JSON excerpt pointing at the full artifact.
+
 ## 1.3.0 - 2026-06-24
 - Screenshots are now captured full-page by default (via Firecrawl's `{"type":"screenshot","fullPage":true}`), so image-based tables/charts below the fold are included rather than just the top viewport. Override with `screenshot_full_page: false`.
 - `firecrawl.scrape` now handles direct image URLs (e.g. a `.png` chart/table): instead of failing on Firecrawl's "cannot process binary image" error, the agent downloads the image and surfaces it as a vision-readable artifact. Also auto-falls back to direct image fetch when Firecrawl rejects a URL as an image content-type.

@@ -530,3 +530,405 @@ async def test_firecrawl_agent_rejects_invalid_proxy_and_missing_session_id(tmp_
     assert recall_result.status == "failed"
     assert recall_result.error is not None
     assert recall_result.error.code == "INVALID_INPUT"
+
+
+@pytest.mark.asyncio
+async def test_firecrawl_agent_search_returns_results_tools_and_contract(tmp_path: Path) -> None:
+    long_description = "d" * 800
+    contract = {
+        "query": {"type": "string"},
+        "k": {"type": "integer"},
+        "authors": {"type": "array"},
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("https://api.firecrawl.dev/v2/search")
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["query"] == "retrieval augmented generation benchmarks"
+        assert payload["sources"] == ["web", "alexandria"]
+        assert payload["toolDetail"] == "full"
+        assert payload["limit"] == 5
+        assert payload["categories"] == ["research"]
+        assert payload["tbs"] == "qdr:y"
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "id": "srch_1",
+                "creditsUsed": 2,
+                "data": {
+                    "web": [
+                        {
+                            "title": "RAGBench",
+                            "url": "https://arxiv.org/abs/2407.11005",
+                            "description": long_description,
+                        }
+                    ],
+                    "tools": [
+                        {
+                            "provider": "firecrawl-research-index",
+                            "capability": "search",
+                            "description": "Find scientific papers about a research question.",
+                            "options": contract,
+                        }
+                    ],
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as firecrawl_client:
+        agent = FirecrawlWebScrapeAgent(
+            redis_client=FakeRedis(),
+            config=FirecrawlWebScrapeConfig(
+                redis_url="redis://unused",
+                gateway_url="http://gateway",
+                gateway_internal_token="internal-token",
+                firecrawl_api_key="firecrawl-key",
+                firecrawl_api_base_url="https://api.firecrawl.dev",
+            ),
+            firecrawl_client=firecrawl_client,
+            store_root=tmp_path / "store",
+            runtime_root=tmp_path / "runtime",
+            artifacts_root=tmp_path / "runs" / "artifacts",
+            agent_secret="agent-secret",
+        )
+        await agent.on_startup()
+        try:
+            result = await agent.execute(
+                _make_task(
+                    intent="firecrawl.search",
+                    payload={
+                        "query": "retrieval augmented generation benchmarks",
+                        "sources": ["web", "alexandria"],
+                        "categories": ["research"],
+                        "limit": 5,
+                        "tbs": "qdr:y",
+                        "tool_detail": "full",
+                    },
+                )
+            )
+        finally:
+            await agent.stop()
+
+    assert result.status == "completed"
+    assert result.output["query"] == "retrieval augmented generation benchmarks"
+    assert result.output["web"][0]["url"] == "https://arxiv.org/abs/2407.11005"
+    # Descriptions are clipped to the inline budget.
+    assert len(result.output["web"][0]["description"]) == 600
+    # Tool contracts arrive intact so firecrawl.alexandria can be built from them.
+    assert result.output["tools"][0]["provider"] == "firecrawl-research-index"
+    assert result.output["tools"][0]["options"] == contract
+    assert result.output["credits_used"] == 2
+    assert any(a.path.endswith("search_response.json") for a in result.artifacts)
+
+
+@pytest.mark.asyncio
+async def test_firecrawl_agent_alexandria_executes_contract_and_tracks_spend(tmp_path: Path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("https://api.firecrawl.dev/v2/scrape")
+        payload = json.loads(request.content.decode("utf-8"))
+        # Alexandria executions carry an alexandria payload, never a url.
+        assert "url" not in payload
+        assert payload["alexandria"]["provider"] == "firecrawl-research-index"
+        assert payload["alexandria"]["capability"] == "search"
+        assert payload["alexandria"]["options"] == {"query": "rag evaluation", "k": 2}
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "scrape_id": "scr_1",
+                "data": {
+                    "alexandria": [
+                        {
+                            "provider": "firecrawl-research-index",
+                            "capability": "search",
+                            "creditsCost": 0,
+                            "data": {
+                                "results": [
+                                    {"paperId": "1", "title": "RAGBench"},
+                                    {"paperId": "2", "title": "MIRAGE"},
+                                ]
+                            },
+                            "records": 2,
+                            "upstreamStatus": 200,
+                            "alexandriaId": "alex_1",
+                            "providerRequestId": "prov_1",
+                        }
+                    ]
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as firecrawl_client:
+        agent = FirecrawlWebScrapeAgent(
+            redis_client=FakeRedis(),
+            config=FirecrawlWebScrapeConfig(
+                redis_url="redis://unused",
+                gateway_url="http://gateway",
+                gateway_internal_token="internal-token",
+                firecrawl_api_key="firecrawl-key",
+                firecrawl_api_base_url="https://api.firecrawl.dev",
+            ),
+            firecrawl_client=firecrawl_client,
+            store_root=tmp_path / "store",
+            runtime_root=tmp_path / "runtime",
+            artifacts_root=tmp_path / "runs" / "artifacts",
+            agent_secret="agent-secret",
+        )
+        await agent.on_startup()
+        try:
+            result = await agent.execute(
+                _make_task(
+                    intent="firecrawl.alexandria",
+                    payload={
+                        "provider": "firecrawl-research-index",
+                        "capability": "search",
+                        "options": {"query": "rag evaluation", "k": 2},
+                    },
+                )
+            )
+        finally:
+            await agent.stop()
+
+    assert result.status == "completed"
+    output = result.output
+    assert output["success"] is True
+    assert output["provider_error"] is None
+    assert output["records_count"] == 2
+    assert output["data"] == {"results": [{"paperId": "1", "title": "RAGBench"}, {"paperId": "2", "title": "MIRAGE"}]}
+    assert output["data_truncated"] is False
+    assert output["credits_cost"] == 0
+    assert output["task_credits_spent"] == 0
+    assert output["task_credit_cap"] == 40
+    assert output["budget_exceeded"] is False
+    assert output["alexandria_id"] == "alex_1"
+    artifact_paths = {a.path for a in result.artifacts}
+    assert any(path.endswith("alexandria_response.json") for path in artifact_paths)
+    assert any(path.endswith("alexandria_records.json") for path in artifact_paths)
+
+
+@pytest.mark.asyncio
+async def test_firecrawl_agent_alexandria_budget_cap_blocks_further_calls(tmp_path: Path) -> None:
+    scrape_calls = {"count": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        scrape_calls["count"] += 1
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "alexandria": [
+                        {
+                            "provider": "semanticscholar-org",
+                            "capability": "papers/search_papers",
+                            "creditsCost": 5,
+                            "data": {"papers": [{"paper_id": "p1"}]},
+                        }
+                    ]
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as firecrawl_client:
+        agent = FirecrawlWebScrapeAgent(
+            redis_client=FakeRedis(),
+            config=FirecrawlWebScrapeConfig(
+                redis_url="redis://unused",
+                gateway_url="http://gateway",
+                gateway_internal_token="internal-token",
+                firecrawl_api_key="firecrawl-key",
+                firecrawl_api_base_url="https://api.firecrawl.dev",
+                alexandria_task_credit_cap=5,
+            ),
+            firecrawl_client=firecrawl_client,
+            store_root=tmp_path / "store",
+            runtime_root=tmp_path / "runtime",
+            artifacts_root=tmp_path / "runs" / "artifacts",
+            agent_secret="agent-secret",
+        )
+        await agent.on_startup()
+        try:
+            first = await agent.execute(
+                _make_task(
+                    intent="firecrawl.alexandria",
+                    payload={"provider": "semanticscholar-org", "capability": "papers/search_papers"},
+                )
+            )
+            second = await agent.execute(
+                _make_task(
+                    intent="firecrawl.alexandria",
+                    payload={"provider": "semanticscholar-org", "capability": "papers/search_papers"},
+                )
+            )
+        finally:
+            await agent.stop()
+
+    # Exactly one paid call may hit the network; the second is refused locally.
+    assert scrape_calls["count"] == 1
+    assert first.status == "completed"
+    assert first.output["credits_cost"] == 5
+    assert first.output["budget_exceeded"] is True
+    assert "cap reached" in first.output["response"]
+    assert second.status == "failed"
+    assert second.error is not None
+    assert second.error.code == "BUDGET_EXCEEDED"
+    assert "5/5" in second.error.message
+
+
+@pytest.mark.asyncio
+async def test_firecrawl_agent_alexandria_surfaces_per_result_errors(tmp_path: Path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        tool = payload["alexandria"]
+        if tool["capability"] == "podcasts/episodes/search":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "alexandria": [
+                            {
+                                "provider": "particle",
+                                "capability": "podcasts/episodes/search",
+                                "creditsCost": 0,
+                                "error": {
+                                    "code": "THIRD_PARTY_DATA_TERMS_REQUIRED",
+                                    "message": "Terms acceptance is required for this provider.",
+                                    "status": 400,
+                                    "requiresAction": {"url": "https://www.firecrawl.dev/app/alexandria/terms"},
+                                },
+                            }
+                        ]
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "alexandria": [
+                        {
+                            "provider": "firecrawl-research-index",
+                            "capability": "search",
+                            "creditsCost": 0,
+                            "error": {
+                                "code": "invalid_option",
+                                "message": "search does not take limit. Valid options: query, k, authors.",
+                                "status": 400,
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as firecrawl_client:
+        agent = FirecrawlWebScrapeAgent(
+            redis_client=FakeRedis(),
+            config=FirecrawlWebScrapeConfig(
+                redis_url="redis://unused",
+                gateway_url="http://gateway",
+                gateway_internal_token="internal-token",
+                firecrawl_api_key="firecrawl-key",
+                firecrawl_api_base_url="https://api.firecrawl.dev",
+            ),
+            firecrawl_client=firecrawl_client,
+            store_root=tmp_path / "store",
+            runtime_root=tmp_path / "runtime",
+            artifacts_root=tmp_path / "runs" / "artifacts",
+            agent_secret="agent-secret",
+        )
+        await agent.on_startup()
+        try:
+            terms = await agent.execute(
+                _make_task(
+                    intent="firecrawl.alexandria",
+                    payload={"provider": "particle", "capability": "podcasts/episodes/search"},
+                )
+            )
+            invalid = await agent.execute(
+                _make_task(
+                    intent="firecrawl.alexandria",
+                    payload={"provider": "firecrawl-research-index", "capability": "search"},
+                )
+            )
+        finally:
+            await agent.stop()
+
+    # The HTTP call succeeded, so the result completes but must not read as data.
+    assert terms.status == "completed"
+    assert terms.output["success"] is False
+    assert terms.output["provider_error"]["code"] == "THIRD_PARTY_DATA_TERMS_REQUIRED"
+    assert terms.output["requires_action_url"] == "https://www.firecrawl.dev/app/alexandria/terms"
+    assert "terms" in terms.output["response"]
+
+    assert invalid.status == "completed"
+    assert invalid.output["success"] is False
+    assert "Valid options: query, k, authors" in invalid.output["provider_error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_firecrawl_agent_search_and_alexandria_validate_input(tmp_path: Path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("No network call is expected for invalid input.")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as firecrawl_client:
+        agent = FirecrawlWebScrapeAgent(
+            redis_client=FakeRedis(),
+            config=FirecrawlWebScrapeConfig(
+                redis_url="redis://unused",
+                gateway_url="http://gateway",
+                gateway_internal_token="internal-token",
+                firecrawl_api_key="firecrawl-key",
+                firecrawl_api_base_url="https://api.firecrawl.dev",
+            ),
+            firecrawl_client=firecrawl_client,
+            store_root=tmp_path / "store",
+            runtime_root=tmp_path / "runtime",
+            artifacts_root=tmp_path / "runs" / "artifacts",
+            agent_secret="agent-secret",
+        )
+        await agent.on_startup()
+        try:
+            empty_query = await agent.execute(
+                _make_task(intent="firecrawl.search", payload={"query": "  "})
+            )
+            bad_source = await agent.execute(
+                _make_task(intent="firecrawl.search", payload={"query": "test", "sources": ["tiktok"]})
+            )
+            gov_combo = await agent.execute(
+                _make_task(intent="firecrawl.search", payload={"query": "test", "categories": ["gov", "research"]})
+            )
+            domain_conflict = await agent.execute(
+                _make_task(
+                    intent="firecrawl.search",
+                    payload={
+                        "query": "test",
+                        "include_domains": ["sec.gov"],
+                        "exclude_domains": ["reddit.com"],
+                    },
+                )
+            )
+            missing_capability = await agent.execute(
+                _make_task(intent="firecrawl.alexandria", payload={"provider": "sec-gov"})
+            )
+            bad_options = await agent.execute(
+                _make_task(
+                    intent="firecrawl.alexandria",
+                    payload={"provider": "sec-gov", "capability": "filings/company", "options": ["bad"]},
+                )
+            )
+        finally:
+            await agent.stop()
+
+    for result in (empty_query, bad_source, gov_combo, domain_conflict, missing_capability, bad_options):
+        assert result.status == "failed", result
+        assert result.error is not None
+        assert result.error.code == "INVALID_INPUT", result.error

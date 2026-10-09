@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "message": { "type": "string" },
+    "query": { "type": "string" },
+    "web": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": ["string", "null"] },
+          "url": { "type": "string" },
+          "description": { "type": ["string", "null"] }
+        },
+        "required": ["url"]
+      }
+    },
+    "news": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": ["string", "null"] },
+          "url": { "type": "string" },
+          "snippet": { "type": ["string", "null"] },
+          "date": { "type": ["string", "null"] }
+        },
+        "required": ["url"]
+      }
+    },
+    "images": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": ["string", "null"] },
+          "image_url": { "type": "string" },
+          "page_url": { "type": ["string", "null"] }
+        },
+        "required": ["image_url"]
+      }
+    },
+    "tools": {
+      "type": "array",
+      "description": "Alexandria catalogue tools matching the query. With tool_detail 'full', each entry carries its executable contract (options/response/examples).",
+      "items": { "type": "object" }
+    },
+    "tool_detail": { "type": "string" },
+    "credits_used": { "type": "integer" },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifact_id": { "type": "string" },
+          "path": { "type": "string" },
+          "mime": { "type": "string" },
+          "filename": { "type": "string" },
+          "audience": { "type": "string" }
+        },
+        "required": ["artifact_id", "mime"]
+      }
+    }
+  },
+  "required": ["response", "message", "query", "web", "tools"]
+}

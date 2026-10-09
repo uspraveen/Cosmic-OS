@@ -16,6 +16,19 @@
 - Fields whose values are not explicitly present in the page are returned as `null`; the agent instructs Firecrawl never to guess or fabricate. Cross-check any surprising number against the page text or the screenshot before trusting it.
 - Pass `parsers: ["pdf"]` for PDF/scanned-document sources before extraction.
 
+## When To Use `firecrawl.search`
+- No exact URL is known yet, or the goal is discovery: links, news recency, or image lookup.
+- Vertical coverage is needed: pass `categories` (`developer`, `research`, `gov`, `pdf`; `gov` cannot combine with others).
+- Recency matters: pass `tbs` (`qdr:h/d/w/m/y`, custom `cdr:1,cd_min=...,cd_max=...` ranges, or `sbd:1` for sort-by-date).
+- The goal touches an official data source (SEC filings, research papers, laws and regulations, package or product documentation). Add `sources: ["alexandria"]` — matching catalogue tools come back free in the same call, and with `tool_detail: "full"` each tool carries its executable input contract.
+
+## Alexandria Workflow (discover free, execute paid)
+1. **Discover (free)** — `firecrawl.search` with `sources` including `"alexandria"`, `tool_detail: "full"`. Tool entries arrive with `provider`, `capability`, `description`, and (at full detail) the `options` contract, `response` shape, and `examples`.
+2. **Execute (paid)** — `firecrawl.alexandria` with the discovered `provider` + `capability` and an `options` object matching the contract exactly. Typed, sourced records come back under `data`.
+3. **Check per-result errors** — the HTTP call can succeed while the tool result failed. `invalid_option` messages list the valid option names (fix and retry once); `THIRD_PARTY_DATA_TERMS_REQUIRED` carries `requires_action_url` — surface it to the user and stop.
+4. **Watch the budget** — every result reports `credits_cost` and the running `task_credits_spent` against `task_credit_cap`. On `budget_exceeded` (or a `BUDGET_EXCEEDED` error), finish with the data already gathered.
+- Prefer free providers when they fit (e.g. `firecrawl-research-index` paper search costs 0 credits). Typical paid calls cost 2-5 credits. Fall back to `firecrawl.scrape` or plain web results when no catalogue tool fits the question.
+
 ## When To Use `firecrawl.agent`
 - Simpler firecrawl.scrape or firecrawl.extract has failed or is clearly insufficient.
 - Complex extractions that require autonomous multi-page navigation or site interaction.

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The search query. Supports operators like site:, -, filetype:, inurl:, intitle:.",
+      "minLength": 2,
+      "maxLength": 500
+    },
+    "sources": {
+      "type": "array",
+      "description": "Result sources to include. Include 'alexandria' to discover matching catalogue tools for free alongside web results.",
+      "items": {
+        "type": "string",
+        "enum": ["web", "news", "images", "alexandria"]
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "default": ["web"]
+    },
+    "categories": {
+      "type": "array",
+      "description": "Optional Firecrawl vertical categories. 'gov' cannot be combined with other categories.",
+      "items": {
+        "type": "string",
+        "enum": ["developer", "gov", "research", "pdf"]
+      },
+      "uniqueItems": true
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum results per source type. Default 8.",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 8
+    },
+    "tbs": {
+      "type": "string",
+      "description": "Optional time filter: qdr:h/d/w/m/y, a custom range like cdr:1,cd_min=MM/DD/YYYY,cd_max=MM/DD/YYYY, or sbd:1 to sort by date."
+    },
+    "include_domains": {
+      "type": "array",
+      "description": "Restrict results to these hostnames. Mutually exclusive with exclude_domains.",
+      "items": { "type": "string" }
+    },
+    "exclude_domains": {
+      "type": "array",
+      "description": "Exclude results from these hostnames. Mutually exclusive with include_domains.",
+      "items": { "type": "string" }
+    },
+    "tool_detail": {
+      "type": "string",
+      "description": "Detail level for returned Alexandria tools. 'full' includes each tool's input contract (options/response/examples) so it can be executed via firecrawl.alexandria without another lookup.",
+      "enum": ["compact", "summary", "full"],
+      "default": "compact"
+    },
+    "domain_tools": {
+      "type": "boolean",
+      "description": "Also return catalogue tools whose provider matches the domains of the web results. On by default when 'alexandria' is among the sources; set false to disable."
+    }
+  },
+  "required": ["query"]
+}

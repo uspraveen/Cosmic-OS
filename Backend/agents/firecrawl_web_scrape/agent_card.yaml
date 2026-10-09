@@ -1,9 +1,12 @@
 agent_id: cosmic/firecrawl-web-scrape-agent:1.0.0
 display_name: Firecrawl Web Scrape Agent
 description: >
-  Specialist agent for high-fidelity page scraping and structured extraction through
-  Firecrawl. It handles single-page scrape requests, multi-page extraction jobs, and
-  recall of prior Firecrawl work captured in the agent's private session ledger.
+  Specialist agent for high-fidelity page scraping, structured extraction, live web
+  search, and Alexandria catalogue data through Firecrawl. It handles single-page
+  scrape requests, multi-page extraction jobs, web/news/image search with Alexandria
+  tool discovery, execution of Alexandria provider tools (typed records from official
+  data sources), and recall of prior Firecrawl work captured in the agent's private
+  session ledger.
 
 intents:
   - name: firecrawl.scrape
@@ -45,6 +48,30 @@ intents:
     output_schema: schemas/intents/firecrawl.recall_session.output.json
     timeout_sec: 30
 
+  - name: firecrawl.search
+    description: Search the live web (web/news/images) and, by adding the 'alexandria' source, discover matching Alexandria catalogue tools for free in the same call. Alexandria is Firecrawl's knowledge library of 100+ official data providers plus research, developer, and government indexes; discovered tools carry provider/capability ids that firecrawl.alexandria executes. tool_detail:'full' returns each tool's input contract (options/response/examples) so the call can be built without another lookup.
+    input_schema: schemas/intents/firecrawl.search.input.json
+    output_schema: schemas/intents/firecrawl.search.output.json
+    timeout_sec: 90
+    usage_hints:
+      - Use this when the orchestrator needs search results (not just one known URL) — plain link discovery, news recency, image lookup, or vertical searches via categories (developer/research/gov/pdf; gov cannot combine with others).
+      - Discovery of Alexandria tools is always free and never counted in credits_used. Add sources:['alexandria'] whenever the goal touches an official data source (SEC filings, research papers, laws and regulations, package or product documentation) — a matching provider tool usually beats scraping HTML.
+      - Call with tool_detail:'full' before executing anything: the tool entry then includes its options contract, so firecrawl.alexandria can be called correctly the first time.
+      - tbs accepts qdr:h/d/w/m/y for recency windows, custom cdr:1,cd_min=...,cd_max=... ranges, and sbd:1 for sort-by-date.
+      - include_domains and exclude_domains are mutually exclusive.
+
+  - name: firecrawl.alexandria
+    description: Execute an Alexandria catalogue tool discovered via firecrawl.search — pass its provider and capability ids plus an options object matching the tool's contract, and get typed, sourced records back (exact figures, timestamps, provenance) instead of scraped HTML. Execution is paid at the tool's listed price and counted against a per-task credit cap; each result reports its cost and the running task spend.
+    input_schema: schemas/intents/firecrawl.alexandria.input.json
+    output_schema: schemas/intents/firecrawl.alexandria.output.json
+    timeout_sec: 120
+    usage_hints:
+      - Contract-first workflow — discover with firecrawl.search (sources:['alexandria'], tool_detail:'full'), then send exactly the options the contract declares. An invalid_option per-result error lists the valid option names, so one self-correcting retry is expected; guessing a second time is not.
+      - Check the per-result provider_error and success flag on every call — the HTTP call can succeed while the tool result failed.
+      - requires_action_url on a THIRD_PARTY_DATA_TERMS_REQUIRED provider_error means the user must accept that provider's data terms; surface the URL to the user and stop retrying. The call cannot authorize acceptance itself.
+      - When the result reports budget_exceeded (or a BUDGET_EXCEEDED error), the task's Alexandria credit cap is spent — finish with the data already gathered instead of more tool calls.
+      - Prefer providers whose records answer the question directly (e.g. firecrawl-research-index paper search is free); fall back to firecrawl.scrape or firecrawl.search web results when no catalogue tool fits.
+
 artifact_types:
   - web_page
   - structured_extract
@@ -64,6 +91,8 @@ policies:
     firecrawl.extract: [cosmic/orchestrator:1.0.0]
     firecrawl.agent: [cosmic/orchestrator:1.0.0]
     firecrawl.recall_session: [cosmic/orchestrator:1.0.0]
+    firecrawl.search: [cosmic/orchestrator:1.0.0]
+    firecrawl.alexandria: [cosmic/orchestrator:1.0.0]
 
 sla:
   max_concurrency: 2
@@ -85,6 +114,7 @@ sla:
       - AUTH_ERROR
       - SCHEMA_VIOLATION
       - INTERNAL_ERROR
+      - BUDGET_EXCEEDED
 
 stream_key: streams:cosmic/firecrawl-web-scrape-agent:1.0.0
 

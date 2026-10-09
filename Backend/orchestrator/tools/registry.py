@@ -306,6 +306,19 @@ def _firecrawl_recall_progress(tool_input: dict[str, Any]) -> str:
     return f"Reviewing prior Firecrawl runs for {session_id}..." if session_id else "Reviewing prior Firecrawl runs..."
 
 
+def _firecrawl_search_progress(tool_input: dict[str, Any]) -> str:
+    query = str(tool_input.get("query") or "").strip()
+    return f"Searching via Firecrawl: {query}" if query else "Searching via Firecrawl..."
+
+
+def _firecrawl_alexandria_progress(tool_input: dict[str, Any]) -> str:
+    provider = str(tool_input.get("provider") or "").strip()
+    capability = str(tool_input.get("capability") or "").strip()
+    if provider and capability:
+        return f"Querying Alexandria: {provider}/{capability}"
+    return "Querying an Alexandria data provider..."
+
+
 def _x_search_progress(tool_input: dict[str, Any]) -> str:
     query = str(tool_input.get("query") or "").strip()
     return f"Searching X for: {query}" if query else "Searching X..."
@@ -2525,6 +2538,145 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
         progress_builder=_firecrawl_recall_progress,
         handler_method="_firecrawl_recall_session",
         read_only=True,
+        exposed_to_model=False,
+        specialist_agent_id=_FIRECRAWL_AGENT_ID,
+    ),
+    ToolSpec(
+        name="firecrawl_search",
+        api_definition={
+            "name": "firecrawl_search",
+            "description": (
+                "Use the Firecrawl specialist agent to search the live web (web, news, or image results) with clean, "
+                "deduplicated results, and — by including 'alexandria' in sources — to discover matching Alexandria "
+                "catalogue tools for free in the same call. Alexandria is Firecrawl's knowledge library of 100+ official "
+                "data providers plus research (scientific papers), developer (docs/READMEs/issues/merged PRs), and "
+                "government (laws, regulations) indexes. When a question touches an official source — SEC filings, "
+                "research papers, laws, package or product documentation — include sources:['alexandria'] and "
+                "tool_detail:'full' so each discovered tool arrives with its executable input contract "
+                "(options/response/examples), then run the best one through firecrawl_alexandria. Tool discovery is "
+                "always free; only web/news/image results and tool execution consume credits. Categories developer/"
+                "research/gov/pdf narrow vertical searches (gov cannot combine with others); tbs filters recency."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query. Supports operators like site:, -, filetype:, inurl:, intitle:.",
+                    },
+                    "sources": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["web", "news", "images", "alexandria"]},
+                        "description": (
+                            "Result sources. Include 'alexandria' to list matching catalogue tools for free alongside "
+                            "web results. Default ['web']."
+                        ),
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["developer", "gov", "research", "pdf"]},
+                        "description": "Optional vertical categories; 'gov' cannot combine with other categories.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results per source type. Default 8, max 100.",
+                    },
+                    "tbs": {
+                        "type": "string",
+                        "description": (
+                            "Recency filter: qdr:h/d/w/m/y, a custom range like "
+                            "cdr:1,cd_min=MM/DD/YYYY,cd_max=MM/DD/YYYY, or sbd:1 to sort by date."
+                        ),
+                    },
+                    "include_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Restrict results to these hostnames (mutually exclusive with exclude_domains).",
+                    },
+                    "exclude_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exclude these hostnames (mutually exclusive with include_domains).",
+                    },
+                    "tool_detail": {
+                        "type": "string",
+                        "enum": ["compact", "summary", "full"],
+                        "description": (
+                            "Detail level for returned Alexandria tools. 'full' includes each tool's input contract "
+                            "(options/response/examples) so firecrawl_alexandria can be called correctly on the first try."
+                        ),
+                    },
+                    "domain_tools": {
+                        "type": "boolean",
+                        "description": (
+                            "Also return catalogue tools whose provider matches the domains of the web results. "
+                            "Defaults on when 'alexandria' is among the sources."
+                        ),
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        group="research",
+        prompt_summary=(
+            "Live web/news/image search via the Firecrawl specialist, plus free discovery of Alexandria catalogue "
+            "tools (sources:['alexandria'], tool_detail:'full' for executable contracts). Prefer it over web_search "
+            "when you need cleaner structured results, vertical categories, or an official-data provider tool."
+        ),
+        progress_builder=_firecrawl_search_progress,
+        handler_method="_firecrawl_search",
+        read_only=True,
+        exposed_to_model=False,
+        specialist_agent_id=_FIRECRAWL_AGENT_ID,
+    ),
+    ToolSpec(
+        name="firecrawl_alexandria",
+        api_definition={
+            "name": "firecrawl_alexandria",
+            "description": (
+                "Execute an Alexandria catalogue tool and get typed, sourced records back (exact figures, timestamps, "
+                "provenance) instead of scraped HTML — e.g. SEC filings, scientific papers from the research index, "
+                "developer docs/issues/merged PRs, government laws and regulations. Workflow: discover the tool with "
+                "firecrawl_search (sources:['alexandria'], tool_detail:'full'), then pass its provider and capability "
+                "ids here with an options object matching the contract exactly. Every result must be checked for a "
+                "per-result provider_error even though the call itself succeeds: an invalid_option error lists the "
+                "valid option names (fix the options and retry once); THIRD_PARTY_DATA_TERMS_REQUIRED means the user "
+                "must accept that provider's data terms at the returned requires_action_url — surface the URL and stop "
+                "retrying. Execution is paid at the tool's listed price (Firecrawl's own research index is free; "
+                "third-party tools typically cost 2-5 credits) and counted against a per-task credit cap: the result "
+                "reports credits_cost and running task spend, and on budget_exceeded (or a BUDGET_EXCEEDED error) "
+                "finish with the data already gathered instead of making more catalogue calls."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "description": "Alexandria provider id from discovery, e.g. 'sec-gov' or 'firecrawl-research-index'.",
+                    },
+                    "capability": {
+                        "type": "string",
+                        "description": "Provider capability id from discovery, e.g. 'filings/company'.",
+                    },
+                    "options": {
+                        "type": "object",
+                        "description": (
+                            "Input object matching the tool contract from discovery (tool_detail 'full' includes it). "
+                            "Do not guess option names."
+                        ),
+                    },
+                },
+                "required": ["provider", "capability"],
+            },
+        },
+        group="research",
+        prompt_summary=(
+            "Run an Alexandria catalogue tool (provider + capability + contract options from firecrawl_search "
+            "discovery) for typed, sourced records from official providers. Contract-first: never guess options; "
+            "honor per-result errors and the per-task credit cap reported in the result."
+        ),
+        progress_builder=_firecrawl_alexandria_progress,
+        handler_method="_firecrawl_alexandria",
         exposed_to_model=False,
         specialist_agent_id=_FIRECRAWL_AGENT_ID,
     ),

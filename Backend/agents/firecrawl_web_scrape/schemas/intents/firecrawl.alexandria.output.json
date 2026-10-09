@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "response": { "type": "string" },
+    "message": { "type": "string" },
+    "provider": { "type": "string" },
+    "capability": { "type": "string" },
+    "success": {
+      "type": "boolean",
+      "description": "False when the tool result carries a per-result provider error even though the HTTP call succeeded."
+    },
+    "provider_error": {
+      "type": ["object", "null"],
+      "description": "Per-result error from the Alexandria entry, e.g. invalid_option (its message lists the valid options) or THIRD_PARTY_DATA_TERMS_REQUIRED."
+    },
+    "requires_action_url": {
+      "type": ["string", "null"],
+      "description": "Present on THIRD_PARTY_DATA_TERMS_REQUIRED: the URL the user must visit to accept the provider's data terms."
+    },
+    "records_count": { "type": "integer" },
+    "data": {
+      "description": "The provider's typed records inline, or a json_excerpt when the payload exceeded the inline budget (see data_full_artifact)."
+    },
+    "data_truncated": { "type": "boolean" },
+    "data_full_artifact": { "type": ["string", "null"] },
+    "credits_cost": { "type": "integer" },
+    "task_credits_spent": { "type": "integer" },
+    "task_credit_cap": { "type": ["integer", "null"] },
+    "budget_exceeded": { "type": "boolean" },
+    "alexandria_id": { "type": ["string", "null"] },
+    "provider_request_id": { "type": ["string", "null"] },
+    "upstream_status": { "type": ["integer", "null"] },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifact_id": { "type": "string" },
+          "path": { "type": "string" },
+          "mime": { "type": "string" },
+          "filename": { "type": "string" },
+          "audience": { "type": "string" }
+        },
+        "required": ["artifact_id", "mime"]
+      }
+    }
+  },
+  "required": [
+    "response",
+    "message",
+    "provider",
+    "capability",
+    "success",
+    "records_count",
+    "data",
+    "credits_cost",
+    "task_credits_spent",
+    "budget_exceeded"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "provider": {
+      "type": "string",
+      "description": "Alexandria provider id from discovery, e.g. 'sec-gov' or 'firecrawl-research-index'."
+    },
+    "capability": {
+      "type": "string",
+      "description": "Provider capability id from discovery, e.g. 'filings/company'."
+    },
+    "options": {
+      "type": "object",
+      "description": "Input object matching the tool contract returned by discovery (tool_detail 'full' includes it). Wrong option names come back as a per-result invalid_option error listing the valid ones."
+    }
+  },
+  "required": ["provider", "capability"]
+}

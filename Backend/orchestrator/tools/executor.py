@@ -2277,6 +2277,57 @@ class ToolExecutor:
             wait_timeout_sec=35.0,
         )
 
+    async def _firecrawl_search(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "query": str(tool_input.get("query") or "").strip(),
+        }
+        for key in (
+            "sources",
+            "categories",
+            "limit",
+            "tbs",
+            "include_domains",
+            "exclude_domains",
+            "tool_detail",
+            "domain_tools",
+        ):
+            value = tool_input.get(key)
+            if value not in (None, "", [], {}):
+                payload[key] = value
+        return await self._dispatch_specialist_agent(
+            intent="firecrawl.search",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/firecrawl-web-scrape-agent:1.0.0",
+            wait_timeout_sec=95.0,
+        )
+
+    async def _firecrawl_alexandria(
+        self,
+        tool_input: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "provider": str(tool_input.get("provider") or "").strip(),
+            "capability": str(tool_input.get("capability") or "").strip(),
+        }
+        options = tool_input.get("options")
+        if isinstance(options, dict) and options:
+            payload["options"] = options
+        return await self._dispatch_specialist_agent(
+            intent="firecrawl.alexandria",
+            payload=payload,
+            context=context,
+            agent_id="cosmic/firecrawl-web-scrape-agent:1.0.0",
+            wait_timeout_sec=125.0,
+        )
+
     async def _x_search(
         self,
         tool_input: dict[str, Any],
