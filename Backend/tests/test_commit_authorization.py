@@ -249,3 +249,133 @@ def test_commit_miss_labels_are_appended_for_harvesting(tmp_path):
     assert first["label"] == "File return"
     assert first["task_id"] == "t1"
     assert "at" in first
+
+
+# --- correctness and the visual check (2026-10-08 Partiful run) -------------
+
+EMAIL_IN_NAME = {
+    "target": "Continue",
+    "url": "https://partiful.com/e/x?rsvp=true",
+    "irreversible": False,
+    "control": {"name": "Continue", "matched": [], "is_submit_control": True},
+    "fields": [{"label": "Your Name", "value": "uspraveenraj@gmail.com"}],
+    "empty_field_count": 1,
+}
+
+
+def _model_and_decider(content: str, *, ready: float | None, model_calls: list, decider_calls: list):
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("/chat/completions"):
+            model_calls.append(request)
+            return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        if url.endswith("/v1/decisions"):
+            decider_calls.append(json.loads(request.content))
+            if ready is None:
+                return httpx.Response(503, text="busy")
+            return httpx.Response(200, json={"answers": {"ready": {"type": "noul", "noul": ready}}})
+        return httpx.Response(204)
+
+    return httpx.MockTransport(handler)
+
+
+def test_prompt_asks_for_correctness_and_shows_the_empty_count(tmp_path):
+    model_calls: list = []
+    runtime = _runtime(tmp_path, _model_and_decider('{"decision":"confirm","reason":"x"}', ready=None,
+                                                    model_calls=model_calls, decider_calls=[]))
+    _seed_tasks(runtime, query="Maybe you apply that for me")
+    asyncio.run(runtime.authorize_browser_commit(
+        session_id="sess_1", task_id="tsk_browser_1", question="Confirm: Continue", commit=EMAIL_IN_NAME,
+    ))
+    prompt = model_calls[0].content.decode("utf-8")
+    assert "Correctness" in prompt and "EMPTY FIELDS IN THIS FORM: 1" in prompt
+    assert "Your Name: uspraveenraj@gmail.com" in prompt
+
+
+def test_fix_verdict_goes_back_with_its_reason(tmp_path):
+    runtime = _runtime(tmp_path, _model_and_decider(
+        '{"decision":"fix","reason":"Your Name holds an email address; put the name there."}',
+        ready=0.9, model_calls=[], decider_calls=[]))
+    _seed_tasks(runtime, query="Maybe you apply that for me")
+    decision = asyncio.run(runtime.authorize_browser_commit(
+        session_id="sess_1", task_id="tsk_browser_1", question="Confirm: Continue", commit=EMAIL_IN_NAME,
+    ))
+    assert decision["status"] == "fix"
+    assert "email address" in decision["reason"]
+
+
+def test_a_fix_with_nothing_to_fix_is_a_confirm(tmp_path):
+    runtime = _runtime(tmp_path, _model_and_decider('{"decision":"fix","reason":""}', ready=0.9,
+                                                    model_calls=[], decider_calls=[]))
+    _seed_tasks(runtime)
+    decision = asyncio.run(runtime.authorize_browser_commit(
+        session_id="sess_1", task_id="tsk_browser_1", question="Confirm", commit=ADDRESS_REQUEST,
+    ))
+    assert decision["status"] == "confirm"
+
+
+def test_visual_check_can_hold_a_model_authorization(tmp_path):
+    decider_calls: list = []
+    runtime = _runtime(
+        tmp_path,
+        _model_and_decider('{"decision":"authorize","reason":"user asked"}', ready=0.1,
+                           model_calls=[], decider_calls=decider_calls),
+        perplexity_api_key="pplx-test",
+    )
+    _seed_tasks(runtime)
+    decision = asyncio.run(runtime.authorize_browser_commit(
+        session_id="sess_1", task_id="tsk_browser_1", question="Confirm: Submit application",
+        commit=ADDRESS_REQUEST, screenshot_b64="/9j/" + "A" * 200,
+    ))
+    assert decision["status"] == "confirm"
+    assert decision["source"] == "visual_check"
+    state = decider_calls[0]["state"]
+    assert state[-1]["image_url"]["url"].startswith("data:image/jpeg;base64,/9j/")
+
+
+def test_visual_check_passing_keeps_the_authorization(tmp_path):
+    runtime = _runtime(
+        tmp_path,
+        _model_and_decider('{"decision":"authorize","reason":"user asked"}', ready=0.93,
+                           model_calls=[], decider_calls=[]),
+        perplexity_api_key="pplx-test",
+    )
+    _seed_tasks(runtime)
+    decision = asyncio.run(runtime.authorize_browser_commit(
+        session_id="sess_1", task_id="tsk_browser_1", question="Confirm", commit=ADDRESS_REQUEST,
+        screenshot_b64="/9j/" + "A" * 200,
+    ))
+    assert decision["status"] == "authorize"
+
+
+def test_visual_check_unavailable_never_blocks_on_its_own(tmp_path):
+    decider_calls: list = []
+    runtime = _runtime(
+        tmp_path,
+        _model_and_decider('{"decision":"authorize","reason":"user asked"}', ready=None,
+                           model_calls=[], decider_calls=decider_calls),
+        perplexity_api_key="pplx-test",
+    )
+    _seed_tasks(runtime)
+    decision = asyncio.run(runtime.authorize_browser_commit(
+        session_id="sess_1", task_id="tsk_browser_1", question="Confirm", commit=ADDRESS_REQUEST,
+        screenshot_b64="/9j/" + "A" * 200,
+    ))
+    assert decision["status"] == "authorize"
+    assert len(decider_calls) == 1
+
+
+def test_no_screenshot_skips_the_visual_check(tmp_path):
+    decider_calls: list = []
+    runtime = _runtime(
+        tmp_path,
+        _model_and_decider('{"decision":"authorize","reason":"user asked"}', ready=0.0,
+                           model_calls=[], decider_calls=decider_calls),
+        perplexity_api_key="pplx-test",
+    )
+    _seed_tasks(runtime)
+    decision = asyncio.run(runtime.authorize_browser_commit(
+        session_id="sess_1", task_id="tsk_browser_1", question="Confirm", commit=ADDRESS_REQUEST,
+    ))
+    assert decision["status"] == "authorize"
+    assert decider_calls == []

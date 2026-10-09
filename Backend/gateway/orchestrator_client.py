@@ -185,12 +185,13 @@ class OrchestratorClient:
         commit: dict[str, Any] | None,
         page_url: str | None = None,
         timeout_sec: float | None = None,
+        screenshot_b64: str | None = None,
     ) -> dict[str, Any]:
         """Ask the orchestrator whether a browser commit may proceed.
 
-        Returns {"status": "authorize"|"confirm"|"deny", ...}; anything else
-        (error, timeout) is the caller's cue to fall through to the user's
-        confirmation card.
+        Returns {"status": "authorize"|"fix"|"confirm"|"deny", ...}; anything
+        else (error, timeout) is the caller's cue to fall through to the
+        user's confirmation card.
         """
         headers = {
             "Content-Type": "application/json",
@@ -205,6 +206,7 @@ class OrchestratorClient:
                 "question": str(question or ""),
                 "commit": commit if isinstance(commit, dict) else {},
                 "page_url": page_url,
+                **({"screenshot_b64": screenshot_b64} if screenshot_b64 else {}),
             },
             timeout=timeout_sec if timeout_sec is not None else self._request_timeout,
         )

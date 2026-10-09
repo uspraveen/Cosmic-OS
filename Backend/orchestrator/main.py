@@ -62,6 +62,9 @@ class BrowserCommitAuthorizeRequest(BaseModel):
     question: str = Field(default="", max_length=4000)
     commit: dict = Field(default_factory=dict)
     page_url: str | None = Field(default=None, max_length=2048)
+    # JPEG of the page about to be committed, for the visual check. Base64,
+    # bounded; never stored and never forwarded to any client.
+    screenshot_b64: str | None = Field(default=None, max_length=4_000_000)
 
 
 class BrowserCommitGrantRequest(BaseModel):
@@ -205,7 +208,9 @@ async def authorize_browser_commit(
     """Can this browser commit proceed without asking the user?
 
     Default confirm; authorize only when the user's own instruction explicitly
-    asked for it or a task-scoped grant already exists.
+    asked for it (and the values about to be sent pass a check) or a
+    task-scoped grant already exists. May also answer "fix": the values are
+    wrong and go back to the specialist instead of to the user.
     """
     decision = await runtime.authorize_browser_commit(
         session_id=body.session_id,
@@ -213,6 +218,7 @@ async def authorize_browser_commit(
         question=body.question,
         commit=body.commit,
         page_url=body.page_url,
+        screenshot_b64=body.screenshot_b64,
     )
     return {"ok": True, **decision}
 

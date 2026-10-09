@@ -795,7 +795,10 @@ export class GatewayConnectionManager {
     const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : undefined
     const hasMetadataArtifacts = Array.isArray(metadata?.produced_artifacts) && metadata.produced_artifacts.length > 0
     const hasMetadataBlocks = Array.isArray(metadata?.response_blocks) && metadata.response_blocks.length > 0
-    if (!content.trim() && !(role === 'assistant' && (hasMetadataArtifacts || hasMetadataBlocks))) {
+    // A live card (browser run, deck build, sheet) is content in its own right:
+    // a turn stopped before any prose still showed the user a run.
+    const hasMetadataCard = Boolean(metadata?.browser_progress || metadata?.slide_progress || metadata?.sheets_progress)
+    if (!content.trim() && !(role === 'assistant' && (hasMetadataArtifacts || hasMetadataBlocks || hasMetadataCard))) {
       return
     }
 
@@ -939,6 +942,51 @@ export class GatewayConnectionManager {
         channel: typeof payload.channel === 'string' ? payload.channel : null,
         created_at: new Date().toISOString(),
         metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+      })
+      return
+    }
+
+    if (eventType === 'task.cancelled') {
+      // A stopped turn is about to lose its foreground stream entry — the only
+      // place this process holds its cards. Mirror what it had into history
+      // (as the gateway now stores it) so a renderer rebuild from this mirror
+      // still draws the browser/slide/sheet cards and the inline progress.
+      const snapshot = this.getForegroundStreamSnapshot(payload)
+      if (!snapshot) {
+        return
+      }
+      const content = String(snapshot.content || '')
+      const hasCard = Boolean(snapshot.browser_progress || snapshot.slide_progress || snapshot.sheets_progress)
+      if (!content.trim() && !hasCard) {
+        return
+      }
+      const requestId = String(snapshot.request_id || payload.request_id || '').trim()
+      const metadata: Record<string, unknown> = { interrupted: true }
+      if (requestId) metadata.request_id = requestId
+      if (typeof snapshot.thinking_text === 'string' && snapshot.thinking_text.trim()) {
+        metadata.thinking_text = snapshot.thinking_text
+      }
+      if (Array.isArray(snapshot.response_blocks) && snapshot.response_blocks.length > 0) {
+        metadata.response_blocks = snapshot.response_blocks
+      }
+      if (Array.isArray(snapshot.activity_log) && snapshot.activity_log.length > 0) {
+        metadata.activity_log = snapshot.activity_log
+      }
+      if (Array.isArray(snapshot.alpha_terminal_log) && snapshot.alpha_terminal_log.length > 0) {
+        metadata.alpha_terminal_log = snapshot.alpha_terminal_log
+      }
+      if (snapshot.browser_progress) metadata.browser_progress = snapshot.browser_progress
+      if (snapshot.slide_progress) metadata.slide_progress = snapshot.slide_progress
+      if (snapshot.sheets_progress) metadata.sheets_progress = snapshot.sheets_progress
+      this.upsertHistoryMessage({
+        message_id: snapshot.message_id || (requestId ? `pending_assistant_${requestId}` : `pending_assistant_${crypto.randomUUID()}`),
+        role: 'assistant',
+        content,
+        route: typeof snapshot.route === 'string' ? snapshot.route : undefined,
+        request_id: requestId || undefined,
+        channel: typeof snapshot.channel === 'string' ? snapshot.channel : null,
+        created_at: new Date().toISOString(),
+        metadata,
       })
       return
     }

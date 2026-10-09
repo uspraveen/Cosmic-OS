@@ -13401,6 +13401,11 @@ class GatewayRuntime:
                 renderable_payload = any(
                     isinstance(metadata.get(key), list) and bool(metadata.get(key))
                     for key in ("produced_artifacts", "response_blocks")
+                ) or any(
+                    # A live card is renderable on its own: a turn stopped
+                    # before any prose still showed the user a run.
+                    isinstance(metadata.get(key), dict) and bool(metadata.get(key))
+                    for key in ("browser_progress", "slide_progress", "sheets_progress")
                 )
             if not renderable_payload:
                 return None
@@ -26959,7 +26964,8 @@ class GatewayRuntime:
                 channel=state.channel,
             )
         finally:
-            if state.cancel_requested and state.partial_content and not state.completed:
+            stopped_cards = self._stopped_turn_card_metadata(state)
+            if state.cancel_requested and (state.partial_content or stopped_cards) and not state.completed:
                 interrupted_metadata: dict[str, Any] = {
                     "request_id": state.request_id,
                     "thinking_text": state.partial_thinking or None,
@@ -26973,6 +26979,11 @@ class GatewayRuntime:
                     interrupted_metadata["response_blocks"] = list(
                         state.response_blocks_snapshot
                     )
+                # The cards and inline progress the user was watching when
+                # they pressed Stop. Without these the stored copy of a stopped
+                # turn was prose only, and any rebuild from history (reopen,
+                # restart, another device) dropped the browser card.
+                interrupted_metadata.update(stopped_cards)
                 if self._should_park_in_background_inbox(state):
                     interrupted_metadata["background"] = True
                 self._append_session_message(
@@ -26988,6 +26999,48 @@ class GatewayRuntime:
                 if not self._persist_failed_foreground_response(state):
                     self._cache_recent_foreground_terminal_stream(state)
             self._finalize_active_request(state)
+
+    def _stopped_turn_card_metadata(self, state: ActiveRequest) -> dict[str, Any]:
+        """Card + progress metadata for a turn the user stopped.
+
+        A browser card still reading "running" is stored as cancelled: the
+        Stop cascades into the run (the specialist's own terminal reading
+        lands after this request is gone), and a stored "running" card would
+        tick forever on every reopen.
+        """
+        cards: dict[str, Any] = {}
+        try:
+            if isinstance(state.browser_progress, dict) and state.browser_progress:
+                browser_progress = dict(state.browser_progress)
+                if str(browser_progress.get("phase") or "running") == "running":
+                    browser_progress["phase"] = "cancelled"
+                    browser_progress["status"] = "cancelled"
+                browser_progress.pop("interrupt", None)
+                browser_progress.pop("takeover", None)
+                cards["browser_progress"] = browser_progress
+            if isinstance(state.slide_progress, dict) and state.slide_progress:
+                cards["slide_progress"] = state.slide_progress
+            if isinstance(state.sheets_progress, dict) and state.sheets_progress:
+                cards["sheets_progress"] = state.sheets_progress
+            if state.activity_log:
+                cards["activity_log"] = list(state.activity_log)
+            if state.alpha_terminal_log:
+                cards["alpha_terminal_log"] = list(state.alpha_terminal_log)
+            if state.alpha_console_anchors:
+                cards["alpha_console_anchors"] = self._alpha_console_anchors_payload(
+                    state.alpha_console_anchors
+                )
+            if state.browser_console_anchors:
+                cards["browser_console_anchors"] = self._alpha_console_anchors_payload(
+                    state.browser_console_anchors
+                )
+            if state.sheet_run_anchors:
+                cards["sheet_run_anchors"] = self._alpha_console_anchors_payload(
+                    state.sheet_run_anchors
+                )
+        except Exception:
+            logger.warning("gateway.stopped_turn_cards_failed request_id=%s", state.request_id, exc_info=True)
+        return cards
 
     async def _emit_cancelled_event(self, state: ActiveRequest) -> None:
         await self._deliver_or_queue_channel_event(

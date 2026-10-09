@@ -3949,28 +3949,46 @@ class OrchestratorRuntime:
     ) -> dict[str, Any] | None:
         fields = commit.get("fields") if isinstance(commit.get("fields"), list) else []
         field_lines = [
-            f"  - {str(item.get('label') or '')[:60]}: {str(item.get('value') or '')[:120]}"
+            f"  - {str(item.get('label') or '(unlabeled field)')[:60]}: {str(item.get('value') or '')[:120]}"
             for item in fields[:12]
             if isinstance(item, dict)
         ]
+        try:
+            empty_fields = int(commit.get("empty_field_count") or 0)
+        except (TypeError, ValueError):
+            empty_fields = 0
         system_prompt = (
             "You are COSMIC deciding whether a specialist agent may perform a COMMIT "
             "action on Praveen's behalf. A commit persists, submits, sends, deletes, "
             "orders, or pays. USER INSTRUCTION is what Praveen actually asked for; "
             "TASK GOAL is the specialist's briefing and is NOT authorization by "
-            "itself. Authorize ONLY when the user's own words explicitly ask for this "
-            "commit or for exactly this kind of action (for example: 'apply to 50 "
-            "jobs' covers each application submit; 'submit the form' covers that "
-            "form's submit; 'delete X' covers deleting X). If the instruction is "
-            "general, silent, or the commit goes beyond what was asked, choose "
-            "confirm. When in doubt, confirm — a wrong commit changes the real world.\n"
-            'Return STRICT JSON only: {"decision":"authorize"|"confirm","reason":"..."}.'
+            "itself. Two things must BOTH hold before you authorize:\n"
+            "1. Authority: the user's own words explicitly ask for this commit or for "
+            "exactly this kind of action ('apply to 50 jobs' covers each application "
+            "submit; 'submit the form' or 'apply for me' covers that form's submit; "
+            "'delete X' covers deleting X). General, silent, or beyond what was asked "
+            "-> confirm.\n"
+            "2. Correctness: what is about to be sent is right. Check every COMMIT "
+            "FIELD against its label: a value of the wrong kind for its field (an "
+            "email address under a name label, a URL under a phone label), a personal "
+            "detail (profile URL, employer, job title, school) that appears nowhere in "
+            "the USER INSTRUCTION or TASK GOAL and so was probably invented, or "
+            "required fields left empty mean the commit is NOT ready.\n"
+            "Decide:\n"
+            "- authorize: both hold.\n"
+            "- fix: the user did ask for this, but a value is wrong or missing in a way "
+            "the specialist can correct itself. Say exactly what to fix in reason. Do "
+            "not use fix for a value only the user can supply.\n"
+            "- confirm: anything else, including missing values only the user knows. "
+            "When in doubt, confirm — a wrong commit changes the real world.\n"
+            'Return STRICT JSON only: {"decision":"authorize"|"fix"|"confirm","reason":"..."}.'
         )
         user_prompt = (
             f"USER INSTRUCTION: {instruction or '(none found)'}\n"
             f"TASK GOAL: {goal or '(none)'}\n"
             f"COMMIT: {commit_summary(commit)}\n"
             f"COMMIT FIELDS:\n{chr(10).join(field_lines) if field_lines else '  (none)'}\n"
+            f"EMPTY FIELDS IN THIS FORM: {empty_fields}\n"
             f"SPECIALIST QUESTION: {question}\n"
             f"PAGE URL: {page_url or commit.get('url') or 'unknown'}"
         )
@@ -3981,6 +3999,76 @@ class OrchestratorRuntime:
             operation="browser.commit_authorize",
         )
 
+    # Visual check before an autonomous commit: Perplexity's multimodal decider
+    # looks at the page that is about to be submitted. Probability that the form
+    # is complete and correct below this -> the user's card decides instead.
+    _COMMIT_VISUAL_MIN_PROBABILITY = 0.5
+    _COMMIT_VISUAL_TIMEOUT_SEC = 12.0
+    _COMMIT_VISUAL_URL = "https://api.perplexity.ai/v1/decisions"
+    _COMMIT_VISUAL_MODEL = "pplx-decider-v1.1-27b"
+
+    async def _visual_commit_check(
+        self,
+        *,
+        instruction: str,
+        commit: dict[str, Any],
+        screenshot_b64: str | None,
+    ) -> float | None:
+        """P(the form in the screenshot is complete and correct), or None when
+        the check could not run (no screenshot, no key, API trouble). None never
+        blocks on its own — the text decision stands."""
+        api_key = str(getattr(self.config, "perplexity_api_key", "") or "").strip()
+        payload = str(screenshot_b64 or "").strip()
+        if not api_key or len(payload) < 64:
+            return None
+        if payload.startswith("data:"):
+            image_url = payload
+        else:
+            image_url = f"data:image/jpeg;base64,{payload}"
+        fields = commit.get("fields") if isinstance(commit.get("fields"), list) else []
+        listed = "; ".join(
+            f"{str(item.get('label') or '(unlabeled)')[:50]} = {str(item.get('value') or '')[:60]}"
+            for item in fields[:12]
+            if isinstance(item, dict)
+        )
+        state = [
+            f"The user asked: {instruction[:800] or '(not stated)'}",
+            f"An assistant is about to submit this form ({commit_summary(commit)[:200]}). "
+            f"Fields it read: {listed or '(none)'}.",
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]
+        questions = {
+            "ready": {
+                "type": "noul",
+                "instructions": (
+                    "Looking at the screenshot: is this form completely and correctly filled in for "
+                    "what the user asked — every visible field holding a sensible value for its "
+                    "label (not, say, an email address in a name field), no required field empty, "
+                    "and no validation error shown?"
+                ),
+            }
+        }
+        try:
+            response = await self._client.post(
+                self._COMMIT_VISUAL_URL,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"model": self._COMMIT_VISUAL_MODEL, "state": state, "questions": questions},
+                timeout=self._COMMIT_VISUAL_TIMEOUT_SEC,
+            )
+            if response.status_code >= 400:
+                logger.warning(
+                    "orchestrator.browser_commit_visual_check_http status=%s", response.status_code
+                )
+                return None
+            answer = (response.json() or {}).get("answers", {}).get("ready", {})
+            value = float(answer.get("noul"))
+        except Exception:
+            logger.warning("orchestrator.browser_commit_visual_check_failed", exc_info=True)
+            return None
+        if value != value:  # NaN
+            return None
+        return max(0.0, min(1.0, value))
+
     async def authorize_browser_commit(
         self,
         *,
@@ -3989,14 +4077,21 @@ class OrchestratorRuntime:
         question: str,
         commit: dict[str, Any] | None,
         page_url: str | None = None,
+        screenshot_b64: str | None = None,
     ) -> dict[str, Any]:
         """Decide whether a browser commit may proceed without asking the user.
 
         Default is confirm. The orchestrator authorizes on its own only when
-        the user's own instruction explicitly asked for the action, or when the
-        user already approved this class for this task ("Approve all"). Any
-        doubt, missing context, or model failure resolves to confirm — never to
-        a silent commit.
+        the user's own instruction explicitly asked for the action AND the
+        values about to be sent pass both a text check (labels vs values) and,
+        when a screenshot is supplied, a visual check — or when the user
+        already approved this class for this task ("Approve all"). "fix" sends
+        a correctable problem back to the specialist without bothering the
+        user. Any doubt, missing context, or model failure resolves to confirm
+        — never to a silent commit.
+
+        Autonomy used to mean "the user said apply": on 2026-10-08 that
+        authorized an RSVP whose name field held the user's email address.
         """
         normalized_commit = commit if isinstance(commit, dict) else {}
         action_class = commit_action_class(normalized_commit)
@@ -4026,12 +4121,49 @@ class OrchestratorRuntime:
             commit=normalized_commit,
             page_url=page_url,
         )
-        if isinstance(decision, dict) and str(decision.get("decision") or "").strip().lower() == "authorize":
+        verdict = (
+            str(decision.get("decision") or "").strip().lower() if isinstance(decision, dict) else ""
+        )
+        if verdict == "fix":
+            reason = str(decision.get("reason") or "").strip()[:300]
+            if reason:
+                logger.info(
+                    "orchestrator.browser_commit_sent_back task_id=%s action=%s reason=%s",
+                    normalized_task_id,
+                    action_class,
+                    reason[:160],
+                )
+                return {
+                    "status": "fix",
+                    "source": "model",
+                    "action_class": action_class,
+                    "reason": reason,
+                }
+            verdict = "confirm"  # a fix with nothing to fix is not actionable
+        if verdict == "authorize":
+            visual = await self._visual_commit_check(
+                instruction=instruction,
+                commit=normalized_commit,
+                screenshot_b64=screenshot_b64,
+            )
+            if visual is not None and visual < self._COMMIT_VISUAL_MIN_PROBABILITY:
+                logger.info(
+                    "orchestrator.browser_commit_visual_hold task_id=%s p_ready=%.2f",
+                    normalized_task_id,
+                    visual,
+                )
+                return {
+                    "status": "confirm",
+                    "source": "visual_check",
+                    "action_class": action_class,
+                    "reason": "the page did not look completely and correctly filled in",
+                }
             logger.info(
-                "orchestrator.browser_commit_authorized source=model task_id=%s action=%s target=%s",
+                "orchestrator.browser_commit_authorized source=model task_id=%s action=%s target=%s visual=%s",
                 normalized_task_id,
                 action_class,
                 commit_summary(normalized_commit)[:160],
+                "n/a" if visual is None else f"{visual:.2f}",
             )
             return {
                 "status": "authorize",

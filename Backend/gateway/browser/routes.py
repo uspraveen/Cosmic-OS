@@ -39,6 +39,19 @@ class AskUserRequest(BaseModel):
     page_url: str | None = None
     commit: dict[str, Any] | None = None
     timeout_sec: float = 240.0
+    # The agent already asked /internal/browser/commit-authorize and was told
+    # "confirm": go straight to the human card, do not authorize twice.
+    authorization_checked: bool = False
+
+
+class CommitAuthorizeRequest(BaseModel):
+    question: str
+    task_id: str | None = None
+    session_id: str | None = None
+    page_url: str | None = None
+    commit: dict[str, Any] | None = None
+    screenshot_b64: str | None = None
+    timeout_sec: float = 25.0
 
 
 class LiveFrameRequest(BaseModel):
@@ -159,10 +172,15 @@ async def internal_ask_user(body: AskUserRequest, request: Request) -> dict[str,
     timeout_sec = min(max(float(body.timeout_sec or 240.0), _MIN_WAIT_SEC), _MAX_WAIT_SEC)
     kind = str(body.kind or "generic").strip().lower()
     commit = body.commit if isinstance(body.commit, dict) else {}
+    # A screenshot is for the orchestrator's visual check only; it must never
+    # ride a card to the desktop or sit in the interrupt store.
+    commit = {key: value for key, value in commit.items() if key != "screenshot_b64"}
     # Commits (submit/apply/save/delete/pay...) are authorized first, always:
     # the orchestrator may authorize on the user's explicit instruction or
     # escalate; the default is a confirmation card showing what will happen.
-    if kind == "commit":
+    # An agent that already ran /internal/browser/commit-authorize says so,
+    # and goes straight to the card.
+    if kind == "commit" and not body.authorization_checked:
         auth_budget = min(25.0, max(5.0, timeout_sec - 15.0))
         try:
             decision = await runtime.orchestrator.authorize_browser_commit(
@@ -259,6 +277,55 @@ async def internal_ask_user(body: AskUserRequest, request: Request) -> dict[str,
     return result
 
 
+@router.post("/internal/browser/commit-authorize")
+async def internal_commit_authorize(body: CommitAuthorizeRequest, request: Request) -> dict[str, Any]:
+    """The orchestrator's verdict on a browser commit, with no card involved.
+
+    The agent asks this BEFORE drawing any confirmation card. The old flow drew
+    the card first and then waited ~13s on the orchestrator's model call; when
+    it authorized, the card vanished on its own and the commit fired, which
+    read as "the card disappeared and it went ahead" (2026-10-08). Now a card
+    appears only when a human is actually needed ("confirm").
+
+    Returns {"status": "authorize"|"fix"|"confirm", "reason", "source"}. Any
+    failure is "confirm" — never a silent commit.
+    """
+    _check_internal_token(request)
+    runtime = request.app.state.gateway_runtime
+    commit = body.commit if isinstance(body.commit, dict) else {}
+    budget = min(max(float(body.timeout_sec or 25.0), 5.0), 40.0)
+    try:
+        decision = await runtime.orchestrator.authorize_browser_commit(
+            session_id=body.session_id,
+            task_id=body.task_id,
+            question=str(body.question or "").strip(),
+            commit=commit,
+            page_url=body.page_url,
+            timeout_sec=budget,
+            screenshot_b64=str(body.screenshot_b64 or "") or None,
+        )
+    except Exception:
+        logger.warning("browser.commit_authorize_failed", exc_info=True)
+        decision = None
+    if not isinstance(decision, dict):
+        return {"status": "confirm", "source": "authorizer_unavailable", "reason": ""}
+    status = str(decision.get("status") or "").strip().lower()
+    if status not in {"authorize", "fix", "confirm"}:
+        status = "confirm"
+    logger.info(
+        "browser.commit_authorize task_id=%s status=%s source=%s",
+        body.task_id,
+        status,
+        decision.get("source"),
+    )
+    return {
+        "status": status,
+        "source": str(decision.get("source") or "orchestrator"),
+        "reason": str(decision.get("reason") or "")[:300],
+        "action_class": str(decision.get("action_class") or ""),
+    }
+
+
 @router.post("/internal/browser/live-frame")
 async def internal_live_frame(body: LiveFrameRequest, request: Request) -> dict[str, Any]:
     """Fire-and-forget: one CDP screencast frame from an active browser.run.
@@ -294,7 +361,10 @@ async def pause_run(task_id: str, request: Request) -> dict[str, Any]:
     )
     if not delivered:
         raise HTTPException(status_code=404, detail="No live browser run for that task.")
-    return {"status": "pausing", "task_id": task_id}
+    # A run blocked on a card can never reach the step boundary where it
+    # parks; taking control answers the card (see release_for_takeover).
+    released = runtime.browser_interrupts.release_for_takeover(str(task_id or "").strip())
+    return {"status": "pausing", "task_id": task_id, "released_interrupts": len(released)}
 
 
 @router.post("/channels/browser/runs/{task_id}/resume")

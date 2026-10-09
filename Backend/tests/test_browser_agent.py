@@ -336,18 +336,25 @@ def test_ask_user_bridge_logs_skip_and_timeout(browser_agent):
 
 
 class _FakeCommitClient:
-    """Routes by URL: ask-user responses are scripted, commit-miss posts are
-    recorded."""
+    """Routes by URL: the orchestrator's pre-card verdicts and ask-user
+    responses are scripted, commit-miss posts are recorded. With no scripted
+    verdict the orchestrator says "confirm" — the human card decides."""
 
-    def __init__(self, frames):
+    def __init__(self, frames, verdicts=None):
         self._frames = list(frames)
+        self._verdicts = list(verdicts or [])
         self.ask_requests: list[dict] = []
         self.miss_requests: list[dict] = []
+        self.authorize_requests: list[dict] = []
 
     async def post(self, url: str, *, json: dict, headers: dict, timeout: float):
         if str(url).endswith("/internal/browser/commit-miss"):
             self.miss_requests.append(json)
             return _FakeAskUserResponse({"status": "recorded"})
+        if str(url).endswith("/internal/browser/commit-authorize"):
+            self.authorize_requests.append(json)
+            verdict = self._verdicts.pop(0) if self._verdicts else {"status": "confirm"}
+            return _FakeAskUserResponse(verdict)
         self.ask_requests.append(json)
         payload = self._frames.pop(0) if self._frames else {"status": "timeout"}
         return _FakeAskUserResponse(payload)
@@ -446,6 +453,98 @@ def test_model_declared_miss_is_harvested(browser_agent):
     assert client.miss_requests[0]["label"] == "File return"
     assert client.miss_requests[0]["action_class"] == "submit"
     assert any(entry.get("classifier_miss") for entry in log)
+
+
+def test_orchestrator_authorization_needs_no_card(browser_agent):
+    """Authorized up front: the commit proceeds and no card is ever drawn —
+    the card used to appear first and then vanish when this verdict landed."""
+    client = _FakeCommitClient([], verdicts=[{"status": "authorize", "reason": "you asked me to apply"}])
+    browser_agent._http_client = client
+    live_state: dict = {}
+    log: list = []
+    payload = {**_COMMIT_PAYLOAD, "screenshot_b64": "SCREENSHOT"}
+
+    decision = __import__("asyncio").run(
+        browser_agent._commit_gate_bridge(_task({"goal": "g"}), payload, live_state, log, _gate_state())
+    )
+    assert decision["allowed"] is True
+    assert client.ask_requests == []
+    assert "interrupt" not in live_state
+    assert client.authorize_requests[0]["screenshot_b64"] == "SCREENSHOT"
+    assert log[-1]["status"] == "allowed"
+
+
+def test_fix_verdict_goes_back_to_the_engine_not_the_user(browser_agent):
+    client = _FakeCommitClient([], verdicts=[{"status": "fix", "reason": "'Your Name' holds an email address."}])
+    browser_agent._http_client = client
+    log: list = []
+
+    decision = __import__("asyncio").run(
+        browser_agent._commit_gate_bridge(_task({"goal": "g"}), _COMMIT_PAYLOAD, {}, log, _gate_state())
+    )
+    assert decision["allowed"] is False
+    assert decision["retry_after_fix"] is True
+    assert "Your Name" in decision["reason"]
+    assert client.ask_requests == []
+    assert log[-1]["status"] == "sent_back"
+
+
+def test_repeated_fix_verdicts_hand_over_to_the_user(browser_agent):
+    """Authorizer and specialist disagreeing must never loop a run."""
+    verdicts = [{"status": "fix", "reason": "wrong"}] * 3
+    client = _FakeCommitClient([{"status": "answered", "answer": "approve"}], verdicts=verdicts)
+    browser_agent._http_client = client
+    state = _gate_state()
+    for _ in range(2):
+        held = __import__("asyncio").run(
+            browser_agent._commit_gate_bridge(_task({"goal": "g"}), _COMMIT_PAYLOAD, {}, [], state)
+        )
+        assert held.get("retry_after_fix") is True
+    third = __import__("asyncio").run(
+        browser_agent._commit_gate_bridge(_task({"goal": "g"}), _COMMIT_PAYLOAD, {}, [], state)
+    )
+    assert third["allowed"] is True
+    assert len(client.ask_requests) == 1
+
+
+def test_confirm_draws_the_card_without_the_screenshot(browser_agent):
+    client = _FakeCommitClient([{"status": "answered", "answer": "approve"}])
+    browser_agent._http_client = client
+    seen_interrupts: list = []
+    original = browser_agent._emit_progress
+
+    async def capture(task_id, message, **payload):
+        progress = payload.get("browser_progress") or {}
+        if progress.get("interrupt"):
+            seen_interrupts.append(progress["interrupt"])
+        return await original(task_id, message, **payload)
+
+    browser_agent._emit_progress = capture
+    payload = {**_COMMIT_PAYLOAD, "screenshot_b64": "SCREENSHOT"}
+    decision = __import__("asyncio").run(
+        browser_agent._commit_gate_bridge(_task({"goal": "g"}), payload, {}, [], _gate_state())
+    )
+    assert decision["allowed"] is True
+    ask = client.ask_requests[0]
+    assert ask["authorization_checked"] is True
+    assert "screenshot_b64" not in ask["commit"]
+    assert seen_interrupts and "screenshot_b64" not in seen_interrupts[0]["commit"]
+
+
+def test_authorizer_failure_means_the_user_decides(browser_agent):
+    class Broken(_FakeCommitClient):
+        async def post(self, url, *, json, headers, timeout):
+            if str(url).endswith("/internal/browser/commit-authorize"):
+                raise RuntimeError("gateway down")
+            return await super().post(url, json=json, headers=headers, timeout=timeout)
+
+    client = Broken([{"status": "answered", "answer": "deny"}])
+    browser_agent._http_client = client
+    decision = __import__("asyncio").run(
+        browser_agent._commit_gate_bridge(_task({"goal": "g"}), _COMMIT_PAYLOAD, {}, [], _gate_state())
+    )
+    assert decision["allowed"] is False
+    assert len(client.ask_requests) == 1
 
 
 def test_commit_once_cache_matches_role_prefixed_targets(browser_agent):

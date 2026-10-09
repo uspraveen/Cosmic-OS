@@ -33,6 +33,12 @@ class SessionStore:
             value = metadata.get(key)
             if isinstance(value, list) and value:
                 return True
+        # A live card (browser run, deck build, sheet) renders on its own — a
+        # turn stopped before any prose still showed the user a run.
+        for key in ("browser_progress", "slide_progress", "sheets_progress"):
+            value = metadata.get(key)
+            if isinstance(value, dict) and value:
+                return True
         return False
 
     def initialize(self) -> None:

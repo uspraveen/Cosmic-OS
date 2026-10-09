@@ -136,3 +136,36 @@ class BrowserInterruptManager:
 
     def get(self, request_id: str) -> BrowserInterrupt | None:
         return self._pending.get((request_id or "").strip())
+
+    # Rides back to the engine as the deny reason the model reads.
+    TAKEOVER_NOTE = (
+        "The user took control of the browser instead of answering. Do not retry this; "
+        "after they hand control back, re-read the page — they may have done it themselves."
+    )
+
+    def release_for_takeover(self, task_id: str | None) -> list[BrowserInterrupt]:
+        """Free a run that is blocked on a card so a takeover can actually start.
+
+        A run only parks between steps, and a step waiting on a card never
+        ends — so "Take control" did nothing until the user answered the card
+        (2026-10-08: pause at 20:56:44, card answered 20:57:05, control 21s
+        later). Taking control IS the answer: a pending commit is denied with
+        a note saying why, and any other question is skipped (never answered:
+        a password card must not receive text as its secret).
+        """
+        wanted = str(task_id or "").strip()
+        if not wanted:
+            return []
+        released: list[BrowserInterrupt] = []
+        for interrupt in list(self._pending.values()):
+            if interrupt.status != "pending" or str(interrupt.task_id or "").strip() != wanted:
+                continue
+            if interrupt.kind == "commit":
+                interrupt.answer = "deny"
+                interrupt.note = self.TAKEOVER_NOTE
+                interrupt.status = "answered"
+            else:
+                interrupt.status = "skipped"
+            interrupt.event.set()
+            released.append(interrupt)
+        return released

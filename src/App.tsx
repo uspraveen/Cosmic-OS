@@ -36,6 +36,7 @@ import { ContentCardStack, QuestionCard, normalizeContentCard, type ContentCardB
 import { AgentGlyph, DomainCluster } from './AgentGlyph'
 import { resolveAgentSignal, stripActorPrefix, summarizeAgentSignals, thinkingPreview } from './agentSignals'
 import { mergeBrowserRunProgress, normalizeBrowserTrail, type BrowserRunTrailEntry } from './browserRunTrail'
+import { messageCarriesLiveWork } from './stoppedMessage'
 import { isEditableCommitField, normalizeInterruptCommit, normalizeInterruptOptions, presentBrowserInterrupt } from './browserInterrupt'
 import { isBrowserRunLive, resolveBrowserLiveControls } from './browserLiveControls'
 import { createLatestFramePump, decodeBrowserFrame, paintBrowserFrame } from './browserFramePump'
@@ -2627,7 +2628,13 @@ const BrowserRunCard = ({
   // A finished run is not necessarily a successful one. Reaching the step
   // ceiling, or stopping short of the goal, both arrive as phase 'finished'.
   const outcome = runEnded ? resolveBrowserOutcome(progress) : null
-  const statusLabel = isAwaitingInput ? 'Waiting for you' : outcome ? outcome.label : live ? 'Running' : 'Done'
+  const statusLabel = isAwaitingInput
+    ? 'Waiting for you'
+    : outcome
+      ? outcome.label
+      : live && progress.takeover === 'active'
+        ? 'You have control'
+        : live ? 'Running' : 'Done'
   // Reuses the Slide Agent's stage color tokens (.docs-progress-stage.*) so
   // this card matches the same amber/blue/green "attention/working/done"
   // language instead of inventing a parallel palette.
@@ -2709,11 +2716,36 @@ const BrowserRunCard = ({
     if (canvas && paintedFrameRef.current) paintBrowserFrame(canvas, paintedFrameRef.current)
   }, [])
 
+  // Set when the window hid while the user held the wheel. Hiding Cosmic is
+  // the user stepping away — to copy a URL from another app, say — never
+  // "give control back": that used to resume the agent behind their back
+  // (2026-10-08: 3.7s of control, then the run carried on without them).
+  // The view closes (it is portaled over the app and would freeze a hidden
+  // window), control stays, and the view reopens when Cosmic comes back.
+  const heldWhileHiddenRef = useRef(false)
+
   useEffect(() => {
     // The run ending, or the lightbox closing, always ends the takeover here
     // too — a control surface over a browser nobody is driving is a trap.
-    if (!expanded || runEnded) setDriving(false)
+    // Except a close caused by hiding the window: the user still has control.
+    if (runEnded) {
+      heldWhileHiddenRef.current = false
+      setDriving(false)
+      return
+    }
+    if (!expanded && !heldWhileHiddenRef.current) setDriving(false)
   }, [expanded, runEnded])
+
+  useEffect(() => {
+    const offShown = window.cosmic?.onShown?.(() => {
+      if (!heldWhileHiddenRef.current) return
+      heldWhileHiddenRef.current = false
+      setExpanded(true)
+    })
+    return () => {
+      offShown?.()
+    }
+  }, [])
 
   // Input is batched to one send per animation frame. A pointer emits moves at
   // display rate; a message each would spend an internet round trip per frame
@@ -2850,9 +2882,14 @@ const BrowserRunCard = ({
       }
       setExpanded(false)
     }
+    // Hiding is not Escape: it never hands control back (see heldWhileHiddenRef).
+    const hide = () => {
+      if (drivingIntentRef.current) heldWhileHiddenRef.current = true
+      setExpanded(false)
+    }
     window.cosmic?.setEscapeCapture?.(true)
     const offEscape = window.cosmic?.onEscape?.(close)
-    const offHiding = window.cosmic?.onHiding?.(close)
+    const offHiding = window.cosmic?.onHiding?.(hide)
     // Fallback for any context without the Electron bridge, where nothing
     // upstream is intercepting the key.
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2874,6 +2911,10 @@ const BrowserRunCard = ({
   // every takeover state change — re-arming races the main-process claim.
   const drivingRef = useRef(false)
   drivingRef.current = drivingLive
+  // Intent, not confirmation: "Pausing…" counts — hiding mid-pause must not
+  // abandon a takeover the run is about to park into.
+  const drivingIntentRef = useRef(false)
+  drivingIntentRef.current = driving
   const handBackRef = useRef(handBack)
   handBackRef.current = handBack
 
@@ -9858,7 +9899,13 @@ export default function App() {
             !Array.isArray(boundMessage.producedArtifacts)
           )
         forgetAssistantMessageBindings(event)
-        if (eventType === 'task.cancelled' && messageId && boundMessage && !String(boundMessage.content || '').trim() && !String(boundMessage.thinking || '').trim()) {
+        // A stopped turn's empty placeholder bubble goes away, but never one
+        // that is showing the user something: a browser run, deck or sheet
+        // card, an Alpha console or inline progress rows live in messages
+        // whose prose can be empty. Deleting those is how Stop made the
+        // browser card vanish mid-run (2026-10-08).
+        const boundMessageShowsWork = Boolean(boundMessage && messageCarriesLiveWork(boundMessage))
+        if (eventType === 'task.cancelled' && messageId && boundMessage && !boundMessageShowsWork && !String(boundMessage.content || '').trim() && !String(boundMessage.thinking || '').trim()) {
           setMessages((prev) => prev.filter((item) => item.id !== messageId))
           return
         }
@@ -9867,7 +9914,7 @@ export default function App() {
             if (item.id !== messageId) {
               return item
             }
-            if (!String(item.content || '').trim() && !String(item.thinking || '').trim()) {
+            if (!String(item.content || '').trim() && !String(item.thinking || '').trim() && !messageCarriesLiveWork(item)) {
               return item
             }
             return {

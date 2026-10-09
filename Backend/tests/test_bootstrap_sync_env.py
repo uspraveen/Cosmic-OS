@@ -1953,3 +1953,35 @@ def test_build_slide_agent_env_rendered_prefers_own_fireworks_key_over_peers(
 
     assert parsed["SLIDE_AGENT_FIREWORKS_API_KEY"] == "own-fw-key"
     assert parsed["SLIDE_AGENT_FIREWORKS_MODEL"] == "accounts/fireworks/models/glm-5p3-flash"
+
+
+def test_browser_agent_env_inherits_the_perplexity_key_and_picks_the_vision_decider(tmp_path) -> None:
+    _, _, rendered = bootstrap.build_browser_agent_env_rendered(
+        signing_secret="s",
+        shared_internal_token="t",
+        system_env_dir=tmp_path,
+        existing_env_by_name={"orchestrator.env": {"PERPLEXITY_API_KEY": "pplx-live"}},
+    )
+    assert rendered["PERPLEXITY_API_KEY"] == "pplx-live"
+    assert rendered["COSMIC_DECISION_ENGINE"] == "pplx"
+
+
+def test_browser_agent_env_keeps_an_operator_engine_choice(tmp_path) -> None:
+    _, _, rendered = bootstrap.build_browser_agent_env_rendered(
+        signing_secret="s",
+        shared_internal_token="t",
+        system_env_dir=tmp_path,
+        existing_env_by_name={
+            "orchestrator.env": {"PERPLEXITY_API_KEY": "pplx-live"},
+            bootstrap.BROWSER_AGENT_ENV_NAME: {"COSMIC_DECISION_ENGINE": "jev"},
+        },
+    )
+    assert rendered["COSMIC_DECISION_ENGINE"] == "jev"
+
+
+def test_browser_agent_env_without_a_perplexity_key_sets_no_engine(tmp_path) -> None:
+    _, _, rendered = bootstrap.build_browser_agent_env_rendered(
+        signing_secret="s", shared_internal_token="t", system_env_dir=tmp_path, existing_env_by_name={},
+    )
+    assert "PERPLEXITY_API_KEY" not in rendered
+    assert rendered.get("COSMIC_DECISION_ENGINE") in (None, "")

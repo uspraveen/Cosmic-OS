@@ -1002,7 +1002,22 @@ def build_browser_agent_env_rendered(
     # downgrades to the classic planner when TYPESAFE_API_KEY is absent, so an
     # unset key changes nothing about existing runs.
     typesafe_api_key = pick_env(["TYPESAFE_API_KEY"])
+    # Perplexity's multimodal decider (pplx-decider) on the same fast-path
+    # contract, shown the step screenshot. The key is the one the orchestrator
+    # and gateway already carry for research; with it present and no explicit
+    # operator choice, the vision decider is the default engine (the engine
+    # itself falls back to Jev, then the planner, when a key is missing).
+    perplexity_api_key = first_meaningful_value(
+        external_env.get("PERPLEXITY_API_KEY"),
+        existing_env.get("PERPLEXITY_API_KEY"),
+        orchestrator_external_env.get("PERPLEXITY_API_KEY"),
+        orchestrator_existing_env.get("PERPLEXITY_API_KEY"),
+        gateway_external_env.get("PERPLEXITY_API_KEY"),
+        gateway_existing_env.get("PERPLEXITY_API_KEY"),
+    )
     cosmic_decision_engine = pick_env(["COSMIC_DECISION_ENGINE"])
+    if cosmic_decision_engine is None and meaningful_env_value(perplexity_api_key) is not None:
+        cosmic_decision_engine = "pplx"
     # AskUser mid-run interrupts (OTP/CAPTCHA/phone-approval/ambiguous forms)
     # now round-trip through the desktop instead of a CLI stdin prompt, so the
     # deployed default needs to be longer than cosmic-browser-use's own 120s.
@@ -1037,6 +1052,8 @@ def build_browser_agent_env_rendered(
         overrides["MIMO_API_KEY"] = mimo_api_key
     if meaningful_env_value(typesafe_api_key) is not None:
         overrides["TYPESAFE_API_KEY"] = typesafe_api_key
+    if meaningful_env_value(perplexity_api_key) is not None:
+        overrides["PERPLEXITY_API_KEY"] = perplexity_api_key
     if meaningful_env_value(cosmic_decision_engine) is not None:
         overrides["COSMIC_DECISION_ENGINE"] = cosmic_decision_engine
 

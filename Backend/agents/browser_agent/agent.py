@@ -595,7 +595,11 @@ class BrowserAgent(AgentRuntime):
             output["takeover_hint"] = (
                 "A human paused this run and drove the browser themselves. The steps around "
                 "each takeover are theirs, not the agent's - if you are deciding what still "
-                "needs doing, read the takeover summary before assuming the agent did it."
+                "needs doing, read the takeover summary before assuming the agent did it. "
+                "form_changes lists the fields they filled; those values are theirs. A new "
+                "browser.run starts on a fresh page and loses any unsubmitted form progress, so "
+                "if they were part-way through a form, ask them whether to finish it themselves "
+                "or have you re-run it - do not re-run on your own."
             )
         paused_sec = float(result.get("paused_sec") or 0)
         if paused_sec:
@@ -1675,6 +1679,52 @@ class BrowserAgent(AgentRuntime):
         except Exception:
             logger.debug("browser_agent.commit_miss_record_failed", exc_info=True)
 
+    # A "fix" verdict sends a commit back to the engine at most this many times
+    # per run; after that the user's card decides, so a disagreement between
+    # the authorizer and the specialist can never loop a run.
+    _MAX_COMMIT_FIXES = 2
+
+    async def _authorize_commit_first(
+        self,
+        task: TaskEnvelope,
+        *,
+        question: str,
+        commit: dict[str, Any],
+        page_url: str,
+        screenshot_b64: str,
+    ) -> dict[str, Any]:
+        """The orchestrator's verdict ({status: authorize|fix|confirm}) with no
+        card on screen. Any failure is "confirm": the user decides."""
+        try:
+            await self._emit_progress(task.task_id, f"Checking before submitting: {question[9:][:100]}")
+        except Exception:
+            pass
+        try:
+            response = await self._http_client.post(
+                f"{self.gateway_url.rstrip('/')}/internal/browser/commit-authorize",
+                json={
+                    "question": question,
+                    "task_id": task.task_id,
+                    "session_id": task.session_id,
+                    "page_url": page_url,
+                    "commit": commit,
+                    **({"screenshot_b64": screenshot_b64} if screenshot_b64 else {}),
+                },
+                headers={"X-Internal-Token": self.gateway_internal_token},
+                timeout=45.0,
+            )
+            response.raise_for_status()
+            verdict = response.json()
+        except Exception:
+            logger.warning("browser_agent.commit_authorize_failed task_id=%s", task.task_id, exc_info=True)
+            return {"status": "confirm"}
+        if not isinstance(verdict, dict):
+            return {"status": "confirm"}
+        status = str(verdict.get("status") or "").strip().lower()
+        if status not in {"authorize", "fix", "confirm"}:
+            status = "confirm"
+        return {**verdict, "status": status}
+
     async def _commit_gate_bridge(
         self,
         task: TaskEnvelope,
@@ -1693,7 +1743,11 @@ class BrowserAgent(AgentRuntime):
         applications asks once, not fifty times. Model-declared holds for
         controls the classifier missed are recorded for list harvesting.
         """
-        commit = payload if isinstance(payload, dict) else {}
+        commit = dict(payload) if isinstance(payload, dict) else {}
+        # The engine attaches a screenshot for the orchestrator's visual check.
+        # It goes to the authorizer only — never onto the card, the progress
+        # stream, the interrupt store or the run log.
+        screenshot_b64 = str(commit.pop("screenshot_b64", "") or "")
         page_url = str(commit.get("url") or live_state.get("url") or "").strip()
         action_class = commit_action_class(commit)
         scope_key = self._commit_scope_key(page_url, action_class)
@@ -1712,6 +1766,46 @@ class BrowserAgent(AgentRuntime):
         timeout_sec = max(5.0, float(self.config.ask_user_wait_sec))
         question = f"Confirm: {target}"
 
+        # 1. The orchestrator decides first, with no card on screen. The old
+        # flow drew the card and then waited on this decision; an
+        # authorization made the card vanish by itself mid-read.
+        verdict = await self._authorize_commit_first(
+            task, question=question, commit=commit, page_url=page_url, screenshot_b64=screenshot_b64
+        )
+        status = str(verdict.get("status") or "confirm")
+        reason = str(verdict.get("reason") or "").strip()[:300]
+        if status == "fix" and int(gate_state.get("fixes", 0)) < self._MAX_COMMIT_FIXES:
+            gate_state["fixes"] = int(gate_state.get("fixes", 0)) + 1
+            interrupt_log.append({
+                "question": question,
+                "kind": "commit",
+                "action_class": action_class,
+                "target": target,
+                "status": "sent_back",
+                "reason": reason[:200],
+            })
+            if is_model_declared_miss:
+                await self._record_commit_miss(task, target, page_url, action_class)
+            return {
+                "allowed": False,
+                "retry_after_fix": True,
+                "reason": f"Cosmic checked this before submitting and sent it back: {reason}"[:400],
+            }
+        if status == "authorize":
+            self._remember_commit_once(gate_state, scope_key, target)
+            interrupt_log.append({
+                "question": question,
+                "kind": "commit",
+                "action_class": action_class,
+                "target": target,
+                "status": "allowed",
+                "source": str(verdict.get("source") or "orchestrator"),
+            })
+            if is_model_declared_miss:
+                await self._record_commit_miss(task, target, page_url, action_class)
+            return {"allowed": True, "reason": reason or "authorized by your instruction"}
+
+        # 2. A human is needed: now, and only now, the card.
         live_state["interrupt"] = {
             "request_id": request_id,
             "question": question,
@@ -1748,6 +1842,7 @@ class BrowserAgent(AgentRuntime):
                     "timeout_sec": timeout_sec,
                     "page_url": page_url,
                     "commit": commit,
+                    "authorization_checked": True,
                 },
                 headers={"X-Internal-Token": self.gateway_internal_token},
                 timeout=timeout_sec + 15.0,
