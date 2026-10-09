@@ -924,3 +924,18 @@ def test_run_usage_is_priced_per_brain_including_the_fallback(browser_agent, mon
     haiku = next(e for e in posted if e.model == "claude-haiku-5-5")
     # Priced from the anthropic card ($0.10 / $0.50 per M): 9000 in + 300 out.
     assert haiku.estimated_cost_usd == pytest.approx(9000 * 0.1e-6 + 300 * 0.5e-6)
+    luna = next(e for e in posted if e.model == "gpt-6-luna")
+    # OpenAI's published Standard rate for gpt-6-luna is also $0.10 / $0.50.
+    assert luna.estimated_cost_usd == pytest.approx(3000 * 0.1e-6 + 80 * 0.5e-6)
+
+
+def test_escalation_models_have_pricing_cards():
+    from shared.model_specs import get_model_spec
+
+    for key, rates in (
+        ("xai:grok-4.7", (2.0, 0.5, 6.0)),
+        ("xai:grok-4.6", (2.0, 0.5, 6.0)),
+        ("openai:gpt-6-luna", (0.1, 0.01, 0.5)),
+    ):
+        pricing = get_model_spec(key).pricing
+        assert (pricing["input_per_1m_usd"], pricing["cached_input_per_1m_usd"], pricing["output_per_1m_usd"]) == rates
