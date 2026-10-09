@@ -11,6 +11,8 @@ type CosmicOrchestratorProvider = 'anthropic' | 'fireworks_kimi' | 'fireworks_gl
 const GLM_53_MODEL = 'accounts/fireworks/models/glm-5p3'
 const GLM_53_FLASH_MODEL = 'accounts/fireworks/models/glm-5p3-flash'
 const MIMO_MODEL = 'xiaomi/mimo-v2.6-pro'
+const ANTHROPIC_OPUS_MODEL = 'claude-opus-5-5'
+const ANTHROPIC_HAIKU_MODEL = 'claude-haiku-5-5'
 
 interface GatewayPreferencesSettingsProps {
   active: boolean
@@ -329,6 +331,11 @@ export default function GatewayPreferencesSettings({
   const isMimoSelected = preferences?.cosmic.provider === 'openrouter_mimo'
   const isGlm53Selected =
     preferences?.cosmic.provider === 'fireworks_glm' && cosmicModel === GLM_53_MODEL
+  const isOpusSelected =
+    preferences?.cosmic.provider === 'anthropic' &&
+    (!cosmicModel || cosmicModel === ANTHROPIC_OPUS_MODEL)
+  const isHaikuSelected =
+    preferences?.cosmic.provider === 'anthropic' && cosmicModel === ANTHROPIC_HAIKU_MODEL
   const statusLabel = !isAuthenticated
     ? 'Sign in required'
     : isSaving
@@ -536,10 +543,16 @@ export default function GatewayPreferencesSettings({
         {showMoreModels && (
           <div className="preferences-provider-control preferences-provider-control--more" aria-label="More orchestrator models">
             <button type="button"
-              className={`preferences-provider-option ${preferences?.cosmic.provider === 'anthropic' ? 'active smart' : ''}`}
-              onClick={() => { void handleSelectModel('anthropic') }} disabled={!canSave}
-              aria-pressed={preferences?.cosmic.provider === 'anthropic'}>
-              <span>Claude</span><small>Anthropic · Smart</small>
+              className={`preferences-provider-option ${isOpusSelected ? 'active smart' : ''}`}
+              onClick={() => { void handleSelectModel('anthropic', ANTHROPIC_OPUS_MODEL) }} disabled={!canSave}
+              aria-pressed={isOpusSelected}>
+              <span>Opus 5.5</span><small>Anthropic · Smart</small>
+            </button>
+            <button type="button"
+              className={`preferences-provider-option ${isHaikuSelected ? 'active' : ''}`}
+              onClick={() => { void handleSelectModel('anthropic', ANTHROPIC_HAIKU_MODEL) }} disabled={!canSave}
+              aria-pressed={isHaikuSelected}>
+              <span>Haiku 5.5</span><small>Anthropic · Fast</small>
             </button>
             <button type="button"
               className={`preferences-provider-option ${isGlm53Selected ? 'active' : ''}`}

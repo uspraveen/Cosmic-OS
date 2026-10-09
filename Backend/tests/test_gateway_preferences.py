@@ -333,6 +333,37 @@ def test_cosmic_orchestrator_model_preference_defaults_and_updates() -> None:
         assert updated_glm["updated_device_id"] == "desk_glm_1"
 
 
+def test_cosmic_orchestrator_model_anthropic_explicit_models_persist() -> None:
+    """Opus 5.5 and Haiku 5.5 are one provider with two models; the store
+    must keep the submitted model verbatim so the orchestrator can route
+    to the picked one (an empty model still resolves via env default)."""
+    with _runtime_root() as root:
+        runtime = build_runtime(root)
+        runtime.preference_store.initialize()
+
+        opus = runtime.preference_store.set_cosmic_orchestrator_model(
+            "anthropic",
+            model="claude-opus-5-5",
+            source="test",
+            device_id="desk_opus_1",
+        )
+        assert opus["provider"] == "anthropic"
+        assert opus["model"] == "claude-opus-5-5"
+
+        haiku = runtime.preference_store.set_cosmic_orchestrator_model(
+            "claude",
+            model="claude-haiku-5-5",
+            source="test",
+            device_id="desk_haiku_1",
+        )
+        assert haiku["provider"] == "anthropic"
+        assert haiku["model"] == "claude-haiku-5-5"
+
+        reread = runtime.preference_store.get_cosmic_orchestrator_model()
+        assert reread["provider"] == "anthropic"
+        assert reread["model"] == "claude-haiku-5-5"
+
+
 def test_cosmic_orchestrator_model_legacy_glm_5p2_row_migrates_to_default() -> None:
     """A stored GLM 5.2 selection predates the catalog; it must not be honored."""
     with _runtime_root() as root:

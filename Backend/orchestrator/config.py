@@ -223,7 +223,7 @@ class OrchestratorConfig:
     internal_token: str = ""
     signing_secret: str = ""
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-opus-4-6"
+    anthropic_model: str = "claude-opus-5-5"
     anthropic_overload_retry_attempts: int = 1
     anthropic_overload_initial_backoff_sec: float = 1.0
     anthropic_overload_max_backoff_sec: float = 4.0
@@ -362,7 +362,7 @@ class OrchestratorConfig:
             internal_token=os.getenv("GATEWAY_INTERNAL_TOKEN", "").strip(),
             signing_secret=os.getenv("GATEWAY_SIGNING_SECRET", "").strip(),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
-            anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6").strip(),
+            anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-5-5").strip(),
             anthropic_overload_retry_attempts=max(0, _env_int("ANTHROPIC_OVERLOAD_RETRY_ATTEMPTS", 1)),
             anthropic_overload_initial_backoff_sec=max(
                 0.1,

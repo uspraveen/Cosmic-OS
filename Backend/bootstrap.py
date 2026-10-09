@@ -5555,7 +5555,7 @@ def build_service_env_overrides(
             "XAI_API_KEY": gateway_xai_api_key or "",
             "GATEWAY_PUBLIC_HOST": gateway_public_host or "<gateway.user.example.com>",
             "GATEWAY_GMAIL_WEBHOOK_SECRET": gmail_webhook_secret or "",
-            "HAIKU_MODEL": haiku_model or "claude-haiku-4-5",
+            "HAIKU_MODEL": haiku_model or "claude-haiku-5-5",
             "ENABLE_PUSH_NOTIFICATIONS": gateway_external.get("ENABLE_PUSH_NOTIFICATIONS")
             or gateway_existing.get("ENABLE_PUSH_NOTIFICATIONS")
             or gateway_data.get("ENABLE_PUSH_NOTIFICATIONS")
@@ -5601,7 +5601,7 @@ def build_service_env_overrides(
             or secrets.token_urlsafe(32),
             "GATEWAY_SIGNING_SECRET": signing_secret or secrets.token_urlsafe(32),
             "ANTHROPIC_API_KEY": shared_anthropic_api_key or "<anthropic-api-key>",
-            "ANTHROPIC_MODEL": opus_model or "claude-opus-4-6",
+            "ANTHROPIC_MODEL": opus_model or "claude-opus-5-5",
             "COSMIC_ORCHESTRATOR_DEFAULT_PROVIDER": cosmic_orchestrator_default_provider
             or "openrouter_mimo",
             "ORCHESTRATOR_OPENROUTER_API_KEY": first_meaningful_value(

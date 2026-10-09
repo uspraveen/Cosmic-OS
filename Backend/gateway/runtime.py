@@ -16298,7 +16298,7 @@ class GatewayRuntime:
         specs: list[ModelSpec] = []
         candidates = [
             ("anthropic", self.config.haiku_model),
-            ("anthropic", "claude-opus-4-6"),
+            ("anthropic", "claude-opus-5-5"),
             ("anthropic", "claude-sonnet-4-6"),
             ("perplexity", self.config.perplexity_model),
             ("fireworks", "accounts/fireworks/models/kimi-k2p6"),

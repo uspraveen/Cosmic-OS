@@ -218,7 +218,7 @@ class GatewayConfig:
     email_process_inbound_timeout_sec: float = 180.0
     email_process_inbound_poll_interval_sec: float = 0.25
     haiku_api_key: str = ""
-    haiku_model: str = "claude-haiku-4-5"
+    haiku_model: str = "claude-haiku-5-5"
     anthropic_version: str = "2023-06-01"
     haiku_max_tokens: int = 16000
     haiku_thinking_budget_tokens: int = 10000
@@ -848,7 +848,7 @@ class GatewayConfig:
             haiku_model=(
                 os.getenv("HAIKU_MODEL")
                 or os.getenv("GEMINI_MODEL")
-                or "claude-haiku-4-5"
+                or "claude-haiku-5-5"
             ).strip(),
             anthropic_version=os.getenv("ANTHROPIC_VERSION", "2023-06-01").strip(),
             haiku_max_tokens=max(1024, _env_int("HAIKU_MAX_TOKENS", 16000)),

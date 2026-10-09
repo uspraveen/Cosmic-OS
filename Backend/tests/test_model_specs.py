@@ -7,6 +7,8 @@ def test_model_specs_registry_contains_active_runtime_models() -> None:
     specs = load_model_specs()
     assert "anthropic:claude-haiku-4-5" in specs
     assert "anthropic:claude-opus-4-6" in specs
+    assert "anthropic:claude-opus-5-5" in specs
+    assert "anthropic:claude-haiku-5-5" in specs
     assert "anthropic:claude-sonnet-4-6" in specs
     assert "perplexity:sonar" in specs
     assert "perplexity:pplx-embed-v1-4b" in specs
@@ -45,6 +47,25 @@ def test_lookup_model_spec_returns_expected_context_metadata() -> None:
     assert sonnet.pricing["input_per_1m_usd"] == 3.0
     assert sonnet.pricing["cached_input_per_1m_usd"] == 0.3
     assert sonnet.pricing["output_per_1m_usd"] == 15.0
+
+    opus55 = get_model_spec("anthropic:claude-opus-5-5")
+    assert opus55 is not None
+    assert opus55.context_window_tokens == 1_000_000
+    assert opus55.max_output_tokens == 128_000
+    assert opus55.pricing["input_per_1m_usd"] == 4.0
+    assert opus55.pricing["cached_input_per_1m_usd"] == 0.2
+    assert opus55.pricing["output_per_1m_usd"] == 20.0
+    assert opus55.capabilities["supports_cached_input_tokens"] is True
+    assert opus55.capabilities["supports_reasoning_tokens"] is True
+
+    haiku55 = get_model_spec("anthropic:claude-haiku-5-5")
+    assert haiku55 is not None
+    assert haiku55.context_window_tokens == 1_000_000
+    assert haiku55.max_output_tokens == 128_000
+    assert haiku55.pricing["input_per_1m_usd"] == 0.1
+    assert haiku55.pricing["cached_input_per_1m_usd"] == 0.01
+    assert haiku55.pricing["output_per_1m_usd"] == 0.5
+    assert haiku55.capabilities["supports_cached_input_tokens"] is True
 
     sonar = get_model_spec("perplexity:sonar")
     assert sonar is not None
