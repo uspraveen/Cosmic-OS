@@ -887,3 +887,40 @@ async def test_emit_terminal_progress_marks_the_run_over(browser_agent):
     assert "interrupt" not in progress
     # The last step's context is kept, so the card still reads sensibly.
     assert progress["step"] == 7
+
+
+def test_run_usage_is_priced_per_brain_including_the_fallback(browser_agent, monkeypatch):
+    """claude model set: Haiku 5.5 base (reported by cosmic-browser-use as
+    provider "claude"), GPT-6 Luna fallback, grok-4.7 frontier — each posted
+    under the vendor key the pricing cards use."""
+    import asyncio
+    import shared.usage as usage_mod
+
+    posted: list = []
+
+    async def capture(*, client, gateway_url, internal_token, event):
+        posted.append(event)
+
+    monkeypatch.setattr(usage_mod, "post_usage_event", capture)
+    result = {
+        "steps_taken": 4,
+        "llm_usage": {
+            "base": {"requests": 3, "prompt_tokens": 9000, "completion_tokens": 300, "total_tokens": 9300,
+                     "provider": "claude", "model": "claude-haiku-5-5"},
+            "base_fallback": {"requests": 1, "prompt_tokens": 3000, "completion_tokens": 80, "total_tokens": 3080,
+                              "provider": "openai", "model": "gpt-6-luna"},
+            "frontier": {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                         "provider": "xai", "model": "grok-4.7"},
+        },
+    }
+
+    async def scenario():
+        browser_agent._post_run_usage(_task({"goal": "g"}), result)
+        await asyncio.sleep(0.05)
+
+    asyncio.run(scenario())
+    served = sorted((e.provider, e.model) for e in posted)
+    assert served == [("anthropic", "claude-haiku-5-5"), ("openai", "gpt-6-luna")]
+    haiku = next(e for e in posted if e.model == "claude-haiku-5-5")
+    # Priced from the anthropic card ($0.10 / $0.50 per M): 9000 in + 300 out.
+    assert haiku.estimated_cost_usd == pytest.approx(9000 * 0.1e-6 + 300 * 0.5e-6)

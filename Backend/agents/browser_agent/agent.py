@@ -888,9 +888,15 @@ class BrowserAgent(AgentRuntime):
             # would misattribute cost; prefer whatever the run itself reported.
             brains_fallback = {
                 "base": ("fireworks", str(os.getenv("BROWSER_AGENT_MODEL") or os.getenv("FIREWORKS_DEFAULT_MODEL") or "accounts/fireworks/models/glm-5p3-flash")),
-                "frontier": ("xai", str(os.getenv("XAI_MODEL") or "grok-4.6")),
+                "frontier": ("xai", str(os.getenv("XAI_MODEL") or "grok-4.7")),
+                # The base brain's same-tier fallback (claude model set: GPT-6
+                # Luna) only ever reports with its own provider/model tags.
+                "base_fallback": ("", ""),
             }
-            for tier in ("base", "frontier"):
+            # cosmic-browser-use names providers by its own enum; pricing cards
+            # are keyed by vendor.
+            vendor_names = {"claude": "anthropic", "fireworks_kimi": "fireworks"}
+            for tier in ("base", "frontier", "base_fallback"):
                 usage = llm_usage.get(tier) if isinstance(llm_usage.get(tier), dict) else {}
                 total_tokens = int(usage.get("total_tokens") or 0)
                 requests = int(usage.get("requests") or 0)
@@ -898,7 +904,10 @@ class BrowserAgent(AgentRuntime):
                     continue
                 fallback_provider, fallback_model = brains_fallback[tier]
                 provider = str(usage.get("provider") or "").strip() or fallback_provider
+                provider = vendor_names.get(provider.lower(), provider)
                 model = str(usage.get("model") or "").strip() or fallback_model
+                if not provider or not model:
+                    continue
                 model_key = build_model_key(provider, model)
                 raw_usage = {
                     "prompt_tokens": int(usage.get("prompt_tokens") or 0),
