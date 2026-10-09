@@ -362,7 +362,8 @@ def test_visual_check_unavailable_never_blocks_on_its_own(tmp_path):
         screenshot_b64="/9j/" + "A" * 200,
     ))
     assert decision["status"] == "authorize"
-    assert len(decider_calls) == 1
+    # A busy decider (503) is retried, then the text decision stands.
+    assert len(decider_calls) == 3
 
 
 def test_no_screenshot_skips_the_visual_check(tmp_path):
@@ -379,3 +380,140 @@ def test_no_screenshot_skips_the_visual_check(tmp_path):
     ))
     assert decision["status"] == "authorize"
     assert decider_calls == []
+
+
+# --- busy Perplexity: retries, then OpenAI's Decisions API (2026-10-09) -----
+
+PPLX_URL = "https://api.perplexity.ai/v1/decisions"
+OPENAI_URL = "https://api.openai.com/v1/decisions"
+
+
+def _busy_decider(*, pplx_statuses: list[int], pplx_ready: float = 0.9, openai_ready: float | None = 0.1,
+                  verdict: str = '{"decision":"authorize","reason":"user asked"}', calls: list):
+    """pplx_statuses: status per successive Perplexity call (the last repeats)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": verdict}}]})
+        if url == PPLX_URL:
+            calls.append(("pplx", json.loads(request.content)))
+            n = sum(1 for kind, _ in calls if kind == "pplx")
+            status = pplx_statuses[min(n - 1, len(pplx_statuses) - 1)]
+            if status != 200:
+                return httpx.Response(status, headers={"retry-after": "1"}, text="busy")
+            return httpx.Response(200, json={"answers": {"ready": {"type": "noul", "noul": pplx_ready}}})
+        if url == OPENAI_URL:
+            calls.append(("openai", json.loads(request.content)))
+            if openai_ready is None:
+                return httpx.Response(500, text="down")
+            return httpx.Response(200, json={"model": "gpt-6-luna", "answers": [
+                {"type": "predicate", "name": "ready", "probability": openai_ready}]})
+        return httpx.Response(204)
+
+    return httpx.MockTransport(handler)
+
+
+def _authorize(runtime):
+    _seed_tasks(runtime)
+    return asyncio.run(runtime.authorize_browser_commit(
+        session_id="sess_1", task_id="tsk_browser_1", question="Confirm: Submit application",
+        commit=ADDRESS_REQUEST, screenshot_b64="/9j/" + "A" * 200,
+    ))
+
+
+def _no_sleep(monkeypatch) -> list:
+    waits: list = []
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+
+    import orchestrator.decider as decider_module
+    monkeypatch.setattr(decider_module.asyncio, "sleep", fake_sleep)
+    return waits
+
+
+def test_a_rate_limited_visual_check_is_answered_by_openai(tmp_path, monkeypatch):
+    waits = _no_sleep(monkeypatch)
+    calls: list = []
+    runtime = _runtime(tmp_path, _busy_decider(pplx_statuses=[429], openai_ready=0.1, calls=calls),
+                       perplexity_api_key="pplx-test", decider_fallback_api_key="sk-test")
+    decision = _authorize(runtime)
+    assert decision["status"] == "confirm" and decision["source"] == "visual_check"
+    assert [kind for kind, _ in calls] == ["pplx", "pplx", "pplx", "openai"]
+    assert len(waits) == 2 and all(w <= 1.1 for w in waits)
+    request = calls[-1][1]
+    assert request["model"] == "gpt-6-luna"
+    assert request["questions"] == [{"type": "predicate", "name": "ready", "instructions": request["questions"][0]["instructions"]}]
+    parts = request["input"][0]["content"]
+    assert parts[-1]["type"] == "input_image" and parts[-1]["image_url"].startswith("data:image/jpeg;base64,/9j/")
+    assert parts[0]["text"].startswith("The user asked:")
+
+
+def test_one_busy_answer_is_retried_on_perplexity(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    calls: list = []
+    runtime = _runtime(tmp_path, _busy_decider(pplx_statuses=[503, 200], pplx_ready=0.9, calls=calls),
+                       perplexity_api_key="pplx-test", decider_fallback_api_key="sk-test")
+    decision = _authorize(runtime)
+    assert decision["status"] == "authorize"
+    assert [kind for kind, _ in calls] == ["pplx", "pplx"]
+
+
+def test_a_perplexity_timeout_skips_its_retries(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    calls: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": '{"decision":"authorize","reason":"ok"}'}}]})
+        if url not in (PPLX_URL, OPENAI_URL):
+            return httpx.Response(204)
+        calls.append(url)
+        if url == PPLX_URL:
+            raise httpx.ReadTimeout("slow")
+        return httpx.Response(200, json={"answers": [{"type": "predicate", "name": "ready", "probability": 0.95}]})
+
+    runtime = _runtime(tmp_path, httpx.MockTransport(handler),
+                       perplexity_api_key="pplx-test", decider_fallback_api_key="sk-test")
+    assert _authorize(runtime)["status"] == "authorize"
+    assert calls == [PPLX_URL, OPENAI_URL]
+
+
+def test_both_deciders_down_leaves_the_text_decision_standing(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    calls: list = []
+    runtime = _runtime(tmp_path, _busy_decider(pplx_statuses=[503], openai_ready=None, calls=calls),
+                       perplexity_api_key="pplx-test", decider_fallback_api_key="sk-test")
+    assert _authorize(runtime)["status"] == "authorize"
+    assert [kind for kind, _ in calls] == ["pplx", "pplx", "pplx", "openai", "openai"]
+
+
+def test_without_a_fallback_key_a_busy_perplexity_is_just_skipped(tmp_path, monkeypatch):
+    _no_sleep(monkeypatch)
+    calls: list = []
+    runtime = _runtime(tmp_path, _busy_decider(pplx_statuses=[429], calls=calls), perplexity_api_key="pplx-test")
+    assert _authorize(runtime)["status"] == "authorize"
+    assert [kind for kind, _ in calls] == ["pplx", "pplx", "pplx"]
+
+
+def test_fallback_key_resolution(monkeypatch):
+    from orchestrator.config import _decider_fallback_key
+    for name in ("COSMIC_DECIDER_FALLBACK", "COSMIC_DECIDER_FALLBACK_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    # The visual-enhancement key doubles as the fallback only when it is an OpenAI key.
+    assert _decider_fallback_key("sk-visual", "https://api.openai.com/v1") == "sk-visual"
+    assert _decider_fallback_key("fw-key", "https://api.fireworks.ai/inference/v1") == ""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    assert _decider_fallback_key("sk-visual", "https://api.openai.com/v1") == "sk-openai"
+    monkeypatch.setenv("COSMIC_DECIDER_FALLBACK", "off")
+    assert _decider_fallback_key("sk-visual", "https://api.openai.com/v1") == ""
+
+
+def test_image_data_url_names_the_real_format():
+    from orchestrator.decider import image_data_url
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+    assert image_data_url(png).startswith("data:image/png;base64,")
+    assert image_data_url("data:image/jpeg;base64," + png).startswith("data:image/png;base64,")
+    assert image_data_url("/9j/" + "A" * 200).startswith("data:image/jpeg;base64,")
+    assert image_data_url("short") is None and image_data_url(None) is None

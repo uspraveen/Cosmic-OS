@@ -72,6 +72,7 @@ from shared import (
 
 from shared.commit_policy import commit_action_class, commit_summary
 
+from . import decider
 from .config import BACKEND_ROOT, OrchestratorConfig
 from .interrupt_memory import select_reused_answer
 from .prompts import build_agentic_system_prompt
@@ -4000,12 +4001,13 @@ class OrchestratorRuntime:
         )
 
     # Visual check before an autonomous commit: Perplexity's multimodal decider
-    # looks at the page that is about to be submitted. Probability that the form
-    # is complete and correct below this -> the user's card decides instead.
+    # looks at the page that is about to be submitted (retried when busy, then
+    # OpenAI's Decisions API — see orchestrator/decider.py). Probability that
+    # the form is complete and correct below this -> the user's card decides.
     _COMMIT_VISUAL_MIN_PROBABILITY = 0.5
     _COMMIT_VISUAL_TIMEOUT_SEC = 12.0
-    _COMMIT_VISUAL_URL = "https://api.perplexity.ai/v1/decisions"
-    _COMMIT_VISUAL_MODEL = "pplx-decider-v1.1-27b"
+    _COMMIT_VISUAL_ATTEMPTS = 3
+    _COMMIT_VISUAL_RETRY_MAX_WAIT_SEC = 1.0
 
     async def _visual_commit_check(
         self,
@@ -4017,57 +4019,53 @@ class OrchestratorRuntime:
         """P(the form in the screenshot is complete and correct), or None when
         the check could not run (no screenshot, no key, API trouble). None never
         blocks on its own — the text decision stands."""
-        api_key = str(getattr(self.config, "perplexity_api_key", "") or "").strip()
-        payload = str(screenshot_b64 or "").strip()
-        if not api_key or len(payload) < 64:
+        pplx_key = str(getattr(self.config, "perplexity_api_key", "") or "").strip()
+        openai_key = str(getattr(self.config, "decider_fallback_api_key", "") or "").strip()
+        image_url = decider.image_data_url(screenshot_b64)
+        if not (pplx_key or openai_key) or image_url is None:
             return None
-        if payload.startswith("data:"):
-            image_url = payload
-        else:
-            image_url = f"data:image/jpeg;base64,{payload}"
         fields = commit.get("fields") if isinstance(commit.get("fields"), list) else []
         listed = "; ".join(
             f"{str(item.get('label') or '(unlabeled)')[:50]} = {str(item.get('value') or '')[:60]}"
             for item in fields[:12]
             if isinstance(item, dict)
         )
-        state = [
+        texts = [
             f"The user asked: {instruction[:800] or '(not stated)'}",
             f"An assistant is about to submit this form ({commit_summary(commit)[:200]}). "
             f"Fields it read: {listed or '(none)'}.",
-            {"type": "image_url", "image_url": {"url": image_url}},
         ]
-        questions = {
-            "ready": {
-                "type": "noul",
-                "instructions": (
+        try:
+            value, provider, primary_error = await decider.ask_yes_no(
+                self._client,
+                name="ready",
+                instructions=(
                     "Looking at the screenshot: is this form completely and correctly filled in for "
                     "what the user asked — every visible field holding a sensible value for its "
                     "label (not, say, an email address in a name field), no required field empty, "
                     "and no validation error shown?"
                 ),
-            }
-        }
-        try:
-            response = await self._client.post(
-                self._COMMIT_VISUAL_URL,
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"model": self._COMMIT_VISUAL_MODEL, "state": state, "questions": questions},
-                timeout=self._COMMIT_VISUAL_TIMEOUT_SEC,
+                texts=texts,
+                image_url=image_url,
+                pplx_key=pplx_key,
+                openai_key=openai_key,
+                timeout_sec=self._COMMIT_VISUAL_TIMEOUT_SEC,
+                attempts=self._COMMIT_VISUAL_ATTEMPTS,
+                max_wait_sec=self._COMMIT_VISUAL_RETRY_MAX_WAIT_SEC,
             )
-            if response.status_code >= 400:
-                logger.warning(
-                    "orchestrator.browser_commit_visual_check_http status=%s", response.status_code
-                )
-                return None
-            answer = (response.json() or {}).get("answers", {}).get("ready", {})
-            value = float(answer.get("noul"))
         except Exception:
             logger.warning("orchestrator.browser_commit_visual_check_failed", exc_info=True)
             return None
-        if value != value:  # NaN
+        if value is None:
+            logger.warning("orchestrator.browser_commit_visual_check_unanswered reason=%s", primary_error)
             return None
-        return max(0.0, min(1.0, value))
+        if provider != "pplx":
+            logger.info(
+                "orchestrator.browser_commit_visual_check_fallback provider=%s primary_error=%s",
+                provider,
+                primary_error,
+            )
+        return value
 
     async def authorize_browser_commit(
         self,

@@ -215,6 +215,19 @@ def _normalize_openai_like_base_url(raw: str, *, default: str = "") -> str:
     return value
 
 
+def _decider_fallback_key(vision_key: str, vision_base: str) -> str:
+    """The OpenAI key for the decider fallback: an explicit one, OPENAI_API_KEY,
+    or the visual-enhancement key when that one already talks to OpenAI."""
+    if os.getenv("COSMIC_DECIDER_FALLBACK", "openai").strip().lower() in {"", "0", "false", "off", "no", "none"}:
+        return ""
+    explicit = (os.getenv("COSMIC_DECIDER_FALLBACK_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+    if explicit:
+        return explicit
+    if "api.openai.com" in str(vision_base or ""):
+        return str(vision_key or "").strip()
+    return ""
+
+
 @dataclass(slots=True)
 class OrchestratorConfig:
     artifacts_root: Path = BACKEND_ROOT / "runs" / "artifacts"
@@ -303,6 +316,9 @@ class OrchestratorConfig:
     # Tool executor service endpoints
     perplexity_api_key: str = ""
     perplexity_model: str = "sonar"
+    # OpenAI key for the decider fallback (orchestrator/decider.py) when
+    # Perplexity's 10 requests/second are used up. Empty = no fallback.
+    decider_fallback_api_key: str = ""
     cosmic_memory_url: str = "http://127.0.0.1:8090"
     gateway_url: str = "http://127.0.0.1:8080"
     max_tool_iterations: int = 25
@@ -524,6 +540,7 @@ class OrchestratorConfig:
                 300.0, float(os.getenv("TASK_SWEEP_RUNNING_AFTER_SEC", "14400") or 14400)
             ),
             perplexity_api_key=os.getenv("PERPLEXITY_API_KEY", "").strip(),
+            decider_fallback_api_key=_decider_fallback_key(vision_key, vision_base),
             perplexity_model=os.getenv("PERPLEXITY_MODEL", "sonar").strip() or "sonar",
             cosmic_memory_url=os.getenv("COSMIC_MEMORY_URL", "http://127.0.0.1:8090").strip(),
             gateway_url=os.getenv("GATEWAY_URL", "http://127.0.0.1:8080").strip(),
