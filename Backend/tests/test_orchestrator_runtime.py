@@ -3303,6 +3303,36 @@ def test_build_agentic_system_prompt_gates_content_cards() -> None:
     assert "Never request Send, Post, Approve" in enabled_prompt
 
 
+def test_content_cards_policy_names_rich_sections_without_mandating_them() -> None:
+    """The rich card shapes must be named where the model reads, but as an offer.
+
+    The A40/L40 turn showed the failure mode: the orchestrator answered a
+    figures-and-architecture question in Markdown tables because nothing in
+    the per-turn prompt told it the client now renders stat/metrics/flow
+    cards. The policy names those shapes and the moment they fit (a table of
+    numbers, a boxes-and-arrows diagram), while keeping plain Markdown a
+    first-class choice so narrative answers are never forced into cards.
+    """
+    enabled_prompt = build_agentic_system_prompt(trusted_ui_enabled=True, channel="desktop")
+    start = enabled_prompt.index("## Content Cards")
+    end = enabled_prompt.find("\n## ", start + 1)
+    policy = enabled_prompt[start : end if end != -1 else len(enabled_prompt)]
+
+    for shape in ("`stat`", "`metrics`", "`flow`", "`note`", "`concepts`"):
+        assert shape in policy
+    # The provenance pattern: caveats plus a source action.
+    assert "not independently reproduced" in policy
+    assert "Read the full report" in policy
+    # The checklist steering error stays the hard gate; the policy must not
+    # invite what the executor rejects. (ask_user_question's own catalog
+    # entry may say "fill-in checklists" - that lives outside this section.)
+    assert "checklists" not in policy
+    # Suggestion, not mandate: the offer and the escape hatch both survive.
+    assert "never as a requirement" in policy
+    assert "never a mandate" in policy
+    assert "keep plain Markdown" in policy
+
+
 def test_get_prompt_asset_hashes_includes_visual_response_policy_asset() -> None:
     hashes = get_prompt_asset_hashes()
 
