@@ -2,6 +2,23 @@ export type ContentCardPreset = 'social_post' | 'copy_payload' | 'option_set' | 
 
 export type ContentCardBrand = 'x' | 'gmail' | 'github' | 'generic'
 
+export interface ContentCardStat {
+  label: string
+  value: string
+  highlight?: boolean
+}
+
+export interface ContentCardFlowNode {
+  title: string
+  subtitle?: string | null
+}
+
+export interface ContentCardConcept {
+  icon?: string | null
+  title: string
+  body?: string | null
+}
+
 export type ContentCardSection =
   | { type: 'text'; text: string }
   | { type: 'quote'; text: string }
@@ -9,6 +26,11 @@ export type ContentCardSection =
   | { type: 'chips'; items: string[] }
   | { type: 'list'; items: string[]; style?: string | null }
   | { type: 'key_value'; rows: Array<{ label: string; value: string }> }
+  | { type: 'stat'; label: string; value: string; qualifier?: string | null }
+  | { type: 'metrics'; stats: ContentCardStat[] }
+  | { type: 'flow'; nodes: ContentCardFlowNode[]; connectors?: string[] | null; layout?: 'stack' | 'grid' | null }
+  | { type: 'note'; text: string }
+  | { type: 'concepts'; items: ContentCardConcept[] }
 
 export type ContentCardAction =
   | { type: 'copy'; label: string; text: string }

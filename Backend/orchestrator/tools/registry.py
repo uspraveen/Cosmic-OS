@@ -1286,12 +1286,19 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "description": (
                 "Present portable objects as native Cosmic cards beside the final response. "
                 "Use this after you have authored copy the user will take: X/Twitter drafts, option sets, "
-                "or compact summaries. The client owns layout. Do not send HTML, CSS, colors, or privileged actions. "
+                "key figures, architectures, or compact summaries. The client owns layout. "
+                "Do not send HTML, CSS, colors, or privileged actions. "
                 "Allowed actions are copy and open_url. After this tool returns _cosmic_ui, do not repeat covered card content in Markdown. "
                 "These cards are static, read-only text: nothing in them is clickable, checkable, or fillable, and "
                 "they are never interactive. If the user should answer, choose, tick, or fill in anything — including "
                 "a checklist — call ask_user_question instead (mode=form for fill-in skeletons); checklist preset is "
-                "rejected here for exactly that reason."
+                "rejected here for exactly that reason. "
+                "For numbers, use a stat section (one hero figure like '192 GB') or a metrics section (a grid of "
+                "2-6 figures); pair them with a note section for caveats ('reported, not independently reproduced') "
+                "and an open_url action labeled like 'Read the full report' for the source. "
+                "For architectures and pipelines, use a flow section (2-6 nodes with optional subtitles, optional "
+                "connector labels; layout=grid for side-by-side schematics without arrows). "
+                "For term-by-term explainers, use a concepts section (each row: an icon name, a title, and a body)."
             ),
             "input_schema": {
                 "type": "object",
@@ -1352,19 +1359,71 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
                                 "variant_total": {"type": "integer"},
                                 "sections": {
                                     "type": "array",
-                                    "description": "Generic sections when no preset fits: text, key_value, chips, list, code, quote.",
+                                    "description": (
+                                        "Generic sections when no preset fits: text, key_value, chips, list, code, quote, "
+                                        "stat (hero figure), metrics (figure grid), flow (architecture/pipeline diagram), "
+                                        "note (fine-print caveats or sourcing), concepts (icon + title + body explainer rows)."
+                                    ),
                                     "items": {
                                         "type": "object",
                                         "properties": {
                                             "type": {
                                                 "type": "string",
-                                                "enum": ["text", "key_value", "chips", "list", "code", "quote"],
+                                                "enum": [
+                                                    "text", "key_value", "chips", "list", "code", "quote",
+                                                    "stat", "metrics", "flow", "note", "concepts",
+                                                ],
                                             },
-                                            "text": {"type": "string"},
+                                            "text": {"type": "string", "description": "Body copy for text/quote, caveat copy for note."},
                                             "code": {"type": "string"},
                                             "language": {"type": "string"},
-                                            "items": {"type": "array", "items": {"type": "string"}},
+                                            "items": {
+                                                "type": "array",
+                                                "items": {"type": "object"},
+                                                "description": (
+                                                    "chips/list: plain strings. concepts: objects with icon (short name like "
+                                                    "'network' or 'cpu'), title, and optional body."
+                                                ),
+                                            },
                                             "style": {"type": "string"},
+                                            "label": {"type": "string", "description": "Stat label, e.g. 'Total GPU memory'."},
+                                            "value": {"type": "string", "description": "The big figure of a stat, e.g. '192 GB' or '191 tok/s'. Required for stat."},
+                                            "qualifier": {"type": "string", "description": "Small print under a stat, e.g. '4 x 48 GB, before CUDA allocations'."},
+                                            "stats": {
+                                                "type": "array",
+                                                "description": "metrics only: 2-6 stats for the grid; set highlight on the one headline figure.",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "label": {"type": "string"},
+                                                        "value": {"type": "string"},
+                                                        "highlight": {"type": "boolean"},
+                                                    },
+                                                    "required": ["value"],
+                                                },
+                                            },
+                                            "nodes": {
+                                                "type": "array",
+                                                "description": "flow only: 2-6 ordered steps, each a title with optional subtitle.",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "title": {"type": "string"},
+                                                        "subtitle": {"type": "string"},
+                                                    },
+                                                    "required": ["title"],
+                                                },
+                                            },
+                                            "connectors": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                                "description": "flow only: up to 5 short labels drawn on the arrows between nodes.",
+                                            },
+                                            "layout": {
+                                                "type": "string",
+                                                "enum": ["stack", "grid"],
+                                                "description": "flow only: stack (vertical, default) or grid (side-by-side boxes, no arrows).",
+                                            },
                                             "rows": {
                                                 "type": "array",
                                                 "items": {
@@ -1401,7 +1460,12 @@ _MODEL_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
         group="presentation",
-        prompt_summary="Present copyable or choosable objects as native Cosmic cards. Use social_post for X drafts. Never invent HTML or privileged buttons.",
+        prompt_summary=(
+            "Present copyable or choosable objects as native Cosmic cards: social_post for X drafts, "
+            "stat/metrics sections for key figures (note section for caveats, open_url action for the source), "
+            "flow for architectures and pipelines, concepts for term-by-term explainers. "
+            "Never invent HTML or privileged buttons."
+        ),
         progress_builder=_present_content_cards_progress,
         handler_method="_present_content_cards",
         read_only=True,

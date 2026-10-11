@@ -56,7 +56,7 @@ intents:
     usage_hints:
       - Use this when the orchestrator needs search results (not just one known URL) — plain link discovery, news recency, image lookup, or vertical searches via categories (developer/research/gov/pdf; gov cannot combine with others).
       - Discovery of Alexandria tools is always free and never counted in credits_used. Add sources:['alexandria'] whenever the goal touches an official data source (SEC filings, research papers, laws and regulations, package or product documentation) — a matching provider tool usually beats scraping HTML.
-      - Call with tool_detail:'full' before executing anything: the tool entry then includes its options contract, so firecrawl.alexandria can be called correctly the first time.
+      - Call with tool_detail:'full' before executing anything — the tool entry then includes its options contract, so firecrawl.alexandria can be called correctly the first time.
       - tbs accepts qdr:h/d/w/m/y for recency windows, custom cdr:1,cd_min=...,cd_max=... ranges, and sbd:1 for sort-by-date.
       - include_domains and exclude_domains are mutually exclusive.
 

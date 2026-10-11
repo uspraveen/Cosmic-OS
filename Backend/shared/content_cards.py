@@ -22,10 +22,23 @@ MAX_KEY_VALUES = 12
 MAX_ACTIONS = 3
 MAX_FALLBACK_CHARS = 8000
 MAX_BATCH_SERIALIZED_CHARS = 24_000
+MAX_STAT_VALUE_CHARS = 40
+MAX_METRIC_STATS = 6
+MAX_METRIC_LABEL_CHARS = 60
+MAX_FLOW_NODES = 6
+MAX_FLOW_CONNECTORS = 5
+MAX_NOTE_CHARS = 600
+MAX_CONCEPTS = 6
+MAX_CONCEPT_BODY_CHARS = 600
+MAX_ICON_CHARS = 24
+FLOW_LAYOUTS = frozenset({"stack", "grid"})
 
 KNOWN_PRESETS = frozenset({"social_post", "copy_payload", "option_set", "checklist"})
 KNOWN_BRANDS = frozenset({"x", "gmail", "github", "generic"})
-ALLOWED_SECTION_TYPES = frozenset({"text", "key_value", "chips", "list", "code", "quote"})
+ALLOWED_SECTION_TYPES = frozenset({
+    "text", "key_value", "chips", "list", "code", "quote",
+    "stat", "metrics", "flow", "note", "concepts",
+})
 ALLOWED_ACTIONS = frozenset({"copy", "open_url"})
 PRIVILEGED_ACTIONS = frozenset({
     "send",
@@ -96,12 +109,25 @@ def normalize_content_cards(raw_cards: Any, *, id_prefix: str = "content_card") 
         if title and title not in covers:
             covers.append(title)
         preset = str(block.get("preset") or "").strip()
+        section_types = {
+            str(section.get("type") or "")
+            for section in (block.get("sections") or [])
+            if isinstance(section, dict)
+        }
         if preset == "social_post" and "post body" not in covers:
             covers.append("post body")
             covers.append("hashtags")
             covers.append("mentions")
         elif "card body" not in covers:
             covers.append("card body")
+        if section_types & {"stat", "metrics"} and "figures" not in covers:
+            covers.append("figures")
+        if "flow" in section_types and "diagram" not in covers:
+            covers.append("diagram")
+        if "note" in section_types and "caveats" not in covers:
+            covers.append("caveats")
+        if "concepts" in section_types and "breakdown" not in covers:
+            covers.append("breakdown")
 
     return {
         "status": "presented",
@@ -339,6 +365,39 @@ def _normalize_section(raw: Any) -> dict[str, Any] | None:
         if not rows:
             return None
         return {"type": "key_value", "rows": rows}
+    if section_type == "stat":
+        label = _clip(_safe_text(raw.get("label")), 80)
+        value = _clip(_safe_text(raw.get("value") or raw.get("text")), MAX_STAT_VALUE_CHARS)
+        if not value:
+            return None
+        section = {"type": "stat", "label": label, "value": value}
+        qualifier = _clip(_safe_text(raw.get("qualifier")), 240)
+        if qualifier:
+            section["qualifier"] = qualifier
+        return section
+    if section_type == "metrics":
+        stats = _normalize_metric_stats(raw.get("stats") or raw.get("items"))
+        if not stats:
+            return None
+        return {"type": "metrics", "stats": stats}
+    if section_type == "flow":
+        nodes = _normalize_flow_nodes(raw.get("nodes") or raw.get("steps") or raw.get("stages"))
+        if len(nodes) < 2:
+            return None
+        section: dict[str, Any] = {"type": "flow", "nodes": nodes}
+        connectors = _connector_labels(raw.get("connectors") or raw.get("edges"))
+        if connectors:
+            section["connectors"] = connectors
+        layout = str(raw.get("layout") or "").strip().lower()
+        if layout == "grid":
+            section["layout"] = "grid"
+        return section
+    if section_type == "note":
+        text = _clip(_safe_text(raw.get("text") or raw.get("note")), MAX_NOTE_CHARS)
+        return {"type": "note", "text": text} if text else None
+    if section_type == "concepts":
+        items = _normalize_concept_items(raw.get("items") or raw.get("concepts"))
+        return {"type": "concepts", "items": items} if items else None
     return None
 
 
@@ -361,6 +420,78 @@ def _normalize_key_values(raw: Any) -> list[dict[str, str]]:
         if label and value:
             rows.append({"label": label, "value": value})
     return rows
+
+
+def _normalize_metric_stats(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    stats: list[dict[str, Any]] = []
+    for item in raw[:MAX_METRIC_STATS]:
+        if not isinstance(item, dict):
+            continue
+        label = _clip(_safe_text(item.get("label")), MAX_METRIC_LABEL_CHARS)
+        value = _clip(_safe_text(item.get("value")), MAX_STAT_VALUE_CHARS)
+        if not value:
+            continue
+        stat: dict[str, Any] = {"label": label, "value": value}
+        if item.get("highlight"):
+            stat["highlight"] = True
+        stats.append(stat)
+    return stats
+
+
+def _normalize_flow_nodes(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    nodes: list[dict[str, Any]] = []
+    for item in raw[:MAX_FLOW_NODES]:
+        if not isinstance(item, dict):
+            continue
+        title = _clip(_safe_text(item.get("title") or item.get("name")), 80)
+        if not title:
+            continue
+        node: dict[str, Any] = {"title": title}
+        subtitle = _clip(_safe_text(item.get("subtitle") or item.get("description")), 160)
+        if subtitle:
+            node["subtitle"] = subtitle
+        nodes.append(node)
+    return nodes
+
+
+def _connector_labels(raw: Any) -> list[str]:
+    # Connector labels may legitimately repeat ("then", "then"), so no dedupe.
+    if not isinstance(raw, list):
+        return []
+    labels: list[str] = []
+    for item in raw[:MAX_FLOW_CONNECTORS]:
+        text = _clip(_safe_text(item), 40)
+        if text:
+            labels.append(text)
+    return labels
+
+
+def _normalize_concept_items(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for entry in raw[:MAX_CONCEPTS]:
+        if not isinstance(entry, dict):
+            continue
+        title = _clip(_safe_text(entry.get("title")), 80)
+        if not title:
+            continue
+        item: dict[str, Any] = {"title": title}
+        icon = _clip(_safe_text(entry.get("icon")), MAX_ICON_CHARS).lower().replace(" ", "_")
+        if icon:
+            item["icon"] = icon
+        body = _clip(
+            _safe_text(entry.get("body") or entry.get("description") or entry.get("text")),
+            MAX_CONCEPT_BODY_CHARS,
+        )
+        if body:
+            item["body"] = body
+        items.append(item)
+    return items
 
 
 def _normalize_actions(raw: Any, *, default_copy_text: str) -> list[dict[str, str]]:
@@ -536,7 +667,7 @@ def _build_fallback_text(
     else:
         for section in sections:
             section_type = str(section.get("type") or "")
-            if section_type in {"text", "quote"}:
+            if section_type in {"text", "quote", "note"}:
                 lines.append(str(section.get("text") or ""))
             elif section_type == "code":
                 lines.append(str(section.get("code") or ""))
@@ -546,6 +677,29 @@ def _build_fallback_text(
                 for row in section.get("rows") or []:
                     if isinstance(row, dict):
                         lines.append(f"{row.get('label')}: {row.get('value')}")
+            elif section_type == "stat":
+                label = str(section.get("label") or "")
+                value = str(section.get("value") or "")
+                lines.append(f"{label}: {value}" if label else value)
+                if section.get("qualifier"):
+                    lines.append(str(section.get("qualifier")))
+            elif section_type == "metrics":
+                for stat in section.get("stats") or []:
+                    if isinstance(stat, dict):
+                        label = str(stat.get("label") or "")
+                        value = str(stat.get("value") or "")
+                        lines.append(f"{label}: {value}" if label else value)
+            elif section_type == "flow":
+                titles = [str(node.get("title") or "") for node in section.get("nodes") or [] if isinstance(node, dict)]
+                arrow_line = " → ".join(title for title in titles if title)
+                if arrow_line:
+                    lines.append(arrow_line)
+            elif section_type == "concepts":
+                for item in section.get("items") or []:
+                    if isinstance(item, dict):
+                        title = str(item.get("title") or "")
+                        body = str(item.get("body") or "")
+                        lines.append(f"{title}: {body}" if body else title)
     extras = [*tags, *mentions]
     if extras:
         lines.append(" ".join(extras))

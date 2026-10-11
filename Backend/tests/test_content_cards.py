@@ -166,3 +166,150 @@ def test_chip_items_keep_the_tight_cap() -> None:
     card = result["response_blocks"][0]
     assert card["tags"][0].endswith("…")
     assert len(card["tags"][0]) <= 80
+
+
+def test_stat_metrics_note_sections_normalize_and_land_in_fallback() -> None:
+    result = normalize_content_cards(
+        [
+            {
+                "title": "Shadeform reported results",
+                "sections": [
+                    {
+                        "type": "metrics",
+                        "stats": [
+                            {"label": "Initial decode", "value": "7.2 tok/s"},
+                            {"label": "Optimized decode", "value": "191 tok/s", "highlight": True},
+                        ],
+                    },
+                    {"type": "note", "text": "Reported measurements, not independently reproduced."},
+                    {"type": "stat", "label": "Total GPU memory", "value": "192 GB", "qualifier": "4 x 48 GB"},
+                    {"type": "stat", "label": "Missing figure"},
+                ],
+                "actions": [
+                    {"type": "open_url", "url": "https://shadeform.ai/report", "label": "Read the report"}
+                ],
+            }
+        ]
+    )
+
+    assert result["status"] == "presented"
+    card = result["response_blocks"][0]
+    types = [section["type"] for section in card["sections"]]
+    assert types == ["metrics", "note", "stat"]
+    metrics = card["sections"][0]
+    assert metrics["stats"][1] == {"label": "Optimized decode", "value": "191 tok/s", "highlight": True}
+    assert "figures" in result["covers"]
+    assert "caveats" in result["covers"]
+    fallback = card["fallback_text"]
+    assert "Initial decode: 7.2 tok/s" in fallback
+    assert "Optimized decode: 191 tok/s" in fallback
+    assert "Total GPU memory: 192 GB" in fallback
+    assert "4 x 48 GB" in fallback
+    assert any(action["type"] == "open_url" for action in card["actions"])
+
+
+def test_flow_section_requires_two_nodes_and_keeps_connectors_and_grid() -> None:
+    result = normalize_content_cards(
+        [
+            {
+                "title": "Migration pipeline",
+                "sections": [
+                    {"type": "flow", "nodes": [{"title": "Only one"}]},
+                    {
+                        "type": "flow",
+                        "nodes": [
+                            {"title": "Source ruleset", "subtitle": "Altium specifications"},
+                            {"name": "Constraint IR", "subtitle": "Typed rules"},
+                        ],
+                        "connectors": ["translates to"],
+                        "layout": "grid",
+                    },
+                ],
+            }
+        ]
+    )
+
+    card = result["response_blocks"][0]
+    types = [section["type"] for section in card["sections"]]
+    assert types == ["flow"]
+    flow = card["sections"][0]
+    assert flow["nodes"][0] == {"title": "Source ruleset", "subtitle": "Altium specifications"}
+    assert flow["nodes"][1]["title"] == "Constraint IR"
+    assert flow["connectors"] == ["translates to"]
+    assert flow["layout"] == "grid"
+    assert "Source ruleset → Constraint IR" in card["fallback_text"]
+    assert "diagram" in result["covers"]
+
+
+def test_flow_stack_layout_is_implicit_and_connector_labels_may_repeat() -> None:
+    result = normalize_content_cards(
+        [
+            {
+                "title": "Steps",
+                "sections": [
+                    {
+                        "type": "flow",
+                        "nodes": [{"title": "A"}, {"title": "B"}, {"title": "C"}],
+                        "connectors": ["then", "then"],
+                    }
+                ],
+            }
+        ]
+    )
+
+    flow = result["response_blocks"][0]["sections"][0]
+    assert "layout" not in flow
+    assert flow["connectors"] == ["then", "then"]
+
+
+def test_concepts_section_normalizes_icons_and_bodies() -> None:
+    result = normalize_content_cards(
+        [
+            {
+                "title": "Parallelism options",
+                "sections": [
+                    {
+                        "type": "concepts",
+                        "items": [
+                            {"icon": "Network", "title": "Expert parallelism", "body": "Assign MoE experts to GPUs."},
+                            {"title": "Pipeline parallelism"},
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert "breakdown" in result["covers"]
+    concepts = result["response_blocks"][0]["sections"][0]
+    assert concepts["items"][0] == {
+        "icon": "network",
+        "title": "Expert parallelism",
+        "body": "Assign MoE experts to GPUs.",
+    }
+    assert concepts["items"][1] == {"title": "Pipeline parallelism"}
+    fallback = result["response_blocks"][0]["fallback_text"]
+    assert "Expert parallelism: Assign MoE experts to GPUs." in fallback
+
+
+def test_metric_stats_without_values_are_dropped() -> None:
+    result = normalize_content_cards(
+        [
+            {
+                "title": "Grid",
+                "sections": [
+                    {
+                        "type": "metrics",
+                        "stats": [
+                            {"label": "No value"},
+                            "garbage",
+                            {"value": "191 tok/s"},
+                        ],
+                    }
+                ],
+            }
+        ]
+    )
+
+    metrics = result["response_blocks"][0]["sections"][0]
+    assert metrics["stats"] == [{"label": "", "value": "191 tok/s"}]

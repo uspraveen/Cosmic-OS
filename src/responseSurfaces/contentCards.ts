@@ -2,9 +2,12 @@ import type {
   ContentCardAction,
   ContentCardBlock,
   ContentCardBrand,
+  ContentCardConcept,
+  ContentCardFlowNode,
   ContentCardGroup,
   ContentCardPreset,
   ContentCardSection,
+  ContentCardStat,
 } from './types'
 
 const PRESETS = new Set<ContentCardPreset>(['social_post', 'copy_payload', 'option_set', 'checklist'])
@@ -78,6 +81,61 @@ const normalizeSection = (raw: any): ContentCardSection | null => {
       if (rows.length >= 12) break
     }
     return rows.length > 0 ? { type: 'key_value', rows } : null
+  }
+  if (type === 'stat') {
+    const label = clip(raw.label, 80)
+    const value = clip(raw.value || raw.text, 40)
+    if (!value) return null
+    const qualifier = clip(raw.qualifier, 240) || null
+    return { type: 'stat', label, value, qualifier }
+  }
+  if (type === 'metrics') {
+    const source = Array.isArray(raw.stats || raw.items) ? (raw.stats || raw.items) : []
+    const stats: ContentCardStat[] = []
+    for (const item of source) {
+      if (stats.length >= 6) break
+      const value = clip(item?.value, 40)
+      if (!value) continue
+      stats.push({ label: clip(item?.label, 60), value, highlight: item?.highlight === true })
+    }
+    return stats.length > 0 ? { type: 'metrics', stats } : null
+  }
+  if (type === 'flow') {
+    const source = Array.isArray(raw.nodes || raw.steps || raw.stages) ? (raw.nodes || raw.steps || raw.stages) : []
+    const nodes: ContentCardFlowNode[] = []
+    for (const item of source) {
+      if (nodes.length >= 6) break
+      const title = clip(item?.title || item?.name, 80)
+      if (!title) continue
+      nodes.push({ title, subtitle: clip(item?.subtitle || item?.description, 160) || null })
+    }
+    if (nodes.length < 2) return null
+    const connectors: string[] = []
+    const connectorSource = Array.isArray(raw.connectors || raw.edges) ? (raw.connectors || raw.edges) : []
+    for (const item of connectorSource) {
+      if (connectors.length >= 5) break
+      const text = clip(item, 40)
+      if (text) connectors.push(text)
+    }
+    const layout = String(raw.layout || '').trim().toLowerCase() === 'grid' ? 'grid' as const : null
+    return { type: 'flow', nodes, connectors: connectors.length > 0 ? connectors : null, layout }
+  }
+  if (type === 'note') {
+    const text = clip(raw.text || raw.note, 600)
+    return text ? { type: 'note', text } : null
+  }
+  if (type === 'concepts') {
+    const source = Array.isArray(raw.items || raw.concepts) ? (raw.items || raw.concepts) : []
+    const items: ContentCardConcept[] = []
+    for (const item of source) {
+      if (items.length >= 6) break
+      const title = clip(item?.title, 80)
+      if (!title) continue
+      const icon = clip(item?.icon, 24).toLowerCase().replace(/ /g, '_') || null
+      const body = clip(item?.body || item?.description || item?.text, 600) || null
+      items.push({ icon, title, body })
+    }
+    return items.length > 0 ? { type: 'concepts', items } : null
   }
   return null
 }
@@ -205,5 +263,9 @@ export const contentCardKicker = (card: ContentCardBlock) => {
   if (card.preset === 'checklist') return 'Checklist'
   if (card.preset === 'option_set') return 'Options'
   if (card.preset === 'copy_payload') return 'Copy'
+  const sectionTypes = new Set(card.sections.map((section) => section.type))
+  if (sectionTypes.has('metrics') || sectionTypes.has('stat')) return 'Results'
+  if (sectionTypes.has('flow')) return 'Diagram'
+  if (sectionTypes.has('concepts')) return 'Breakdown'
   return 'Card'
 }

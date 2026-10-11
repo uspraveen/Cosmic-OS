@@ -1,5 +1,11 @@
-import { Check, Copy, ExternalLink } from 'lucide-react'
-import { useState } from 'react'
+import {
+  BarChart3, BookOpen, Box, Brain, Calendar, Check, Clock, Cloud, Code, Copy, Cpu, Database,
+  ExternalLink, FileText, Globe, Key, Layers, Lock, Mail, Monitor, Network, Package, Puzzle,
+  Rocket, Route, Scale, Search, Server, Settings, Shield, Smartphone, Target, Terminal, TrendingUp,
+  Users, Workflow, Wrench, Zap,
+} from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
+import { Fragment, useState } from 'react'
 import { contentCardKicker } from './contentCards'
 import { BrandMark } from './registry'
 import type { ContentCardBlock, ContentCardSection } from './types'
@@ -11,6 +17,51 @@ const copyText = async (text: string) => {
 const openApprovedUrl = (url: string) => {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
+
+const CONCEPT_ICONS: Record<string, LucideIcon> = {
+  network: Network,
+  layers: Layers,
+  cpu: Cpu,
+  chip: Cpu,
+  branch: Workflow,
+  workflow: Workflow,
+  pipeline: Route,
+  route: Route,
+  database: Database,
+  zap: Zap,
+  globe: Globe,
+  shield: Shield,
+  lock: Lock,
+  key: Key,
+  box: Box,
+  package: Package,
+  server: Server,
+  code: Code,
+  terminal: Terminal,
+  chart: BarChart3,
+  trending: TrendingUp,
+  users: Users,
+  mail: Mail,
+  calendar: Calendar,
+  clock: Clock,
+  check: Check,
+  book: BookOpen,
+  file: FileText,
+  search: Search,
+  settings: Settings,
+  tool: Wrench,
+  wrench: Wrench,
+  puzzle: Puzzle,
+  scale: Scale,
+  cloud: Cloud,
+  smartphone: Smartphone,
+  monitor: Monitor,
+  brain: Brain,
+  rocket: Rocket,
+  target: Target,
+}
+
+const conceptIcon = (name?: string | null): LucideIcon => (name ? CONCEPT_ICONS[name] || Layers : Layers)
 
 function CardSections({ sections }: { sections: ContentCardSection[] }) {
   return (
@@ -45,6 +96,73 @@ function CardSections({ sections }: { sections: ContentCardSection[] }) {
                 <li key={item}>{item}</li>
               ))}
             </ul>
+          )
+        }
+        if (section.type === 'stat') {
+          return (
+            <div key={index} className="assistant-content-card-stat">
+              {section.label && <div className="assistant-content-card-stat-label">{section.label}</div>}
+              <div className="assistant-content-card-stat-value">{section.value}</div>
+              {section.qualifier && <div className="assistant-content-card-stat-qualifier">{section.qualifier}</div>}
+            </div>
+          )
+        }
+        if (section.type === 'metrics') {
+          return (
+            <div key={index} className="assistant-content-card-metrics">
+              {section.stats.map((stat, statIndex) => (
+                <div key={statIndex} className="assistant-content-card-stat">
+                  {stat.label && <div className="assistant-content-card-stat-label">{stat.label}</div>}
+                  <div className={`assistant-content-card-stat-value${stat.highlight ? ' is-highlight' : ''}`}>{stat.value}</div>
+                </div>
+              ))}
+            </div>
+          )
+        }
+        if (section.type === 'flow') {
+          const isGrid = section.layout === 'grid'
+          return (
+            <div key={index} className={`assistant-content-card-flow${isGrid ? ' is-grid' : ''}`}>
+              {section.nodes.map((node, nodeIndex) => (
+                <Fragment key={nodeIndex}>
+                  {!isGrid && nodeIndex > 0 && (
+                    <div className="assistant-content-card-flow-link" aria-hidden="true">
+                      ↓
+                      {section.connectors?.[nodeIndex - 1] && (
+                        <span className="assistant-content-card-flow-link-label">{section.connectors[nodeIndex - 1]}</span>
+                      )}
+                    </div>
+                  )}
+                  <div className="assistant-content-card-flow-node">
+                    <div className="assistant-content-card-flow-title">{node.title}</div>
+                    {node.subtitle && <div className="assistant-content-card-flow-subtitle">{node.subtitle}</div>}
+                  </div>
+                </Fragment>
+              ))}
+            </div>
+          )
+        }
+        if (section.type === 'note') {
+          return <div key={index} className="assistant-content-card-note">{section.text}</div>
+        }
+        if (section.type === 'concepts') {
+          return (
+            <div key={index} className="assistant-content-card-concepts">
+              {section.items.map((item, itemIndex) => {
+                const Icon = conceptIcon(item.icon)
+                return (
+                  <div key={itemIndex} className="assistant-content-card-concept">
+                    <span className="assistant-content-card-concept-icon" aria-hidden="true">
+                      <Icon size={15} />
+                    </span>
+                    <div className="assistant-content-card-concept-copy">
+                      <div className="assistant-content-card-concept-title">{item.title}</div>
+                      {item.body && <div className="assistant-content-card-concept-body">{item.body}</div>}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           )
         }
         return (
