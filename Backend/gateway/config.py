@@ -233,6 +233,11 @@ class GatewayConfig:
     luna_timeout_sec: float = 180.0
     perplexity_api_key: str = ""
     perplexity_model: str = "sonar"
+    # TypeSafe Jev backs the quick emoji acknowledgments on the user's own
+    # message (gateway/message_reactions.py). Unset key = the feature silently
+    # stays off; nothing else about intake changes.
+    typesafe_api_key: str = ""
+    message_reaction_timeout_sec: float = 4.0
     capability_wishlist_embedding_model: str = "pplx-embed-v1-4b"
     capability_wishlist_embedding_dimensions: int = 1024
     xai_api_key: str = ""
@@ -876,6 +881,11 @@ class GatewayConfig:
             luna_timeout_sec=max(30.0, _env_float("LUNA_TIMEOUT_SEC", 180.0)),
             perplexity_api_key=os.getenv("PERPLEXITY_API_KEY", "").strip(),
             perplexity_model=os.getenv("PERPLEXITY_MODEL", "sonar").strip(),
+            typesafe_api_key=os.getenv("TYPESAFE_API_KEY", "").strip(),
+            message_reaction_timeout_sec=max(
+                1.0,
+                _env_float("GATEWAY_MESSAGE_REACTION_TIMEOUT_SEC", 4.0),
+            ),
             capability_wishlist_embedding_model=(
                 os.getenv(
                     "CAPABILITY_WISHLIST_EMBEDDING_MODEL", "pplx-embed-v1-4b"

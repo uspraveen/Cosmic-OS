@@ -230,6 +230,36 @@ body,
   backdrop-filter: blur(12px);
 }
 
+/* Gateway's emoji receipt on the user's own message: pops in above the
+   query pill the moment the message.reaction event lands. */
+.query-reaction-badge {
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 3px;
+  animation: reaction-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes reaction-pop {
+  from {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .query-reaction-badge {
+    animation: none;
+  }
+}
+
 .query-pill-shell {
   max-width: 70%;
   align-self: flex-end;

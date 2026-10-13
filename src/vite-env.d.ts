@@ -209,6 +209,7 @@ interface Window {
       cosmicOrchestratorProvider?: 'anthropic' | 'fireworks_kimi' | 'fireworks_glm' | 'openrouter_mimo'
       cosmicOrchestratorModel?: string
       cosmicHeartbeatEnabled?: boolean
+      messageReactionsEnabled?: boolean
     }) => Promise<any>
     getGatewaySchedulerOverview: () => Promise<any>
     pauseGatewaySchedulerCron: (payload: {

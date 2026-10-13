@@ -27,6 +27,7 @@ import {
   type AlphaConsoleAnchor,
 } from './alphaStreamLayout'
 import { appendStreamText, mergeCompletedStreamText } from './streamText'
+import { applyReactionToMessages, parseReactionEvent } from './messageReactions'
 import { scrubAssistantProse } from './assistantProse'
 import { canAdoptTaskForActiveStream, canClaimActiveStreamSlot, extractEventStreamIds, isEventForActiveStream as isEventForActiveStreamIds, shouldBindToLastAssistantMessage } from './streamIdentity'
 import { groupRepliesWithTheirQuery } from './transcriptOrder'
@@ -120,6 +121,8 @@ interface Message {
   browserProgress?: BrowserProgressState
   sheetsProgress?: SheetProgressState
   backgroundState?: 'working' | 'ready' | 'failed'
+  /** Gateway's quick emoji receipt on the user's own message (Jev-picked). */
+  reaction?: string | null
 }
 
 interface PendingTaskInput {
@@ -1399,6 +1402,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       emailBody: typeof item?.metadata?.body_text === 'string' ? item.metadata.body_text : null,
       emailBodyTruncated: Boolean(item?.metadata?.body_truncated),
       activity: typeof item?.metadata?.activity === 'string' ? item.metadata.activity : undefined,
+      reaction: typeof item?.metadata?.reaction === 'string' ? item.metadata.reaction : undefined,
       progress: normalizeTabularProgress(item?.metadata?.tabular_progress) ?? normalizeDocsProgress(item?.metadata?.docs_progress),
       slideProgress: normalizeSlideProgress(item?.metadata?.slide_progress),
       browserProgress: normalizeBrowserProgress(item?.metadata?.browser_progress),
@@ -9637,6 +9641,15 @@ export default function App() {
       // An inbound email's reply, token by token, inside its thread card.
       // This is not the desktop's own stream: it must not lock the composer
       // or claim the active-turn slot.
+      // The gateway's quick emoji receipt on the user's own message.
+      if (eventType === 'message.reaction') {
+        const parsed = parseReactionEvent(event as any, activeSessionIdRef.current)
+        if (parsed) {
+          setMessages((prev) => applyReactionToMessages(prev, parsed))
+        }
+        return
+      }
+
       if (eventType === 'crosschannel.stream') {
         const threadId = typeof (event as any).email_thread_id === 'string'
           ? (event as any).email_thread_id.trim()
@@ -11969,6 +11982,11 @@ export default function App() {
 
                     {msg.role === 'user' ? (
                         <>
+                          {msg.reaction && (
+                            <span className="query-reaction-badge" aria-hidden="true">
+                              {msg.reaction}
+                            </span>
+                          )}
                           <ExpandableQueryPill
                             text={cleanText(msg.content)}
                             copied={copiedId === `user-${idx}`}

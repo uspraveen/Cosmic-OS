@@ -46,10 +46,16 @@ interface CosmicHeartbeatPreference extends TimestampedPreference {
   lastResultSummary?: string | null
 }
 
+interface MessageReactionsPreference extends TimestampedPreference {
+  enabled: boolean
+}
+
 interface GatewayPreferenceSnapshot {
   visual: VisualResponseEnhancementPreference
   cosmic: CosmicOrchestratorModelPreference
   heartbeat: CosmicHeartbeatPreference
+  /** Absent when the VM backend predates message reactions. */
+  messages: MessageReactionsPreference | null
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -114,6 +120,8 @@ function normalizePreferences(payload: unknown): GatewayPreferenceSnapshot | nul
     return null
   }
 
+  const messagesSource = asRecord(root?.message_reactions)
+
   return {
     visual: {
       ...normalizeTimestampedPreference(visualSource),
@@ -124,6 +132,12 @@ function normalizePreferences(payload: unknown): GatewayPreferenceSnapshot | nul
       provider: normalizeCosmicProvider(cosmicSource.provider),
       model: typeof cosmicSource.model === 'string' ? cosmicSource.model : '',
     },
+    messages: messagesSource
+      ? {
+          ...normalizeTimestampedPreference(messagesSource),
+          enabled: messagesSource.enabled !== false,
+        }
+      : null,
     heartbeat: {
       ...normalizeTimestampedPreference(heartbeatSource),
       enabled: heartbeatSource.enabled !== false,
@@ -249,7 +263,7 @@ export default function GatewayPreferencesSettings({
 }: GatewayPreferencesSettingsProps) {
   const [preferences, setPreferences] = useState<GatewayPreferenceSnapshot | null>(null)
   const [isLoading, setIsLoading] = useState(false)
-  const [savingKey, setSavingKey] = useState<'visual' | 'cosmic' | 'heartbeat' | null>(null)
+  const [savingKey, setSavingKey] = useState<'visual' | 'cosmic' | 'heartbeat' | 'messages' | null>(null)
   const [showMoreModels, setShowMoreModels] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -394,6 +408,28 @@ export default function GatewayPreferencesSettings({
     try {
       const payload = await window.cosmic.saveGatewayPreferences({
         cosmicHeartbeatEnabled: !preferences.heartbeat.enabled,
+      })
+      const nextPreferences = normalizePreferences(payload)
+      if (!nextPreferences) {
+        throw new Error('Gateway returned an invalid preferences payload.')
+      }
+      setPreferences(nextPreferences)
+    } catch (err: unknown) {
+      setError(errorMessage(err, 'Unable to save this preference to your VM.'))
+    } finally {
+      setSavingKey(null)
+    }
+  }
+
+  const handleToggleMessages = async () => {
+    if (!preferences?.messages || !window.cosmic?.saveGatewayPreferences || !canSave) {
+      return
+    }
+    setSavingKey('messages')
+    setError(null)
+    try {
+      const payload = await window.cosmic.saveGatewayPreferences({
+        messageReactionsEnabled: !preferences.messages.enabled,
       })
       const nextPreferences = normalizePreferences(payload)
       if (!nextPreferences) {
@@ -645,6 +681,37 @@ export default function GatewayPreferencesSettings({
           </button>
         </div>
       </div>
+
+      {preferences?.messages && (
+        <div className={`preferences-card ${!canSave ? 'muted' : ''}`}>
+          <div className="preferences-card-copy">
+            <div className="preferences-card-title">Message Reactions</div>
+            <div className="preferences-card-note">
+              Let Cosmic flash a quick emoji on your message the moment it starts working — a receipt before the reply. Runs on Jev on your VM, and most messages rightly get none.
+            </div>
+            {preferenceDetail(preferences.messages) && (
+              <div className="preferences-card-detail">
+                {preferenceDetail(preferences.messages)}
+              </div>
+            )}
+          </div>
+
+          <button
+            type="button"
+            className={`preferences-switch ${preferences.messages.enabled ? 'enabled' : 'disabled'}`}
+            onClick={handleToggleMessages}
+            disabled={!canSave}
+            aria-pressed={preferences.messages.enabled === true}
+          >
+            <span className="preferences-switch-track">
+              <span className="preferences-switch-thumb" />
+            </span>
+            <span className="preferences-switch-label">
+              {preferences.messages.enabled ? 'On' : 'Off'}
+            </span>
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="preferences-error-banner">

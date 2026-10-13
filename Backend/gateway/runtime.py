@@ -52,6 +52,7 @@ from .vault.store import POLICY_ALWAYS_ALLOW, POLICY_WINDOW, VaultStore, decrypt
 from .browser_interrupts import BrowserInterruptManager
 from .slide_workflow_choice_store import SlideWorkflowChoiceStore
 from .memory import MemoryWriteAuditStore
+from .message_reactions import pick_reaction
 from .memory.client import (
     CosmicMemoryClient,
     MemoryClientHTTPError,
@@ -707,6 +708,10 @@ class GatewayRuntime:
         self.adapter_errors: dict[str, str] = {}
         self.active_task_channels: dict[str, str] = {}
         self.request_records: dict[str, dict[str, Any]] = {}
+        # Last reaction emoji per session (with monotonic timestamp), so the
+        # same emoji never fires twice in a row within a window. In-memory on
+        # purpose: restarting clears it, which is the correct reset.
+        self._recent_message_reactions: dict[str, tuple[str, float]] = {}
         self.active_requests: dict[str, ActiveRequest] = {}
         self.active_requests_by_task: dict[str, str] = {}
         self._vault_inline_waiters: set[str] = set()
@@ -10777,7 +10782,7 @@ class GatewayRuntime:
                 if value is not None:
                     user_message_metadata[key] = value
 
-        self._append_session_message(
+        user_message_id = self._append_session_message(
             session_id,
             role="user",
             content=content or "[non-text inbound message]",
@@ -10797,6 +10802,22 @@ class GatewayRuntime:
                     if isinstance(metadata.get("attachments"), list)
                     else None,
                     input_artifacts=input_artifacts,
+                )
+            )
+
+        # Quick emoji receipt on the user's own message: fired in parallel with
+        # dispatch, never on the critical path. Fails silent in every direction.
+        if user_message_id:
+            self._track_background_task(
+                self._maybe_react_to_user_message(
+                    session_id=session_id,
+                    request_id=request_id,
+                    message_id=user_message_id,
+                    content=content,
+                    attachments=metadata.get("attachments")
+                    if isinstance(metadata.get("attachments"), list)
+                    else [],
+                    channel=channel,
                 )
             )
 
@@ -10871,6 +10892,95 @@ class GatewayRuntime:
             error_text=routing_decision.error_text,
         )
         return result
+
+    async def _maybe_react_to_user_message(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        message_id: str,
+        content: str,
+        attachments: list[Any],
+        channel: str,
+    ) -> None:
+        """Pick a quick emoji for the user's own message via Jev, off the
+        critical path. Every failure mode is silent: no key, a disabled
+        preference, a timeout, or a malformed answer all leave no badge."""
+        try:
+            if not self.config.typesafe_api_key:
+                return
+            if self._channel_platform(channel) != "desktop":
+                return
+            try:
+                reactions_preference = self.preference_store.get_message_reactions()
+            except Exception:
+                logger.exception("gateway.message_reaction_preference_read_failed")
+                return
+            if not reactions_preference.get("enabled", True):
+                return
+
+            outcome = await pick_reaction(
+                self.config.typesafe_api_key,
+                content or "",
+                attachments,
+                timeout_sec=self.config.message_reaction_timeout_sec,
+            )
+            if not outcome:
+                return
+            emoji = str(outcome.get("emoji") or "")
+            if not emoji:
+                return
+
+            # Never the same emoji twice in a row in one session — a run of
+            # identical receipts reads as a bot tic, not an acknowledgment.
+            last_emoji, last_at = self._recent_message_reactions.get(session_id, ("", 0.0))
+            if emoji == last_emoji and (time.monotonic() - last_at) < 600.0:
+                return
+            self._recent_message_reactions[session_id] = (emoji, time.monotonic())
+
+            self.session_store.merge_message_metadata(
+                message_id,
+                {
+                    "reaction": emoji,
+                    "reaction_confidence": round(
+                        float(outcome.get("confidence") or 0.0), 2
+                    ),
+                },
+            )
+            await self._publish_message_reaction(
+                session_id=session_id,
+                request_id=request_id,
+                message_id=message_id,
+                emoji=emoji,
+            )
+        except Exception:
+            logger.exception("gateway.message_reaction_failed")
+
+    async def _publish_message_reaction(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        message_id: str,
+        emoji: str,
+    ) -> None:
+        event = {
+            "type": "message.reaction",
+            "session_id": session_id,
+            "request_id": request_id,
+            "message_id": message_id,
+            "emoji": emoji,
+            "timestamp": utcnow_iso(),
+        }
+        for adapter in self.registry.adapters.values():
+            if not isinstance(adapter, (DesktopAdapter, MobileAdapter)):
+                continue
+            try:
+                await adapter.broadcast_to_session(session_id, event)
+            except Exception:
+                # A dead socket drops the badge; the persisted metadata still
+                # shows it on the next history load.
+                continue
 
     async def fulfill_processed_message(self, request_record: dict[str, Any]) -> None:
         route = self._safe_text(request_record.get("route")) or "orchestrator"
@@ -24347,6 +24457,19 @@ class GatewayRuntime:
                 "updated_device_id": None,
             }
         try:
+            message_reactions = self.preference_store.get_message_reactions()
+        except Exception:
+            logger.exception(
+                "gateway.message_reactions_preference_snapshot_failed; using runtime fallback defaults"
+            )
+            message_reactions = {
+                "enabled": True,
+                "revision": 1,
+                "updated_at": utcnow_iso(),
+                "updated_source": "runtime_fallback",
+                "updated_device_id": None,
+            }
+        try:
             heartbeat_state = self.scheduler_store.get_heartbeat()
             cosmic_heartbeat = {
                 **cosmic_heartbeat,
@@ -24369,6 +24492,7 @@ class GatewayRuntime:
             "visual_response_enhancement": visual_response_enhancement,
             "cosmic_orchestrator_model": cosmic_orchestrator_model,
             "cosmic_heartbeat": cosmic_heartbeat,
+            "message_reactions": message_reactions,
         }
 
     async def save_desktop_preferences(
@@ -24378,6 +24502,7 @@ class GatewayRuntime:
         cosmic_orchestrator_provider: str | None = None,
         cosmic_orchestrator_model: str | None = None,
         cosmic_heartbeat_enabled: bool | None = None,
+        message_reactions_enabled: bool | None = None,
         source: str | None = None,
         device_id: str | None = None,
     ) -> dict[str, Any]:
@@ -24391,6 +24516,12 @@ class GatewayRuntime:
             self.preference_store.set_cosmic_orchestrator_model(
                 cosmic_orchestrator_provider,
                 model=cosmic_orchestrator_model,
+                source=source,
+                device_id=device_id,
+            )
+        if message_reactions_enabled is not None:
+            self.preference_store.set_message_reactions(
+                bool(message_reactions_enabled),
                 source=source,
                 device_id=device_id,
             )

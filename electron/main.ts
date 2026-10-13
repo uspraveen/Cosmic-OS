@@ -3018,6 +3018,7 @@ app.whenReady().then(() => {
     cosmicOrchestratorProvider?: string
     cosmicOrchestratorModel?: string
     cosmicHeartbeatEnabled?: boolean
+    messageReactionsEnabled?: boolean
   }) => {
     const config = getStoredGatewayTransportConfig()
     if (!config) {
@@ -3035,6 +3036,9 @@ app.whenReady().then(() => {
     }
     if (typeof payload?.cosmicHeartbeatEnabled === 'boolean') {
       body.cosmic_heartbeat_enabled = payload.cosmicHeartbeatEnabled
+    }
+    if (typeof payload?.messageReactionsEnabled === 'boolean') {
+      body.message_reactions_enabled = payload.messageReactionsEnabled
     }
     return callGatewayJson(config, '/desktop/preferences', {
       method: 'PATCH',

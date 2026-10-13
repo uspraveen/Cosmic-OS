@@ -42,10 +42,19 @@ class CosmicHeartbeatPreference(BaseModel):
     last_result_summary: str | None = None
 
 
+class MessageReactionsPreference(BaseModel):
+    enabled: bool
+    revision: int = Field(..., ge=1)
+    updated_at: str
+    updated_source: str | None = None
+    updated_device_id: str | None = None
+
+
 class DesktopPreferencesResponse(BaseModel):
     visual_response_enhancement: VisualResponseEnhancementPreference
     cosmic_orchestrator_model: CosmicOrchestratorModelPreference
     cosmic_heartbeat: CosmicHeartbeatPreference
+    message_reactions: MessageReactionsPreference
 
 
 class DesktopPreferencesUpdateRequest(BaseModel):
@@ -53,6 +62,7 @@ class DesktopPreferencesUpdateRequest(BaseModel):
     cosmic_orchestrator_provider: str | None = Field(default=None, max_length=64)
     cosmic_orchestrator_model: str | None = Field(default=None, max_length=256)
     cosmic_heartbeat_enabled: bool | None = None
+    message_reactions_enabled: bool | None = None
 
 
 def _extract_device_id(request: Request) -> str | None:
@@ -79,6 +89,7 @@ async def update_desktop_preferences(
         cosmic_orchestrator_provider=payload.cosmic_orchestrator_provider,
         cosmic_orchestrator_model=payload.cosmic_orchestrator_model,
         cosmic_heartbeat_enabled=payload.cosmic_heartbeat_enabled,
+        message_reactions_enabled=payload.message_reactions_enabled,
         source="desktop_settings",
         device_id=_extract_device_id(request),
     )
