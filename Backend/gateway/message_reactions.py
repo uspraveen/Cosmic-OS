@@ -41,8 +41,11 @@ EMOJI_DESCRIPTIONS: dict[str, str] = {
 }
 
 # The noul readout is absolute; the choice readout is relative. Both must
-# clear their bar before a badge shows.
-REACT_THRESHOLD = 0.6
+# clear their bar before a badge shows. Calibrated live (2026-10-13): bland
+# and routine messages cluster at noul <= 0.23, while the proven reactions
+# ("post this" + video, "think 10 years out") scored 0.35 and 0.69 — the bar
+# sits between the two clusters.
+REACT_THRESHOLD = 0.30
 EMOJI_CONFIDENCE_THRESHOLD = 0.35
 
 # Tone lives at the start and the ask lives at the end; the middle rarely

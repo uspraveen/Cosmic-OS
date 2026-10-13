@@ -83,7 +83,14 @@ def test_parse_reaction_accepts_clear_signal():
 
 
 def test_parse_reaction_abstains_on_low_react_score():
-    assert parse_reaction_response(_jev_response(0.3, "👍", 0.9)) is None
+    assert parse_reaction_response(_jev_response(0.23, "👍", 0.9)) is None
+
+
+def test_parse_reaction_accepts_calibrated_video_case():
+    # "How about we post this" + video scored noul 0.35 live.
+    outcome = parse_reaction_response(_jev_response(0.35, "👀", 0.51))
+    assert outcome is not None
+    assert outcome["emoji"] == "👀"
 
 
 def test_parse_reaction_abstains_on_low_confidence():
