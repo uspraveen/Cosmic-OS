@@ -450,6 +450,16 @@ class MidRunCoordinator:
             self.queue.remove(item)
             delivered.append(item)
         for item in delivered:
+            # Where in the reply the model read it: the visible stream length
+            # right now. Deliveries ride the same ordered stream as the
+            # response chunks, so this is exactly the text produced before it.
+            anchor = {
+                "request_id": item.request_id,
+                "content": item.content,
+                "stream_offset": len(state.partial_content or ""),
+                "delivered_at": _utcnow_iso(),
+            }
+            state.steer_anchors.append(anchor)
             self.runtime._record_steered_user_message(item, into=state)
             await self._send(
                 item.channel,
@@ -461,6 +471,8 @@ class MidRunCoordinator:
                     "session_id": state.session_id,
                     "channel": item.channel,
                     "content": item.content,
+                    "stream_offset": anchor["stream_offset"],
+                    "delivered_at": anchor["delivered_at"],
                 },
             )
         if delivered:

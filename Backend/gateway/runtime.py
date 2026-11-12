@@ -496,6 +496,11 @@ class ActiveRequest:
     browser_progress: dict[str, Any] | None = None
     sheets_progress: dict[str, Any] | None = None
     error_message: str = ""
+    # Messages the user sent mid-run that this run read, each stamped with the
+    # visible stream length at the moment the model took it in (same contract
+    # as the card anchors above). The desktop renders the user's bubble inline
+    # at that point of the reply, live and after reload.
+    steer_anchors: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -11546,6 +11551,30 @@ class GatewayRuntime:
         finally:
             self.mid_run.end_dispatch(channel, dispatch_key)
 
+    @staticmethod
+    def _steer_anchors_payload(anchors: Any) -> list[dict[str, Any]]:
+        """Wire/persisted form of ActiveRequest.steer_anchors."""
+        payload: list[dict[str, Any]] = []
+        for anchor in anchors or []:
+            if not isinstance(anchor, dict):
+                continue
+            request_id = str(anchor.get("request_id") or "").strip()
+            try:
+                offset = max(0, int(anchor.get("stream_offset") or 0))
+            except (TypeError, ValueError):
+                continue
+            if not request_id:
+                continue
+            payload.append(
+                {
+                    "request_id": request_id,
+                    "content": str(anchor.get("content") or ""),
+                    "stream_offset": offset,
+                    "delivered_at": anchor.get("delivered_at"),
+                }
+            )
+        return payload
+
     def _record_steered_user_message(
         self, item: HeldMessage, *, into: ActiveRequest
     ) -> None:
@@ -11562,6 +11591,13 @@ class GatewayRuntime:
             "steered_into_request_id": into.request_id,
             "steered_into_task_id": into.task_id,
         }
+        anchor = next(
+            (a for a in into.steer_anchors if a.get("request_id") == item.request_id),
+            None,
+        )
+        if anchor is not None:
+            metadata["steered_stream_offset"] = anchor.get("stream_offset")
+            metadata["delivered_at"] = anchor.get("delivered_at")
         try:
             self._append_session_message(
                 into.session_id,
@@ -13712,6 +13748,7 @@ class GatewayRuntime:
             "sheet_run_anchors": self._alpha_console_anchors_payload(
                 state.sheet_run_anchors
             ),
+            "steer_anchors": self._steer_anchors_payload(state.steer_anchors),
             "completed": True,
             "failed": True,
             "error": state.error_message or None,
@@ -13755,6 +13792,9 @@ class GatewayRuntime:
         )
         if sheet_run_anchors:
             metadata["sheet_run_anchors"] = sheet_run_anchors
+        steer_anchors = self._steer_anchors_payload(state.steer_anchors)
+        if steer_anchors:
+            metadata["steer_anchors"] = steer_anchors
         if state.error_message:
             metadata["error"] = state.error_message
         if state.partial_content:
@@ -17204,6 +17244,7 @@ class GatewayRuntime:
                 "slide_progress": state.slide_progress,
                 "browser_progress": state.browser_progress,
                 "sheets_progress": state.sheets_progress,
+                "steer_anchors": self._steer_anchors_payload(state.steer_anchors),
                 "completed": state.completed,
                 "failed": state.failed,
                 "error": state.error_message or None,
@@ -17266,6 +17307,11 @@ class GatewayRuntime:
                     "sheet_run_anchors": [
                         dict(item)
                         for item in snapshot.get("sheet_run_anchors", [])
+                        if isinstance(item, dict)
+                    ],
+                    "steer_anchors": [
+                        dict(item)
+                        for item in snapshot.get("steer_anchors", [])
                         if isinstance(item, dict)
                     ],
                     "completed": True,
@@ -23295,6 +23341,11 @@ class GatewayRuntime:
                 if request_state is not None and request_state.browser_console_anchors
                 else []
             )
+            steer_anchors = (
+                self._steer_anchors_payload(request_state.steer_anchors)
+                if request_state is not None
+                else []
+            )
             sheet_run_anchors = (
                 self._alpha_console_anchors_payload(request_state.sheet_run_anchors)
                 if request_state is not None and request_state.sheet_run_anchors
@@ -23362,6 +23413,7 @@ class GatewayRuntime:
                     "alpha_console_anchors": alpha_console_anchors,
                     "browser_console_anchors": browser_console_anchors,
                     "sheet_run_anchors": sheet_run_anchors,
+                    "steer_anchors": steer_anchors or None,
                     "browser_progress": browser_progress,
                     "sheets_progress": sheets_progress,
                 },
@@ -23414,6 +23466,8 @@ class GatewayRuntime:
                 event["browser_console_anchors"] = browser_console_anchors
             if sheet_run_anchors:
                 event["sheet_run_anchors"] = sheet_run_anchors
+            if steer_anchors:
+                event["steer_anchors"] = steer_anchors
             event_channel_platform = self._channel_platform(event_channel)
             email_delivery = (
                 self._effective_email_delivery(event)
@@ -27288,6 +27342,8 @@ class GatewayRuntime:
                 cards["sheet_run_anchors"] = self._alpha_console_anchors_payload(
                     state.sheet_run_anchors
                 )
+            if state.steer_anchors:
+                cards["steer_anchors"] = self._steer_anchors_payload(state.steer_anchors)
         except Exception:
             logger.warning("gateway.stopped_turn_cards_failed request_id=%s", state.request_id, exc_info=True)
         return cards

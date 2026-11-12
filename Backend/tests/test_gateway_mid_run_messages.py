@@ -50,6 +50,8 @@ class SteeringFakeOrchestrator:
         self.queries: list[str] = []
         self.cancelled: set[str] = set()
         self.submit_calls: list[str] = []
+        # Optional text the run streams before its tool step (per query).
+        self.prelude: dict[str, str] = {}
 
     def gate(self, request_id: str, name: str) -> asyncio.Event:
         key = (request_id, name)
@@ -89,6 +91,9 @@ class SteeringFakeOrchestrator:
         }
         behavior = self.behavior.get(query, "normal")
         yield {**base, "type": "task.created", "status": "running"}
+        prelude = self.prelude.get(query, "")
+        if prelude:
+            yield {**base, "type": "response.chunk", "content": prelude, "done": False}
         # The "tool call" is running; the user may type now.
         await self.gate(request_id, "step").wait()
         if behavior == "fail":
@@ -110,7 +115,7 @@ class SteeringFakeOrchestrator:
         yield {
             **base,
             "type": "response.complete",
-            "content": answer,
+            "content": prelude + answer,
             "awaiting_reply": False,
         }
         yield {**base, "type": "task.completed", "status": "completed"}
@@ -506,3 +511,62 @@ def test_queue_release_only_touches_the_finished_runs_messages() -> None:
     assert queue.release_target("req_1") == [a]
     assert a.state == "waiting" and b.state == "injecting"
     assert [item.request_id for item in queue.waiting(CHANNEL)] == ["m1"]
+
+
+@pytest.mark.asyncio
+async def test_steer_is_anchored_where_the_model_read_it_in_the_reply(tmp_path) -> None:
+    """The desktop shows a read steer inline in the reply, at the point the
+    model took it in; that point travels live and is persisted with the reply
+    so a reload puts the bubble back in the same place."""
+    async with Harness(tmp_path) as h:
+        prelude = "Checking flights. "
+        h.orchestrator.prelude["research flights"] = prelude
+        h.orchestrator.hold("req_a", "step")
+        await h.query("req_a", "research flights")
+        await wait_for(lambda: h.runtime.active_requests.get("req_a") is not None
+                       and h.runtime.active_requests["req_a"].partial_content == prelude)
+        await h.query("req_b", "only nonstop please")
+        await wait_for(lambda: h.queue_items() and h.queue_items()[0].state == "injecting")
+        h.orchestrator.release("req_a", "step")
+        await h.wait_idle()
+
+        delivered = h.socket.of_type("user_message.delivered")
+        assert len(delivered) == 1
+        assert delivered[0]["stream_offset"] == len(prelude)
+        assert delivered[0]["delivered_at"]
+
+        history = h.history()
+        steer_row = next(row for row in history if row["role"] == "user" and row["content"] == "only nonstop please")
+        assert steer_row["metadata"]["steered_stream_offset"] == len(prelude)
+        answer_row = next(row for row in history if row["role"] == "assistant")
+        assert answer_row["content"].startswith(prelude)
+        anchors = answer_row["metadata"]["steer_anchors"]
+        assert [(a["request_id"], a["content"], a["stream_offset"]) for a in anchors] == [
+            ("req_b", "only nonstop please", len(prelude))
+        ]
+        # The final answer event carries them too, so the live bubble keeps them.
+        complete = [e for e in h.socket.of_type("response.complete") if e.get("request_id") == "req_a"]
+        assert complete and complete[-1]["steer_anchors"][0]["request_id"] == "req_b"
+
+
+@pytest.mark.asyncio
+async def test_resume_snapshot_carries_steer_anchors_of_the_live_run(tmp_path) -> None:
+    async with Harness(tmp_path) as h:
+        h.orchestrator.hold("req_a", "end")
+        h.orchestrator.hold("req_a", "step")
+        await h.query("req_a", "research flights")
+        await wait_for(lambda: h.socket.of_type("task.created"))
+        await h.query("req_b", "only nonstop please")
+        await wait_for(lambda: h.queue_items() and h.queue_items()[0].state == "injecting")
+        h.orchestrator.release("req_a", "step")
+        await wait_for(lambda: h.socket.of_type("user_message.delivered"))
+        state = h.runtime.active_requests["req_a"]
+        assert [a["request_id"] for a in state.steer_anchors] == ["req_b"]
+        resume = await h.runtime.build_resume_payload(channel=CHANNEL)
+        streams = [stream for stream in resume.get("foreground_streams", []) if stream["request_id"] == "req_a"]
+        assert streams, resume.keys()
+        payload = streams[0]["steer_anchors"]
+        assert [(a["request_id"], a["stream_offset"]) for a in payload] == [("req_b", 0)]
+        h.orchestrator.release("req_a", "end")
+        await h.wait_idle()
+
