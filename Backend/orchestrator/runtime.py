@@ -29,6 +29,12 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
+from .steering import (
+    SteerInbox,
+    last_message_accepts_user_text,
+    render_steers_for_model,
+)
+
 from urllib.parse import urlparse
 
 import httpx
@@ -258,6 +264,9 @@ class ActiveTaskRun:
     channel: str | None
     cancel_requested: bool = False
     cancel_message: str = "Response stopped."
+    # Messages the user sent while this run was working. Drained at the next
+    # step boundary; see orchestrator/steering.py for the delivery contract.
+    steer_inbox: SteerInbox = field(default_factory=SteerInbox)
 
 
 class OrchestratorTaskError(RuntimeError):
@@ -744,6 +753,11 @@ class OrchestratorRuntime:
             while iteration < max_iterations:
                 iteration += 1
                 turn_stream_boundary_emitted = False
+                steer_event = self._inject_pending_steers(
+                    task.task_id, messages, ev=ev, iteration=iteration
+                )
+                if steer_event is not None:
+                    yield steer_event
                 messages = self._prepare_messages_for_anthropic(
                     messages,
                     strip_all_server_tool_blocks=strict_server_tool_replay_recovery,
@@ -1307,6 +1321,11 @@ class OrchestratorRuntime:
                     continue
                 break
 
+            # No step boundary is left, so stop accepting steers before any
+            # terminal event can be emitted. Undelivered ones stay with the
+            # gateway and run as the next turn.
+            self._close_steer_inbox(task.task_id)
+
             # ── Emit completion ─────────────────────────────────
             hit_max_iterations = iteration >= max_iterations and stop_reason in ("tool_use", "pause_turn")
             result_type = "max_iterations" if hit_max_iterations else "success"
@@ -1607,6 +1626,11 @@ class OrchestratorRuntime:
             while iteration < max_iterations:
                 iteration += 1
                 turn_stream_boundary_emitted = False
+                steer_event = self._inject_pending_steers(
+                    task.task_id, openai_messages, ev=ev, iteration=iteration
+                )
+                if steer_event is not None:
+                    yield steer_event
                 fireworks_requests += 1
                 current_reasoning_effort = (
                     reasoning_effort_override
@@ -2086,6 +2110,8 @@ class OrchestratorRuntime:
                     continue
                 break
 
+            self._close_steer_inbox(task.task_id)
+
             hit_max_iterations = iteration >= max_iterations and bool(stop_reason == "tool_calls")
             result_type = "max_iterations" if hit_max_iterations else "success"
 
@@ -2422,6 +2448,77 @@ class OrchestratorRuntime:
                 )
                 cancelled_any = True
         return cancelled_any
+
+    # ── Mid-run user messages (steering) ───────────────────────
+    def submit_user_steer(self, task_id: str, *, message_id: str, content: str) -> bool:
+        """Queue a user message for the run's next step boundary.
+
+        Returns False when the run is unknown, cancelled, or past its last
+        step boundary; the gateway then keeps the message for a follow-up
+        turn. Synchronous on purpose: no await between the check and the
+        append, so it is atomic against ``_close_steer_inbox``.
+        """
+        run_state = self._active_runs.get(str(task_id or "").strip())
+        if run_state is None or run_state.cancel_requested:
+            return False
+        return run_state.steer_inbox.submit(message_id, content)
+
+    def withdraw_user_steer(self, task_id: str, *, message_id: str) -> bool:
+        run_state = self._active_runs.get(str(task_id or "").strip())
+        if run_state is None:
+            return False
+        return run_state.steer_inbox.withdraw(message_id)
+
+    def _close_steer_inbox(self, task_id: str) -> None:
+        run_state = self._active_runs.get(task_id)
+        if run_state is None:
+            return
+        leftover = run_state.steer_inbox.close()
+        if leftover:
+            logger.info(
+                "orchestrator.steer_inbox_closed task_id=%s undelivered=%s",
+                task_id,
+                len(leftover),
+            )
+
+    def _inject_pending_steers(
+        self,
+        task_id: str,
+        messages: list[dict[str, Any]],
+        *,
+        ev: dict[str, Any],
+        iteration: int,
+    ) -> dict[str, Any] | None:
+        """Append any pending user steers to the transcript before a model call.
+
+        Only runs at a boundary where a user turn may legally be extended (see
+        ``last_message_accepts_user_text``); otherwise the steers stay pending
+        for the next boundary. Returns the delivery event to yield, so the
+        gateway can persist the message in history and tell the UI.
+        """
+        run_state = self._active_runs.get(task_id)
+        if run_state is None or run_state.cancel_requested:
+            return None
+        if not run_state.steer_inbox.pending:
+            return None
+        if not last_message_accepts_user_text(messages):
+            return None
+        steers = run_state.steer_inbox.drain()
+        if not steers:
+            return None
+        self._append_user_nudge(messages, render_steers_for_model(steers))
+        logger.info(
+            "orchestrator.user_steer_delivered task_id=%s iteration=%s count=%s",
+            task_id,
+            iteration,
+            len(steers),
+        )
+        return {
+            **ev,
+            "type": "task.user_message_delivered",
+            "iteration": iteration,
+            "message_ids": [item.message_id for item in steers],
+        }
 
     async def _request_agent_task_cancel(self, task_id: str) -> None:
         if self._redis is None:
