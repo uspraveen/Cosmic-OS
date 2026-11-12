@@ -31,6 +31,18 @@ import { applyReactionToMessages, parseReactionEvent } from './messageReactions'
 import { scrubAssistantProse } from './assistantProse'
 import { canAdoptTaskForActiveStream, canClaimActiveStreamSlot, extractEventStreamIds, isEventForActiveStream as isEventForActiveStreamIds, shouldBindToLastAssistantMessage } from './streamIdentity'
 import { groupRepliesWithTheirQuery } from './transcriptOrder'
+import {
+  addLocalMidRunItem,
+  applyMidRunAck,
+  applyMidRunSnapshot,
+  describeMidRunItem,
+  findMidRunItem,
+  midRunModeForKey,
+  patchMidRunItem,
+  removeMidRunItem,
+  type MidRunMode,
+  type MidRunQueueItem,
+} from './midRunQueue'
 import { groupEmailThreads, stripEmailEnvelope, type EmailThreadUnit } from './emailThreads'
 import { findPendingApprovals } from './pendingApprovals'
 import { ContentCardStack, QuestionCard, normalizeContentCard, type ContentCardBlock } from './responseSurfaces'
@@ -123,6 +135,8 @@ interface Message {
   backgroundState?: 'working' | 'ready' | 'failed'
   /** Gateway's quick emoji receipt on the user's own message (Jev-picked). */
   reaction?: string | null
+  /** Sent while Cosmic was working and read by the running task mid-run. */
+  deliveredMidRun?: boolean
 }
 
 interface PendingTaskInput {
@@ -1403,6 +1417,7 @@ const historyToMessages = (history: any[] = []): Message[] => {
       emailBodyTruncated: Boolean(item?.metadata?.body_truncated),
       activity: typeof item?.metadata?.activity === 'string' ? item.metadata.activity : undefined,
       reaction: typeof item?.metadata?.reaction === 'string' ? item.metadata.reaction : undefined,
+      deliveredMidRun: item?.role === 'user' && item?.metadata?.delivery === 'mid_run_steer' ? true : undefined,
       progress: normalizeTabularProgress(item?.metadata?.tabular_progress) ?? normalizeDocsProgress(item?.metadata?.docs_progress),
       slideProgress: normalizeSlideProgress(item?.metadata?.slide_progress),
       browserProgress: normalizeBrowserProgress(item?.metadata?.browser_progress),
@@ -6467,6 +6482,11 @@ export default function App() {
   // React only re-renders on the empty↔non-empty transition (via `hasText`), so individual
   // keystrokes don't trigger a 5910-line App re-render. Submit reads inputRef.current.value.
   const [hasText, setHasText] = useState(false)
+  // Messages typed while Cosmic is busy. The gateway holds them and steers
+  // them into the run (or runs them next); this mirrors its queue.
+  const [midRunQueue, setMidRunQueue] = useState<MidRunQueueItem[]>([])
+  const midRunQueueRef = useRef<MidRunQueueItem[]>([])
+  const midRunEditIntentRef = useRef<Set<string>>(new Set())
   const inputHasTextRef = useRef(false)
   const [pendingAttachments, setPendingAttachments] = useState<PendingDocumentAttachment[]>([])
   const [searchState, setSearchState] = useState<'hidden' | 'visible' | 'hiding'>('hidden')
@@ -8030,6 +8050,9 @@ export default function App() {
     setDismissedTaskInterruptIds([])
     setSelectedTaskInputId(null)
     setSelectedBackgroundRequestId(null)
+    midRunQueueRef.current = []
+    midRunEditIntentRef.current.clear()
+    setMidRunQueue([])
     clearCronResultNotifications()
     clearArtifactReadyNotifications()
     setIsStreaming(false)
@@ -8694,6 +8717,30 @@ export default function App() {
     const offEvent = window.cosmic?.onGatewayEvent((event) => {
       const eventType = String(event?.type || '')
       if (!eventType) return
+
+      if (eventType.startsWith('user_message.')) {
+        handleMidRunGatewayEvent(eventType, event)
+        return
+      }
+      const resumedMidRunQueue = (event as { mid_run_queue?: unknown }).mid_run_queue
+      if (eventType === 'resume.ok' && Array.isArray(resumedMidRunQueue)) {
+        updateMidRunQueue((items) => applyMidRunSnapshot(items, resumedMidRunQueue, { keepStarting: false }))
+      }
+      if (eventType === 'route_result' && typeof event.request_id === 'string') {
+        // A message sent while the UI thought Cosmic was busy, but which the
+        // gateway ran straight away (it had just finished): it is a normal
+        // turn now, so it leaves the tray and becomes a query bubble first.
+        promoteMidRunItemToTranscript(event.request_id)
+      }
+      if (eventType === 'error' && findMidRunItem(midRunQueueRef.current, event?.request_id)) {
+        const failedId = String(event.request_id).trim()
+        updateMidRunQueue((items) => patchMidRunItem(items, failedId, {
+          state: 'failed',
+          withdrawing: false,
+          error: String(event?.message || 'Cosmic could not accept this message.'),
+        }))
+        return
+      }
 
       if (eventType === 'resume.ok') {
         rememberHeartbeatConsumptions((event as any).heartbeat_consumptions)
@@ -10124,7 +10171,7 @@ export default function App() {
   }
 
   const handleComposerVoiceTyping = () => {
-    if (isStreaming || authState !== 'authenticated') {
+    if (authState !== 'authenticated') {
       return
     }
     const input = inputRef.current
@@ -10167,7 +10214,7 @@ export default function App() {
   }
 
   const handlePickDocuments = async () => {
-    if (!window.cosmic?.pickGatewayDocuments || isStreaming || authState !== 'authenticated') {
+    if (!window.cosmic?.pickGatewayDocuments || authState !== 'authenticated') {
       return
     }
     try {
@@ -10192,7 +10239,7 @@ export default function App() {
     if (!hasImagePayload) {
       return
     }
-    if (isStreaming || authState !== 'authenticated') {
+    if (authState !== 'authenticated') {
       return
     }
     const readClipboardImageAttachment = (window.cosmic as any)?.readClipboardImageAttachment
@@ -10218,13 +10265,169 @@ export default function App() {
     setPendingAttachments((prev) => prev.filter((item) => item.filePath !== filePath))
   }
 
+  const updateMidRunQueue = (updater: (items: MidRunQueueItem[]) => MidRunQueueItem[]) => {
+    const next = updater(midRunQueueRef.current)
+    if (next === midRunQueueRef.current) return
+    midRunQueueRef.current = next
+    setMidRunQueue(next)
+  }
+
+  const restoreComposerText = (text: string) => {
+    const input = inputRef.current
+    const restored = String(text || '').trim()
+    if (!input || !restored) return
+    const existing = input.value.trim()
+    input.value = existing ? `${restored}\n${existing}` : restored
+    input.style.height = 'auto'
+    input.style.height = `${Math.min(input.scrollHeight, 120)}px`
+    inputHasTextRef.current = true
+    setHasText(true)
+    input.focus()
+  }
+
+  /** Put a held message into the transcript once it is part of the conversation. */
+  const appendMidRunUserBubble = (requestId: string, content: string, overrides: Partial<Message> = {}) => {
+    const text = String(content || '').trim()
+    if (!requestId || !text) return
+    setMessages((prev) => {
+      if (prev.some((message) => message.role === 'user' && message.requestId === requestId)) {
+        return prev
+      }
+      return [...prev, createUserMessage(text, undefined, { requestId, ...overrides })]
+    })
+  }
+
+  const promoteMidRunItemToTranscript = (rawRequestId: unknown, content?: unknown) => {
+    const item = findMidRunItem(midRunQueueRef.current, rawRequestId)
+    if (!item) return
+    updateMidRunQueue((items) => removeMidRunItem(items, item.requestId))
+    midRunEditIntentRef.current.delete(item.requestId)
+    pendingResponseStartScrollRef.current = true
+    shouldAutoScrollRef.current = false
+    appendMidRunUserBubble(item.requestId, typeof content === 'string' && content.trim() ? content : item.content)
+  }
+
+  const handleMidRunGatewayEvent = (
+    eventType: string,
+    event: { request_id?: unknown; items?: unknown; content?: unknown; withdrawn?: unknown } | null | undefined,
+  ) => {
+    const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
+    if (eventType === 'user_message.queue') {
+      updateMidRunQueue((items) => applyMidRunSnapshot(items, event?.items))
+      return
+    }
+    if (eventType === 'user_message.queued') {
+      updateMidRunQueue((items) => applyMidRunAck(items, event))
+      return
+    }
+    if (eventType === 'user_message.delivered') {
+      const item = findMidRunItem(midRunQueueRef.current, requestId)
+      updateMidRunQueue((items) => removeMidRunItem(items, requestId))
+      midRunEditIntentRef.current.delete(requestId)
+      appendMidRunUserBubble(requestId, String(event?.content || item?.content || ''), { deliveredMidRun: true })
+      return
+    }
+    if (eventType === 'user_message.dispatched') {
+      // Its turn has come. It stays in the tray until route_result: by then
+      // the gateway has persisted it, so a history refresh cannot drop it.
+      updateMidRunQueue((items) => patchMidRunItem(items, requestId, { state: 'starting', withdrawing: false }))
+      return
+    }
+    if (eventType === 'user_message.withdrawn') {
+      const item = findMidRunItem(midRunQueueRef.current, requestId)
+      const wantedEdit = midRunEditIntentRef.current.has(requestId)
+      midRunEditIntentRef.current.delete(requestId)
+      if (event?.withdrawn === true) {
+        updateMidRunQueue((items) => removeMidRunItem(items, requestId))
+        if (wantedEdit) {
+          restoreComposerText(String(event?.content || item?.content || ''))
+        }
+        return
+      }
+      // Too late: Cosmic already read it (it will show up in the chat).
+      updateMidRunQueue((items) => patchMidRunItem(items, requestId, { withdrawing: false }))
+    }
+  }
+
+  const currentRouteOverride = () => (
+    mode === 'task'
+      ? 'orchestrator'
+      : selectedModel === 'cosmic'
+        ? undefined
+        : selectedModel
+  )
+
+  /**
+   * Send while Cosmic is working. 'steer' is read by the running task at its
+   * next step; 'queue' runs as its own turn afterwards. The composer stays
+   * focused so the user can keep typing.
+   */
+  const submitMidRunMessage = (delivery: MidRunMode) => {
+    if (mode === 'meeting') return
+    const textToSend = (inputRef.current?.value ?? '').trim()
+    const attachments = pendingAttachments
+    if (!textToSend && attachments.length === 0) return
+    if (authState !== 'authenticated' || !gatewayStatus.connected || !window.cosmic?.sendGatewayQuery) {
+      // Keep the draft; the composer already explains the connection state.
+      return
+    }
+    const requestId = `req_${crypto.randomUUID()}`
+    const displayText = textToSend || buildPendingAttachmentSummary(attachments)
+    clearComposerInput()
+    setPendingAttachments([])
+    updateMidRunQueue((items) => addLocalMidRunItem(items, {
+      requestId,
+      content: displayText,
+      mode: delivery,
+      attachmentCount: attachments.length,
+    }))
+    window.cosmic.sendGatewayQuery({
+      requestId,
+      content: textToSend,
+      conversationContext: buildConversationContext(messages),
+      routeOverride: currentRouteOverride(),
+      attachments,
+      delivery,
+      deferHistory: true,
+    }).catch((error: unknown) => {
+      updateMidRunQueue((items) => patchMidRunItem(items, requestId, {
+        state: 'failed',
+        error: (error instanceof Error && error.message) || 'Unable to send the message to your VM.',
+      }))
+    })
+    inputRef.current?.focus()
+  }
+
+  const handleWithdrawMidRunItem = (item: MidRunQueueItem, intent: 'cancel' | 'edit') => {
+    if (item.withdrawing) return
+    if (item.state === 'failed' || !window.cosmic?.withdrawGatewayQuery) {
+      // Never reached the VM: purely local.
+      updateMidRunQueue((items) => removeMidRunItem(items, item.requestId))
+      if (intent === 'edit') restoreComposerText(item.content)
+      return
+    }
+    if (intent === 'edit') {
+      midRunEditIntentRef.current.add(item.requestId)
+    }
+    updateMidRunQueue((items) => patchMidRunItem(items, item.requestId, { withdrawing: true }))
+    window.cosmic.withdrawGatewayQuery({ requestId: item.requestId }).catch(() => {
+      midRunEditIntentRef.current.delete(item.requestId)
+      updateMidRunQueue((items) => patchMidRunItem(items, item.requestId, { withdrawing: false }))
+    })
+  }
+
   const handleSubmit = () => {
     if (mode === 'meeting') return
     setIsInputFocused(false)
     if (inputRef.current) inputRef.current.blur()
 
     const textToSend = (inputRef.current?.value ?? '').trim()
-    if ((!textToSend && pendingAttachments.length === 0) || isStreaming) return
+    if (!textToSend && pendingAttachments.length === 0) return
+    if (isStreaming) {
+      // Never block the user: steer the running task instead.
+      submitMidRunMessage('steer')
+      return
+    }
 
     const messageAttachments = normalizeMessageAttachments(pendingAttachments)
     const displayText = textToSend || buildPendingAttachmentSummary(pendingAttachments)
@@ -10275,12 +10478,7 @@ export default function App() {
       return
     }
 
-    const effectiveRouteOverride =
-      mode === 'task'
-        ? 'orchestrator'
-        : selectedModel === 'cosmic'
-          ? undefined
-          : selectedModel
+    const effectiveRouteOverride = currentRouteOverride()
 
     window.cosmic.sendGatewayQuery({
       requestId,
@@ -10962,7 +11160,9 @@ export default function App() {
     authState !== 'authenticated'
       ? 'Sign in to connect Cosmic to your VM...'
       : gatewayStatus.connected
-        ? 'Ask Cosmic...'
+        ? isStreaming
+          ? 'Add to what Cosmic is doing... (Enter: next step, Tab: queue)'
+          : 'Ask Cosmic...'
         : gatewayStatus.state === 'connecting' || gatewayStatus.state === 'reconnecting'
           ? 'Connecting to your VM...'
           : gatewayStatus.state === 'error'
@@ -12001,6 +12201,11 @@ export default function App() {
                                   : 'Background task failed'}
                             </div>
                           )}
+                          {msg.deliveredMidRun && (
+                            <div className="query-background-status steered" title="Sent while Cosmic was working; the running task read it at its next step.">
+                              Read mid-run
+                            </div>
+                          )}
                           <UserMessageAttachments attachments={msg.attachments} />
                         </>
                       ) : (
@@ -12330,6 +12535,50 @@ export default function App() {
                         ))}
                       </div>
                     )}
+                  {midRunQueue.length > 0 && (
+                    <div className="mid-run-tray" role="list" aria-label="Messages waiting for Cosmic">
+                      {midRunQueue.map((item) => {
+                        const { label, hint } = describeMidRunItem(item)
+                        return (
+                          <div
+                            key={item.requestId}
+                            role="listitem"
+                            className={`mid-run-item state-${item.state}${item.withdrawing ? ' is-withdrawing' : ''}`}
+                            title={hint}
+                          >
+                            <span className="mid-run-item-label">{label}</span>
+                            <span className="mid-run-item-text">
+                              {item.content}
+                              {item.attachmentCount > 0 ? ` (+${item.attachmentCount} file${item.attachmentCount === 1 ? '' : 's'})` : ''}
+                            </span>
+                            <button
+                              type="button"
+                              className="mid-run-item-action"
+                              onClick={() => handleWithdrawMidRunItem(item, 'edit')}
+                              disabled={item.withdrawing}
+                              aria-label="Edit this message"
+                              title="Edit (takes it back into the composer)"
+                            >
+                              <Pencil size={12} strokeWidth={2.2} aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              className="mid-run-item-action"
+                              onClick={() => handleWithdrawMidRunItem(item, 'cancel')}
+                              disabled={item.withdrawing}
+                              aria-label="Remove this message"
+                              title="Remove"
+                            >
+                              <X size={12} strokeWidth={2.2} aria-hidden="true" />
+                            </button>
+                          </div>
+                        )
+                      })}
+                      <div className="mid-run-tray-hint">
+                        Enter: Cosmic reads it at its next step · Tab: queue for after · Stop keeps these
+                      </div>
+                    </div>
+                  )}
                   <div className="input-row">
                     <button
                       className="back-btn"
@@ -12356,7 +12605,7 @@ export default function App() {
                       onFocus={(event) => showHoverTooltipForElement('Attach files', event.currentTarget, 'control')}
                       onBlur={hideHoverTooltip}
                       aria-label="Attach files"
-                      disabled={isStreaming || authState !== 'authenticated'}
+                      disabled={authState !== 'authenticated'}
                       type="button"
                     >
                       {pendingAttachments.length > 0 && <span className="attach-btn-badge">{pendingAttachments.length}</span>}
@@ -12381,7 +12630,7 @@ export default function App() {
                       onBlur={hideHoverTooltip}
                       aria-label={composerVoiceActive ? 'Stop voice typing' : 'Start voice typing'}
                       aria-pressed={composerVoiceActive}
-                      disabled={isStreaming || authState !== 'authenticated'}
+                      disabled={authState !== 'authenticated'}
                       type="button"
                     >
                       <Mic size={17} strokeWidth={2.15} aria-hidden="true" />
@@ -12410,6 +12659,18 @@ export default function App() {
                       defaultValue=""
                       onChange={handleInput}
                       onKeyDown={(e) => {
+                        // While Cosmic works: Enter steers the run, Tab queues
+                        // a follow-up. The composer is never locked.
+                        const midRunMode = midRunModeForKey(e.key, {
+                          busy: isStreaming,
+                          hasContent: hasText || pendingAttachments.length > 0,
+                          shiftKey: e.shiftKey,
+                        })
+                        if (midRunMode) {
+                          e.preventDefault()
+                          submitMidRunMessage(midRunMode)
+                          return
+                        }
                         if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault()
                           handleSubmit()
@@ -12421,7 +12682,7 @@ export default function App() {
                       placeholder={composerPlaceholder}
                       spellCheck={false}
                       autoComplete="off"
-                      disabled={isStreaming || authState !== 'authenticated'}
+                      disabled={authState !== 'authenticated'}
                     />
 
                     {hasText && (
@@ -12484,6 +12745,23 @@ export default function App() {
                         disabled={backgroundingRequestId === activeStreamingRequestIdRef.current}
                       >
                         <img src={moveToBackgroundIcon} alt="" aria-hidden="true" className="background-task-icon-image invert" />
+                      </button>
+                    )}
+
+                    {isStreaming && (hasText || pendingAttachments.length > 0) && (
+                      <button
+                        className="send-btn active mid-run-send-btn"
+                        onClick={() => submitMidRunMessage('steer')}
+                        onMouseEnter={(event) => showHoverTooltipForElement('Send now: Cosmic reads it at its next step (Tab queues it for after)', event.currentTarget, 'control')}
+                        onMouseLeave={hideHoverTooltip}
+                        onFocus={(event) => showHoverTooltipForElement('Send now: Cosmic reads it at its next step (Tab queues it for after)', event.currentTarget, 'control')}
+                        onBlur={hideHoverTooltip}
+                        type="button"
+                        aria-label="Send to Cosmic while it works"
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                        </svg>
                       </button>
                     )}
 
