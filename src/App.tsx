@@ -1,4 +1,4 @@
-import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, KeyRound, Mail, Maximize2, Mic, Minimize2, MousePointerClick, Pencil, Presentation, Save, Shield, Square, X } from 'lucide-react'
+import { CalendarDays, Check, ChevronRight, Code2, Copy, Globe, KeyRound, Mail, Maximize2, Mic, Minimize2, MousePointerClick, Pencil, Presentation, RotateCcw, Save, Shield, Square, X } from 'lucide-react'
 import { NotionMark } from './brandIcons'
 import { Fragment, memo, type ClipboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
@@ -25,6 +25,7 @@ import {
   measureAssistantStreamLength,
   normalizeAlphaConsoleAnchors,
   type AlphaConsoleAnchor,
+  type AlphaStreamSegment,
 } from './alphaStreamLayout'
 import { appendStreamText, mergeCompletedStreamText } from './streamText'
 import { applyReactionToMessages, parseReactionEvent } from './messageReactions'
@@ -32,17 +33,18 @@ import { scrubAssistantProse } from './assistantProse'
 import { canAdoptTaskForActiveStream, canClaimActiveStreamSlot, extractEventStreamIds, isEventForActiveStream as isEventForActiveStreamIds, shouldBindToLastAssistantMessage } from './streamIdentity'
 import { groupRepliesWithTheirQuery } from './transcriptOrder'
 import {
-  addLocalMidRunItem,
-  applyMidRunAck,
-  applyMidRunSnapshot,
-  describeMidRunItem,
-  findMidRunItem,
-  midRunModeForKey,
-  patchMidRunItem,
-  removeMidRunItem,
-  type MidRunMode,
-  type MidRunQueueItem,
-} from './midRunQueue'
+  applySteerDelivery,
+  dropSteeredUserDuplicates,
+  mergeSteerAnchors,
+  normalizeHeldServerItems,
+  normalizeSteerAnchors,
+  patchPendingBubble,
+  reconcilePendingBubbles,
+  removePendingBubble,
+  settlePendingBubble,
+  type MidRunPending,
+  type SteerAnchor,
+} from './midRunMessages'
 import { groupEmailThreads, stripEmailEnvelope, type EmailThreadUnit } from './emailThreads'
 import { findPendingApprovals } from './pendingApprovals'
 import { ContentCardStack, QuestionCard, normalizeContentCard, type ContentCardBlock } from './responseSurfaces'
@@ -135,8 +137,12 @@ interface Message {
   backgroundState?: 'working' | 'ready' | 'failed'
   /** Gateway's quick emoji receipt on the user's own message (Jev-picked). */
   reaction?: string | null
-  /** Sent while Cosmic was working and read by the running task mid-run. */
-  deliveredMidRun?: boolean
+  /** User message sent while Cosmic was working, not taken in yet. Shown as
+   * a normal bubble with a subtle pending spinner (or a retry on failure). */
+  midRun?: MidRunPending
+  /** Assistant reply: messages the user sent mid-run that this run read,
+   * rendered inline at the point in the reply where the model read them. */
+  steerAnchors?: SteerAnchor[]
 }
 
 interface PendingTaskInput {
@@ -219,6 +225,7 @@ interface GatewayStatus {
 }
 
 interface GatewayForegroundStreamSnapshot {
+  steerAnchors?: SteerAnchor[]
   requestId?: string | null
   taskId?: string | null
   sessionId?: string | null
@@ -1376,7 +1383,9 @@ const dedupeMessageSources = (
 }
 
 const historyToMessages = (history: any[] = []): Message[] => {
-  return groupRepliesWithTheirQuery(history
+  // A steered message is stored as a user row and as an anchor on the reply
+  // that read it; it is shown once, inline in that reply.
+  return dropSteeredUserDuplicates(groupRepliesWithTheirQuery(history
     .filter((item) => item
       && (item.role === 'user' || item.role === 'assistant')
       && !(item.role === 'user' && isSyntheticSlideChoiceMessage(item?.content, item?.metadata)))
@@ -1417,14 +1426,14 @@ const historyToMessages = (history: any[] = []): Message[] => {
       emailBodyTruncated: Boolean(item?.metadata?.body_truncated),
       activity: typeof item?.metadata?.activity === 'string' ? item.metadata.activity : undefined,
       reaction: typeof item?.metadata?.reaction === 'string' ? item.metadata.reaction : undefined,
-      deliveredMidRun: item?.role === 'user' && item?.metadata?.delivery === 'mid_run_steer' ? true : undefined,
+      steerAnchors: item?.role === 'assistant' ? normalizeSteerAnchors(item?.metadata?.steer_anchors) : undefined,
       progress: normalizeTabularProgress(item?.metadata?.tabular_progress) ?? normalizeDocsProgress(item?.metadata?.docs_progress),
       slideProgress: normalizeSlideProgress(item?.metadata?.slide_progress),
       browserProgress: normalizeBrowserProgress(item?.metadata?.browser_progress),
       // The persisted payload closes with a replay of the task's writes —
       // fold it here so a reopened conversation rebuilds the grid.
       sheetsProgress: mergeSheetsProgress(undefined, normalizeSheetProgress(item?.metadata?.sheets_progress)),
-    })))
+    }))))
 }
 
 const isHeartbeatMessage = (message: Pick<Message, 'role' | 'source' | 'sourceId'>) => (
@@ -1528,6 +1537,9 @@ const normalizeForegroundStreamSnapshot = (value: unknown): GatewayForegroundStr
     alphaConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).alpha_console_anchors ?? (value as any).alphaConsoleAnchors),
     browserConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).browser_console_anchors ?? (value as any).browserConsoleAnchors),
     sheetRunAnchors: normalizeAlphaConsoleAnchors((value as any).sheet_run_anchors ?? (value as any).sheetRunAnchors),
+    steerAnchors: normalizeSteerAnchors(
+      (value as { steer_anchors?: unknown }).steer_anchors ?? (value as { steerAnchors?: unknown }).steerAnchors,
+    ),
     progress,
     slideProgress,
     browserProgress,
@@ -1645,6 +1657,7 @@ const mergeHydratedMessages = (
       browserProgress: mergeBrowserProgress(existing.browserProgress, message.browserProgress),
       sheetsProgress: mergeSheetsProgress(existing.sheetsProgress, message.sheetsProgress),
       backgroundState: message.backgroundState ?? existing.backgroundState,
+      steerAnchors: mergeSteerAnchors(message.steerAnchors, existing.steerAnchors),
     }
   })
 
@@ -1655,19 +1668,19 @@ const mergeHydratedMessages = (
   // placeholder stays attached to its query.
   const inFlightRequestId = String(preserveInFlight.requestId || '').trim()
   const inFlightTaskId = String(preserveInFlight.taskId || '').trim()
-  const carried = (inFlightRequestId || inFlightTaskId)
-    ? current.filter((message) => (
-      !consumed.has(message) &&
-      (
-        (inFlightRequestId && message.requestId === inFlightRequestId) ||
-        (inFlightTaskId && message.sourceId === inFlightTaskId)
-      )
-    ))
-    : []
+  const carried = current.filter((message) => (
+    !consumed.has(message) &&
+    (
+      (inFlightRequestId && message.requestId === inFlightRequestId) ||
+      (inFlightTaskId && message.sourceId === inFlightTaskId) ||
+      // Sent mid-run and not taken in yet: not in history, keep it.
+      (message.role === 'user' && Boolean(message.midRun))
+    )
+  ))
   if (carried.length === 0) {
-    return merged
+    return dropSteeredUserDuplicates(merged)
   }
-  return groupRepliesWithTheirQuery([...merged, ...carried])
+  return dropSteeredUserDuplicates(groupRepliesWithTheirQuery([...merged, ...carried]))
 }
 
 /** Extract a human-readable channel label from the raw channel string. */
@@ -6041,7 +6054,7 @@ const AssistantAlphaStreamBody = ({
   sheetStreaming = false,
   streaming = false,
 }: {
-  message: Pick<Message, 'content' | 'responseBlocks' | 'alphaTerminalLog' | 'alphaConsoleAnchors' | 'activityLog' | 'requestId' | 'sourceId' | 'stopped' | 'browserProgress' | 'browserConsoleAnchors' | 'sheetsProgress' | 'sheetRunAnchors'>
+  message: Pick<Message, 'content' | 'responseBlocks' | 'alphaTerminalLog' | 'alphaConsoleAnchors' | 'activityLog' | 'requestId' | 'sourceId' | 'stopped' | 'browserProgress' | 'browserConsoleAnchors' | 'sheetsProgress' | 'sheetRunAnchors' | 'steerAnchors'>
   onStopAlpha: (payload: { requestId?: string; taskId?: string }) => void
   /** Assistant streaming is only a fallback for older browser progress
    * without an explicit lifecycle phase. */
@@ -6077,7 +6090,7 @@ const AssistantAlphaStreamBody = ({
     return { roots, childrenByRoot }
   }, [message.activityLog])
 
-  const { segments, hasAnchors } = buildAlphaStreamSegments({
+  const { segments, hasAnchors, hasSteers } = buildAlphaStreamSegments({
     content: message.content,
     responseBlocks: message.responseBlocks,
     alphaConsoleAnchors: message.alphaConsoleAnchors,
@@ -6088,9 +6101,36 @@ const AssistantAlphaStreamBody = ({
       ? inlineActivity.roots.map((entry) => ({
         id: entry.id,
         offset: Math.max(0, Math.floor(entry.streamOffset || 0)),
+        createdAt: entry.createdAt,
+      }))
+      : undefined,
+    steerAnchors: message.steerAnchors && message.steerAnchors.length > 0
+      ? message.steerAnchors.map((anchor) => ({
+        id: anchor.requestId,
+        offset: anchor.offset,
+        deliveredAt: anchor.deliveredAt,
       }))
       : undefined,
   })
+  // Messages the user sent mid-run that this reply read: the user's own
+  // bubble, inline where the model took it in.
+  const renderSteer = (anchorId: string) => {
+    const anchor = message.steerAnchors?.find((item) => item.requestId === anchorId)
+    if (!anchor || !anchor.content.trim()) return null
+    return (
+      <div key={`user-steer-${anchorId}`} className="message-row user inline-steer-row">
+        <ExpandableQueryPill text={cleanText(anchor.content)} />
+      </div>
+    )
+  }
+  const renderPlainSegment = (segment: AlphaStreamSegment, index: number) => {
+    if (segment.kind === 'user_steer') return renderSteer(segment.anchorId)
+    if (segment.kind !== 'content') return null
+    if (segment.blocks && segment.blocks.length > 0) {
+      return <AssistantResponseBlocks key={`steer-split-blocks-${index}`} blocks={segment.blocks as ResponseBlock[]} />
+    }
+    return segment.content ? <AssistantMarkdownBlock key={`steer-split-markdown-${index}`} content={segment.content} /> : null
+  }
   const fallbackConsole = buildAlphaConsoleView(message.activityLog, message.alphaTerminalLog, {
     stopped: message.stopped,
   })
@@ -6115,7 +6155,9 @@ const AssistantAlphaStreamBody = ({
         {message.sheetsProgress && (
           <SheetRunCard progress={message.sheetsProgress} streaming={sheetStreaming} />
         )}
-        {message.responseBlocks && message.responseBlocks.length > 0 ? (
+        {hasSteers ? (
+          segments.map(renderPlainSegment)
+        ) : message.responseBlocks && message.responseBlocks.length > 0 ? (
           <AssistantResponseBlocks blocks={message.responseBlocks} />
         ) : (
           <AssistantMarkdownBlock content={message.content} />
@@ -6129,6 +6171,9 @@ const AssistantAlphaStreamBody = ({
       {segments.map((segment, index) => {
         if (segment.kind === 'action') {
           return <AssistantResponseBlocks key={`action-${segment.block.id}`} blocks={[segment.block as ResponseBlock]} />
+        }
+        if (segment.kind === 'user_steer') {
+          return renderSteer(segment.anchorId)
         }
         if (segment.kind === 'alpha_console') {
           return (
@@ -6482,11 +6527,9 @@ export default function App() {
   // React only re-renders on the empty↔non-empty transition (via `hasText`), so individual
   // keystrokes don't trigger a 5910-line App re-render. Submit reads inputRef.current.value.
   const [hasText, setHasText] = useState(false)
-  // Messages typed while Cosmic is busy. The gateway holds them and steers
-  // them into the run (or runs them next); this mirrors its queue.
-  const [midRunQueue, setMidRunQueue] = useState<MidRunQueueItem[]>([])
-  const midRunQueueRef = useRef<MidRunQueueItem[]>([])
-  const midRunEditIntentRef = useRef<Set<string>>(new Set())
+  // Messages sent while Cosmic works that it has not taken in yet (their
+  // bubbles carry `midRun`). Kept for retry, and to recognise their events.
+  const pendingMidRunIdsRef = useRef<Map<string, { content: string; attachments: PendingDocumentAttachment[] }>>(new Map())
   const inputHasTextRef = useRef(false)
   const [pendingAttachments, setPendingAttachments] = useState<PendingDocumentAttachment[]>([])
   const [searchState, setSearchState] = useState<'hidden' | 'visible' | 'hiding'>('hidden')
@@ -7825,6 +7868,10 @@ export default function App() {
         sheetRunAnchors: stream.sheetRunAnchors
           ?? existingMessage?.sheetRunAnchors
           ?? liveMessage?.sheetRunAnchors,
+        steerAnchors: mergeSteerAnchors(
+          mergeSteerAnchors(existingMessage?.steerAnchors, liveMessage?.steerAnchors),
+          stream.steerAnchors,
+        ),
         progress: stream.progress ?? existingMessage?.progress,
         slideProgress: stream.slideProgress ?? existingMessage?.slideProgress,
         browserProgress: mergeBrowserProgress(existingMessage?.browserProgress, stream.browserProgress),
@@ -8050,9 +8097,7 @@ export default function App() {
     setDismissedTaskInterruptIds([])
     setSelectedTaskInputId(null)
     setSelectedBackgroundRequestId(null)
-    midRunQueueRef.current = []
-    midRunEditIntentRef.current.clear()
-    setMidRunQueue([])
+    pendingMidRunIdsRef.current.clear()
     clearCronResultNotifications()
     clearArtifactReadyNotifications()
     setIsStreaming(false)
@@ -8724,20 +8769,24 @@ export default function App() {
       }
       const resumedMidRunQueue = (event as { mid_run_queue?: unknown }).mid_run_queue
       if (eventType === 'resume.ok' && Array.isArray(resumedMidRunQueue)) {
-        updateMidRunQueue((items) => applyMidRunSnapshot(items, resumedMidRunQueue, { keepStarting: false }))
+        // After the resume handler below restores history: re-sync pending
+        // bubbles with what the gateway still holds.
+        queueMicrotask(() => reconcileMidRunWithGateway(resumedMidRunQueue))
       }
-      if (eventType === 'route_result' && typeof event.request_id === 'string') {
-        // A message sent while the UI thought Cosmic was busy, but which the
-        // gateway ran straight away (it had just finished): it is a normal
-        // turn now, so it leaves the tray and becomes a query bubble first.
-        promoteMidRunItemToTranscript(event.request_id)
+      const eventRequestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
+      if (eventType === 'route_result' && eventRequestId && pendingMidRunIdsRef.current.has(eventRequestId)) {
+        // It is running as its own turn (it could not be read in time, or
+        // Cosmic had just finished): a normal query bubble from here on. Its
+        // answer is appended by the handler below; regroup afterwards so the
+        // answer sits under it, ahead of any later pending bubbles.
+        settleMidRunBubble(eventRequestId)
+        queueMicrotask(() => setMessages((prev) => groupRepliesWithTheirQuery(prev)))
       }
-      if (eventType === 'error' && findMidRunItem(midRunQueueRef.current, event?.request_id)) {
-        const failedId = String(event.request_id).trim()
-        updateMidRunQueue((items) => patchMidRunItem(items, failedId, {
+      if (eventType === 'error' && eventRequestId && pendingMidRunIdsRef.current.has(eventRequestId)) {
+        setMessages((prev) => patchPendingBubble(prev, eventRequestId, {
           state: 'failed',
           withdrawing: false,
-          error: String(event?.message || 'Cosmic could not accept this message.'),
+          error: String(event?.message || 'Cosmic could not take this message.'),
         }))
         return
       }
@@ -9484,6 +9533,7 @@ export default function App() {
         const alphaConsoleAnchors = normalizeAlphaConsoleAnchors((event as any).alpha_console_anchors)
         const browserConsoleAnchors = normalizeAlphaConsoleAnchors((event as any).browser_console_anchors)
         const sheetRunAnchors = normalizeAlphaConsoleAnchors((event as any).sheet_run_anchors)
+        const steerAnchors = normalizeSteerAnchors((event as { steer_anchors?: unknown }).steer_anchors)
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
           const persistedMessageId = typeof (event as any).message_id === 'string'
@@ -9510,6 +9560,7 @@ export default function App() {
               alphaConsoleAnchors: alphaConsoleAnchors ?? message.alphaConsoleAnchors,
               browserConsoleAnchors: browserConsoleAnchors ?? message.browserConsoleAnchors,
               sheetRunAnchors: sheetRunAnchors ?? message.sheetRunAnchors,
+              steerAnchors: mergeSteerAnchors(message.steerAnchors, steerAnchors),
               requestId: typeof event.request_id === 'string' ? event.request_id : message.requestId,
               source: typeof event.source === 'string' ? event.source : message.source,
               sourceId: typeof event.source_id === 'string' ? event.source_id : message.sourceId,
@@ -10265,87 +10316,81 @@ export default function App() {
     setPendingAttachments((prev) => prev.filter((item) => item.filePath !== filePath))
   }
 
-  const updateMidRunQueue = (updater: (items: MidRunQueueItem[]) => MidRunQueueItem[]) => {
-    const next = updater(midRunQueueRef.current)
-    if (next === midRunQueueRef.current) return
-    midRunQueueRef.current = next
-    setMidRunQueue(next)
+  const settleMidRunBubble = (requestId: string) => {
+    pendingMidRunIdsRef.current.delete(requestId)
+    setMessages((prev) => settlePendingBubble(prev, requestId))
   }
 
-  const restoreComposerText = (text: string) => {
-    const input = inputRef.current
-    const restored = String(text || '').trim()
-    if (!input || !restored) return
-    const existing = input.value.trim()
-    input.value = existing ? `${restored}\n${existing}` : restored
-    input.style.height = 'auto'
-    input.style.height = `${Math.min(input.scrollHeight, 120)}px`
-    inputHasTextRef.current = true
-    setHasText(true)
-    input.focus()
-  }
-
-  /** Put a held message into the transcript once it is part of the conversation. */
-  const appendMidRunUserBubble = (requestId: string, content: string, overrides: Partial<Message> = {}) => {
-    const text = String(content || '').trim()
-    if (!requestId || !text) return
+  const reconcileMidRunWithGateway = (serverItems: unknown) => {
+    const held = new Set(normalizeHeldServerItems(serverItems).map((item) => item.requestId))
     setMessages((prev) => {
-      if (prev.some((message) => message.role === 'user' && message.requestId === requestId)) {
-        return prev
+      const next = reconcilePendingBubbles(prev, serverItems, (item) => createUserMessage(item.content, undefined, {
+        requestId: item.requestId,
+        midRun: { state: 'waiting', acked: true },
+      }))
+      const stillPending = new Set<string>()
+      for (const message of next) {
+        if (message.role === 'user' && message.midRun && message.requestId) stillPending.add(message.requestId)
       }
-      return [...prev, createUserMessage(text, undefined, { requestId, ...overrides })]
+      for (const id of Array.from(pendingMidRunIdsRef.current.keys())) {
+        if (!stillPending.has(id)) pendingMidRunIdsRef.current.delete(id)
+      }
+      for (const id of held) {
+        if (!pendingMidRunIdsRef.current.has(id)) {
+          const bubble = next.find((message) => message.role === 'user' && message.requestId === id)
+          pendingMidRunIdsRef.current.set(id, { content: bubble?.content || '', attachments: [] })
+        }
+      }
+      return next
     })
-  }
-
-  const promoteMidRunItemToTranscript = (rawRequestId: unknown, content?: unknown) => {
-    const item = findMidRunItem(midRunQueueRef.current, rawRequestId)
-    if (!item) return
-    updateMidRunQueue((items) => removeMidRunItem(items, item.requestId))
-    midRunEditIntentRef.current.delete(item.requestId)
-    pendingResponseStartScrollRef.current = true
-    shouldAutoScrollRef.current = false
-    appendMidRunUserBubble(item.requestId, typeof content === 'string' && content.trim() ? content : item.content)
   }
 
   const handleMidRunGatewayEvent = (
     eventType: string,
-    event: { request_id?: unknown; items?: unknown; content?: unknown; withdrawn?: unknown } | null | undefined,
+    event: {
+      request_id?: unknown
+      into_request_id?: unknown
+      items?: unknown
+      content?: unknown
+      withdrawn?: unknown
+      stream_offset?: unknown
+      delivered_at?: unknown
+    } | null | undefined,
   ) => {
     const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
-    if (eventType === 'user_message.queue') {
-      updateMidRunQueue((items) => applyMidRunSnapshot(items, event?.items))
+    if (eventType === 'user_message.queued') {
+      setMessages((prev) => patchPendingBubble(prev, requestId, { state: 'waiting', acked: true }))
       return
     }
-    if (eventType === 'user_message.queued') {
-      updateMidRunQueue((items) => applyMidRunAck(items, event))
+    if (eventType === 'user_message.queue') {
+      const held = normalizeHeldServerItems(event?.items)
+      if (held.length === 0) return
+      setMessages((prev) => held.reduce(
+        (acc, item) => patchPendingBubble(acc, item.requestId, { state: 'waiting', acked: true }),
+        prev,
+      ))
       return
     }
     if (eventType === 'user_message.delivered') {
-      const item = findMidRunItem(midRunQueueRef.current, requestId)
-      updateMidRunQueue((items) => removeMidRunItem(items, requestId))
-      midRunEditIntentRef.current.delete(requestId)
-      appendMidRunUserBubble(requestId, String(event?.content || item?.content || ''), { deliveredMidRun: true })
+      // The running task took it in: the spinner goes, and the bubble sits
+      // in the reply where the model read it.
+      pendingMidRunIdsRef.current.delete(requestId)
+      setMessages((prev) => applySteerDelivery(prev, event || {}))
       return
     }
     if (eventType === 'user_message.dispatched') {
-      // Its turn has come. It stays in the tray until route_result: by then
-      // the gateway has persisted it, so a history refresh cannot drop it.
-      updateMidRunQueue((items) => patchMidRunItem(items, requestId, { state: 'starting', withdrawing: false }))
+      // Its own turn is starting; the bubble stops being pending on that
+      // turn's route_result (by then the gateway has stored it).
       return
     }
     if (eventType === 'user_message.withdrawn') {
-      const item = findMidRunItem(midRunQueueRef.current, requestId)
-      const wantedEdit = midRunEditIntentRef.current.has(requestId)
-      midRunEditIntentRef.current.delete(requestId)
       if (event?.withdrawn === true) {
-        updateMidRunQueue((items) => removeMidRunItem(items, requestId))
-        if (wantedEdit) {
-          restoreComposerText(String(event?.content || item?.content || ''))
-        }
+        pendingMidRunIdsRef.current.delete(requestId)
+        setMessages((prev) => removePendingBubble(prev, requestId))
         return
       }
-      // Too late: Cosmic already read it (it will show up in the chat).
-      updateMidRunQueue((items) => patchMidRunItem(items, requestId, { withdrawing: false }))
+      // Too late to cancel: Cosmic already read it, the delivery follows.
+      setMessages((prev) => patchPendingBubble(prev, requestId, { withdrawing: false }))
     }
   }
 
@@ -10357,12 +10402,33 @@ export default function App() {
         : selectedModel
   )
 
+  const sendMidRunMessage = (requestId: string, content: string, attachments: PendingDocumentAttachment[]) => {
+    if (!window.cosmic?.sendGatewayQuery) return
+    window.cosmic.sendGatewayQuery({
+      requestId,
+      content,
+      conversationContext: buildConversationContext(messages),
+      routeOverride: currentRouteOverride(),
+      attachments,
+      // The gateway reads it into the running task at its next step, or runs
+      // it as its own turn right after if it cannot (or if nothing is running).
+      delivery: 'steer',
+      deferHistory: true,
+    }).catch((error: unknown) => {
+      setMessages((prev) => patchPendingBubble(prev, requestId, {
+        state: 'failed',
+        withdrawing: false,
+        error: (error instanceof Error && error.message) || 'Unable to send the message to your VM.',
+      }))
+    })
+  }
+
   /**
-   * Send while Cosmic is working. 'steer' is read by the running task at its
-   * next step; 'queue' runs as its own turn afterwards. The composer stays
-   * focused so the user can keep typing.
+   * Send while Cosmic is working. The message shows up in the transcript
+   * right away like any other, with a subtle pending spinner until the agent
+   * takes it in. The composer keeps focus so the user can keep typing.
    */
-  const submitMidRunMessage = (delivery: MidRunMode) => {
+  const submitMidRunMessage = () => {
     if (mode === 'meeting') return
     const textToSend = (inputRef.current?.value ?? '').trim()
     const attachments = pendingAttachments
@@ -10373,47 +10439,55 @@ export default function App() {
     }
     const requestId = `req_${crypto.randomUUID()}`
     const displayText = textToSend || buildPendingAttachmentSummary(attachments)
+    const bubble = createUserMessage(displayText, normalizeMessageAttachments(attachments), {
+      requestId,
+      midRun: { state: 'sending' },
+    })
     clearComposerInput()
     setPendingAttachments([])
-    updateMidRunQueue((items) => addLocalMidRunItem(items, {
-      requestId,
-      content: displayText,
-      mode: delivery,
-      attachmentCount: attachments.length,
-    }))
-    window.cosmic.sendGatewayQuery({
-      requestId,
-      content: textToSend,
-      conversationContext: buildConversationContext(messages),
-      routeOverride: currentRouteOverride(),
-      attachments,
-      delivery,
-      deferHistory: true,
-    }).catch((error: unknown) => {
-      updateMidRunQueue((items) => patchMidRunItem(items, requestId, {
-        state: 'failed',
-        error: (error instanceof Error && error.message) || 'Unable to send the message to your VM.',
-      }))
-    })
+    pendingMidRunIdsRef.current.set(requestId, { content: textToSend, attachments })
+    shouldAutoScrollRef.current = true
+    setMessages((prev) => [...prev, bubble])
+    sendMidRunMessage(requestId, textToSend, attachments)
     inputRef.current?.focus()
   }
 
-  const handleWithdrawMidRunItem = (item: MidRunQueueItem, intent: 'cancel' | 'edit') => {
-    if (item.withdrawing) return
-    if (item.state === 'failed' || !window.cosmic?.withdrawGatewayQuery) {
-      // Never reached the VM: purely local.
-      updateMidRunQueue((items) => removeMidRunItem(items, item.requestId))
-      if (intent === 'edit') restoreComposerText(item.content)
+  /** Cancel a message Cosmic has not read yet (hover action on the bubble). */
+  const cancelPendingMessage = (message: Message) => {
+    const requestId = String(message.requestId || '').trim()
+    if (!requestId || !message.midRun || message.midRun.withdrawing) return
+    if (message.midRun.state === 'failed' || !message.midRun.acked || !window.cosmic?.withdrawGatewayQuery) {
+      if (message.midRun.state !== 'failed' && !message.midRun.acked) {
+        // Not acknowledged yet: the gateway may still be taking it. Ask it to
+        // drop it too; an unknown id is a harmless no-op there.
+        window.cosmic?.withdrawGatewayQuery?.({ requestId }).catch(() => undefined)
+      }
+      pendingMidRunIdsRef.current.delete(requestId)
+      setMessages((prev) => removePendingBubble(prev, requestId))
       return
     }
-    if (intent === 'edit') {
-      midRunEditIntentRef.current.add(item.requestId)
-    }
-    updateMidRunQueue((items) => patchMidRunItem(items, item.requestId, { withdrawing: true }))
-    window.cosmic.withdrawGatewayQuery({ requestId: item.requestId }).catch(() => {
-      midRunEditIntentRef.current.delete(item.requestId)
-      updateMidRunQueue((items) => patchMidRunItem(items, item.requestId, { withdrawing: false }))
+    setMessages((prev) => patchPendingBubble(prev, requestId, { withdrawing: true }))
+    window.cosmic.withdrawGatewayQuery({ requestId }).catch(() => {
+      setMessages((prev) => patchPendingBubble(prev, requestId, { withdrawing: false }))
     })
+  }
+
+  /** Resend a message that failed to reach Cosmic, in place. */
+  const retryPendingMessage = (message: Message) => {
+    const oldId = String(message.requestId || '').trim()
+    if (!oldId || message.midRun?.state !== 'failed') return
+    const original = pendingMidRunIdsRef.current.get(oldId)
+    const content = original?.content ?? message.content
+    const attachments = original?.attachments ?? []
+    const requestId = `req_${crypto.randomUUID()}`
+    pendingMidRunIdsRef.current.delete(oldId)
+    pendingMidRunIdsRef.current.set(requestId, { content, attachments })
+    setMessages((prev) => prev.map((item) => (
+      item.id === message.id
+        ? { ...item, requestId, midRun: { state: 'sending' as const } }
+        : item
+    )))
+    sendMidRunMessage(requestId, content, attachments)
   }
 
   const handleSubmit = () => {
@@ -10423,9 +10497,10 @@ export default function App() {
 
     const textToSend = (inputRef.current?.value ?? '').trim()
     if (!textToSend && pendingAttachments.length === 0) return
-    if (isStreaming) {
-      // Never block the user: steer the running task instead.
-      submitMidRunMessage('steer')
+    if (isStreaming || pendingMidRunIdsRef.current.size > 0) {
+      // Never block the user: hand it to the running task instead (or line
+      // it up behind messages Cosmic has not taken in yet, keeping order).
+      submitMidRunMessage()
       return
     }
 
@@ -11160,9 +11235,7 @@ export default function App() {
     authState !== 'authenticated'
       ? 'Sign in to connect Cosmic to your VM...'
       : gatewayStatus.connected
-        ? isStreaming
-          ? 'Add to what Cosmic is doing... (Enter: next step, Tab: queue)'
-          : 'Ask Cosmic...'
+        ? 'Ask Cosmic...'
         : gatewayStatus.state === 'connecting' || gatewayStatus.state === 'reconnecting'
           ? 'Connecting to your VM...'
           : gatewayStatus.state === 'error'
@@ -12178,7 +12251,11 @@ export default function App() {
                     return (
                     <Fragment key={msg.id}>
                     {unreadDivider}
-                    <div className={`message-row ${msg.role}`} style={{ marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                    <div
+                      className={`message-row ${msg.role}${msg.midRun ? ` mid-run-pending state-${msg.midRun.state}${msg.midRun.withdrawing ? ' is-withdrawing' : ''}` : ''}`}
+                      style={{ marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}
+                      aria-busy={msg.midRun && msg.midRun.state !== 'failed' ? true : undefined}
+                    >
 
                     {msg.role === 'user' ? (
                         <>
@@ -12187,11 +12264,49 @@ export default function App() {
                               {msg.reaction}
                             </span>
                           )}
-                          <ExpandableQueryPill
-                            text={cleanText(msg.content)}
-                            copied={copiedId === `user-${idx}`}
-                            onCopy={() => handleCopy(msg.content, `user-${idx}`)}
-                          />
+                          {msg.midRun ? (
+                            // Sent while Cosmic works and not taken in yet: the
+                            // same bubble as any message, dimmed, with a small
+                            // spinner (hover to cancel) or, if it did not get
+                            // through, a quiet retry.
+                            <div className="mid-run-bubble-line">
+                              {msg.midRun.state === 'failed' ? (
+                                <button
+                                  type="button"
+                                  className="mid-run-retry"
+                                  onClick={() => retryPendingMessage(msg)}
+                                  title={msg.midRun.error || 'Not sent'}
+                                  aria-label="Not sent. Retry"
+                                >
+                                  <RotateCcw size={12} strokeWidth={2.2} aria-hidden="true" />
+                                  <span>Retry</span>
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="mid-run-indicator"
+                                  onClick={() => cancelPendingMessage(msg)}
+                                  disabled={Boolean(msg.midRun.withdrawing)}
+                                  title="Cancel"
+                                  aria-label="Cosmic will read this at its next step. Cancel"
+                                >
+                                  <span className="mid-run-spinner" aria-hidden="true" />
+                                  <X className="mid-run-cancel-icon" size={12} strokeWidth={2.4} aria-hidden="true" />
+                                </button>
+                              )}
+                              <ExpandableQueryPill
+                                text={cleanText(msg.content)}
+                                copied={copiedId === `user-${idx}`}
+                                onCopy={() => handleCopy(msg.content, `user-${idx}`)}
+                              />
+                            </div>
+                          ) : (
+                            <ExpandableQueryPill
+                              text={cleanText(msg.content)}
+                              copied={copiedId === `user-${idx}`}
+                              onCopy={() => handleCopy(msg.content, `user-${idx}`)}
+                            />
+                          )}
                           {msg.backgroundState && (
                             <div className={`query-background-status ${msg.backgroundState}`}>
                               {msg.backgroundState === 'working'
@@ -12199,11 +12314,6 @@ export default function App() {
                                 : msg.backgroundState === 'ready'
                                   ? 'Ready in Tasks'
                                   : 'Background task failed'}
-                            </div>
-                          )}
-                          {msg.deliveredMidRun && (
-                            <div className="query-background-status steered" title="Sent while Cosmic was working; the running task read it at its next step.">
-                              Read mid-run
                             </div>
                           )}
                           <UserMessageAttachments attachments={msg.attachments} />
@@ -12535,50 +12645,6 @@ export default function App() {
                         ))}
                       </div>
                     )}
-                  {midRunQueue.length > 0 && (
-                    <div className="mid-run-tray" role="list" aria-label="Messages waiting for Cosmic">
-                      {midRunQueue.map((item) => {
-                        const { label, hint } = describeMidRunItem(item)
-                        return (
-                          <div
-                            key={item.requestId}
-                            role="listitem"
-                            className={`mid-run-item state-${item.state}${item.withdrawing ? ' is-withdrawing' : ''}`}
-                            title={hint}
-                          >
-                            <span className="mid-run-item-label">{label}</span>
-                            <span className="mid-run-item-text">
-                              {item.content}
-                              {item.attachmentCount > 0 ? ` (+${item.attachmentCount} file${item.attachmentCount === 1 ? '' : 's'})` : ''}
-                            </span>
-                            <button
-                              type="button"
-                              className="mid-run-item-action"
-                              onClick={() => handleWithdrawMidRunItem(item, 'edit')}
-                              disabled={item.withdrawing}
-                              aria-label="Edit this message"
-                              title="Edit (takes it back into the composer)"
-                            >
-                              <Pencil size={12} strokeWidth={2.2} aria-hidden="true" />
-                            </button>
-                            <button
-                              type="button"
-                              className="mid-run-item-action"
-                              onClick={() => handleWithdrawMidRunItem(item, 'cancel')}
-                              disabled={item.withdrawing}
-                              aria-label="Remove this message"
-                              title="Remove"
-                            >
-                              <X size={12} strokeWidth={2.2} aria-hidden="true" />
-                            </button>
-                          </div>
-                        )
-                      })}
-                      <div className="mid-run-tray-hint">
-                        Enter: Cosmic reads it at its next step · Tab: queue for after · Stop keeps these
-                      </div>
-                    </div>
-                  )}
                   <div className="input-row">
                     <button
                       className="back-btn"
@@ -12659,18 +12725,6 @@ export default function App() {
                       defaultValue=""
                       onChange={handleInput}
                       onKeyDown={(e) => {
-                        // While Cosmic works: Enter steers the run, Tab queues
-                        // a follow-up. The composer is never locked.
-                        const midRunMode = midRunModeForKey(e.key, {
-                          busy: isStreaming,
-                          hasContent: hasText || pendingAttachments.length > 0,
-                          shiftKey: e.shiftKey,
-                        })
-                        if (midRunMode) {
-                          e.preventDefault()
-                          submitMidRunMessage(midRunMode)
-                          return
-                        }
                         if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault()
                           handleSubmit()
@@ -12751,10 +12805,10 @@ export default function App() {
                     {isStreaming && (hasText || pendingAttachments.length > 0) && (
                       <button
                         className="send-btn active mid-run-send-btn"
-                        onClick={() => submitMidRunMessage('steer')}
-                        onMouseEnter={(event) => showHoverTooltipForElement('Send now: Cosmic reads it at its next step (Tab queues it for after)', event.currentTarget, 'control')}
+                        onClick={() => submitMidRunMessage()}
+                        onMouseEnter={(event) => showHoverTooltipForElement('Send', event.currentTarget, 'control')}
                         onMouseLeave={hideHoverTooltip}
-                        onFocus={(event) => showHoverTooltipForElement('Send now: Cosmic reads it at its next step (Tab queues it for after)', event.currentTarget, 'control')}
+                        onFocus={(event) => showHoverTooltipForElement('Send', event.currentTarget, 'control')}
                         onBlur={hideHoverTooltip}
                         type="button"
                         aria-label="Send to Cosmic while it works"
