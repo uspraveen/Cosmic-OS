@@ -104,6 +104,38 @@ class OrchestratorClient:
         payload = response.json()
         return bool(payload.get("cancelled"))
 
+    async def submit_task_message(self, task_id: str, *, message_id: str, content: str) -> bool:
+        """Hand a mid-run user message to a running orchestrator task.
+
+        True means the run will show it to the model at its next step
+        boundary (or report it undelivered by ending without a delivery
+        event). False means the run is gone or past its last boundary.
+        """
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_task_id:
+            return False
+        response = await self._client.post(
+            f"{self.base_url}/internal/tasks/{normalized_task_id}/messages",
+            headers={"X-Internal-Token": self.internal_token},
+            json={"message_id": message_id, "content": content},
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(self._error_from_response(response.content, response.status_code))
+        return bool(response.json().get("accepted"))
+
+    async def withdraw_task_message(self, task_id: str, *, message_id: str) -> bool:
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_task_id:
+            return False
+        response = await self._client.post(
+            f"{self.base_url}/internal/tasks/{normalized_task_id}/messages/withdraw",
+            headers={"X-Internal-Token": self.internal_token},
+            json={"message_id": message_id},
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(self._error_from_response(response.content, response.status_code))
+        return bool(response.json().get("withdrawn"))
+
     async def health(self, *, timeout_sec: float | None = None) -> dict[str, Any]:
         headers = {
             "X-Internal-Token": self.internal_token,
