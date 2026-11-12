@@ -350,7 +350,12 @@ interface Window {
       requestId?: string
       routeOverride?: string
       attachments?: GatewayPendingDocumentAttachment[]
+      /** Only meaningful while a run is busy: steer it, or queue a follow-up. */
+      delivery?: 'steer' | 'queue'
+      /** Keep it out of cached history until the gateway places it. */
+      deferHistory?: boolean
     }) => Promise<{ requestId: string }>
+    withdrawGatewayQuery?: (payload: { requestId: string }) => Promise<{ ok: boolean }>
     submitGatewayTaskInputReply: (payload: { inputRequestId: string; taskId: string; content: string; skipped?: boolean }) => Promise<{ ok: boolean; requestId: string }>
     cancelGatewayResponse: (payload: { requestId?: string; taskId?: string }) => Promise<{ ok: boolean }>
     backgroundGatewayRequest: (payload: { requestId: string }) => Promise<{ ok: boolean; requestId: string }>

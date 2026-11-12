@@ -2538,6 +2538,8 @@ app.whenReady().then(() => {
     requestId?: string
     routeOverride?: string
     attachments?: PendingGatewayDocumentUpload[]
+    delivery?: 'steer' | 'queue'
+    deferHistory?: boolean
   }) => {
     if (!gatewayConnectionManager) {
       throw new Error('Gateway connection manager is unavailable.')
@@ -2566,8 +2568,19 @@ app.whenReady().then(() => {
         effectiveRequestId,
         String(payload?.routeOverride || ''),
         stagedAttachments,
+        {
+          delivery: payload?.delivery === 'queue' ? 'queue' : payload?.delivery === 'steer' ? 'steer' : undefined,
+          deferHistory: Boolean(payload?.deferHistory),
+        },
       ),
     }
+  })
+
+  ipcMain.handle('gateway:withdraw-query', async (_, payload: { requestId?: string }) => {
+    if (!gatewayConnectionManager) {
+      throw new Error('Gateway connection manager is unavailable.')
+    }
+    return gatewayConnectionManager.withdrawQuery(String(payload?.requestId || ''))
   })
 
   ipcMain.handle('gateway:cancel-response', async (_, payload: { requestId?: string; taskId?: string }) => {
