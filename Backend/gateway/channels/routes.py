@@ -771,37 +771,36 @@ async def _handle_realtime_websocket_message(
         return
 
     if message_type == "query":
+        # The composer is never locked: while a foreground run is busy the
+        # message is held and either steered into that run at its next step
+        # boundary or queued as the next turn (gateway/mid_run_queue.py).
         try:
-            result = await adapter.handle_incoming_message(payload, channel=channel)
+            held = await runtime.mid_run.accept(
+                payload,
+                adapter=adapter,
+                channel=channel,
+                platform=platform,
+            )
         except (TypeError, ValueError) as exc:
             await adapter.send(
                 _error_payload(request_id, "INVALID_QUERY", str(exc)),
                 channel=channel,
             )
             return
+        if held:
+            return
+        await runtime.run_realtime_query(payload, adapter=adapter, channel=channel)
+        return
 
-        await adapter.send(
-            {
-                "type": "route_result",
-                "request_id": result["request_id"],
-                "session_id": result["session_id"],
-                "channel": result["channel"],
-                "route": result["route"],
-                "classification": result["classification"],
-            },
-            channel=channel,
-        )
-        try:
-            runtime.start_request_fulfillment(result)
-        except Exception as exc:
+    if message_type == "query.withdraw":
+        target = str(payload.get("target_request_id") or payload.get("request_id") or "").strip()
+        if not target:
             await adapter.send(
-                _error_payload(
-                    request_id,
-                    "UPSTREAM_ERROR",
-                    str(exc),
-                ),
+                _error_payload(request_id, "INVALID_WITHDRAW", "target_request_id is required"),
                 channel=channel,
             )
+            return
+        await runtime.mid_run.withdraw(channel, target, adapter=adapter)
         return
 
     if message_type == "task.input_reply":

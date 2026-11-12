@@ -58,6 +58,7 @@ from .memory.client import (
     MemoryClientHTTPError,
     MemoryPromptContext,
 )
+from .mid_run_queue import HeldMessage, MidRunCoordinator
 from .mobile_device_store import MobileDeviceStore
 from .orchestrator_client import OrchestratorClient
 from .preferences.store import GatewayPreferenceStore
@@ -495,6 +496,11 @@ class ActiveRequest:
     browser_progress: dict[str, Any] | None = None
     sheets_progress: dict[str, Any] | None = None
     error_message: str = ""
+    # Messages the user sent mid-run that this run read, each stamped with the
+    # visible stream length at the moment the model took it in (same contract
+    # as the card anchors above). The desktop renders the user's bubble inline
+    # at that point of the reply, live and after reload.
+    steer_anchors: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -697,6 +703,9 @@ class GatewayRuntime:
             config.orchestrator_task_ledger_db_path
         )
         self._recent_foreground_terminal_streams: dict[str, dict[str, Any]] = {}
+        # Messages the user sends while a foreground run is busy: steered into
+        # the run at its next step boundary, or queued as the next turn.
+        self.mid_run = MidRunCoordinator(self)
         # Vault/browser approval cards published mid-turn, keyed by session then
         # block id. Merged into the next assistant message persisted for that
         # session so the cards survive reloads; pruned after a few hours.
@@ -11367,6 +11376,20 @@ class GatewayRuntime:
 
         try:
             async for event in self.orchestrator.stream_task(task):
+                if active_request is not None and isinstance(event, dict):
+                    event_type = self._safe_text(event.get("type"))
+                    if event_type == "task.user_message_delivered":
+                        # A mid-run user message reached the model. Internal
+                        # bookkeeping event: persisted + announced by the
+                        # coordinator, never forwarded raw.
+                        message_ids = event.get("message_ids")
+                        await self.mid_run.on_delivered(
+                            active_request,
+                            message_ids if isinstance(message_ids, list) else [],
+                        )
+                        continue
+                    if event_type == "task.created":
+                        self.mid_run.on_run_started(active_request)
                 normalized_event = self._normalize_orchestrator_event(
                     event,
                     task_id=task.task_id,
@@ -11467,6 +11490,135 @@ class GatewayRuntime:
         )
         state.worker = asyncio.create_task(
             self._run_request_fulfillment(state, request_record)
+        )
+
+    async def run_realtime_query(
+        self,
+        payload: dict[str, Any],
+        *,
+        adapter: Any,
+        channel: str,
+    ) -> None:
+        """Normal intake for a desktop/mobile ``query``: classify, ack, start.
+
+        Shared by the websocket handler (idle channel) and the mid-run queue
+        (a held message whose turn has come), so both paths behave
+        identically. The channel is marked as dispatching for the whole
+        classification window so a concurrent message is held instead of
+        racing this one into the foreground slot.
+        """
+        request_id = self._safe_text(payload.get("request_id")) or None
+        dispatch_key = request_id or f"dispatch_{id(payload)}"
+        self.mid_run.begin_dispatch(channel, dispatch_key)
+        try:
+            try:
+                result = await adapter.handle_incoming_message(payload, channel=channel)
+            except (TypeError, ValueError) as exc:
+                await adapter.send(
+                    {
+                        "type": "error",
+                        "request_id": request_id,
+                        "code": "INVALID_QUERY",
+                        "message": str(exc),
+                    },
+                    channel=channel,
+                )
+                return
+
+            await adapter.send(
+                {
+                    "type": "route_result",
+                    "request_id": result["request_id"],
+                    "session_id": result["session_id"],
+                    "channel": result["channel"],
+                    "route": result["route"],
+                    "classification": result["classification"],
+                },
+                channel=channel,
+            )
+            try:
+                self.start_request_fulfillment(result)
+            except Exception as exc:
+                await adapter.send(
+                    {
+                        "type": "error",
+                        "request_id": request_id,
+                        "code": "UPSTREAM_ERROR",
+                        "message": str(exc),
+                    },
+                    channel=channel,
+                )
+        finally:
+            self.mid_run.end_dispatch(channel, dispatch_key)
+
+    @staticmethod
+    def _steer_anchors_payload(anchors: Any) -> list[dict[str, Any]]:
+        """Wire/persisted form of ActiveRequest.steer_anchors."""
+        payload: list[dict[str, Any]] = []
+        for anchor in anchors or []:
+            if not isinstance(anchor, dict):
+                continue
+            request_id = str(anchor.get("request_id") or "").strip()
+            try:
+                offset = max(0, int(anchor.get("stream_offset") or 0))
+            except (TypeError, ValueError):
+                continue
+            if not request_id:
+                continue
+            payload.append(
+                {
+                    "request_id": request_id,
+                    "content": str(anchor.get("content") or ""),
+                    "stream_offset": offset,
+                    "delivered_at": anchor.get("delivered_at"),
+                }
+            )
+        return payload
+
+    def _record_steered_user_message(
+        self, item: HeldMessage, *, into: ActiveRequest
+    ) -> None:
+        """Persist a mid-run message at the point the model actually read it.
+
+        Written now (not when it was typed) so session history lists it where
+        the run saw it: after the run's own query and before the run's answer.
+        """
+        metadata = {
+            "request_id": item.request_id,
+            "platform": item.platform,
+            "message_type": "query",
+            "delivery": "mid_run_steer",
+            "steered_into_request_id": into.request_id,
+            "steered_into_task_id": into.task_id,
+        }
+        anchor = next(
+            (a for a in into.steer_anchors if a.get("request_id") == item.request_id),
+            None,
+        )
+        if anchor is not None:
+            metadata["steered_stream_offset"] = anchor.get("stream_offset")
+            metadata["delivered_at"] = anchor.get("delivered_at")
+        try:
+            self._append_session_message(
+                into.session_id,
+                role="user",
+                content=item.content,
+                channel=item.channel,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception(
+                "gateway.mid_run.persist_failed request_id=%s", item.request_id
+            )
+            return
+        self._track_background_task(
+            self._broadcast_cross_channel_to_realtime_clients(
+                into.session_id,
+                request_id=item.request_id,
+                role="user",
+                content=item.content,
+                channel=item.channel,
+            )
         )
 
     def _is_autonomous_source(self, source: Any, source_id: Any = None) -> bool:
@@ -11737,6 +11889,7 @@ class GatewayRuntime:
 
         state.foreground = False
         state.backgrounded_at = utcnow_iso()
+        self.mid_run.on_request_backgrounded(state)
         await self._deliver_or_queue_channel_event(
             {
                 "type": "task.backgrounded",
@@ -11781,11 +11934,12 @@ class GatewayRuntime:
                 return False
             if state.foreground:
                 return True  # already foreground
-            # Reject if another foreground stream is active on this channel
+            # Reject if another foreground stream is active on this channel,
+            # or a queued message is mid-dispatch into that slot.
             has_foreground = any(
                 s.foreground and not s.completed and s.channel == channel
                 for s in self.active_requests.values()
-            )
+            ) or self.mid_run.is_busy(channel)
             if has_foreground:
                 return False
             state.foreground = True
@@ -13594,6 +13748,7 @@ class GatewayRuntime:
             "sheet_run_anchors": self._alpha_console_anchors_payload(
                 state.sheet_run_anchors
             ),
+            "steer_anchors": self._steer_anchors_payload(state.steer_anchors),
             "completed": True,
             "failed": True,
             "error": state.error_message or None,
@@ -13637,6 +13792,9 @@ class GatewayRuntime:
         )
         if sheet_run_anchors:
             metadata["sheet_run_anchors"] = sheet_run_anchors
+        steer_anchors = self._steer_anchors_payload(state.steer_anchors)
+        if steer_anchors:
+            metadata["steer_anchors"] = steer_anchors
         if state.error_message:
             metadata["error"] = state.error_message
         if state.partial_content:
@@ -17086,6 +17244,7 @@ class GatewayRuntime:
                 "slide_progress": state.slide_progress,
                 "browser_progress": state.browser_progress,
                 "sheets_progress": state.sheets_progress,
+                "steer_anchors": self._steer_anchors_payload(state.steer_anchors),
                 "completed": state.completed,
                 "failed": state.failed,
                 "error": state.error_message or None,
@@ -17150,6 +17309,11 @@ class GatewayRuntime:
                         for item in snapshot.get("sheet_run_anchors", [])
                         if isinstance(item, dict)
                     ],
+                    "steer_anchors": [
+                        dict(item)
+                        for item in snapshot.get("steer_anchors", [])
+                        if isinstance(item, dict)
+                    ],
                     "completed": True,
                     "failed": True,
                     "error": self._safe_text(snapshot.get("error")) or None,
@@ -17212,6 +17376,7 @@ class GatewayRuntime:
             "background_tasks": background_tasks,
             "foreground_streams": foreground_streams,
             "prophet_notifications": self.prophet_pending_notifications(limit=2),
+            "mid_run_queue": self.mid_run.snapshot(channel),
         }
 
     def notify_channel_active(self, channel: str | None) -> None:
@@ -23176,6 +23341,11 @@ class GatewayRuntime:
                 if request_state is not None and request_state.browser_console_anchors
                 else []
             )
+            steer_anchors = (
+                self._steer_anchors_payload(request_state.steer_anchors)
+                if request_state is not None
+                else []
+            )
             sheet_run_anchors = (
                 self._alpha_console_anchors_payload(request_state.sheet_run_anchors)
                 if request_state is not None and request_state.sheet_run_anchors
@@ -23243,6 +23413,7 @@ class GatewayRuntime:
                     "alpha_console_anchors": alpha_console_anchors,
                     "browser_console_anchors": browser_console_anchors,
                     "sheet_run_anchors": sheet_run_anchors,
+                    "steer_anchors": steer_anchors or None,
                     "browser_progress": browser_progress,
                     "sheets_progress": sheets_progress,
                 },
@@ -23295,6 +23466,8 @@ class GatewayRuntime:
                 event["browser_console_anchors"] = browser_console_anchors
             if sheet_run_anchors:
                 event["sheet_run_anchors"] = sheet_run_anchors
+            if steer_anchors:
+                event["steer_anchors"] = steer_anchors
             event_channel_platform = self._channel_platform(event_channel)
             email_delivery = (
                 self._effective_email_delivery(event)
@@ -27169,6 +27342,8 @@ class GatewayRuntime:
                 cards["sheet_run_anchors"] = self._alpha_console_anchors_payload(
                     state.sheet_run_anchors
                 )
+            if state.steer_anchors:
+                cards["steer_anchors"] = self._steer_anchors_payload(state.steer_anchors)
         except Exception:
             logger.warning("gateway.stopped_turn_cards_failed request_id=%s", state.request_id, exc_info=True)
         return cards
@@ -27224,6 +27399,12 @@ class GatewayRuntime:
             bound_request_id = self.active_requests_by_task.get(state.task_id)
             if bound_request_id == state.request_id:
                 self.active_requests_by_task.pop(state.task_id, None)
+        # Anything the user sent mid-run that this run never read now runs as
+        # the next turn (or steers the next foreground run).
+        try:
+            self.mid_run.on_request_finalized(state)
+        except Exception:
+            logger.exception("gateway.mid_run.finalize_hook_failed request_id=%s", state.request_id)
 
     def _track_partial_stream(
         self, state: ActiveRequest, event: dict[str, Any]

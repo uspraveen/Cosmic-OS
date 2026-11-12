@@ -426,6 +426,10 @@ export class GatewayConnectionManager {
   private foregroundStreamRequestIndex = new Map<string, string>()
   private foregroundStreamTaskIndex = new Map<string, string>()
   private backgroundedRequestIds = new Set<string>()
+  // Mid-run messages sent while a run was busy. They only enter the cached
+  // history once the gateway delivers them into the run or starts them as
+  // their own turn, so the cache mirrors the gateway's history order.
+  private deferredHistoryQueries = new Map<string, { content: string; attachments: DesktopQueryAttachment[] }>()
   private status: GatewayConnectionStatus = {
     state: 'idle',
     connected: false,
@@ -627,10 +631,12 @@ export class GatewayConnectionManager {
     requestId?: string,
     routeOverride?: string,
     attachments: DesktopQueryAttachment[] = [],
+    options: { delivery?: 'steer' | 'queue'; deferHistory?: boolean } = {},
   ) {
     const effectiveRequestId = String(requestId || '').trim() || `req_${crypto.randomUUID()}`
     const normalizedRouteOverride = String(routeOverride || '').trim()
     const normalizedAttachments = Array.isArray(attachments) ? attachments.filter((item) => item && typeof item === 'object') : []
+    const delivery = options.delivery === 'queue' ? 'queue' : options.delivery === 'steer' ? 'steer' : undefined
     this.sendJson({
       type: 'query',
       request_id: effectiveRequestId,
@@ -639,9 +645,46 @@ export class GatewayConnectionManager {
       conversation_context: Array.isArray(conversationContext) ? conversationContext : [],
       route_override: normalizedRouteOverride || undefined,
       attachments: normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
+      delivery,
     })
-    this.recordDesktopQueryInHistory(content, effectiveRequestId, normalizedAttachments)
+    if (options.deferHistory) {
+      this.deferredHistoryQueries.set(effectiveRequestId, { content, attachments: normalizedAttachments })
+    } else {
+      this.recordDesktopQueryInHistory(content, effectiveRequestId, normalizedAttachments)
+    }
     return effectiveRequestId
+  }
+
+  /** Take back a held mid-run message before Cosmic reads it. */
+  withdrawQuery(requestId: string) {
+    const normalizedRequestId = String(requestId || '').trim()
+    if (!normalizedRequestId) {
+      throw new Error('A requestId is required to withdraw a queued message.')
+    }
+    this.sendJson({
+      type: 'query.withdraw',
+      request_id: `withdraw_${crypto.randomUUID()}`,
+      target_request_id: normalizedRequestId,
+    })
+    return { ok: true }
+  }
+
+  private settleDeferredHistoryQuery(payload: { request_id?: unknown; withdrawn?: unknown } | null | undefined, eventType: string) {
+    const requestId = String(payload?.request_id || '').trim()
+    if (!requestId || !this.deferredHistoryQueries.has(requestId)) {
+      return
+    }
+    if (eventType === 'user_message.delivered' || eventType === 'user_message.dispatched' || eventType === 'route_result') {
+      const deferred = this.deferredHistoryQueries.get(requestId)
+      this.deferredHistoryQueries.delete(requestId)
+      if (deferred) {
+        this.recordDesktopQueryInHistory(deferred.content, requestId, deferred.attachments)
+      }
+      return
+    }
+    if (eventType === 'user_message.withdrawn' && payload?.withdrawn === true) {
+      this.deferredHistoryQueries.delete(requestId)
+    }
   }
 
   submitTaskInputReply(inputRequestId: string, taskId: string, content: string, skipped = false) {
@@ -1644,6 +1687,7 @@ export class GatewayConnectionManager {
       this.knownTaskIds.delete(String(payload.task_id))
     }
 
+    this.settleDeferredHistoryQuery(payload, eventType)
     this.captureForegroundStreamEvent(payload, eventType)
     const foregroundSnapshot = this.getForegroundStreamSnapshot(payload)
     if (foregroundSnapshot) {

@@ -9,6 +9,17 @@ export interface AlphaConsoleAnchor {
 export interface ActivityAnchor {
   id: string
   offset: number
+  /** When the step happened (ISO). Orders a step against a steer that was
+   * read at the same stream offset (tools often run with no prose between). */
+  createdAt?: string | null
+}
+
+/** A message the user sent mid-run, read by the model at `offset` of the
+ * reply. Rendered as the user's bubble inline at that point. */
+export interface SteerSegmentAnchor {
+  id: string
+  offset: number
+  deliveredAt?: string | null
 }
 
 export interface AlphaTerminalAnchorSource {
@@ -31,6 +42,7 @@ export type AlphaStreamSegment =
   | { kind: 'sheet_run'; taskId: string | null }
   | { kind: 'activity'; anchorId: string }
   | { kind: 'action'; block: ResponseBlockLike }
+  | { kind: 'user_steer'; anchorId: string }
 
 const DEFAULT_ALPHA_TASK_KEY = '_default'
 
@@ -129,7 +141,29 @@ export const ensureAlphaConsoleAnchor = (
 }
 
 interface KindedAnchor extends AlphaConsoleAnchor {
-  segmentKind: 'alpha_console' | 'browser_run' | 'sheet_run' | 'activity' | 'action'
+  segmentKind: 'alpha_console' | 'browser_run' | 'sheet_run' | 'activity' | 'action' | 'user_steer'
+  at?: string | null
+}
+
+const timeOf = (value?: string | null): number | null => {
+  if (!value) return null
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/** Tie-break for anchors at the same offset. Everything except steers keeps
+ * its existing order (stable sort). A steer goes after the steps that
+ * happened before it was read and before the ones after; with no times to
+ * compare it goes after the other anchors at that offset. */
+const compareAtSameOffset = (a: KindedAnchor, b: KindedAnchor): number => {
+  const aSteer = a.segmentKind === 'user_steer'
+  const bSteer = b.segmentKind === 'user_steer'
+  if (!aSteer && !bSteer) return 0
+  const aTime = timeOf(a.at)
+  const bTime = timeOf(b.at)
+  if (aTime !== null && bTime !== null && aTime !== bTime) return aTime - bTime
+  if (aSteer && bSteer) return 0
+  return aSteer ? 1 : -1
 }
 
 export const buildAlphaStreamSegments = (options: {
@@ -148,7 +182,9 @@ export const buildAlphaStreamSegments = (options: {
   // at the stream offset where the entry arrived. Not deduped: several rows
   // may sit at the same offset when steps ran between two text chunks.
   activityAnchors?: ActivityAnchor[]
-}): { segments: AlphaStreamSegment[]; hasAnchors: boolean } => {
+  // Mid-run user messages, at the offset the model read them.
+  steerAnchors?: SteerSegmentAnchor[]
+}): { segments: AlphaStreamSegment[]; hasAnchors: boolean; hasSteers: boolean } => {
   const actionBlocks = (options.responseBlocks || []).filter((block) =>
     (block.type === 'vault_permission_request' || block.type === 'browser_credential_request')
     && typeof block.streamOffset === 'number' && Number.isFinite(block.streamOffset))
@@ -168,15 +204,28 @@ export const buildAlphaStreamSegments = (options: {
       && typeof anchor.offset === 'number' && Number.isFinite(anchor.offset))
     .map((anchor) => ({ taskId: anchor.id,
       offset: resolveActivityAnchorOffset(options.content || '', contentBlocks, anchor.offset),
-      segmentKind: 'activity' as const }))
+      segmentKind: 'activity' as const,
+      at: anchor.createdAt ?? null }))
+  const steerKinded: KindedAnchor[] = (options.steerAnchors || [])
+    .filter((anchor) => typeof anchor?.id === 'string' && anchor.id.trim()
+      && typeof anchor.offset === 'number' && Number.isFinite(anchor.offset))
+    .map((anchor) => ({ taskId: anchor.id,
+      offset: Math.max(0, Math.floor(anchor.offset)),
+      segmentKind: 'user_steer' as const,
+      at: anchor.deliveredAt ?? null }))
   // Activity rows sort before card anchors at the same offset: the delegation
   // line is narrated before the specialist it invoked appears, so a tie should
   // read as narration-then-card, not card-then-narration.
-  const anchors: KindedAnchor[] = [...activityKinded, ...alphaAnchors, ...browserAnchors, ...sheetAnchors, ...actionAnchors].sort((a, b) => a.offset - b.offset)
+  const hasAnchors = activityKinded.length + alphaAnchors.length + browserAnchors.length
+    + sheetAnchors.length + actionAnchors.length > 0
+  const hasSteers = steerKinded.length > 0
+  const anchors: KindedAnchor[] = [...activityKinded, ...alphaAnchors, ...browserAnchors, ...sheetAnchors, ...actionAnchors, ...steerKinded]
+    .sort((a, b) => (a.offset - b.offset) || compareAtSameOffset(a, b))
 
   if (anchors.length <= 0) {
     return {
       hasAnchors: false,
+      hasSteers: false,
       segments: [{
         kind: 'content',
         content: options.content,
@@ -217,6 +266,8 @@ export const buildAlphaStreamSegments = (options: {
     if (anchor.segmentKind === 'action') {
       const block = actionBlocks.find((item) => item.id === anchor.taskId)
       if (block) segments.push({ kind: 'action', block })
+    } else if (anchor.segmentKind === 'user_steer') {
+      segments.push({ kind: 'user_steer', anchorId: String(anchor.taskId || '') })
     } else if (anchor.segmentKind === 'activity') {
       // Activity ids are pre-filtered non-empty at the option boundary.
       segments.push({ kind: 'activity', anchorId: String(anchor.taskId || '') })
@@ -236,7 +287,7 @@ export const buildAlphaStreamSegments = (options: {
     }
   })
 
-  return { segments, hasAnchors: true }
+  return { segments, hasAnchors, hasSteers }
 }
 
 const measureResponseBlockLength = (block: ResponseBlockLike): number => {

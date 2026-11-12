@@ -157,6 +157,40 @@ async def cancel_task(
     }
 
 
+class TaskSteerBody(BaseModel):
+    message_id: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=1, max_length=20000)
+
+
+class TaskSteerWithdrawBody(BaseModel):
+    message_id: str = Field(..., min_length=1, max_length=200)
+
+
+@app.post("/internal/tasks/{task_id}/messages")
+async def submit_task_message(
+    task_id: str,
+    body: TaskSteerBody,
+    _: None = Depends(require_internal_token),
+    runtime: OrchestratorRuntime = Depends(get_runtime),
+) -> dict[str, object]:
+    """Hand a mid-run user message to a running task (next step boundary)."""
+    accepted = runtime.submit_user_steer(
+        task_id, message_id=body.message_id, content=body.content
+    )
+    return {"ok": True, "task_id": task_id, "message_id": body.message_id, "accepted": accepted}
+
+
+@app.post("/internal/tasks/{task_id}/messages/withdraw")
+async def withdraw_task_message(
+    task_id: str,
+    body: TaskSteerWithdrawBody,
+    _: None = Depends(require_internal_token),
+    runtime: OrchestratorRuntime = Depends(get_runtime),
+) -> dict[str, object]:
+    withdrawn = runtime.withdraw_user_steer(task_id, message_id=body.message_id)
+    return {"ok": True, "task_id": task_id, "message_id": body.message_id, "withdrawn": withdrawn}
+
+
 @app.post("/internal/tasks/{task_id}/request-input")
 async def request_task_input(
     task_id: str,

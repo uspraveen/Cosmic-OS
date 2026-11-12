@@ -871,6 +871,115 @@ body,
   padding: 14px 20px 0;
 }
 
+/* Messages sent while Cosmic works. They sit in the transcript as normal
+   bubbles; until the agent takes one in it is slightly dimmed with a small
+   spinner beside it (hover the spinner to cancel). No status labels. */
+.mid-run-bubble-line {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.message-row.mid-run-pending .query-pill-shell,
+.message-row.mid-run-pending .query-pill {
+  opacity: 0.62;
+  transition: opacity 0.2s ease;
+}
+
+.message-row.mid-run-pending.is-withdrawing .query-pill-shell,
+.message-row.mid-run-pending.is-withdrawing .query-pill {
+  opacity: 0.35;
+}
+
+.mid-run-indicator {
+  position: relative;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(235, 244, 252, 0.75);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mid-run-indicator:disabled {
+  cursor: default;
+}
+
+.mid-run-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.6px solid rgba(235, 244, 252, 0.22);
+  border-top-color: rgba(235, 244, 252, 0.75);
+  animation: mid-run-spin 0.9s linear infinite;
+}
+
+.mid-run-cancel-icon {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.mid-run-indicator:hover:not(:disabled) .mid-run-spinner,
+.mid-run-indicator:focus-visible .mid-run-spinner {
+  opacity: 0;
+}
+
+.mid-run-indicator:hover:not(:disabled) .mid-run-cancel-icon,
+.mid-run-indicator:focus-visible .mid-run-cancel-icon {
+  opacity: 1;
+}
+
+@keyframes mid-run-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mid-run-spinner { animation-duration: 2.4s; }
+}
+
+.mid-run-retry {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 170, 170, 0.85);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.mid-run-retry:hover {
+  background: rgba(255, 170, 170, 0.1);
+  color: rgba(255, 196, 196, 1);
+}
+
+/* A message the running task read, shown inside its reply where the model
+   took it in. */
+.message-row.inline-steer-row {
+  display: flex;
+  justify-content: flex-end;
+  align-self: stretch;
+  margin: 14px 0;
+}
+
+.mid-run-send-btn {
+  margin-right: 8px;
+}
+
 .composer-pending-approval-chip {
   display: inline-flex;
   align-items: center;
