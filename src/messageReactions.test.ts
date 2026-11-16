@@ -11,6 +11,7 @@ interface TestMessage {
   content: string
   requestId?: string | null
   reaction?: string | null
+  steerAnchors?: Array<{ requestId: string; content: string; offset: number; reaction?: string | null }>
 }
 
 const baseMessage: TestMessage = {
@@ -118,5 +119,39 @@ describe('applyReactionToMessages', () => {
       { emoji: '🔥', requestId: 'req_abc', messageId: '', sessionId: '' },
     )
     expect(next[0].reaction).toBe('🔥')
+  })
+
+  it('stamps a reaction onto a matching inline steer anchor inside an assistant reply', () => {
+    const assistantWithSteers: TestMessage = {
+      id: 'a_1',
+      role: 'assistant',
+      content: 'Checking flights.',
+      requestId: 'req_parent',
+      steerAnchors: [
+        { requestId: 'req_steer_1', content: 'nonstop only', offset: 17 },
+        { requestId: 'req_steer_2', content: 'morning departure', offset: 17, reaction: '👍' },
+      ],
+    }
+    const next = applyReactionToMessages([assistantWithSteers], {
+      emoji: '👀',
+      requestId: 'req_steer_1',
+      messageId: '',
+      sessionId: 'sess_1',
+    })
+    expect(next[0].reaction).toBeUndefined()
+    expect(next[0].steerAnchors).toEqual([
+      { requestId: 'req_steer_1', content: 'nonstop only', offset: 17, reaction: '👀' },
+      { requestId: 'req_steer_2', content: 'morning departure', offset: 17, reaction: '👍' },
+    ])
+
+    // Same emoji is a referential no-op.
+    expect(
+      applyReactionToMessages(next, {
+        emoji: '👀',
+        requestId: 'req_steer_1',
+        messageId: '',
+        sessionId: 'sess_1',
+      }),
+    ).toBe(next)
   })
 })

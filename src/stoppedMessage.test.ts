@@ -14,6 +14,11 @@ describe('messageCarriesLiveWork', () => {
     expect(messageCarriesLiveWork({ browserConsoleAnchors: [{ taskId: 't', offset: 0 }] })).toBe(true)
   })
 
+  it('keeps a quiet stopped turn that carries delivered inline steers', () => {
+    expect(messageCarriesLiveWork({ steerAnchors: [{ requestId: 'req_steer', content: 'nonstop only', offset: 0 }] })).toBe(true)
+    expect(messageCarriesLiveWork({ steerAnchors: [] })).toBe(false)
+  })
+
   it('lets a genuinely empty placeholder go', () => {
     expect(messageCarriesLiveWork({})).toBe(false)
     expect(messageCarriesLiveWork({ activityLog: [], alphaTerminalLog: null })).toBe(false)

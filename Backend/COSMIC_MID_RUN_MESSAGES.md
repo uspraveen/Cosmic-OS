@@ -89,7 +89,11 @@ gateway on request finalize:
 ## Background / foreground (BG/FG)
 
 Before this change, backgrounding a run was the only way to talk to Cosmic
-while it worked. Now that the composer never locks, that job is gone.
-BG/FG is still useful for real parallel work (several long tasks per
-session, autonomous runs), so it is kept unchanged here. See the PR for the
-keep / simplify / remove assessment.
+while it worked. Now that the composer never locks, inline mid-run messages
+handle both steering into the active run and queued follow-up turns directly
+in the chat (matching Codex, Claude Code, and Grok Bot). Accordingly, the
+Desktop app's manual background tasks tab ("Task Inbox") and composer "Move to
+background" button were removed, while the gateway retains the BG/FG handlers
+(`background`, `foreground`, `task.backgrounded`, `task.foregrounded`, and
+`background_tasks` on `resume.ok`) for historical SQLite rows and mobile
+backward compatibility.

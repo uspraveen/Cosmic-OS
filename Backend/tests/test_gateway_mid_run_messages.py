@@ -15,7 +15,7 @@ import pytest
 from gateway.channels.desktop import DesktopAdapter
 from gateway.channels.routes import _handle_realtime_websocket_message
 from gateway.mid_run_queue import HeldMessage, HeldMessageQueue
-from orchestrator.steering import SteerInbox
+from orchestrator.steering import MAX_STEER_CHARS, SteerInbox
 from test_gateway_desktop_ws import build_runtime
 
 CHANNEL = "desktop:desk_midrun"
@@ -52,6 +52,8 @@ class SteeringFakeOrchestrator:
         self.submit_calls: list[str] = []
         # Optional text the run streams before its tool step (per query).
         self.prelude: dict[str, str] = {}
+        self.omit_prelude_in_complete: set[str] = set()
+        self.final_answers: dict[str, str] = {}
 
     def gate(self, request_id: str, name: str) -> asyncio.Event:
         key = (request_id, name)
@@ -110,12 +112,13 @@ class SteeringFakeOrchestrator:
                 }
         inbox.close()  # last boundary passed
         await self.gate(request_id, "end").wait()
-        answer = f"answer to {query}"
+        answer = self.final_answers.get(query, f"answer to {query}")
         yield {**base, "type": "response.chunk", "content": answer, "done": False}
+        complete_content = answer if query in self.omit_prelude_in_complete else prelude + answer
         yield {
             **base,
             "type": "response.complete",
-            "content": prelude + answer,
+            "content": complete_content,
             "awaiting_reply": False,
         }
         yield {**base, "type": "task.completed", "status": "completed"}
@@ -194,6 +197,7 @@ class Harness:
             lambda: not self.runtime.active_requests
             and not self.queue_items()
             and CHANNEL not in self.runtime.mid_run._dispatching  # noqa: SLF001
+            and CHANNEL not in self.runtime.mid_run._reclaiming_channels  # noqa: SLF001
         )
 
 
@@ -569,4 +573,151 @@ async def test_resume_snapshot_carries_steer_anchors_of_the_live_run(tmp_path) -
         assert [(a["request_id"], a["stream_offset"]) for a in payload] == [("req_b", 0)]
         h.orchestrator.release("req_a", "end")
         await h.wait_idle()
+
+
+@pytest.mark.asyncio
+async def test_followup_turn_still_fulfills_when_socket_disconnects_before_route_result(tmp_path) -> None:
+    async with Harness(tmp_path) as h:
+        h.orchestrator.hold("req_a", "step")
+        await h.query("req_a", "first job")
+        await wait_for(lambda: h.socket.of_type("task.created"))
+        await h.query("req_b", "follow up after disconnect", delivery="queue")
+        assert h.adapter is not None
+        await h.adapter.unregister_connection(CHANNEL, h.socket)  # type: ignore[arg-type]
+
+        h.orchestrator.release("req_a", "step")
+        await h.wait_idle()
+
+        assert h.orchestrator.queries == ["first job", "follow up after disconnect"]
+        assert h.transcript() == [
+            ("user", "first job"),
+            ("assistant", "answer to first job"),
+            ("user", "follow up after disconnect"),
+            ("assistant", "answer to follow up after disconnect"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_omitted_pre_tool_narration_rebases_steer_anchor_offset_to_zero(tmp_path) -> None:
+    async with Harness(tmp_path) as h:
+        prelude = "Checking flights.\n\n"
+        final_text = "Found two nonstop flights."
+        h.orchestrator.prelude["research flights"] = prelude
+        h.orchestrator.omit_prelude_in_complete.add("research flights")
+        h.orchestrator.final_answers["research flights"] = final_text
+        h.orchestrator.hold("req_a", "step")
+
+        await h.query("req_a", "research flights")
+        await wait_for(
+            lambda: h.runtime.active_requests.get("req_a") is not None
+            and h.runtime.active_requests["req_a"].partial_content == prelude
+        )
+        await h.query("req_b", "only nonstop please")
+        await wait_for(lambda: h.queue_items() and h.queue_items()[0].state == "injecting")
+        h.orchestrator.release("req_a", "step")
+        await h.wait_idle()
+
+        delivered = h.socket.of_type("user_message.delivered")
+        assert len(delivered) == 1 and delivered[0]["stream_offset"] == len(prelude)
+
+        complete = [e for e in h.socket.of_type("response.complete") if e.get("request_id") == "req_a"]
+        assert complete and complete[-1]["content"] == final_text
+        assert [(a["request_id"], a["stream_offset"]) for a in complete[-1]["steer_anchors"]] == [
+            ("req_b", 0)
+        ]
+
+        answer_row = next(row for row in h.history() if row["role"] == "assistant")
+        assert answer_row["content"] == final_text
+        assert [(a["request_id"], a["stream_offset"]) for a in answer_row["metadata"]["steer_anchors"]] == [
+            ("req_b", 0)
+        ]
+
+
+@pytest.mark.asyncio
+async def test_attachment_message_followed_by_text_steer_preserves_causal_order(tmp_path) -> None:
+    async with Harness(tmp_path) as h:
+        h.orchestrator.hold("req_a", "step")
+        await h.query("req_a", "audit current architecture")
+        await wait_for(lambda: h.socket.of_type("task.created"))
+
+        await h.query(
+            "req_b",
+            "here is spec.pdf",
+            attachments=[{"id": "att_spec", "filename": "spec.pdf", "mime_type": "application/pdf"}],
+        )
+        await h.query("req_c", "focus on section 3")
+        await asyncio.sleep(0.05)
+
+        # Neither message may jump into Turn 1: req_c depends on req_b's attachment.
+        assert [item.request_id for item in h.queue_items()] == ["req_b", "req_c"]
+        assert all(item.state == "waiting" for item in h.queue_items())
+        assert h.orchestrator.submit_calls == []
+
+        h.orchestrator.release("req_a", "step")
+        await h.wait_idle()
+
+        assert "req_a" not in h.orchestrator.model_saw
+        assert h.orchestrator.queries[0] == "audit current architecture"
+        assert h.orchestrator.queries[1] == "here is spec.pdf"
+        # Turn 2 either reads req_c as a steer or runs it right after req_b, never before req_b.
+        roles_and_texts = h.transcript()
+        idx_turn1_answer = roles_and_texts.index(("assistant", "answer to audit current architecture"))
+        idx_attachment_msg = roles_and_texts.index(("user", "here is spec.pdf"))
+        idx_followup_steer = roles_and_texts.index(("user", "focus on section 3"))
+        assert idx_turn1_answer < idx_attachment_msg < idx_followup_steer
+
+
+@pytest.mark.asyncio
+async def test_stopping_after_steer_delivery_before_prose_persists_assistant_steer_anchors(tmp_path) -> None:
+    async with Harness(tmp_path) as h:
+        h.orchestrator.hold("req_a", "step")
+        h.orchestrator.hold("req_a", "end")
+        await h.query("req_a", "research flights")
+        await wait_for(lambda: h.socket.of_type("task.created"))
+        await h.query("req_b", "only nonstop please")
+        await wait_for(lambda: h.queue_items() and h.queue_items()[0].state == "injecting")
+
+        h.orchestrator.release("req_a", "step")
+        await wait_for(lambda: h.socket.of_type("user_message.delivered"))
+        assert h.runtime.active_requests["req_a"].partial_content == ""
+
+        await h.send({"type": "cancel", "request_id": "cancel_1", "target_request_id": "req_a"})
+        await h.wait_idle()
+
+        assistant_rows = [row for row in h.history() if row["role"] == "assistant"]
+        assert len(assistant_rows) == 1
+        assert assistant_rows[0]["content"] == ""
+        assert assistant_rows[0]["metadata"]["interrupted"] is True
+        assert [(a["request_id"], a["stream_offset"]) for a in assistant_rows[0]["metadata"]["steer_anchors"]] == [
+            ("req_b", 0)
+        ]
+
+
+@pytest.mark.asyncio
+async def test_backgrounding_reclaims_unread_steer_and_oversize_steer_runs_intact(tmp_path) -> None:
+    async with Harness(tmp_path) as h:
+        h.orchestrator.hold("req_a", "step")
+        await h.query("req_a", "long background job")
+        await wait_for(lambda: h.socket.of_type("task.created"))
+        await h.query("req_b", "unread steer becomes foreground turn")
+        await wait_for(lambda: h.queue_items() and h.queue_items()[0].state == "injecting")
+
+        await h.send({"type": "background", "request_id": "req_a"})
+        await wait_for(lambda: "unread steer becomes foreground turn" in h.orchestrator.queries)
+        assert h.running("req_a")
+        h.orchestrator.release("req_b", "step")
+        h.orchestrator.release("req_a", "step")
+        await h.wait_idle()
+        assert "req_a" not in h.orchestrator.model_saw
+
+        # Oversize steer (> MAX_STEER_CHARS) is refused by SteerInbox and runs intact next.
+        oversize = "z" * (MAX_STEER_CHARS + 25)
+        h.orchestrator.hold("req_c", "step")
+        await h.query("req_c", "short run")
+        await wait_for(lambda: any(e.get("request_id") == "req_c" for e in h.socket.of_type("task.created")))
+        await h.query("req_d", oversize)
+        await wait_for(lambda: "req_d" in h.orchestrator.submit_calls)
+        h.orchestrator.release("req_c", "step")
+        await h.wait_idle()
+        assert h.orchestrator.queries[-2:] == ["short run", oversize]
 

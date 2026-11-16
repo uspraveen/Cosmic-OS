@@ -201,8 +201,6 @@ contextBridge.exposeInMainWorld('cosmic', {
   withdrawGatewayQuery: (payload: { requestId: string }) => ipcRenderer.invoke('gateway:withdraw-query', payload),
   submitGatewayTaskInputReply: (payload: { inputRequestId: string; taskId: string; content: string; skipped?: boolean }) => ipcRenderer.invoke('gateway:submit-task-input-reply', payload),
   cancelGatewayResponse: (payload: { requestId?: string; taskId?: string }) => ipcRenderer.invoke('gateway:cancel-response', payload),
-  backgroundGatewayRequest: (payload: { requestId: string }) => ipcRenderer.invoke('gateway:background-request', payload),
-  foregroundGatewayRequest: (payload: { requestId: string }) => ipcRenderer.invoke('gateway:foreground-request', payload),
   setGatewayProphetNotificationState: (payload: { notificationId: string; state: string; snoozedUntil?: string; reason?: string }) =>
     ipcRenderer.invoke('gateway:prophet-notification-state', payload),
   listGatewaySessions: () => ipcRenderer.invoke('gateway:list-sessions'),

@@ -60,7 +60,7 @@ export interface ScreenshotSurfaceRects {
 export interface ScreenshotSurfaceState {
   /** Whether the main search/chat surface is on screen (island-only when false). */
   visible: boolean
-  mode: 'chat' | 'task' | 'meeting' | 'spaces'
+  mode: 'chat' | 'meeting' | 'spaces'
   launcherTrayOpen: boolean
   composerFocused: boolean
 }
@@ -155,7 +155,7 @@ export function pickAutoBoundRect(
 
   const mainColumn = unionRects([rects.response, rects.composer])
   if (mainColumn) {
-    return { surface: state.mode === 'task' ? 'task' : 'chat', rect: mainColumn }
+    return { surface: 'chat', rect: mainColumn }
   }
   if (isUsableRect(rects.task)) {
     return { surface: 'task', rect: rects.task }

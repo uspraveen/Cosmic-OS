@@ -17,6 +17,7 @@ interface GatewaySocketState {
   heartbeatConsumptions?: any[]
   knownTaskIds?: string[]
   foregroundStreams?: any[]
+  midRunQueue?: unknown[]
 }
 
 interface GatewayPendingDocumentAttachment {
@@ -358,8 +359,6 @@ interface Window {
     withdrawGatewayQuery?: (payload: { requestId: string }) => Promise<{ ok: boolean }>
     submitGatewayTaskInputReply: (payload: { inputRequestId: string; taskId: string; content: string; skipped?: boolean }) => Promise<{ ok: boolean; requestId: string }>
     cancelGatewayResponse: (payload: { requestId?: string; taskId?: string }) => Promise<{ ok: boolean }>
-    backgroundGatewayRequest: (payload: { requestId: string }) => Promise<{ ok: boolean; requestId: string }>
-    foregroundGatewayRequest: (payload: { requestId: string }) => Promise<{ ok: boolean; requestId: string }>
     setGatewayProphetNotificationState: (payload: { notificationId: string; state: string; snoozedUntil?: string; reason?: string }) => Promise<{ ok: boolean }>
     listGatewaySessions: () => Promise<{ sessions: any[] }>
     getGatewaySessionHistory: (sessionId: string) => Promise<{ session_id: string; messages: any[]; heartbeat_consumptions?: any[] }>

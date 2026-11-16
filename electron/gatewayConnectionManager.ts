@@ -44,6 +44,10 @@ interface ForegroundStreamSnapshot {
   activity?: string
   activity_log?: any[]
   alpha_terminal_log?: any[]
+  alpha_console_anchors?: any[]
+  browser_console_anchors?: any[]
+  sheet_run_anchors?: any[]
+  steer_anchors?: any[]
   docs_progress?: unknown
   tabular_progress?: unknown
   slide_progress?: unknown
@@ -72,27 +76,7 @@ const MAX_RESUME_ATTEMPTS = 2
 const FOREGROUND_STREAM_TTL_MS = 10 * 60 * 1000
 
 function appendCachedStreamText(current: string | undefined, incoming: unknown): string {
-  const prev = String(current || '')
-  const next = String(incoming || '')
-  if (!next) {
-    return prev
-  }
-  if (!prev) {
-    return next
-  }
-
-  const prevEnd = prev.slice(-1)
-  const nextStart = next.slice(0, 1)
-  if (!prevEnd || !nextStart || /\s/.test(prevEnd) || /\s/.test(nextStart)) {
-    return `${prev}${next}`
-  }
-  if (/[\.\!\?\:\u2026]/.test(prevEnd) && /[A-Z0-9"'`(\[]/.test(nextStart)) {
-    return `${prev}\n\n${next}`
-  }
-  if (/[A-Za-z0-9]/.test(prevEnd) && /[A-Za-z0-9]/.test(nextStart)) {
-    return `${prev} ${next}`
-  }
-  return `${prev}${next}`
+  return String(current || '') + String(incoming || '')
 }
 
 function mergeCachedCompletedText(current: string | undefined, completed: unknown): string {
@@ -106,11 +90,25 @@ function mergeCachedCompletedText(current: string | undefined, completed: unknow
   }
   const normalizedPrev = prev.replace(/\s+/g, ' ').trim()
   const normalizedFinal = finalText.replace(/\s+/g, ' ').trim()
-  if (normalizedPrev && normalizedFinal && normalizedPrev === normalizedFinal) {
-    return prev
+  if (!normalizedPrev || !normalizedFinal) {
+    return finalText || prev
   }
-  if (normalizedPrev && normalizedFinal && normalizedFinal.startsWith(normalizedPrev)) {
+  if (normalizedPrev === normalizedFinal) {
+    const prevParagraphs = (prev.match(/\n{2,}/g) || []).length
+    const finalParagraphs = (finalText.match(/\n{2,}/g) || []).length
+    if (finalParagraphs > prevParagraphs) {
+      return finalText
+    }
+    if (prevParagraphs > finalParagraphs) {
+      return prev
+    }
+    return finalText.length >= prev.length ? finalText : prev
+  }
+  if (normalizedFinal.startsWith(normalizedPrev)) {
     return finalText
+  }
+  if (normalizedPrev.startsWith(normalizedFinal) && normalizedPrev.length > normalizedFinal.length) {
+    return prev
   }
   return finalText
 }
@@ -298,6 +296,11 @@ function normalizeCachedAlphaTerminalEntry(value: any) {
     return null
   }
   const rawStream = typeof value.stream === 'string' ? value.stream.trim().toLowerCase() : ''
+  const rawOffset = value.stream_offset ?? value.streamOffset
+  const streamOffset =
+    typeof rawOffset === 'number' && Number.isFinite(rawOffset)
+      ? Math.max(0, Math.floor(rawOffset))
+      : undefined
   return {
     id: typeof value.id === 'string' && value.id.trim() ? value.id.trim() : `alpha_terminal_${crypto.randomUUID()}`,
     task_id:
@@ -322,6 +325,7 @@ function normalizeCachedAlphaTerminalEntry(value: any) {
         : typeof value.createdAt === 'string' && value.createdAt.trim()
           ? value.createdAt.trim()
           : new Date().toISOString(),
+    ...(streamOffset !== undefined ? { stream_offset: streamOffset } : {}),
   }
 }
 
@@ -350,6 +354,169 @@ function mergeCachedAlphaTerminalLogs(current: any[] | undefined, incoming: any[
   let merged = Array.isArray(current) ? current : undefined
   for (const item of incoming || []) {
     merged = appendCachedAlphaTerminalLog(merged, item)
+  }
+  return merged
+}
+
+function cachedConsoleAnchorKey(taskId: string | null | undefined) {
+  const normalized = typeof taskId === 'string' ? taskId.trim() : ''
+  return normalized || '_default'
+}
+
+function normalizeCachedConsoleAnchor(value: any): { task_id: string | null; offset: number } | null {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+  const offsetRaw = value.offset ?? value.stream_offset
+  const offset =
+    typeof offsetRaw === 'number' && Number.isFinite(offsetRaw)
+      ? Math.max(0, Math.floor(offsetRaw))
+      : null
+  if (offset === null) {
+    return null
+  }
+  const taskId =
+    typeof value.task_id === 'string' && value.task_id.trim()
+      ? value.task_id.trim()
+      : typeof value.taskId === 'string' && value.taskId.trim()
+        ? value.taskId.trim()
+        : null
+  return { task_id: taskId, offset }
+}
+
+function mergeCachedConsoleAnchors(current: any[] | undefined, incoming: any[] | undefined): any[] | undefined {
+  const currentList: { task_id: string | null; offset: number }[] = []
+  const seenCurrent = new Set<string>()
+  for (const raw of current || []) {
+    const normalized = normalizeCachedConsoleAnchor(raw)
+    if (!normalized) continue
+    const key = cachedConsoleAnchorKey(normalized.task_id)
+    if (seenCurrent.has(key)) continue
+    seenCurrent.add(key)
+    currentList.push(normalized)
+  }
+
+  const incomingByKey = new Map<string, { task_id: string | null; offset: number }>()
+  for (const raw of incoming || []) {
+    const normalized = normalizeCachedConsoleAnchor(raw)
+    if (!normalized) continue
+    const key = cachedConsoleAnchorKey(normalized.task_id)
+    if (!incomingByKey.has(key)) {
+      incomingByKey.set(key, normalized)
+    }
+  }
+
+  if (currentList.length === 0 && incomingByKey.size === 0) {
+    return undefined
+  }
+  if (incomingByKey.size === 0) {
+    return currentList.sort((a, b) => a.offset - b.offset)
+  }
+
+  const merged: { task_id: string | null; offset: number }[] = []
+  const usedKeys = new Set<string>()
+  for (const item of currentList) {
+    const key = cachedConsoleAnchorKey(item.task_id)
+    usedKeys.add(key)
+    merged.push(incomingByKey.get(key) || item)
+  }
+  for (const [key, item] of incomingByKey.entries()) {
+    if (!usedKeys.has(key)) {
+      merged.push(item)
+    }
+  }
+  return merged.sort((a, b) => a.offset - b.offset)
+}
+
+function ensureCachedConsoleAnchor(
+  current: any[] | undefined,
+  taskId: string | null | undefined,
+  offset: number,
+): any[] {
+  const key = cachedConsoleAnchorKey(taskId)
+  const existing = mergeCachedConsoleAnchors(current, undefined) || []
+  if (existing.some((item) => cachedConsoleAnchorKey(item.task_id) === key)) {
+    return existing
+  }
+  const normalizedTaskId = typeof taskId === 'string' && taskId.trim() ? taskId.trim() : null
+  return [...existing, { task_id: normalizedTaskId, offset: Math.max(0, Math.floor(offset)) }]
+    .sort((a, b) => a.offset - b.offset)
+}
+
+function normalizeCachedSteerAnchor(value: any) {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+  const requestId =
+    typeof value.request_id === 'string' && value.request_id.trim()
+      ? value.request_id.trim()
+      : typeof value.requestId === 'string' && value.requestId.trim()
+        ? value.requestId.trim()
+        : ''
+  const offsetRaw = value.stream_offset ?? value.offset
+  const streamOffset =
+    typeof offsetRaw === 'number' && Number.isFinite(offsetRaw)
+      ? Math.max(0, Math.floor(offsetRaw))
+      : null
+  if (!requestId || streamOffset === null) {
+    return null
+  }
+  const deliveredAtRaw = value.delivered_at ?? value.deliveredAt
+  return {
+    request_id: requestId,
+    content: typeof value.content === 'string' ? value.content : '',
+    stream_offset: streamOffset,
+    delivered_at: typeof deliveredAtRaw === 'string' ? deliveredAtRaw : null,
+  }
+}
+
+function mergeCachedSteerAnchors(current: any[] | undefined, incoming: any[] | undefined): any[] | undefined {
+  const currentList: NonNullable<ReturnType<typeof normalizeCachedSteerAnchor>>[] = []
+  const seenCurrent = new Set<string>()
+  for (const raw of current || []) {
+    const normalized = normalizeCachedSteerAnchor(raw)
+    if (!normalized || seenCurrent.has(normalized.request_id)) continue
+    seenCurrent.add(normalized.request_id)
+    currentList.push(normalized)
+  }
+
+  const incomingById = new Map<string, NonNullable<ReturnType<typeof normalizeCachedSteerAnchor>>>()
+  for (const raw of incoming || []) {
+    const normalized = normalizeCachedSteerAnchor(raw)
+    if (!normalized || incomingById.has(normalized.request_id)) continue
+    incomingById.set(normalized.request_id, normalized)
+  }
+
+  if (currentList.length === 0 && incomingById.size === 0) {
+    return undefined
+  }
+  if (incomingById.size === 0) {
+    return currentList
+  }
+  if (currentList.length === 0) {
+    return Array.from(incomingById.values())
+  }
+
+  const merged: NonNullable<ReturnType<typeof normalizeCachedSteerAnchor>>[] = []
+  const usedIds = new Set<string>()
+  for (const item of currentList) {
+    usedIds.add(item.request_id)
+    const inc = incomingById.get(item.request_id)
+    if (inc) {
+      merged.push({
+        request_id: item.request_id,
+        content: inc.content || item.content,
+        stream_offset: inc.stream_offset,
+        delivered_at: inc.delivered_at ?? item.delivered_at,
+      })
+    } else {
+      merged.push(item)
+    }
+  }
+  for (const [id, inc] of incomingById.entries()) {
+    if (!usedIds.has(id)) {
+      merged.push(inc)
+    }
   }
   return merged
 }
@@ -425,7 +592,7 @@ export class GatewayConnectionManager {
   private foregroundStreams = new Map<string, ForegroundStreamSnapshot>()
   private foregroundStreamRequestIndex = new Map<string, string>()
   private foregroundStreamTaskIndex = new Map<string, string>()
-  private backgroundedRequestIds = new Set<string>()
+  private midRunQueue: any[] = []
   // Mid-run messages sent while a run was busy. They only enter the cached
   // history once the gateway delivers them into the run or starts them as
   // their own turn, so the cache mirrors the gateway's history order.
@@ -571,7 +738,8 @@ export class GatewayConnectionManager {
     this.foregroundStreams.clear()
     this.foregroundStreamRequestIndex.clear()
     this.foregroundStreamTaskIndex.clear()
-    this.backgroundedRequestIds.clear()
+    this.midRunQueue = []
+    this.deferredHistoryQueries.clear()
     for (const [requestId, waiter] of this.resumeWaiters) {
       clearTimeout(waiter.timer)
       this.resumeWaiters.delete(requestId)
@@ -674,7 +842,7 @@ export class GatewayConnectionManager {
     if (!requestId || !this.deferredHistoryQueries.has(requestId)) {
       return
     }
-    if (eventType === 'user_message.delivered' || eventType === 'user_message.dispatched' || eventType === 'route_result') {
+    if (eventType === 'user_message.delivered' || eventType === 'route_result') {
       const deferred = this.deferredHistoryQueries.get(requestId)
       this.deferredHistoryQueries.delete(requestId)
       if (deferred) {
@@ -682,7 +850,7 @@ export class GatewayConnectionManager {
       }
       return
     }
-    if (eventType === 'user_message.withdrawn' && payload?.withdrawn === true) {
+    if ((eventType === 'user_message.withdrawn' && payload?.withdrawn === true) || eventType === 'error') {
       this.deferredHistoryQueries.delete(requestId)
     }
   }
@@ -732,18 +900,6 @@ export class GatewayConnectionManager {
     return { ok: true }
   }
 
-  backgroundRequest(requestId: string) {
-    const normalizedRequestId = String(requestId || '').trim()
-    if (!normalizedRequestId) {
-      throw new Error('A requestId is required to move a response to the background.')
-    }
-    this.sendJson({
-      type: 'background',
-      request_id: normalizedRequestId,
-    })
-    return { ok: true, requestId: normalizedRequestId }
-  }
-
   setProphetNotificationState(
     notificationId: string,
     state: string,
@@ -764,18 +920,6 @@ export class GatewayConnectionManager {
     return { ok: true }
   }
 
-  foregroundRequest(requestId: string) {
-    const normalizedRequestId = String(requestId || '').trim()
-    if (!normalizedRequestId) {
-      throw new Error('A requestId is required to bring a background response to the foreground.')
-    }
-    this.sendJson({
-      type: 'foreground',
-      request_id: normalizedRequestId,
-    })
-    return { ok: true, requestId: normalizedRequestId }
-  }
-
   getState() {
     return {
       status: this.status,
@@ -784,6 +928,7 @@ export class GatewayConnectionManager {
       heartbeatConsumptions: this.heartbeatConsumptions,
       knownTaskIds: Array.from(this.knownTaskIds),
       foregroundStreams: this.getForegroundStreams(),
+      midRunQueue: this.midRunQueue,
       config: this.config ? { ...this.config, apiToken: undefined } : null,
     }
   }
@@ -838,10 +983,11 @@ export class GatewayConnectionManager {
     const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : undefined
     const hasMetadataArtifacts = Array.isArray(metadata?.produced_artifacts) && metadata.produced_artifacts.length > 0
     const hasMetadataBlocks = Array.isArray(metadata?.response_blocks) && metadata.response_blocks.length > 0
-    // A live card (browser run, deck build, sheet) is content in its own right:
-    // a turn stopped before any prose still showed the user a run.
+    // A live card (browser run, deck build, sheet) or delivered mid-run steer is
+    // content in its own right: a turn stopped before any prose still showed work.
     const hasMetadataCard = Boolean(metadata?.browser_progress || metadata?.slide_progress || metadata?.sheets_progress)
-    if (!content.trim() && !(role === 'assistant' && (hasMetadataArtifacts || hasMetadataBlocks || hasMetadataCard))) {
+    const hasMetadataSteers = Array.isArray(metadata?.steer_anchors) && metadata.steer_anchors.length > 0
+    if (!content.trim() && !(role === 'assistant' && (hasMetadataArtifacts || hasMetadataBlocks || hasMetadataCard || hasMetadataSteers))) {
       return
     }
 
@@ -943,10 +1089,28 @@ export class GatewayConnectionManager {
     }
 
     if (eventType === 'response.complete') {
+      const snapshot = this.getForegroundStreamSnapshot(payload)
       const content = String(payload.content || '')
       const hasBlocks = Array.isArray(payload.response_blocks) && payload.response_blocks.length > 0
       const hasArtifacts = Array.isArray(payload.produced_artifacts) && payload.produced_artifacts.length > 0
-      if (!content.trim() && !hasBlocks && !hasArtifacts) {
+      const steerAnchors = Array.isArray(payload.steer_anchors) && payload.steer_anchors.length > 0
+        ? payload.steer_anchors
+        : undefined
+      const alphaConsoleAnchors = Array.isArray(payload.alpha_console_anchors) && payload.alpha_console_anchors.length > 0
+        ? payload.alpha_console_anchors
+        : undefined
+      const browserConsoleAnchors = Array.isArray(payload.browser_console_anchors) && payload.browser_console_anchors.length > 0
+        ? payload.browser_console_anchors
+        : undefined
+      const sheetRunAnchors = Array.isArray(payload.sheet_run_anchors) && payload.sheet_run_anchors.length > 0
+        ? payload.sheet_run_anchors
+        : undefined
+      const browserProgress = payload.browser_progress ?? snapshot?.browser_progress
+      const slideProgress = payload.slide_progress ?? snapshot?.slide_progress
+      const sheetsProgress = payload.sheets_progress ?? snapshot?.sheets_progress
+      const hasCard = Boolean(browserProgress || slideProgress || sheetsProgress)
+      const hasSteers = Boolean(steerAnchors)
+      if (!content.trim() && !hasBlocks && !hasArtifacts && !hasCard && !hasSteers) {
         return
       }
       const requestId = String(payload.request_id || '').trim()
@@ -960,6 +1124,9 @@ export class GatewayConnectionManager {
       if (hasArtifacts) {
         metadata.produced_artifacts = payload.produced_artifacts
       }
+      if (Array.isArray(payload.supporting_artifacts) && payload.supporting_artifacts.length > 0) {
+        metadata.supporting_artifacts = payload.supporting_artifacts
+      }
       if (hasBlocks) {
         metadata.response_blocks = payload.response_blocks
       }
@@ -968,6 +1135,27 @@ export class GatewayConnectionManager {
       }
       if (Array.isArray(payload.alpha_terminal_log) && payload.alpha_terminal_log.length > 0) {
         metadata.alpha_terminal_log = payload.alpha_terminal_log
+      }
+      if (steerAnchors) {
+        metadata.steer_anchors = steerAnchors
+      }
+      if (alphaConsoleAnchors) {
+        metadata.alpha_console_anchors = alphaConsoleAnchors
+      }
+      if (browserConsoleAnchors) {
+        metadata.browser_console_anchors = browserConsoleAnchors
+      }
+      if (sheetRunAnchors) {
+        metadata.sheet_run_anchors = sheetRunAnchors
+      }
+      if (browserProgress) {
+        metadata.browser_progress = browserProgress
+      }
+      if (slideProgress) {
+        metadata.slide_progress = slideProgress
+      }
+      if (sheetsProgress) {
+        metadata.sheets_progress = sheetsProgress
       }
       if (payload.awaiting_reply === true) {
         metadata.awaiting_reply = true
@@ -1000,7 +1188,8 @@ export class GatewayConnectionManager {
       }
       const content = String(snapshot.content || '')
       const hasCard = Boolean(snapshot.browser_progress || snapshot.slide_progress || snapshot.sheets_progress)
-      if (!content.trim() && !hasCard) {
+      const hasSteers = Array.isArray(snapshot.steer_anchors) && snapshot.steer_anchors.length > 0
+      if (!content.trim() && !hasCard && !hasSteers) {
         return
       }
       const requestId = String(snapshot.request_id || payload.request_id || '').trim()
@@ -1017,6 +1206,18 @@ export class GatewayConnectionManager {
       }
       if (Array.isArray(snapshot.alpha_terminal_log) && snapshot.alpha_terminal_log.length > 0) {
         metadata.alpha_terminal_log = snapshot.alpha_terminal_log
+      }
+      if (hasSteers) {
+        metadata.steer_anchors = snapshot.steer_anchors
+      }
+      if (Array.isArray(snapshot.alpha_console_anchors) && snapshot.alpha_console_anchors.length > 0) {
+        metadata.alpha_console_anchors = snapshot.alpha_console_anchors
+      }
+      if (Array.isArray(snapshot.browser_console_anchors) && snapshot.browser_console_anchors.length > 0) {
+        metadata.browser_console_anchors = snapshot.browser_console_anchors
+      }
+      if (Array.isArray(snapshot.sheet_run_anchors) && snapshot.sheet_run_anchors.length > 0) {
+        metadata.sheet_run_anchors = snapshot.sheet_run_anchors
       }
       if (snapshot.browser_progress) metadata.browser_progress = snapshot.browser_progress
       if (snapshot.slide_progress) metadata.slide_progress = snapshot.slide_progress
@@ -1266,10 +1467,6 @@ export class GatewayConnectionManager {
   private getForegroundStreams() {
     this.pruneForegroundStreams()
     return Array.from(this.foregroundStreams.values())
-      .filter((stream) => {
-        const requestId = typeof stream.request_id === 'string' ? stream.request_id.trim() : ''
-        return !requestId || !this.backgroundedRequestIds.has(requestId)
-      })
       .sort((left, right) => Date.parse(String(left.updated_at || '')) - Date.parse(String(right.updated_at || '')))
   }
 
@@ -1282,37 +1479,58 @@ export class GatewayConnectionManager {
         continue
       }
       const payload = stream as any
+      const existing = this.getForegroundStreamSnapshot(payload)
       this.upsertForegroundStream(payload, {
         request_id: typeof payload.request_id === 'string' ? payload.request_id : undefined,
         task_id: typeof payload.task_id === 'string' ? payload.task_id : undefined,
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
         route: typeof payload.route === 'string' ? payload.route : undefined,
         message_id: typeof payload.message_id === 'string' ? payload.message_id : undefined,
-        content: typeof payload.content === 'string' ? payload.content : undefined,
+        content: typeof payload.content === 'string' ? payload.content : existing?.content,
         thinking_text: typeof payload.thinking_text === 'string'
           ? payload.thinking_text
           : typeof payload.thinking === 'string'
             ? payload.thinking
-            : undefined,
-        activity: typeof payload.activity === 'string' ? payload.activity : undefined,
-        activity_log: Array.isArray(payload.activity_log) ? payload.activity_log : undefined,
-        alpha_terminal_log: Array.isArray(payload.alpha_terminal_log) ? payload.alpha_terminal_log : undefined,
-        docs_progress: payload.docs_progress,
-        tabular_progress: payload.tabular_progress,
-        slide_progress: payload.slide_progress,
-        browser_progress: payload.browser_progress,
-        sheets_progress: payload.sheets_progress,
-        produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
-        supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : undefined,
-        response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
+            : existing?.thinking_text,
+        activity: typeof payload.activity === 'string' ? payload.activity : existing?.activity,
+        activity_log: Array.isArray(payload.activity_log)
+          ? mergeCachedActivityLogs(existing?.activity_log, payload.activity_log)
+          : existing?.activity_log,
+        alpha_terminal_log: Array.isArray(payload.alpha_terminal_log)
+          ? mergeCachedAlphaTerminalLogs(existing?.alpha_terminal_log, payload.alpha_terminal_log)
+          : existing?.alpha_terminal_log,
+        alpha_console_anchors: mergeCachedConsoleAnchors(
+          existing?.alpha_console_anchors,
+          Array.isArray(payload.alpha_console_anchors) ? payload.alpha_console_anchors : undefined,
+        ),
+        browser_console_anchors: mergeCachedConsoleAnchors(
+          existing?.browser_console_anchors,
+          Array.isArray(payload.browser_console_anchors) ? payload.browser_console_anchors : undefined,
+        ),
+        sheet_run_anchors: mergeCachedConsoleAnchors(
+          existing?.sheet_run_anchors,
+          Array.isArray(payload.sheet_run_anchors) ? payload.sheet_run_anchors : undefined,
+        ),
+        steer_anchors: mergeCachedSteerAnchors(
+          existing?.steer_anchors,
+          Array.isArray(payload.steer_anchors) ? payload.steer_anchors : undefined,
+        ),
+        docs_progress: payload.docs_progress ?? existing?.docs_progress,
+        tabular_progress: payload.tabular_progress ?? existing?.tabular_progress,
+        slide_progress: payload.slide_progress ?? existing?.slide_progress,
+        browser_progress: payload.browser_progress ?? existing?.browser_progress,
+        sheets_progress: payload.sheets_progress ?? existing?.sheets_progress,
+        produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : existing?.produced_artifacts,
+        supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : existing?.supporting_artifacts,
+        response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : existing?.response_blocks,
         snapshot_seq:
           Number.isFinite(Number(payload.snapshot_seq)) && Number(payload.snapshot_seq) > 0
             ? Number(payload.snapshot_seq)
-            : undefined,
-        sources: Array.isArray(payload.sources) ? payload.sources : undefined,
-        channel: typeof payload.channel === 'string' ? payload.channel : undefined,
-        source: typeof payload.source === 'string' ? payload.source : undefined,
-        source_id: typeof payload.source_id === 'string' ? payload.source_id : undefined,
+            : existing?.snapshot_seq,
+        sources: Array.isArray(payload.sources) ? payload.sources : existing?.sources,
+        channel: typeof payload.channel === 'string' ? payload.channel : existing?.channel,
+        source: typeof payload.source === 'string' ? payload.source : existing?.source,
+        source_id: typeof payload.source_id === 'string' ? payload.source_id : existing?.source_id,
         awaiting_reply: payload.awaiting_reply === true,
         completed: payload.completed === true,
         failed: payload.failed === true,
@@ -1325,47 +1543,38 @@ export class GatewayConnectionManager {
     if (!payload || typeof payload !== 'object') {
       return
     }
-    const requestId = typeof payload.request_id === 'string' ? payload.request_id.trim() : ''
-    if (eventType === 'task.backgrounded') {
-      if (requestId) {
-        this.backgroundedRequestIds.add(requestId)
-      }
-      this.removeForegroundStream(payload)
-      return
-    }
     if (eventType.startsWith('task.background.')) {
       return
     }
-    if (requestId && this.backgroundedRequestIds.has(requestId) && eventType !== 'task.foregrounded') {
-      return
-    }
 
-    if (eventType === 'task.foregrounded' && requestId) {
-      this.backgroundedRequestIds.delete(requestId)
-      this.upsertForegroundStream(payload, {
-        session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
-        route: typeof payload.route === 'string' ? payload.route : undefined,
-        content: typeof payload.partial_content === 'string' ? payload.partial_content : undefined,
-        thinking_text: typeof payload.partial_thinking === 'string' ? payload.partial_thinking : undefined,
-        activity: typeof payload.activity === 'string' ? payload.activity : undefined,
-        activity_log: Array.isArray(payload.activity_log) ? payload.activity_log : undefined,
-        alpha_terminal_log: Array.isArray(payload.alpha_terminal_log) ? payload.alpha_terminal_log : undefined,
-        docs_progress: payload.docs_progress,
-        tabular_progress: payload.tabular_progress,
-        slide_progress: payload.slide_progress,
-        browser_progress: payload.browser_progress,
-        sheets_progress: payload.sheets_progress,
-        produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
-        supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : undefined,
-        response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
-        snapshot_seq:
-          Number.isFinite(Number(payload.snapshot_seq)) && Number(payload.snapshot_seq) > 0
-            ? Number(payload.snapshot_seq)
-            : undefined,
-        sources: Array.isArray(payload.sources) ? payload.sources : undefined,
-        completed: Boolean(payload.completed),
-        failed: Boolean(payload.failed),
-        error: typeof payload.error === 'string' ? payload.error : undefined,
+    if (eventType === 'user_message.delivered') {
+      const intoRequestId = typeof payload.into_request_id === 'string' ? payload.into_request_id.trim() : ''
+      const taskId = typeof payload.task_id === 'string' ? payload.task_id.trim() : ''
+      const targetLookup = {
+        request_id: intoRequestId || undefined,
+        task_id: taskId || undefined,
+      }
+      const existing = this.getForegroundStreamSnapshot(targetLookup)
+      if (!existing && !intoRequestId) {
+        return
+      }
+      const deliveredRequestId = String(payload.request_id || '').trim()
+      if (!deliveredRequestId) {
+        return
+      }
+      const anchor = {
+        request_id: deliveredRequestId,
+        content: typeof payload.content === 'string' ? payload.content : '',
+        stream_offset:
+          typeof payload.stream_offset === 'number' && Number.isFinite(payload.stream_offset)
+            ? payload.stream_offset
+            : String(existing?.content || '').length,
+        delivered_at: payload.delivered_at ?? null,
+      }
+      this.upsertForegroundStream(targetLookup, {
+        session_id: typeof payload.session_id === 'string' ? payload.session_id : existing?.session_id,
+        channel: typeof payload.channel === 'string' ? payload.channel : existing?.channel,
+        steer_anchors: mergeCachedSteerAnchors(existing?.steer_anchors, [anchor]),
       })
       return
     }
@@ -1414,25 +1623,71 @@ export class GatewayConnectionManager {
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
         route: typeof payload.route === 'string' ? payload.route : undefined,
       })
+      const streamLength = String(current?.content || '').length
+      const stampedActivityEntries = activityEntries.map((entry: any) => (
+        entry && typeof entry === 'object' && entry.stream_offset == null
+          ? { ...entry, stream_offset: streamLength }
+          : entry
+      ))
       const snapshotActivityLog = Array.isArray(payload.activity_log) ? payload.activity_log : undefined
       const snapshotAlphaTerminalLog = Array.isArray(payload.alpha_terminal_log) ? payload.alpha_terminal_log : undefined
+      const normalizedTerminalEntry = normalizeCachedAlphaTerminalEntry(payload.codex_terminal)
+      const stampedTerminalEntry = normalizedTerminalEntry && normalizedTerminalEntry.stream_offset === undefined
+        ? { ...normalizedTerminalEntry, stream_offset: streamLength }
+        : normalizedTerminalEntry
+
+      let alphaConsoleAnchors = mergeCachedConsoleAnchors(
+        current?.alpha_console_anchors,
+        Array.isArray(payload.alpha_console_anchors) ? payload.alpha_console_anchors : undefined,
+      )
+      if (Array.isArray(payload.specialist_delegations)) {
+        for (const item of payload.specialist_delegations) {
+          const delegatedTaskId = typeof item?.task_id === 'string' ? item.task_id.trim() : ''
+          if (delegatedTaskId) {
+            alphaConsoleAnchors = ensureCachedConsoleAnchor(alphaConsoleAnchors, delegatedTaskId, streamLength)
+          }
+        }
+      }
+      if (stampedTerminalEntry) {
+        alphaConsoleAnchors = ensureCachedConsoleAnchor(alphaConsoleAnchors, stampedTerminalEntry.task_id, streamLength)
+      }
+
+      let browserConsoleAnchors = mergeCachedConsoleAnchors(
+        current?.browser_console_anchors,
+        Array.isArray(payload.browser_console_anchors) ? payload.browser_console_anchors : undefined,
+      )
+      if (payload.browser_progress && typeof payload.browser_progress === 'object') {
+        browserConsoleAnchors = ensureCachedConsoleAnchor(browserConsoleAnchors, null, streamLength)
+      }
+
+      let sheetRunAnchors = mergeCachedConsoleAnchors(
+        current?.sheet_run_anchors,
+        Array.isArray(payload.sheet_run_anchors) ? payload.sheet_run_anchors : undefined,
+      )
+      if (payload.sheets_progress && typeof payload.sheets_progress === 'object') {
+        sheetRunAnchors = ensureCachedConsoleAnchor(sheetRunAnchors, null, streamLength)
+      }
+
       this.upsertForegroundStream(payload, {
         session_id: typeof payload.session_id === 'string' ? payload.session_id : undefined,
         route: typeof payload.route === 'string' ? payload.route : undefined,
         activity: activityText,
         activity_log: mergeCachedActivityLogs(
           current?.activity_log,
-          snapshotActivityLog && snapshotActivityLog.length > 0 ? snapshotActivityLog : activityEntries,
+          snapshotActivityLog && snapshotActivityLog.length > 0 ? snapshotActivityLog : stampedActivityEntries,
         ),
         alpha_terminal_log: mergeCachedAlphaTerminalLogs(
-          appendCachedAlphaTerminalLog(current?.alpha_terminal_log, payload.codex_terminal),
+          stampedTerminalEntry ? appendCachedAlphaTerminalLog(current?.alpha_terminal_log, stampedTerminalEntry) : current?.alpha_terminal_log,
           snapshotAlphaTerminalLog,
         ),
+        alpha_console_anchors: alphaConsoleAnchors,
+        browser_console_anchors: browserConsoleAnchors,
+        sheet_run_anchors: sheetRunAnchors,
         docs_progress: payload.docs_progress,
         tabular_progress: payload.tabular_progress,
-        slide_progress: payload.slide_progress,
-        browser_progress: payload.browser_progress,
-        sheets_progress: payload.sheets_progress,
+        slide_progress: payload.slide_progress ?? current?.slide_progress,
+        browser_progress: payload.browser_progress ?? current?.browser_progress,
+        sheets_progress: payload.sheets_progress ?? current?.sheets_progress,
         completed: false,
         failed: false,
       })
@@ -1524,17 +1779,36 @@ export class GatewayConnectionManager {
           existing?.alpha_terminal_log,
           Array.isArray(payload.alpha_terminal_log) ? payload.alpha_terminal_log : undefined,
         ),
-        produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : undefined,
-        supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : undefined,
-        response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : undefined,
+        alpha_console_anchors: mergeCachedConsoleAnchors(
+          existing?.alpha_console_anchors,
+          Array.isArray(payload.alpha_console_anchors) ? payload.alpha_console_anchors : undefined,
+        ),
+        browser_console_anchors: mergeCachedConsoleAnchors(
+          existing?.browser_console_anchors,
+          Array.isArray(payload.browser_console_anchors) ? payload.browser_console_anchors : undefined,
+        ),
+        sheet_run_anchors: mergeCachedConsoleAnchors(
+          existing?.sheet_run_anchors,
+          Array.isArray(payload.sheet_run_anchors) ? payload.sheet_run_anchors : undefined,
+        ),
+        steer_anchors: mergeCachedSteerAnchors(
+          existing?.steer_anchors,
+          Array.isArray(payload.steer_anchors) ? payload.steer_anchors : undefined,
+        ),
+        browser_progress: payload.browser_progress ?? existing?.browser_progress,
+        slide_progress: payload.slide_progress ?? existing?.slide_progress,
+        sheets_progress: payload.sheets_progress ?? existing?.sheets_progress,
+        produced_artifacts: Array.isArray(payload.produced_artifacts) ? payload.produced_artifacts : existing?.produced_artifacts,
+        supporting_artifacts: Array.isArray(payload.supporting_artifacts) ? payload.supporting_artifacts : existing?.supporting_artifacts,
+        response_blocks: Array.isArray(payload.response_blocks) ? payload.response_blocks : existing?.response_blocks,
         snapshot_seq:
           Number.isFinite(Number(payload.snapshot_seq)) && Number(payload.snapshot_seq) > 0
             ? Number(payload.snapshot_seq)
             : existing?.snapshot_seq,
-        sources: Array.isArray(payload.sources) ? payload.sources : undefined,
-        channel: typeof payload.channel === 'string' ? payload.channel : undefined,
-        source: typeof payload.source === 'string' ? payload.source : undefined,
-        source_id: typeof payload.source_id === 'string' ? payload.source_id : undefined,
+        sources: Array.isArray(payload.sources) ? payload.sources : existing?.sources,
+        channel: typeof payload.channel === 'string' ? payload.channel : existing?.channel,
+        source: typeof payload.source === 'string' ? payload.source : existing?.source,
+        source_id: typeof payload.source_id === 'string' ? payload.source_id : existing?.source_id,
         awaiting_reply: payload.awaiting_reply === true,
         completed: true,
         failed: false,
@@ -1563,6 +1837,13 @@ export class GatewayConnectionManager {
         thinking_text: typeof existing?.thinking_text === 'string' ? existing.thinking_text : undefined,
         activity_log: Array.isArray(existing?.activity_log) ? existing.activity_log : undefined,
         alpha_terminal_log: Array.isArray(existing?.alpha_terminal_log) ? existing.alpha_terminal_log : undefined,
+        alpha_console_anchors: Array.isArray(existing?.alpha_console_anchors) ? existing.alpha_console_anchors : undefined,
+        browser_console_anchors: Array.isArray(existing?.browser_console_anchors) ? existing.browser_console_anchors : undefined,
+        sheet_run_anchors: Array.isArray(existing?.sheet_run_anchors) ? existing.sheet_run_anchors : undefined,
+        steer_anchors: Array.isArray(existing?.steer_anchors) ? existing.steer_anchors : undefined,
+        browser_progress: existing?.browser_progress,
+        slide_progress: existing?.slide_progress,
+        sheets_progress: existing?.sheets_progress,
         produced_artifacts: Array.isArray(existing?.produced_artifacts) ? existing.produced_artifacts : undefined,
         response_blocks: Array.isArray(existing?.response_blocks) ? existing.response_blocks : undefined,
         snapshot_seq:
@@ -1630,6 +1911,69 @@ export class GatewayConnectionManager {
     this.socket.send(JSON.stringify(payload))
   }
 
+  private updateMidRunQueue(payload: any, eventType: string) {
+    if (!payload || typeof payload !== 'object') {
+      return
+    }
+    if (eventType === 'resume.ok') {
+      this.midRunQueue = Array.isArray(payload.mid_run_queue)
+        ? payload.mid_run_queue.filter((item: any) => item && typeof item === 'object')
+        : []
+      const heldIds = new Set(
+        this.midRunQueue
+          .map((item: any) => String(item?.request_id ?? item?.requestId ?? '').trim())
+          .filter(Boolean),
+      )
+      for (const requestId of Array.from(this.deferredHistoryQueries.keys())) {
+        if (!heldIds.has(requestId)) {
+          this.deferredHistoryQueries.delete(requestId)
+        }
+      }
+      return
+    }
+    if (eventType === 'user_message.queue') {
+      this.midRunQueue = Array.isArray(payload.items)
+        ? payload.items.filter((item: any) => item && typeof item === 'object')
+        : []
+      return
+    }
+    if (eventType === 'user_message.queued') {
+      const item = payload.item && typeof payload.item === 'object' ? payload.item : null
+      const itemRequestId = String(item?.request_id ?? item?.requestId ?? '').trim()
+      if (!item || !itemRequestId) {
+        return
+      }
+      const existingIndex = this.midRunQueue.findIndex(
+        (entry: any) => String(entry?.request_id ?? entry?.requestId ?? '').trim() === itemRequestId,
+      )
+      if (existingIndex >= 0) {
+        this.midRunQueue = this.midRunQueue.map((entry, idx) => (idx === existingIndex ? item : entry))
+      } else {
+        this.midRunQueue = [...this.midRunQueue, item]
+      }
+      return
+    }
+    if (eventType === 'user_message.delivered' || eventType === 'user_message.dispatched') {
+      const requestId = String(payload.request_id || '').trim()
+      if (requestId) {
+        this.midRunQueue = this.midRunQueue.filter(
+          (entry: any) => String(entry?.request_id ?? entry?.requestId ?? '').trim() !== requestId,
+        )
+      }
+      return
+    }
+    if (eventType === 'user_message.withdrawn') {
+      if (payload.withdrawn === true) {
+        const requestId = String(payload.request_id || '').trim()
+        if (requestId) {
+          this.midRunQueue = this.midRunQueue.filter(
+            (entry: any) => String(entry?.request_id ?? entry?.requestId ?? '').trim() !== requestId,
+          )
+        }
+      }
+    }
+  }
+
   private async handleMessage(raw: RawData) {
     const payloadText = toEventPayload(raw)
     if (!payloadText) {
@@ -1656,6 +2000,15 @@ export class GatewayConnectionManager {
             String(item?.request_id || item?.metadata?.request_id || '').trim() === requestId
           ))
           : []
+        const preservedDeferred =
+          requestId && (eventType === 'route_result' || eventType === 'user_message.delivered')
+            ? this.deferredHistoryQueries.get(requestId)
+            : undefined
+        this.midRunQueue = []
+        this.deferredHistoryQueries.clear()
+        if (requestId && preservedDeferred) {
+          this.deferredHistoryQueries.set(requestId, preservedDeferred)
+        }
       }
       this.currentSessionId = nextSessionId
     }
@@ -1687,9 +2040,12 @@ export class GatewayConnectionManager {
       this.knownTaskIds.delete(String(payload.task_id))
     }
 
+    this.updateMidRunQueue(payload, eventType)
     this.settleDeferredHistoryQuery(payload, eventType)
     this.captureForegroundStreamEvent(payload, eventType)
-    const foregroundSnapshot = this.getForegroundStreamSnapshot(payload)
+    const foregroundSnapshot = eventType.startsWith('user_message.')
+      ? null
+      : this.getForegroundStreamSnapshot(payload)
     if (foregroundSnapshot) {
       payload = {
         ...payload,
@@ -1701,6 +2057,22 @@ export class GatewayConnectionManager {
           Array.isArray(foregroundSnapshot.alpha_terminal_log) && foregroundSnapshot.alpha_terminal_log.length > 0
             ? foregroundSnapshot.alpha_terminal_log
             : payload.alpha_terminal_log,
+        steer_anchors:
+          Array.isArray(payload.steer_anchors) && payload.steer_anchors.length > 0
+            ? (mergeCachedSteerAnchors(foregroundSnapshot.steer_anchors, payload.steer_anchors) ?? payload.steer_anchors)
+            : foregroundSnapshot.steer_anchors,
+        alpha_console_anchors:
+          Array.isArray(payload.alpha_console_anchors) && payload.alpha_console_anchors.length > 0
+            ? (mergeCachedConsoleAnchors(foregroundSnapshot.alpha_console_anchors, payload.alpha_console_anchors) ?? payload.alpha_console_anchors)
+            : foregroundSnapshot.alpha_console_anchors,
+        browser_console_anchors:
+          Array.isArray(payload.browser_console_anchors) && payload.browser_console_anchors.length > 0
+            ? (mergeCachedConsoleAnchors(foregroundSnapshot.browser_console_anchors, payload.browser_console_anchors) ?? payload.browser_console_anchors)
+            : foregroundSnapshot.browser_console_anchors,
+        sheet_run_anchors:
+          Array.isArray(payload.sheet_run_anchors) && payload.sheet_run_anchors.length > 0
+            ? (mergeCachedConsoleAnchors(foregroundSnapshot.sheet_run_anchors, payload.sheet_run_anchors) ?? payload.sheet_run_anchors)
+            : foregroundSnapshot.sheet_run_anchors,
       }
     }
     this.applyEventToHistory(payload, eventType)

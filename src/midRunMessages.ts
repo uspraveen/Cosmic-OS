@@ -16,7 +16,7 @@
 //
 // Everything here is pure so the transitions are unit-tested.
 
-export type MidRunPendingState = 'sending' | 'waiting' | 'failed'
+export type MidRunPendingState = 'sending' | 'waiting' | 'dispatching' | 'failed'
 
 export interface MidRunPending {
   state: MidRunPendingState
@@ -33,6 +33,7 @@ export interface SteerAnchor {
   /** Visible stream length of the reply when the model read the message. */
   offset: number
   deliveredAt?: string | null
+  reaction?: string | null
 }
 
 export interface MidRunAwareMessage {
@@ -40,6 +41,7 @@ export interface MidRunAwareMessage {
   role: string
   content: string
   requestId?: string | null
+  reaction?: string | null
   midRun?: MidRunPending
   steerAnchors?: SteerAnchor[]
 }
@@ -105,26 +107,74 @@ export const normalizeSteerAnchors = (value: unknown): SteerAnchor[] | undefined
     if (!requestId || offset === null || seen.has(requestId)) continue
     seen.add(requestId)
     const deliveredAt = item.delivered_at ?? item.deliveredAt
+    const reaction = typeof item.reaction === 'string' && item.reaction.trim() ? item.reaction.trim() : undefined
     anchors.push({
       requestId,
       content: typeof item.content === 'string' ? item.content : '',
       offset,
       deliveredAt: typeof deliveredAt === 'string' ? deliveredAt : null,
+      ...(reaction ? { reaction } : {}),
     })
   }
   return anchors.length > 0 ? anchors : undefined
 }
 
-/** Union by request id, keeping the first-seen anchor (offsets never move). */
+/**
+ * Union by request id. By default keeps the first-seen anchor; when
+ * `preferIncomingOffsets` is true (e.g. `response.complete` or stream snapshot
+ * restore after pre-tool narration is stripped), takes `incoming`'s rebased
+ * `offset` and `deliveredAt` while preserving `current`'s `reaction` if
+ * `incoming` lacks one.
+ */
 export const mergeSteerAnchors = (
   current: SteerAnchor[] | undefined,
   incoming: SteerAnchor[] | undefined,
+  options?: { preferIncomingOffsets?: boolean },
 ): SteerAnchor[] | undefined => {
   if (!incoming || incoming.length === 0) return current
   if (!current || current.length === 0) return incoming
+  const incomingById = new Map(incoming.map((anchor) => [anchor.requestId, anchor]))
+  let base = current
+  if (options?.preferIncomingOffsets) {
+    let changed = false
+    const nextBase = current.map((anchor) => {
+      const match = incomingById.get(anchor.requestId)
+      if (!match) return anchor
+      const reaction = match.reaction ?? anchor.reaction
+      const deliveredAt = match.deliveredAt ?? anchor.deliveredAt
+      const content = match.content || anchor.content
+      const updated: SteerAnchor = {
+        requestId: anchor.requestId,
+        content,
+        offset: match.offset,
+        ...(deliveredAt !== undefined ? { deliveredAt } : {}),
+        ...(reaction ? { reaction } : reaction === null ? { reaction: null } : {}),
+      }
+      if (
+        updated.offset === anchor.offset &&
+        updated.deliveredAt === anchor.deliveredAt &&
+        updated.content === anchor.content &&
+        updated.reaction === anchor.reaction
+      ) {
+        return anchor
+      }
+      changed = true
+      return updated
+    })
+    if (changed) base = nextBase
+  } else {
+    let changed = false
+    const nextBase = current.map((anchor) => {
+      const match = incomingById.get(anchor.requestId)
+      if (!match || anchor.reaction || !match.reaction) return anchor
+      changed = true
+      return { ...anchor, reaction: match.reaction }
+    })
+    if (changed) base = nextBase
+  }
   const known = new Set(current.map((anchor) => anchor.requestId))
   const added = incoming.filter((anchor) => !known.has(anchor.requestId))
-  return added.length > 0 ? [...current, ...added] : current
+  return added.length > 0 ? [...base, ...added] : base
 }
 
 /**
@@ -165,6 +215,7 @@ export const applySteerDelivery = <M extends MidRunAwareMessage>(
     content,
     offset,
     deliveredAt: typeof event.delivered_at === 'string' ? event.delivered_at : null,
+    ...(bubble?.reaction ? { reaction: bubble.reaction } : {}),
   }
   const steerAnchors = mergeSteerAnchors(target.steerAnchors, [anchor])
   return messages
@@ -185,10 +236,29 @@ export const dropSteeredUserDuplicates = <M extends MidRunAwareMessage>(messages
     for (const anchor of message.steerAnchors || []) anchored.add(anchor.requestId)
   }
   if (anchored.size === 0) return messages
-  const next = messages.filter((message) => !(
+  const reactionsByRequest = new Map<string, string>()
+  for (const message of messages) {
+    if (message.role === 'user' && message.requestId && anchored.has(message.requestId) && message.reaction) {
+      reactionsByRequest.set(message.requestId, message.reaction)
+    }
+  }
+  let next = messages.filter((message) => !(
     message.role === 'user' && message.requestId && anchored.has(message.requestId)
   ))
-  return next.length === messages.length ? messages : next
+  if (reactionsByRequest.size > 0) {
+    next = next.map((message) => {
+      if (message.role !== 'assistant' || !message.steerAnchors?.length) return message
+      let anchorChanged = false
+      const steerAnchors = message.steerAnchors.map((anchor) => {
+        const inheritedReaction = !anchor.reaction ? reactionsByRequest.get(anchor.requestId) : undefined
+        if (!inheritedReaction) return anchor
+        anchorChanged = true
+        return { ...anchor, reaction: inheritedReaction }
+      })
+      return anchorChanged ? { ...message, steerAnchors } : message
+    })
+  }
+  return next.length === messages.length && reactionsByRequest.size === 0 ? messages : next
 }
 
 export interface HeldServerItem {
@@ -220,11 +290,17 @@ export const reconcilePendingBubbles = <M extends MidRunAwareMessage>(
   messages: M[],
   serverItems: unknown,
   makeBubble: (item: HeldServerItem) => M,
+  options?: { preserveDispatching?: boolean },
 ): M[] => {
   const held = normalizeHeldServerItems(serverItems)
   const heldIds = new Set(held.map((item) => item.requestId))
   let next = messages.filter((message) => !(
-    message.role === 'user' && message.midRun && message.midRun.acked && message.requestId && !heldIds.has(message.requestId)
+    message.role === 'user' &&
+    message.midRun &&
+    message.midRun.acked &&
+    !(options?.preserveDispatching && message.midRun.state === 'dispatching') &&
+    message.requestId &&
+    !heldIds.has(message.requestId)
   ))
   const present = new Set(next.filter((message) => message.role === 'user').map((message) => message.requestId))
   const missing = held.filter((item) => !present.has(item.requestId))

@@ -80,6 +80,23 @@ from .session.summary import (
 )
 from .session_store import SessionStore
 from .usage_store import UsageStore
+
+if not getattr(SessionStore._metadata_has_renderable_payload, "_includes_steer_anchors", False):
+    _base_has_renderable_payload = SessionStore._metadata_has_renderable_payload
+
+    def _metadata_has_renderable_payload_with_steers(metadata: dict[str, Any] | None) -> bool:
+        if _base_has_renderable_payload(metadata):
+            return True
+        if isinstance(metadata, dict):
+            steer_anchors = metadata.get("steer_anchors")
+            if isinstance(steer_anchors, list) and steer_anchors:
+                return True
+        return False
+
+    _metadata_has_renderable_payload_with_steers._includes_steer_anchors = True  # type: ignore[attr-defined]
+    SessionStore._metadata_has_renderable_payload = staticmethod(  # type: ignore[method-assign]
+        _metadata_has_renderable_payload_with_steers
+    )
 from .wishlist import CapabilityWishlistService, CapabilityWishlistStore
 from .tool_opportunities import ToolOpportunityService, ToolOpportunityStore
 from .prophet import (
@@ -11406,8 +11423,13 @@ class GatewayRuntime:
                 )
         except Exception as exc:
             self.active_task_channels.pop(task.task_id, None)
+            message = str(exc).strip() or "Orchestrator stream failed."
             if active_request is not None:
                 self.active_requests_by_task.pop(task.task_id, None)
+                active_request.completed = True
+                active_request.failed = True
+                active_request.error_message = message
+                active_request.activity = message or active_request.activity
             logger.exception(
                 "gateway.orchestrator_stream_error request_id=%s task_id=%s error=%s",
                 request_id,
@@ -11514,40 +11536,61 @@ class GatewayRuntime:
             try:
                 result = await adapter.handle_incoming_message(payload, channel=channel)
             except (TypeError, ValueError) as exc:
+                try:
+                    await adapter.send(
+                        {
+                            "type": "error",
+                            "request_id": request_id,
+                            "code": "INVALID_QUERY",
+                            "message": str(exc),
+                        },
+                        channel=channel,
+                    )
+                except Exception:
+                    logger.info(
+                        "gateway.realtime.invalid_query_send_skipped request_id=%s channel=%s",
+                        request_id,
+                        channel,
+                    )
+                return
+
+            try:
                 await adapter.send(
                     {
-                        "type": "error",
-                        "request_id": request_id,
-                        "code": "INVALID_QUERY",
-                        "message": str(exc),
+                        "type": "route_result",
+                        "request_id": result["request_id"],
+                        "session_id": result["session_id"],
+                        "channel": result["channel"],
+                        "route": result["route"],
+                        "classification": result["classification"],
                     },
                     channel=channel,
                 )
-                return
-
-            await adapter.send(
-                {
-                    "type": "route_result",
-                    "request_id": result["request_id"],
-                    "session_id": result["session_id"],
-                    "channel": result["channel"],
-                    "route": result["route"],
-                    "classification": result["classification"],
-                },
-                channel=channel,
-            )
+            except Exception:
+                logger.info(
+                    "gateway.realtime.route_result_send_skipped request_id=%s channel=%s",
+                    result.get("request_id"),
+                    channel,
+                )
             try:
                 self.start_request_fulfillment(result)
             except Exception as exc:
-                await adapter.send(
-                    {
-                        "type": "error",
-                        "request_id": request_id,
-                        "code": "UPSTREAM_ERROR",
-                        "message": str(exc),
-                    },
-                    channel=channel,
-                )
+                try:
+                    await adapter.send(
+                        {
+                            "type": "error",
+                            "request_id": request_id,
+                            "code": "UPSTREAM_ERROR",
+                            "message": str(exc),
+                        },
+                        channel=channel,
+                    )
+                except Exception:
+                    logger.info(
+                        "gateway.realtime.upstream_error_send_skipped request_id=%s channel=%s",
+                        request_id,
+                        channel,
+                    )
         finally:
             self.mid_run.end_dispatch(channel, dispatch_key)
 
@@ -11575,6 +11618,44 @@ class GatewayRuntime:
             )
         return payload
 
+    @staticmethod
+    def _rebase_steer_anchors_for_final_content(
+        anchors: Any,
+        *,
+        streamed_content: str,
+        final_content: str,
+    ) -> list[dict[str, Any]]:
+        """Adjust steer stream offsets when pre-tool narration is omitted from final content."""
+        normalized = GatewayRuntime._steer_anchors_payload(anchors)
+        if not normalized:
+            return []
+        streamed_trimmed = str(streamed_content or "").rstrip()
+        final_trimmed = str(final_content or "").rstrip()
+        if not final_trimmed:
+            return [{**anchor, "stream_offset": 0} for anchor in normalized]
+        if len(streamed_trimmed) > len(final_trimmed) and streamed_trimmed.endswith(final_trimmed):
+            prefix_dropped = len(streamed_trimmed) - len(final_trimmed)
+            return [
+                {
+                    **anchor,
+                    "stream_offset": max(
+                        0, min(len(final_content), anchor["stream_offset"] - prefix_dropped)
+                    ),
+                }
+                for anchor in normalized
+            ]
+        return [
+            {
+                **anchor,
+                "stream_offset": (
+                    max(0, min(len(final_content), anchor["stream_offset"]))
+                    if streamed_trimmed and anchor["stream_offset"] > len(final_content)
+                    else anchor["stream_offset"]
+                ),
+            }
+            for anchor in normalized
+        ]
+
     def _record_steered_user_message(
         self, item: HeldMessage, *, into: ActiveRequest
     ) -> None:
@@ -11599,7 +11680,7 @@ class GatewayRuntime:
             metadata["steered_stream_offset"] = anchor.get("stream_offset")
             metadata["delivered_at"] = anchor.get("delivered_at")
         try:
-            self._append_session_message(
+            user_message_id = self._append_session_message(
                 into.session_id,
                 role="user",
                 content=item.content,
@@ -11620,6 +11701,17 @@ class GatewayRuntime:
                 channel=item.channel,
             )
         )
+        if user_message_id:
+            self._track_background_task(
+                self._maybe_react_to_user_message(
+                    session_id=into.session_id,
+                    request_id=item.request_id,
+                    message_id=user_message_id,
+                    content=item.content,
+                    attachments=item.attachments,
+                    channel=item.channel,
+                )
+            )
 
     def _is_autonomous_source(self, source: Any, source_id: Any = None) -> bool:
         source = self._safe_text(source) or ""
@@ -11912,6 +12004,7 @@ class GatewayRuntime:
                 "sheet_run_anchors": self._alpha_console_anchors_payload(
                     state.sheet_run_anchors
                 ),
+                "steer_anchors": self._steer_anchors_payload(state.steer_anchors),
                 "slide_progress": state.slide_progress,
                 "browser_progress": state.browser_progress,
                 "sheets_progress": state.sheets_progress,
@@ -11965,6 +12058,7 @@ class GatewayRuntime:
                     "sheet_run_anchors": self._alpha_console_anchors_payload(
                         state.sheet_run_anchors
                     ),
+                    "steer_anchors": self._steer_anchors_payload(state.steer_anchors),
                     "slide_progress": state.slide_progress,
                     "browser_progress": state.browser_progress,
                     "sheets_progress": state.sheets_progress,
@@ -12011,6 +12105,7 @@ class GatewayRuntime:
                 "partial_content": completed_msg.get("content") or "",
                 "partial_thinking": meta.get("thinking_text") or "",
                 "activity_log": meta.get("activity_log"),
+                "steer_anchors": self._steer_anchors_payload(meta.get("steer_anchors")),
                 "sources": meta.get("sources"),
                 "produced_artifacts": meta.get("produced_artifacts"),
                 "response_blocks": meta.get("response_blocks"),
@@ -13664,7 +13759,7 @@ class GatewayRuntime:
             if isinstance(metadata, dict):
                 renderable_payload = any(
                     isinstance(metadata.get(key), list) and bool(metadata.get(key))
-                    for key in ("produced_artifacts", "response_blocks")
+                    for key in ("produced_artifacts", "response_blocks", "steer_anchors")
                 ) or any(
                     # A live card is renderable on its own: a turn stopped
                     # before any prose still showed the user a run.
@@ -13725,6 +13820,7 @@ class GatewayRuntime:
             or state.partial_thinking
             or state.response_blocks_snapshot
             or state.activity
+            or state.steer_anchors
         ):
             return
         self._recent_foreground_terminal_streams[state.request_id] = {
@@ -13766,6 +13862,7 @@ class GatewayRuntime:
             or state.partial_thinking
             or state.response_blocks_snapshot
             or state.supporting_artifacts
+            or state.steer_anchors
         ):
             return False
 
@@ -17205,6 +17302,7 @@ class GatewayRuntime:
                 "sheet_run_anchors": self._alpha_console_anchors_payload(
                     state.sheet_run_anchors
                 ),
+                "steer_anchors": self._steer_anchors_payload(state.steer_anchors),
                 "slide_progress": state.slide_progress,
                 "browser_progress": state.browser_progress,
                 "sheets_progress": state.sheets_progress,
@@ -17235,6 +17333,9 @@ class GatewayRuntime:
                 "activity": state.activity or "Working on your request...",
                 "activity_log": state.activity_log,
                 "alpha_terminal_log": state.alpha_terminal_log,
+                "alpha_console_anchors": self._alpha_console_anchors_payload(
+                    state.alpha_console_anchors
+                ),
                 "browser_console_anchors": self._alpha_console_anchors_payload(
                     state.browser_console_anchors
                 ),
@@ -17299,6 +17400,11 @@ class GatewayRuntime:
                     "snapshot_seq": None,
                     "activity": self._safe_text(snapshot.get("activity"))
                     or "Request failed.",
+                    "alpha_console_anchors": [
+                        dict(item)
+                        for item in snapshot.get("alpha_console_anchors", [])
+                        if isinstance(item, dict)
+                    ],
                     "browser_console_anchors": [
                         dict(item)
                         for item in snapshot.get("browser_console_anchors", [])
@@ -17352,6 +17458,7 @@ class GatewayRuntime:
                     "partial_thinking": meta.get("thinking_text") or "",
                     "activity_log": meta.get("activity_log"),
                     "alpha_terminal_log": meta.get("alpha_terminal_log"),
+                    "steer_anchors": self._steer_anchors_payload(meta.get("steer_anchors")),
                     "sources": meta.get("sources"),
                     "produced_artifacts": self._hydrate_produced_artifact_list_for_client(
                         meta.get("produced_artifacts")
@@ -23341,11 +23448,18 @@ class GatewayRuntime:
                 if request_state is not None and request_state.browser_console_anchors
                 else []
             )
+            final_content = str(event.get("content") or "")
             steer_anchors = (
-                self._steer_anchors_payload(request_state.steer_anchors)
+                self._rebase_steer_anchors_for_final_content(
+                    request_state.steer_anchors,
+                    streamed_content=request_state.partial_content,
+                    final_content=final_content,
+                )
                 if request_state is not None
                 else []
             )
+            if request_state is not None and steer_anchors:
+                request_state.steer_anchors = steer_anchors
             sheet_run_anchors = (
                 self._alpha_console_anchors_payload(request_state.sheet_run_anchors)
                 if request_state is not None and request_state.sheet_run_anchors
@@ -27290,17 +27404,31 @@ class GatewayRuntime:
                 interrupted_metadata.update(stopped_cards)
                 if self._should_park_in_background_inbox(state):
                     interrupted_metadata["background"] = True
-                self._append_session_message(
-                    state.session_id,
-                    role="assistant",
-                    content=state.partial_content,
-                    route=state.route,
-                    channel=state.channel,
-                    metadata=interrupted_metadata,
-                    in_reply_to_request_id=state.request_id,
-                )
+                try:
+                    self._append_session_message(
+                        state.session_id,
+                        role="assistant",
+                        content=state.partial_content,
+                        route=state.route,
+                        channel=state.channel,
+                        metadata=interrupted_metadata,
+                        in_reply_to_request_id=state.request_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "gateway.stopped_turn_persist_failed request_id=%s",
+                        state.request_id,
+                    )
             elif state.failed:
-                if not self._persist_failed_foreground_response(state):
+                try:
+                    persisted = self._persist_failed_foreground_response(state)
+                except Exception:
+                    logger.exception(
+                        "gateway.failed_turn_persist_failed request_id=%s",
+                        state.request_id,
+                    )
+                    persisted = False
+                if not persisted:
                     self._cache_recent_foreground_terminal_stream(state)
             self._finalize_active_request(state)
 

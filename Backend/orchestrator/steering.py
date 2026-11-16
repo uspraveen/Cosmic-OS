@@ -73,9 +73,9 @@ class SteerInbox:
             return True
         if any(item.message_id == normalized_id for item in self.pending):
             return True
-        if not self.open or len(self.pending) >= MAX_PENDING_STEERS:
+        if not self.open or len(self.pending) >= MAX_PENDING_STEERS or len(text) > MAX_STEER_CHARS:
             return False
-        self.pending.append(PendingSteer(message_id=normalized_id, content=text[:MAX_STEER_CHARS]))
+        self.pending.append(PendingSteer(message_id=normalized_id, content=text))
         return True
 
     def withdraw(self, message_id: str) -> bool:

@@ -187,6 +187,8 @@ class MidRunCoordinator:
         # Requests whose orchestrator run has started (task.created seen), so
         # its steer inbox exists. Injecting earlier would be refused.
         self._steerable_requests: set[str] = set()
+        # Channels reclaiming unread steers from a newly backgrounded run.
+        self._reclaiming_channels: set[str] = set()
         self._pumping: set[str] = set()
         self._repump: set[str] = set()
 
@@ -211,6 +213,7 @@ class MidRunCoordinator:
         return (
             self.foreground_request(channel) is not None
             or channel in self._dispatching
+            or channel in self._reclaiming_channels
             or bool(self.queue.waiting(channel))
         )
 
@@ -331,9 +334,14 @@ class MidRunCoordinator:
                 for item in waiting:
                     if self._can_inject(item, foreground):
                         await self._inject(item, foreground)
+                    elif item.mode == "steer":
+                        # Earlier steer-mode message cannot inject into this run (e.g. has
+                        # attachments, or run refused steers); keep later steers behind it
+                        # so Turn 1 never reads "Focus on section 3" before Turn 2 sends spec.pdf.
+                        break
                 # Follow-ups wait for this run to end.
                 return
-            if channel in self._dispatching:
+            if channel in self._dispatching or channel in self._reclaiming_channels:
                 return
             await self._dispatch(waiting[0])
 
@@ -496,9 +504,72 @@ class MidRunCoordinator:
                 self.schedule_pump(channel)
 
     def on_request_backgrounded(self, state: "ActiveRequest") -> None:
-        # The composer slot is free again: queued follow-ups go now. Steers
-        # already handed to the backgrounded run stay with it.
+        # The composer slot is free again: withdraw any unread steers from the
+        # backgrounded run so they dispatch as a new foreground turn, then pump.
+        injecting = [
+            item
+            for item in self.queue.items(state.channel)
+            if item.state == "injecting" and item.target_request_id == state.request_id
+        ]
+        if injecting:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            self._reclaiming_channels.add(state.channel)
+            self.runtime._schedule_background_task(
+                self._reclaim_backgrounded_steers(
+                    channel=state.channel,
+                    request_id=state.request_id,
+                    task_id=state.task_id,
+                    items=injecting,
+                ),
+                name=f"gateway-mid-run-bg-reclaim:{state.request_id}",
+            )
+            return
         self.schedule_pump(state.channel)
+
+    async def _reclaim_backgrounded_steers(
+        self,
+        *,
+        channel: str,
+        request_id: str,
+        task_id: str | None,
+        items: list[HeldMessage],
+    ) -> None:
+        reclaimed = False
+        try:
+            withdraw = getattr(self.runtime.orchestrator, "withdraw_task_message", None)
+            for item in items:
+                if item.withdrawing:
+                    continue
+                ok = False
+                if callable(withdraw) and task_id:
+                    try:
+                        ok = bool(await withdraw(task_id, message_id=item.request_id))
+                    except Exception:
+                        logger.warning(
+                            "gateway.mid_run.background_withdraw_failed request_id=%s target=%s",
+                            item.request_id,
+                            request_id,
+                            exc_info=True,
+                        )
+                still_held = self.queue.get(channel, item.request_id) is item
+                if (
+                    ok
+                    and still_held
+                    and item.state == "injecting"
+                    and item.target_request_id == request_id
+                ):
+                    item.state = "waiting"
+                    item.target_request_id = None
+                    item.target_task_id = None
+                    reclaimed = True
+        finally:
+            self._reclaiming_channels.discard(channel)
+            if reclaimed:
+                await self._publish(channel)
+            self.schedule_pump(channel)
 
     # ── Withdraw (cancel / edit a queued message) ─────────────────
     async def withdraw(

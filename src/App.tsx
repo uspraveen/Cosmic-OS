@@ -16,8 +16,6 @@ import SpacesControlCenter from './SpacesControlCenter'
 import ScreenshotOverlay from './ScreenshotOverlay'
 import InlineMap from './components/InlineMap'
 import cosmicBallLogo from './assets/cosmic-ball-logo-v1.1.png'
-import moveToBackgroundIcon from './assets/move-to-background.png'
-import bringToForegroundIcon from './assets/bring-to-foreground.png'
 import './spotlight.css'
 import {
   buildAlphaStreamSegments,
@@ -88,11 +86,11 @@ import {
 import { VAULT_ALLOW_WINDOW_SECONDS, vaultIslandAllowWindowLabel, vaultIslandAlwaysAllowLabel } from './vaultIsland'
 
 export type SearchPosition = 'bottom' | 'middle'
-export type QueryMode = 'chat' | 'task' | 'meeting' | 'spaces'
+export type QueryMode = 'chat' | 'meeting' | 'spaces'
 // The orchestrator route is the task/delegation path; the model behind it is
 // a separate preference. 'opus' persists in old saved settings and maps over.
 export type GatewayModelSelection = 'cosmic' | 'haiku' | 'orchestrator' | 'perplexity'
-type LauncherTileId = 'chat' | 'meeting' | 'task' | 'spaces'
+type LauncherTileId = 'chat' | 'meeting' | 'spaces'
 
 interface Message {
   id: string
@@ -134,7 +132,6 @@ interface Message {
   slideProgress?: SlideProgressState
   browserProgress?: BrowserProgressState
   sheetsProgress?: SheetProgressState
-  backgroundState?: 'working' | 'ready' | 'failed'
   /** Gateway's quick emoji receipt on the user's own message (Jev-picked). */
   reaction?: string | null
   /** User message sent while Cosmic was working, not taken in yet. Shown as
@@ -156,33 +153,6 @@ interface PendingTaskInput {
   fields?: Array<{ label: string; placeholder: string | null; kind?: string | null; options?: string[] | null }>
   status?: string
   timestamp?: string | null
-}
-
-interface BackgroundTask {
-  requestId: string
-  taskId?: string | null
-  sessionId?: string | null
-  route?: string | null
-  userQueryExcerpt: string
-  partialContent: string
-  partialThinking: string
-  backgroundedAt?: string | null
-  completed: boolean
-  failed?: boolean
-  error?: string | null
-  activity?: string
-  activityLog?: ActivityLogEntry[]
-  alphaTerminalLog?: AlphaTerminalEntry[]
-  alphaConsoleAnchors?: AlphaConsoleAnchor[]
-  browserConsoleAnchors?: AlphaConsoleAnchor[]
-  sheetRunAnchors?: AlphaConsoleAnchor[]
-  progress?: DocsProgressState | TabularProgressState
-  slideProgress?: SlideProgressState
-  browserProgress?: BrowserProgressState
-  sheetsProgress?: SheetProgressState
-  producedArtifacts?: ProducedArtifact[]
-  supportingArtifacts?: ProducedArtifact[]
-  sources?: Array<{ url: string; title?: string; domain?: string } | string>
 }
 
 interface CronResultNotification {
@@ -1656,7 +1626,6 @@ const mergeHydratedMessages = (
       slideProgress: message.slideProgress ?? existing.slideProgress,
       browserProgress: mergeBrowserProgress(existing.browserProgress, message.browserProgress),
       sheetsProgress: mergeSheetsProgress(existing.sheetsProgress, message.sheetsProgress),
-      backgroundState: message.backgroundState ?? existing.backgroundState,
       steerAnchors: mergeSteerAnchors(message.steerAnchors, existing.steerAnchors),
     }
   })
@@ -2107,60 +2076,6 @@ const isSlidePreviewBlock = (block: ResponseBlock): block is ResponseArtifactBlo
 )
 
 const hasSlidePreviewBlocks = (blocks?: ResponseBlock[]) => Boolean(blocks?.some(isSlidePreviewBlock))
-
-const normalizeBackgroundTask = (value: unknown): BackgroundTask | null => {
-  if (!value || typeof value !== 'object') {
-    return null
-  }
-  const requestId = String((value as any).request_id || (value as any).requestId || '').trim()
-  if (!requestId) {
-    return null
-  }
-  return {
-    requestId,
-    taskId: typeof (value as any).task_id === 'string' && (value as any).task_id.trim()
-      ? (value as any).task_id.trim()
-      : typeof (value as any).taskId === 'string' && (value as any).taskId.trim()
-        ? (value as any).taskId.trim()
-        : null,
-    sessionId: typeof (value as any).session_id === 'string' && (value as any).session_id.trim()
-      ? (value as any).session_id.trim()
-      : typeof (value as any).sessionId === 'string' && (value as any).sessionId.trim()
-        ? (value as any).sessionId.trim()
-        : null,
-    route: typeof (value as any).route === 'string' && (value as any).route.trim()
-      ? (value as any).route.trim()
-      : null,
-    userQueryExcerpt: String((value as any).user_query_excerpt || (value as any).userQueryExcerpt || '').trim(),
-    partialContent: String((value as any).partial_content || (value as any).partialContent || ''),
-    partialThinking: String((value as any).partial_thinking || (value as any).partialThinking || ''),
-    backgroundedAt: typeof (value as any).backgrounded_at === 'string' && (value as any).backgrounded_at.trim()
-      ? (value as any).backgrounded_at.trim()
-      : typeof (value as any).backgroundedAt === 'string' && (value as any).backgroundedAt.trim()
-        ? (value as any).backgroundedAt.trim()
-        : null,
-    completed: Boolean((value as any).completed),
-    failed: Boolean((value as any).failed),
-    error: typeof (value as any).error === 'string' && (value as any).error.trim()
-      ? (value as any).error.trim()
-      : null,
-    activity: typeof (value as any).activity === 'string' && (value as any).activity.trim()
-      ? (value as any).activity.trim()
-      : undefined,
-    activityLog: normalizeActivityLog((value as any).activity_log ?? (value as any).activityLog),
-    alphaTerminalLog: normalizeAlphaTerminalLog((value as any).alpha_terminal_log ?? (value as any).alphaTerminalLog),
-    alphaConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).alpha_console_anchors ?? (value as any).alphaConsoleAnchors),
-    browserConsoleAnchors: normalizeAlphaConsoleAnchors((value as any).browser_console_anchors ?? (value as any).browserConsoleAnchors),
-    sheetRunAnchors: normalizeAlphaConsoleAnchors((value as any).sheet_run_anchors ?? (value as any).sheetRunAnchors),
-    progress: normalizeTabularProgress((value as any).tabular_progress) ?? normalizeDocsProgress((value as any).docs_progress),
-    slideProgress: normalizeSlideProgress((value as any).slide_progress ?? (value as any).slideProgress),
-    browserProgress: normalizeBrowserProgress((value as any).browser_progress ?? (value as any).browserProgress),
-    sheetsProgress: normalizeSheetProgress((value as any).sheets_progress ?? (value as any).sheetsProgress),
-    producedArtifacts: normalizeProducedArtifacts((value as any).produced_artifacts ?? (value as any).producedArtifacts),
-    supportingArtifacts: normalizeSupportingArtifacts((value as any).supporting_artifacts ?? (value as any).supportingArtifacts),
-    sources: Array.isArray((value as any).sources) ? (value as any).sources : undefined,
-  }
-}
 
 const TabularProgressCard = ({ progress }: { progress: TabularProgressState }) => {
   const percentLabel = `${Math.max(1, Math.round(progress.percent * 100))}%`
@@ -6053,6 +5968,8 @@ const AssistantAlphaStreamBody = ({
   browserStreaming = false,
   sheetStreaming = false,
   streaming = false,
+  copiedId = null,
+  onCopy,
 }: {
   message: Pick<Message, 'content' | 'responseBlocks' | 'alphaTerminalLog' | 'alphaConsoleAnchors' | 'activityLog' | 'requestId' | 'sourceId' | 'stopped' | 'browserProgress' | 'browserConsoleAnchors' | 'sheetsProgress' | 'sheetRunAnchors' | 'steerAnchors'>
   onStopAlpha: (payload: { requestId?: string; taskId?: string }) => void
@@ -6065,6 +5982,8 @@ const AssistantAlphaStreamBody = ({
   /** Whether THIS message is the one streaming: drives the live pulse and
    * the unfolded child tail on its inline activity rows. */
   streaming?: boolean
+  copiedId?: string | null
+  onCopy?: (text: string, id: string) => void
 }) => {
   // Roots and their children among the stamped entries -- roots become inline
   // anchors at their own stream offsets, children fold under their root.
@@ -6117,9 +6036,19 @@ const AssistantAlphaStreamBody = ({
   const renderSteer = (anchorId: string) => {
     const anchor = message.steerAnchors?.find((item) => item.requestId === anchorId)
     if (!anchor || !anchor.content.trim()) return null
+    const copyKey = `steer-${anchorId}`
     return (
       <div key={`user-steer-${anchorId}`} className="message-row user inline-steer-row">
-        <ExpandableQueryPill text={cleanText(anchor.content)} />
+        {anchor.reaction && (
+          <span key={`${anchorId}:${anchor.reaction}`} className="query-reaction-badge" aria-hidden="true">
+            {anchor.reaction}
+          </span>
+        )}
+        <ExpandableQueryPill
+          text={cleanText(anchor.content)}
+          copied={copiedId === copyKey}
+          onCopy={onCopy ? () => onCopy(anchor.content, copyKey) : undefined}
+        />
       </div>
     )
   }
@@ -6278,7 +6207,6 @@ const MODEL_OPTIONS: Array<{ id: GatewayModelSelection; label: string; shortLabe
 const LAUNCHPAD_TILES: Array<{ id: LauncherTileId; label: string; locked: boolean }> = [
   { id: 'chat', label: 'Chat', locked: false },
   { id: 'meeting', label: 'Meeting', locked: false },
-  { id: 'task', label: 'Task', locked: false },
   { id: 'spaces', label: 'Spaces', locked: false },
 ]
 
@@ -6358,43 +6286,6 @@ const mergePendingTaskInputs = (existing: PendingTaskInput[], incoming: PendingT
     byId.set(item.inputRequestId, item)
   }
   return sortPendingTaskInputs(Array.from(byId.values()))
-}
-
-// --- Foregrounded-task persistence helpers ---
-// Tracks request IDs that have been moved to chat so the resume handler can
-// filter them out even if the backend hasn't cleared the background flag yet.
-const FOREGROUNDED_STORAGE_KEY = 'cosmic_foregrounded_ids'
-
-function markRequestForegrounded(requestId: string) {
-  try {
-    const ids: string[] = JSON.parse(localStorage.getItem(FOREGROUNDED_STORAGE_KEY) || '[]')
-    if (!ids.includes(requestId)) {
-      ids.push(requestId)
-      localStorage.setItem(FOREGROUNDED_STORAGE_KEY, JSON.stringify(ids))
-    }
-  } catch { /* best-effort */ }
-}
-
-function getForegroundedRequestIds(): Set<string> {
-  try {
-    const raw = JSON.parse(localStorage.getItem(FOREGROUNDED_STORAGE_KEY) || '[]')
-    if (!Array.isArray(raw)) {
-      return new Set<string>()
-    }
-    return new Set<string>(raw.map((value) => String(value)))
-  } catch {
-    return new Set<string>()
-  }
-}
-
-function pruneStaleforegroundedIds(stillBackgroundIds: Set<string>) {
-  try {
-    const ids: string[] = JSON.parse(localStorage.getItem(FOREGROUNDED_STORAGE_KEY) || '[]')
-    const kept = ids.filter((id) => stillBackgroundIds.has(id))
-    if (kept.length !== ids.length) {
-      localStorage.setItem(FOREGROUNDED_STORAGE_KEY, JSON.stringify(kept))
-    }
-  } catch { /* best-effort */ }
 }
 
 function ExpandableQueryPill({
@@ -6502,7 +6393,6 @@ export default function App() {
   const activeStreamingTaskIdRef = useRef<string | null>(null)
   const userStoppedStreamKeysRef = useRef<Set<string>>(new Set())
   const messagesRef = useRef<Message[]>([])
-  const backgroundTasksRef = useRef<BackgroundTask[]>([])
   const activeSessionIdRef = useRef<string | null>(null)
   const authStateRef = useRef<'loading' | 'unauthenticated' | 'authenticated'>('loading')
   const isStreamingRef = useRef(false)
@@ -6529,7 +6419,8 @@ export default function App() {
   const [hasText, setHasText] = useState(false)
   // Messages sent while Cosmic works that it has not taken in yet (their
   // bubbles carry `midRun`). Kept for retry, and to recognise their events.
-  const pendingMidRunIdsRef = useRef<Map<string, { content: string; attachments: PendingDocumentAttachment[] }>>(new Map())
+  const pendingMidRunIdsRef = useRef<Map<string, { content: string; attachments: PendingDocumentAttachment[]; failed?: boolean }>>(new Map())
+  const hasActivePendingMidRun = () => Array.from(pendingMidRunIdsRef.current.values()).some((entry) => !entry.failed)
   const inputHasTextRef = useRef(false)
   const [pendingAttachments, setPendingAttachments] = useState<PendingDocumentAttachment[]>([])
   const [searchState, setSearchState] = useState<'hidden' | 'visible' | 'hiding'>('hidden')
@@ -6616,30 +6507,20 @@ export default function App() {
   // --- HISTORY / DB STATE ---
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [pendingTaskInputs, setPendingTaskInputs] = useState<PendingTaskInput[]>([])
-  const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTask[]>([])
   // Browser JPEGs live in a per-run external store. The App and transcript
   // never rerender or persist on each incoming video frame.
   const [taskInputDrafts, setTaskInputDrafts] = useState<Record<string, string>>({})
   const [submittingTaskInputs, setSubmittingTaskInputs] = useState<Record<string, boolean>>({})
-  const [backgroundTaskErrors, setBackgroundTaskErrors] = useState<Record<string, string>>({})
-  const [backgroundingRequestId, setBackgroundingRequestId] = useState<string | null>(null)
-  const [foregroundingRequestId, setForegroundingRequestId] = useState<string | null>(null)
   const [taskInputErrors, setTaskInputErrors] = useState<Record<string, string>>({})
   const [dismissedTaskInterruptIds, setDismissedTaskInterruptIds] = useState<string[]>([])
   // Answers already accepted by the gateway. The `task.input_reply.accepted`
   // event is what removes the card, but it can lag the HTTP reply by a beat —
   // this set flips the docked question to its "Answer sent" state instantly.
   const [answeredTaskInputs, setAnsweredTaskInputs] = useState<string[]>([])
-  const [selectedTaskInputId, setSelectedTaskInputId] = useState<string | null>(null)
-  const [selectedBackgroundRequestId, setSelectedBackgroundRequestId] = useState<string | null>(null)
-  const [backgroundTaskListRetracted, setBackgroundTaskListRetracted] = useState(false)
-  const [pendingTaskListRetracted, setPendingTaskListRetracted] = useState(false)
   const [cronResultNotifications, setCronResultNotifications] = useState<CronResultNotification[]>([])
   const [cronResultIndex, setCronResultIndex] = useState(0)
   const [artifactReadyNotifications, setArtifactReadyNotifications] = useState<ProducedArtifactNotification[]>([])
   const pendingTaskCount = pendingTaskInputs.length
-  const backgroundTaskCount = backgroundTasks.length
-  const taskDashboardCount = pendingTaskCount + backgroundTaskCount
   const orderedPendingTaskInputs = useMemo(() => [...pendingTaskInputs].reverse(), [pendingTaskInputs])
   // Approval cards (sandbox permission, Gmail/agent-email drafts, calendar
   // responses) live inline in their message and never disappear on their
@@ -6652,33 +6533,6 @@ export default function App() {
     () => pendingApprovals.reduce((total, item) => total + item.blockIds.length, 0),
     [pendingApprovals],
   )
-  const orderedBackgroundTasks = useMemo(() => backgroundTasks
-    .map((task, index) => ({ task, index }))
-    .filter(({ task }) => task.requestId !== foregroundingRequestId)
-    .sort((a, b) => {
-      const aCompleted = a.task.completed ? 1 : 0
-      const bCompleted = b.task.completed ? 1 : 0
-      if (aCompleted !== bCompleted) {
-        return aCompleted - bCompleted
-      }
-      const tsA = String(a.task.backgroundedAt || '').trim()
-      const tsB = String(b.task.backgroundedAt || '').trim()
-      if (tsA && tsB) {
-        const cmp = tsB.localeCompare(tsA)
-        if (cmp !== 0) {
-          return cmp
-        }
-        return b.index - a.index
-      }
-      if (tsA && !tsB) {
-        return 1
-      }
-      if (!tsA && tsB) {
-        return -1
-      }
-      return b.index - a.index
-    })
-    .map(({ task }) => task), [backgroundTasks, foregroundingRequestId])
   const visibleTaskInterrupts = useMemo(
     () => orderedPendingTaskInputs.filter((item) => !dismissedTaskInterruptIds.includes(item.inputRequestId)),
     [dismissedTaskInterruptIds, orderedPendingTaskInputs],
@@ -6701,31 +6555,6 @@ export default function App() {
     () => [...artifactReadyNotifications].reverse(),
     [artifactReadyNotifications],
   )
-  const selectedTaskInput = useMemo(() => {
-    if (orderedPendingTaskInputs.length === 0) {
-      return null
-    }
-    if (selectedTaskInputId) {
-      const matched = orderedPendingTaskInputs.find((item) => item.inputRequestId === selectedTaskInputId)
-      if (matched) {
-        return matched
-      }
-    }
-    return orderedPendingTaskInputs[0]
-  }, [orderedPendingTaskInputs, selectedTaskInputId])
-  const selectedBackgroundTask = useMemo(() => {
-    if (orderedBackgroundTasks.length === 0) {
-      return null
-    }
-    if (selectedBackgroundRequestId) {
-      const matched = orderedBackgroundTasks.find((item) => item.requestId === selectedBackgroundRequestId)
-      if (matched) {
-        return matched
-      }
-    }
-    return orderedBackgroundTasks[0]
-  }, [orderedBackgroundTasks, selectedBackgroundRequestId])
-  const canBringBackgroundTaskToForeground = !isStreaming && !activeStreamingRequestIdRef.current && !activeStreamingTaskIdRef.current
 
   // Track key status for SetupModal
   const [keyStatus, setKeyStatus] = useState({
@@ -6833,52 +6662,6 @@ export default function App() {
     setUnreadBoundaryMessageId(null)
   }
 
-  const insertAssistantMessageAfterRequest = (
-    current: Message[],
-    requestId: string,
-    assistantMessage: Message,
-  ): Message[] => {
-    const normalizedRequestId = String(requestId || '').trim()
-    const withoutExisting = current.filter((message) => (
-      message.role !== 'assistant' || message.requestId !== normalizedRequestId
-    ))
-    if (!normalizedRequestId) {
-      return [...withoutExisting, assistantMessage]
-    }
-    let userIndex = -1
-    for (let index = withoutExisting.length - 1; index >= 0; index -= 1) {
-      const message = withoutExisting[index]
-      if (message.role === 'user' && message.requestId === normalizedRequestId) {
-        userIndex = index
-        break
-      }
-    }
-    if (userIndex < 0) {
-      return [...withoutExisting, assistantMessage]
-    }
-    return [
-      ...withoutExisting.slice(0, userIndex + 1),
-      assistantMessage,
-      ...withoutExisting.slice(userIndex + 1),
-    ]
-  }
-
-  const patchMessagesForRequest = (
-    requestId: string,
-    updater: (message: Message) => Message,
-  ) => {
-    const normalizedRequestId = String(requestId || '').trim()
-    if (!normalizedRequestId) {
-      return
-    }
-    setMessages((prev) => prev.map((message) => {
-      if (message.role !== 'user' || message.requestId !== normalizedRequestId) {
-        return message
-      }
-      return updater(message)
-    }))
-  }
-
   const buildCronResultNotificationKey = (value: {
     messageId?: string | null
     requestId?: string | null
@@ -6946,12 +6729,6 @@ export default function App() {
     const streamId = String(activeStreamingRequestIdRef.current || '').trim()
     if (streamId) {
       ids.add(streamId)
-    }
-    for (const task of backgroundTasksRef.current) {
-      const requestId = String(task.requestId || '').trim()
-      if (requestId && !task.completed) {
-        ids.add(requestId)
-      }
     }
     inFlightWhenInactiveRef.current = ids
   }
@@ -7314,67 +7091,6 @@ export default function App() {
 
   const clearArtifactReadyNotifications = () => {
     setArtifactReadyNotifications([])
-  }
-
-  const upsertBackgroundTask = (task: BackgroundTask) => {
-    setBackgroundTasks((prev) => {
-      const nextTask = {
-        ...task,
-        partialContent: String(task.partialContent || ''),
-        partialThinking: String(task.partialThinking || ''),
-        userQueryExcerpt: String(task.userQueryExcerpt || ''),
-      }
-      const existingIndex = prev.findIndex((item) => item.requestId === nextTask.requestId)
-      if (existingIndex < 0) {
-        return [...prev, nextTask]
-      }
-      return prev.map((item, index) => {
-        if (index !== existingIndex) {
-          return item
-        }
-        return {
-          ...item,
-          ...nextTask,
-          activityLog: nextTask.activityLog ?? item.activityLog,
-          alphaTerminalLog: mergeAlphaTerminalLogs(item.alphaTerminalLog, nextTask.alphaTerminalLog),
-          producedArtifacts: nextTask.producedArtifacts ?? item.producedArtifacts,
-          supportingArtifacts: nextTask.supportingArtifacts ?? item.supportingArtifacts,
-          sources: nextTask.sources ?? item.sources,
-          slideProgress: nextTask.slideProgress ?? item.slideProgress,
-          browserProgress: mergeBrowserProgress(item.browserProgress, nextTask.browserProgress),
-          sheetsProgress: mergeSheetsProgress(item.sheetsProgress, nextTask.sheetsProgress),
-        }
-      })
-    })
-  }
-
-  const patchBackgroundTask = (requestId: string, patch: (current: BackgroundTask) => BackgroundTask) => {
-    const normalizedRequestId = String(requestId || '').trim()
-    if (!normalizedRequestId) {
-      return
-    }
-    setBackgroundTasks((prev) => prev.map((item) => {
-      if (item.requestId !== normalizedRequestId) {
-        return item
-      }
-      return patch(item)
-    }))
-  }
-
-  const removeBackgroundTask = (requestId: string) => {
-    const normalizedRequestId = String(requestId || '').trim()
-    if (!normalizedRequestId) {
-      return
-    }
-    setBackgroundTasks((prev) => prev.filter((item) => item.requestId !== normalizedRequestId))
-    setBackgroundTaskErrors((prev) => {
-      if (!(normalizedRequestId in prev)) {
-        return prev
-      }
-      const next = { ...prev }
-      delete next[normalizedRequestId]
-      return next
-    })
   }
 
   const openProphetFromCronNotification = (notificationId: string) => {
@@ -7871,6 +7587,7 @@ export default function App() {
         steerAnchors: mergeSteerAnchors(
           mergeSteerAnchors(existingMessage?.steerAnchors, liveMessage?.steerAnchors),
           stream.steerAnchors,
+          { preferIncomingOffsets: true },
         ),
         progress: stream.progress ?? existingMessage?.progress,
         slideProgress: stream.slideProgress ?? existingMessage?.slideProgress,
@@ -7910,9 +7627,12 @@ export default function App() {
       if (taskId && (nextMessage.content || nextMessage.thinking || nextMessage.activity || nextMessage.activityLog?.length || nextMessage.alphaTerminalLog?.length)) {
         streamedResponseTaskIdsRef.current.add(taskId)
       }
+      for (const anchor of nextMessage.steerAnchors || []) {
+        pendingMidRunIdsRef.current.delete(anchor.requestId)
+      }
     }
 
-    nextMessages = groupRepliesWithTheirQuery(nextMessages)
+    nextMessages = dropSteeredUserDuplicates(groupRepliesWithTheirQuery(nextMessages))
     setMessages(nextMessages)
     messagesRef.current = nextMessages
     if (usingHistoryTail) {
@@ -7952,6 +7672,10 @@ export default function App() {
       restoreForegroundStreamsFromState((state as any).foregroundStreams ?? (state as any).foreground_streams, {
         clearIfNone: false,
       })
+      const midRunQueue = (state as any).midRunQueue ?? (state as any).mid_run_queue
+      if (Array.isArray(midRunQueue)) {
+        reconcileMidRunWithGateway(midRunQueue, { preserveDispatching: true })
+      }
     } catch {
       return
     }
@@ -8087,16 +7811,10 @@ export default function App() {
     setMessages([])
     setActiveSessionId(null)
     setPendingTaskInputs([])
-    setBackgroundTasks([])
     setTaskInputDrafts({})
     setSubmittingTaskInputs({})
-    setBackgroundTaskErrors({})
-    setBackgroundingRequestId(null)
-    setForegroundingRequestId(null)
     setTaskInputErrors({})
     setDismissedTaskInterruptIds([])
-    setSelectedTaskInputId(null)
-    setSelectedBackgroundRequestId(null)
     pendingMidRunIdsRef.current.clear()
     clearCronResultNotifications()
     clearArtifactReadyNotifications()
@@ -8246,10 +7964,6 @@ export default function App() {
   }, [messages, unreadBoundaryMessageId])
 
   useEffect(() => {
-    backgroundTasksRef.current = backgroundTasks
-  }, [backgroundTasks])
-
-  useEffect(() => {
     activeSessionIdRef.current = activeSessionId
   }, [activeSessionId])
 
@@ -8275,30 +7989,6 @@ export default function App() {
       }
     }
   }, [])
-
-  useEffect(() => {
-    if (orderedPendingTaskInputs.length === 0) {
-      if (selectedTaskInputId !== null) {
-        setSelectedTaskInputId(null)
-      }
-      return
-    }
-    if (!selectedTaskInputId || !orderedPendingTaskInputs.some((item) => item.inputRequestId === selectedTaskInputId)) {
-      setSelectedTaskInputId(orderedPendingTaskInputs[0].inputRequestId)
-    }
-  }, [orderedPendingTaskInputs, selectedTaskInputId])
-
-  useEffect(() => {
-    if (orderedBackgroundTasks.length <= 1) {
-      setBackgroundTaskListRetracted(false)
-    }
-  }, [orderedBackgroundTasks.length])
-
-  useEffect(() => {
-    if (orderedPendingTaskInputs.length <= 1) {
-      setPendingTaskListRetracted(false)
-    }
-  }, [orderedPendingTaskInputs.length])
 
   useEffect(() => {
     if (dismissedTaskInterruptIds.length === 0) {
@@ -8394,32 +8084,12 @@ export default function App() {
         restoreForegroundStreamsFromState(state.foregroundStreams ?? state.foreground_streams, {
           clearIfNone: false,
         })
+        const midRunQueue = state.midRunQueue ?? state.mid_run_queue
+        if (Array.isArray(midRunQueue)) {
+          reconcileMidRunWithGateway(midRunQueue, { preserveDispatching: true })
+        }
       })
       .catch(() => { })
-  }
-
-  const showTaskSurface = (options: { focusComposer?: boolean; focusInputRequestId?: string | null } = {}) => {
-    const { focusComposer = false, focusInputRequestId = null } = options
-    hideHoverTooltip()
-    setDismissedTaskInterruptIds([])
-    if (focusInputRequestId) {
-      setSelectedTaskInputId(focusInputRequestId)
-    }
-    setSearchState('visible')
-    modeRef.current = 'task'
-    setMode('task')
-    setShowLauncherTray(false)
-    setIsInputFocused(focusComposer)
-    if (!focusComposer && inputRef.current) {
-      inputRef.current.blur()
-    }
-    if (focusComposer) {
-      setTimeout(() => {
-        if (!inputRef.current) return
-        inputRef.current.style.height = '24px'
-        inputRef.current.focus()
-      }, 10)
-    }
   }
 
   const showMeetingSurface = () => {
@@ -8645,6 +8315,10 @@ export default function App() {
             historyTail: Array.isArray(state.historyTail) ? state.historyTail : [],
             clearIfNone: true,
           })
+          const initialMidRunQueue = (state as any).midRunQueue ?? (state as any).mid_run_queue
+          if (Array.isArray(initialMidRunQueue)) {
+            reconcileMidRunWithGateway(initialMidRunQueue)
+          }
         })
         .catch(() => { })
     }
@@ -8709,8 +8383,6 @@ export default function App() {
         showSpacesSurface()
       } else if (modeRef.current === 'meeting') {
         showMeetingSurface()
-      } else if (modeRef.current === 'task') {
-        showTaskSurface({ focusComposer: false })
       } else {
         showChatComposer()
       }
@@ -8783,6 +8455,8 @@ export default function App() {
         queueMicrotask(() => setMessages((prev) => groupRepliesWithTheirQuery(prev)))
       }
       if (eventType === 'error' && eventRequestId && pendingMidRunIdsRef.current.has(eventRequestId)) {
+        const pendingEntry = pendingMidRunIdsRef.current.get(eventRequestId)
+        if (pendingEntry) pendingEntry.failed = true
         setMessages((prev) => patchPendingBubble(prev, eventRequestId, {
           state: 'failed',
           withdrawing: false,
@@ -8823,29 +8497,10 @@ export default function App() {
               : [],
           ),
         )
-        const foregroundedIds = getForegroundedRequestIds()
-        const resumedBackgroundTasks = Array.isArray((event as any).background_tasks)
-          ? (event as any).background_tasks
-              .map(normalizeBackgroundTask)
-              .filter((t: BackgroundTask | null) => t && !foregroundedIds.has(t.requestId)) as BackgroundTask[]
-          : []
-        setBackgroundTasks(resumedBackgroundTasks)
-        // Prune localStorage entries the backend no longer considers background
-        const rawBackgroundIds = new Set<string>(
-          (Array.isArray((event as any).background_tasks) ? (event as any).background_tasks : [])
-            .map((t: any) => String(t?.request_id || '').trim())
-            .filter((value: string): value is string => Boolean(value)),
-        )
-        pruneStaleforegroundedIds(rawBackgroundIds)
         setTaskInputDrafts({})
         setSubmittingTaskInputs({})
-        setBackgroundTaskErrors({})
-        setBackgroundingRequestId(null)
-        setForegroundingRequestId(null)
         setTaskInputErrors({})
         setDismissedTaskInterruptIds([])
-        setSelectedTaskInputId(null)
-        setSelectedBackgroundRequestId(null)
         if (!sessionRolledOver) {
           restoreForegroundStreamsFromState((event as any).foreground_streams, {
             historyTail: Array.isArray(event.history_tail) ? event.history_tail : [],
@@ -8860,381 +8515,6 @@ export default function App() {
         // ordinary replies that finished while Cosmic was hidden.
         applyPendingProphetNotifications((event as any).prophet_notifications)
         return
-      }
-
-      if (eventType === 'task.backgrounded') {
-        const requestId = String(event?.request_id || '').trim()
-        const existingTask = requestId
-          ? backgroundTasksRef.current.find((item) => item.requestId === requestId)
-          : null
-        const existingAssistantMessage = requestId
-          ? messagesRef.current.find((message) => message.role === 'assistant' && message.requestId === requestId)
-          : null
-        const existingUserMessage = requestId
-          ? messagesRef.current.find((message) => message.role === 'user' && message.requestId === requestId)
-          : null
-        const docsProgress = normalizeDocsProgress((event as any)?.docs_progress)
-        const tabularProgress = normalizeTabularProgress((event as any)?.tabular_progress)
-        const backgroundTask = normalizeBackgroundTask({
-          ...(event || {}),
-          user_query_excerpt:
-            typeof (event as any)?.user_query_excerpt === 'string' && String((event as any).user_query_excerpt).trim()
-              ? (event as any).user_query_excerpt
-              : existingTask?.userQueryExcerpt || existingUserMessage?.content || '',
-          partial_content: typeof (event as any)?.partial_content === 'string'
-            ? (event as any).partial_content
-            : existingTask?.partialContent || existingAssistantMessage?.content || '',
-          partial_thinking: typeof (event as any)?.partial_thinking === 'string'
-            ? (event as any).partial_thinking
-            : existingTask?.partialThinking || existingAssistantMessage?.thinking || '',
-          activity: typeof (event as any)?.activity === 'string'
-            ? (event as any).activity
-            : existingTask?.activity || existingAssistantMessage?.activity || '',
-          activity_log: (event as any)?.activity_log ?? existingTask?.activityLog ?? existingAssistantMessage?.activityLog,
-          alpha_terminal_log: (event as any)?.alpha_terminal_log ?? existingTask?.alphaTerminalLog ?? existingAssistantMessage?.alphaTerminalLog,
-          alpha_console_anchors: (event as any)?.alpha_console_anchors ?? existingTask?.alphaConsoleAnchors ?? existingAssistantMessage?.alphaConsoleAnchors,
-          browser_console_anchors: (event as any)?.browser_console_anchors ?? existingTask?.browserConsoleAnchors ?? existingAssistantMessage?.browserConsoleAnchors,
-          sheet_run_anchors: (event as any)?.sheet_run_anchors ?? existingTask?.sheetRunAnchors ?? existingAssistantMessage?.sheetRunAnchors,
-          docs_progress: docsProgress ?? (existingTask?.progress?.kind === 'docs_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'docs_parse' ? existingAssistantMessage.progress : undefined),
-          tabular_progress: tabularProgress ?? (existingTask?.progress?.kind === 'tabular_parse' ? existingTask.progress : undefined) ?? (existingAssistantMessage?.progress?.kind === 'tabular_parse' ? existingAssistantMessage.progress : undefined),
-          slide_progress: (event as any)?.slide_progress ?? existingTask?.slideProgress ?? existingAssistantMessage?.slideProgress,
-          browser_progress: (event as any)?.browser_progress ?? existingTask?.browserProgress ?? existingAssistantMessage?.browserProgress,
-          sheets_progress: (event as any)?.sheets_progress ?? existingTask?.sheetsProgress ?? existingAssistantMessage?.sheetsProgress,
-          produced_artifacts: (event as any)?.produced_artifacts ?? existingTask?.producedArtifacts ?? existingAssistantMessage?.producedArtifacts,
-          sources: Array.isArray((event as any)?.sources) ? (event as any).sources : existingTask?.sources ?? existingAssistantMessage?.sources,
-          completed: false,
-        })
-        if (!backgroundTask) {
-          return
-        }
-        upsertBackgroundTask(backgroundTask)
-        setBackgroundingRequestId((current) => (current === backgroundTask.requestId ? null : current))
-        setBackgroundTaskErrors((prev) => {
-          if (!(backgroundTask.requestId in prev)) {
-            return prev
-          }
-          const next = { ...prev }
-          delete next[backgroundTask.requestId]
-          return next
-        })
-        if (activeStreamingRequestIdRef.current === backgroundTask.requestId) {
-          setIsStreaming(false)
-          clearActiveStreamingRefs()
-          setMessages((prev) => {
-            const requestId = backgroundTask.requestId
-            const taskId = backgroundTask.taskId
-            return prev.filter((message) => {
-              if (message.role !== 'assistant') {
-                return true
-              }
-              const matchesRequest = requestId && message.requestId === requestId
-              const matchesTask = taskId && message.sourceId === taskId
-              return !(matchesRequest || matchesTask)
-            })
-          })
-          forgetAssistantMessageBindings(event)
-        }
-        patchMessagesForRequest(backgroundTask.requestId, (message) => ({
-          ...message,
-          backgroundState: 'working',
-        }))
-        return
-      }
-
-      if (eventType === 'task.foregrounded') {
-        const requestId = String(event?.request_id || '').trim()
-        const preservedTask = requestId
-          ? backgroundTasksRef.current.find((item) => item.requestId === requestId)
-          : null
-        const foregroundTask = normalizeBackgroundTask({
-          ...(event || {}),
-          user_query_excerpt:
-            typeof (event as any)?.user_query_excerpt === 'string' && String((event as any).user_query_excerpt).trim()
-              ? (event as any).user_query_excerpt
-              : preservedTask?.userQueryExcerpt || '',
-          partial_content: typeof (event as any)?.partial_content === 'string'
-            ? (event as any).partial_content
-            : preservedTask?.partialContent || '',
-          partial_thinking: typeof (event as any)?.partial_thinking === 'string'
-            ? (event as any).partial_thinking
-            : preservedTask?.partialThinking || '',
-          activity_log: (event as any)?.activity_log ?? preservedTask?.activityLog,
-          alpha_terminal_log: (event as any)?.alpha_terminal_log ?? preservedTask?.alphaTerminalLog,
-          alpha_console_anchors: (event as any)?.alpha_console_anchors ?? preservedTask?.alphaConsoleAnchors,
-          browser_console_anchors: (event as any)?.browser_console_anchors ?? preservedTask?.browserConsoleAnchors,
-          sheet_run_anchors: (event as any)?.sheet_run_anchors ?? preservedTask?.sheetRunAnchors,
-          docs_progress: (event as any)?.docs_progress ?? (preservedTask?.progress?.kind === 'docs_parse' ? preservedTask.progress : undefined),
-          tabular_progress: (event as any)?.tabular_progress ?? (preservedTask?.progress?.kind === 'tabular_parse' ? preservedTask.progress : undefined),
-          slide_progress: (event as any)?.slide_progress ?? preservedTask?.slideProgress,
-          browser_progress: (event as any)?.browser_progress ?? preservedTask?.browserProgress,
-          sheets_progress: (event as any)?.sheets_progress ?? preservedTask?.sheetsProgress,
-          produced_artifacts: (event as any)?.produced_artifacts ?? preservedTask?.producedArtifacts,
-          sources: Array.isArray((event as any)?.sources) ? (event as any).sources : preservedTask?.sources,
-          completed: Boolean((event as any).completed ?? preservedTask?.completed),
-          failed: Boolean((event as any).failed ?? preservedTask?.failed),
-          error: (event as any)?.error ?? preservedTask?.error,
-        })
-        if (requestId) {
-          markRequestForegrounded(requestId)
-          removeBackgroundTask(requestId)
-          setSelectedBackgroundRequestId((current) => (current === requestId ? null : current))
-          setForegroundingRequestId((current) => (current === requestId ? null : current))
-          setBackgroundingRequestId((current) => (current === requestId ? null : current))
-        }
-        if (!requestId) {
-          return
-        }
-        const messageId = createAssistantMessageId()
-        bindAssistantMessageToEvent(event, messageId)
-        const foregroundAssistantMessage = createAssistantMessage({
-          id: messageId,
-          requestId,
-          content: foregroundTask?.partialContent || '',
-          thinking: foregroundTask?.partialThinking || '',
-          activity: foregroundTask?.activity,
-          activityLog: foregroundTask?.activityLog,
-          alphaTerminalLog: foregroundTask?.alphaTerminalLog,
-          alphaConsoleAnchors: foregroundTask?.alphaConsoleAnchors,
-          browserConsoleAnchors: foregroundTask?.browserConsoleAnchors,
-          sheetRunAnchors: foregroundTask?.sheetRunAnchors,
-          progress: foregroundTask?.progress,
-          slideProgress: foregroundTask?.slideProgress,
-          browserProgress: foregroundTask?.browserProgress,
-          sheetsProgress: foregroundTask?.sheetsProgress,
-          producedArtifacts: foregroundTask?.producedArtifacts,
-          sources: foregroundTask?.sources,
-        })
-        setMessages((prev) => {
-          return insertAssistantMessageAfterRequest(prev, requestId, foregroundAssistantMessage)
-        })
-        const foregroundCompleted = Boolean((event as any).completed)
-        if (!foregroundCompleted) {
-          activeStreamingRequestIdRef.current = requestId
-          if (foregroundTask?.taskId) {
-            activeStreamingTaskIdRef.current = foregroundTask.taskId
-          }
-          pendingResponseStartScrollRef.current = true
-          setIsStreaming(true)
-        } else if (activeStreamingRequestIdRef.current === requestId) {
-          clearActiveStreamingRefs()
-          setIsStreaming(false)
-        }
-        shouldAutoScrollRef.current = false
-        if (modeRef.current !== 'chat') {
-          showChatComposer()
-        }
-        patchMessagesForRequest(requestId, (message) => {
-          const next = { ...message }
-          delete next.backgroundState
-          return next
-        })
-        return
-      }
-
-      if (eventType.startsWith('task.background.')) {
-        const backgroundEventType = eventType.slice('task.background.'.length)
-        const requestId = String(event?.request_id || '').trim()
-        const taskId = typeof event?.task_id === 'string' ? event.task_id.trim() : ''
-        if (!requestId && !taskId) {
-          return
-        }
-        if (requestId && activeStreamingRequestIdRef.current === requestId) {
-          return
-        }
-
-        if (backgroundEventType === 'task.created') {
-          upsertBackgroundTask({
-            requestId: requestId || `background_${crypto.randomUUID()}`,
-            taskId: taskId || null,
-            sessionId: typeof event.session_id === 'string' ? event.session_id : null,
-            route: typeof event.route === 'string' ? event.route : null,
-            userQueryExcerpt: '',
-            partialContent: '',
-            partialThinking: '',
-            backgroundedAt: null,
-            completed: false,
-          })
-          return
-        }
-
-        if (backgroundEventType === 'task.progress') {
-          const eventStatus = String(event.status || '').trim()
-          const statusMessage = String(event.message || '').trim()
-          const docsProgress = normalizeDocsProgress(event.docs_progress)
-          const tabularProgress = normalizeTabularProgress((event as any).tabular_progress)
-          const progressState = tabularProgress ?? docsProgress
-          const incomingSlideProgress = normalizeSlideProgress(event.slide_progress ?? event.slideProgress)
-          const incomingBrowserProgress = normalizeBrowserProgress(event.browser_progress ?? event.browserProgress)
-          if (incomingBrowserProgress?.phase && incomingBrowserProgress.phase !== 'running') {
-            browserLiveFrameStore.finish(incomingBrowserProgress.taskId || '')
-          }
-          const incomingSheetsProgress = normalizeSheetProgress((event as any).sheets_progress ?? (event as any).sheetsProgress)
-          const alphaTerminalEntry = normalizeAlphaTerminalEntry((event as any).codex_terminal)
-          const fallbackMessage = eventStatus ? `Task ${eventStatus}...` : 'Working in the background...'
-          const activityText = incomingSlideProgress?.label || progressState?.label || statusMessage || fallbackMessage
-          const activityEntries = alphaTerminalEntry
-            ? undefined
-            : buildProgressActivityEntries(event, activityText, statusMessage, progressState)
-          const activityLog = normalizeActivityLog((event as any).activity_log)
-          upsertBackgroundTask({
-            requestId,
-            taskId: taskId || null,
-            sessionId: typeof event.session_id === 'string' ? event.session_id : null,
-            route: typeof event.route === 'string' ? event.route : null,
-            userQueryExcerpt: '',
-            partialContent: '',
-            partialThinking: '',
-            backgroundedAt: null,
-            completed: false,
-            activity: alphaTerminalEntry ? undefined : activityText,
-            activityLog: mergeActivityLogEntries(
-              activityLog,
-              activityEntries,
-            ),
-            alphaTerminalLog: appendAlphaTerminalEntry(undefined, alphaTerminalEntry),
-            progress: alphaTerminalEntry ? undefined : progressState,
-            slideProgress: alphaTerminalEntry ? undefined : incomingSlideProgress,
-            browserProgress: alphaTerminalEntry ? undefined : incomingBrowserProgress,
-            sheetsProgress: alphaTerminalEntry ? undefined : incomingSheetsProgress,
-          })
-          patchBackgroundTask(requestId, (current) => ({
-            ...current,
-            taskId: taskId || current.taskId || null,
-            sessionId: typeof event.session_id === 'string' ? event.session_id : current.sessionId,
-            route: typeof event.route === 'string' ? event.route : current.route,
-            activity: alphaTerminalEntry ? current.activity : activityText,
-            activityLog: mergeActivityLogEntries(
-              mergeActivityLogEntries(current.activityLog, activityLog),
-              activityEntries,
-            ),
-            alphaTerminalLog: appendAlphaTerminalEntry(current.alphaTerminalLog, alphaTerminalEntry),
-            progress: alphaTerminalEntry ? current.progress : (progressState ?? current.progress),
-            slideProgress: alphaTerminalEntry ? current.slideProgress : (incomingSlideProgress ?? current.slideProgress),
-            browserProgress: alphaTerminalEntry ? current.browserProgress : mergeBrowserProgress(current.browserProgress, incomingBrowserProgress),
-            sheetsProgress: alphaTerminalEntry ? current.sheetsProgress : mergeSheetsProgress(current.sheetsProgress, incomingSheetsProgress),
-            completed: false,
-          }))
-          return
-        }
-
-        if (backgroundEventType === 'response.thinking.chunk') {
-          patchBackgroundTask(requestId, (current) => ({
-            ...current,
-            taskId: taskId || current.taskId || null,
-            partialThinking: appendStreamText(current.partialThinking, event.content),
-            progress: undefined,
-            completed: false,
-          }))
-          return
-        }
-
-        if (backgroundEventType === 'response.chunk') {
-          patchBackgroundTask(requestId, (current) => ({
-            ...current,
-            taskId: taskId || current.taskId || null,
-            partialContent: appendStreamText(current.partialContent, event.content),
-            progress: undefined,
-            completed: false,
-          }))
-          return
-        }
-
-        if (backgroundEventType === 'response.complete') {
-          const producedArtifacts = normalizeProducedArtifacts((event as any).produced_artifacts)
-          const supportingArtifacts = normalizeSupportingArtifacts((event as any).supporting_artifacts)
-          const activityLog = normalizeActivityLog((event as any).activity_log)
-          patchBackgroundTask(requestId, (current) => ({
-            ...current,
-            taskId: taskId || current.taskId || null,
-            sessionId: typeof event.session_id === 'string' ? event.session_id : current.sessionId,
-            route: typeof event.route === 'string' ? event.route : current.route,
-            partialContent: mergeCompletedStreamText(current.partialContent, event.content),
-            partialThinking: typeof event.thinking_text === 'string'
-              ? event.thinking_text
-              : current.partialThinking,
-            producedArtifacts: producedArtifacts ?? current.producedArtifacts,
-            supportingArtifacts: supportingArtifacts ?? current.supportingArtifacts,
-            activityLog: mergeActivityLogEntries(current.activityLog, activityLog),
-            sources: Array.isArray(event.sources) ? event.sources : current.sources,
-            progress: undefined,
-            completed: true,
-            failed: false,
-          }))
-          if (producedArtifacts && producedArtifacts.length > 0 && isProducedArtifactChatInactive()) {
-            const messageId = typeof (event as any).message_id === 'string' && (event as any).message_id.trim()
-              ? (event as any).message_id.trim()
-              : typeof event.request_id === 'string' && event.request_id.trim()
-                ? `pending_assistant_${event.request_id.trim()}`
-                : `artifact_ready_${crypto.randomUUID()}`
-            enqueueArtifactReadyNotification({
-              id: `artifact_ready_${messageId}`,
-              messageId,
-              requestId,
-              sourceId: typeof event.source_id === 'string' ? event.source_id : null,
-              sessionId: typeof event.session_id === 'string' ? event.session_id : null,
-              channel: typeof event.channel === 'string' ? event.channel : null,
-              createdAt: new Date().toISOString(),
-              artifacts: producedArtifacts,
-            })
-          } else if (isCronResultChatInactive()) {
-            const noticeKind = classifyAssistantNoticeKind(
-              typeof event.source === 'string' ? event.source : null,
-              typeof event.source_id === 'string' ? event.source_id : null,
-            )
-            const content = mergeCompletedStreamText('', event.content)
-            if (noticeKind && content) {
-              enqueueAssistantNotice({
-                kind: noticeKind,
-                messageId: typeof (event as any).message_id === 'string' ? (event as any).message_id : null,
-                requestId,
-                sourceId: typeof event.source_id === 'string' ? event.source_id : null,
-                sessionId: typeof event.session_id === 'string' ? event.session_id : null,
-                content,
-                channel: typeof event.channel === 'string' ? event.channel : null,
-                createdAt: new Date().toISOString(),
-              })
-            }
-          }
-          patchMessagesForRequest(requestId, (message) => ({
-            ...message,
-            backgroundState: 'ready',
-          }))
-          return
-        }
-
-        if (backgroundEventType === 'task.failed') {
-          patchBackgroundTask(requestId, (current) => ({
-            ...current,
-            taskId: taskId || current.taskId || null,
-            completed: true,
-            failed: true,
-            error: String(event?.error?.message || event?.message || 'Background task failed.'),
-            progress: undefined,
-          }))
-          patchMessagesForRequest(requestId, (message) => ({
-            ...message,
-            backgroundState: 'failed',
-          }))
-          return
-        }
-
-        if (backgroundEventType === 'task.completed' || backgroundEventType === 'task.cancelled') {
-          patchBackgroundTask(requestId, (current) => ({
-            ...current,
-            taskId: taskId || current.taskId || null,
-            completed: true,
-            failed: backgroundEventType === 'task.cancelled' ? false : current.failed,
-            progress: undefined,
-          }))
-          if (backgroundEventType === 'task.cancelled') {
-            patchMessagesForRequest(requestId, (message) => {
-              const next = { ...message }
-              delete next.backgroundState
-              return next
-            })
-          }
-          return
-        }
       }
 
       if (eventType === 'route_result') {
@@ -9308,9 +8588,6 @@ export default function App() {
         // (reconnect replay, queue flush) must never resurrect what the user
         // already skipped — the skip is a terminal resolution server-side, and
         // until it lands, re-showing the card is exactly the bug this fixes.
-        if (modeRef.current === 'task') {
-          setSelectedTaskInputId(pendingInput.inputRequestId)
-        }
         return
       }
 
@@ -9534,6 +8811,9 @@ export default function App() {
         const browserConsoleAnchors = normalizeAlphaConsoleAnchors((event as any).browser_console_anchors)
         const sheetRunAnchors = normalizeAlphaConsoleAnchors((event as any).sheet_run_anchors)
         const steerAnchors = normalizeSteerAnchors((event as { steer_anchors?: unknown }).steer_anchors)
+        for (const anchor of steerAnchors || []) {
+          pendingMidRunIdsRef.current.delete(anchor.requestId)
+        }
         setMessages((prev) => {
           const sources = Array.isArray(event.sources) ? event.sources : undefined
           const persistedMessageId = typeof (event as any).message_id === 'string'
@@ -9560,7 +8840,7 @@ export default function App() {
               alphaConsoleAnchors: alphaConsoleAnchors ?? message.alphaConsoleAnchors,
               browserConsoleAnchors: browserConsoleAnchors ?? message.browserConsoleAnchors,
               sheetRunAnchors: sheetRunAnchors ?? message.sheetRunAnchors,
-              steerAnchors: mergeSteerAnchors(message.steerAnchors, steerAnchors),
+              steerAnchors: mergeSteerAnchors(message.steerAnchors, steerAnchors, { preferIncomingOffsets: true }),
               requestId: typeof event.request_id === 'string' ? event.request_id : message.requestId,
               source: typeof event.source === 'string' ? event.source : message.source,
               sourceId: typeof event.source_id === 'string' ? event.source_id : message.sourceId,
@@ -9575,7 +8855,7 @@ export default function App() {
           if (!event.task_id) {
             forgetAssistantMessageBindings(event)
           }
-          return updatedMessages
+          return dropSteeredUserDuplicates(updatedMessages)
         })
         const eventSource = String(event.source || '').trim()
         const eventSourceId = String(event.source_id || '').trim()
@@ -10004,10 +9284,11 @@ export default function App() {
           : null
         const shouldRefreshFromHistory =
           eventType === 'task.completed' &&
+          !hasActivePendingMidRun() &&
+          !activeStreamingRequestIdRef.current &&
           (
             !boundMessage ||
-            !String(boundMessage.content || '').trim() ||
-            !Array.isArray(boundMessage.producedArtifacts)
+            !String(boundMessage.content || '').trim()
           )
         forgetAssistantMessageBindings(event)
         // A stopped turn's empty placeholder bubble goes away, but never one
@@ -10038,6 +9319,9 @@ export default function App() {
         }
         if (shouldRefreshFromHistory) {
           window.setTimeout(() => {
+            if (hasActivePendingMidRun() || activeStreamingRequestIdRef.current) {
+              return
+            }
             void refreshSessionFromGateway(typeof event.session_id === 'string' ? event.session_id : null)
           }, 180)
         }
@@ -10084,12 +9368,10 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const shouldFocusComposer =
-      mode === 'chat' || (mode === 'task' && pendingTaskCount === 0)
-    if (!isStreaming && searchState === 'visible' && !showLauncherTray && mode !== 'meeting' && shouldFocusComposer) {
+    if (!isStreaming && !hasActivePendingMidRun() && searchState === 'visible' && !showLauncherTray && mode === 'chat') {
       setTimeout(() => inputRef.current?.focus(), 10)
     }
-  }, [isStreaming, mode, pendingTaskCount, searchState, showLauncherTray])
+  }, [isStreaming, mode, searchState, showLauncherTray])
 
   useEffect(() => {
     const chatInactive = isChatInactiveForNotices({
@@ -10321,24 +9603,39 @@ export default function App() {
     setMessages((prev) => settlePendingBubble(prev, requestId))
   }
 
-  const reconcileMidRunWithGateway = (serverItems: unknown) => {
+  const reconcileMidRunWithGateway = (serverItems: unknown, options?: { preserveDispatching?: boolean }) => {
     const held = new Set(normalizeHeldServerItems(serverItems).map((item) => item.requestId))
     setMessages((prev) => {
-      const next = reconcilePendingBubbles(prev, serverItems, (item) => createUserMessage(item.content, undefined, {
-        requestId: item.requestId,
-        midRun: { state: 'waiting', acked: true },
-      }))
-      const stillPending = new Set<string>()
+      const next = reconcilePendingBubbles(
+        prev,
+        serverItems,
+        (item) => createUserMessage(item.content, undefined, {
+          requestId: item.requestId,
+          midRun: { state: 'waiting', acked: true },
+        }),
+        options,
+      )
+      const stillPending = new Map<string, boolean>()
       for (const message of next) {
-        if (message.role === 'user' && message.midRun && message.requestId) stillPending.add(message.requestId)
+        if (message.role === 'user' && message.midRun && message.requestId) {
+          stillPending.set(message.requestId, message.midRun.state === 'failed')
+        }
       }
-      for (const id of Array.from(pendingMidRunIdsRef.current.keys())) {
-        if (!stillPending.has(id)) pendingMidRunIdsRef.current.delete(id)
+      for (const [id, entry] of Array.from(pendingMidRunIdsRef.current.entries())) {
+        const isFailed = stillPending.get(id)
+        if (isFailed === undefined) {
+          pendingMidRunIdsRef.current.delete(id)
+        } else {
+          entry.failed = isFailed
+        }
       }
       for (const id of held) {
-        if (!pendingMidRunIdsRef.current.has(id)) {
+        const existing = pendingMidRunIdsRef.current.get(id)
+        if (existing) {
+          existing.failed = false
+        } else {
           const bubble = next.find((message) => message.role === 'user' && message.requestId === id)
-          pendingMidRunIdsRef.current.set(id, { content: bubble?.content || '', attachments: [] })
+          pendingMidRunIdsRef.current.set(id, { content: bubble?.content || '', attachments: [], failed: false })
         }
       }
       return next
@@ -10359,12 +9656,18 @@ export default function App() {
   ) => {
     const requestId = typeof event?.request_id === 'string' ? event.request_id.trim() : ''
     if (eventType === 'user_message.queued') {
+      const existing = pendingMidRunIdsRef.current.get(requestId)
+      if (existing) existing.failed = false
       setMessages((prev) => patchPendingBubble(prev, requestId, { state: 'waiting', acked: true }))
       return
     }
     if (eventType === 'user_message.queue') {
       const held = normalizeHeldServerItems(event?.items)
       if (held.length === 0) return
+      for (const item of held) {
+        const existing = pendingMidRunIdsRef.current.get(item.requestId)
+        if (existing) existing.failed = false
+      }
       setMessages((prev) => held.reduce(
         (acc, item) => patchPendingBubble(acc, item.requestId, { state: 'waiting', acked: true }),
         prev,
@@ -10381,6 +9684,13 @@ export default function App() {
     if (eventType === 'user_message.dispatched') {
       // Its own turn is starting; the bubble stops being pending on that
       // turn's route_result (by then the gateway has stored it).
+      const existing = pendingMidRunIdsRef.current.get(requestId)
+      if (existing) existing.failed = false
+      setMessages((prev) => patchPendingBubble(prev, requestId, {
+        state: 'dispatching',
+        acked: true,
+        withdrawing: false,
+      }))
       return
     }
     if (eventType === 'user_message.withdrawn') {
@@ -10394,13 +9704,7 @@ export default function App() {
     }
   }
 
-  const currentRouteOverride = () => (
-    mode === 'task'
-      ? 'orchestrator'
-      : selectedModel === 'cosmic'
-        ? undefined
-        : selectedModel
-  )
+  const currentRouteOverride = () => (selectedModel === 'cosmic' ? undefined : selectedModel)
 
   const sendMidRunMessage = (requestId: string, content: string, attachments: PendingDocumentAttachment[]) => {
     if (!window.cosmic?.sendGatewayQuery) return
@@ -10415,6 +9719,8 @@ export default function App() {
       delivery: 'steer',
       deferHistory: true,
     }).catch((error: unknown) => {
+      const existing = pendingMidRunIdsRef.current.get(requestId)
+      if (existing) existing.failed = true
       setMessages((prev) => patchPendingBubble(prev, requestId, {
         state: 'failed',
         withdrawing: false,
@@ -10445,7 +9751,7 @@ export default function App() {
     })
     clearComposerInput()
     setPendingAttachments([])
-    pendingMidRunIdsRef.current.set(requestId, { content: textToSend, attachments })
+    pendingMidRunIdsRef.current.set(requestId, { content: textToSend, attachments, failed: false })
     shouldAutoScrollRef.current = true
     setMessages((prev) => [...prev, bubble])
     sendMidRunMessage(requestId, textToSend, attachments)
@@ -10455,7 +9761,7 @@ export default function App() {
   /** Cancel a message Cosmic has not read yet (hover action on the bubble). */
   const cancelPendingMessage = (message: Message) => {
     const requestId = String(message.requestId || '').trim()
-    if (!requestId || !message.midRun || message.midRun.withdrawing) return
+    if (!requestId || !message.midRun || message.midRun.withdrawing || message.midRun.state === 'dispatching') return
     if (message.midRun.state === 'failed' || !message.midRun.acked || !window.cosmic?.withdrawGatewayQuery) {
       if (message.midRun.state !== 'failed' && !message.midRun.acked) {
         // Not acknowledged yet: the gateway may still be taking it. Ask it to
@@ -10481,7 +9787,7 @@ export default function App() {
     const attachments = original?.attachments ?? []
     const requestId = `req_${crypto.randomUUID()}`
     pendingMidRunIdsRef.current.delete(oldId)
-    pendingMidRunIdsRef.current.set(requestId, { content, attachments })
+    pendingMidRunIdsRef.current.set(requestId, { content, attachments, failed: false })
     setMessages((prev) => prev.map((item) => (
       item.id === message.id
         ? { ...item, requestId, midRun: { state: 'sending' as const } }
@@ -10492,17 +9798,17 @@ export default function App() {
 
   const handleSubmit = () => {
     if (mode === 'meeting') return
-    setIsInputFocused(false)
-    if (inputRef.current) inputRef.current.blur()
-
     const textToSend = (inputRef.current?.value ?? '').trim()
     if (!textToSend && pendingAttachments.length === 0) return
-    if (isStreaming || pendingMidRunIdsRef.current.size > 0) {
+    if (isStreaming || hasActivePendingMidRun()) {
       // Never block the user: hand it to the running task instead (or line
       // it up behind messages Cosmic has not taken in yet, keeping order).
       submitMidRunMessage()
       return
     }
+
+    setIsInputFocused(false)
+    if (inputRef.current) inputRef.current.blur()
 
     const messageAttachments = normalizeMessageAttachments(pendingAttachments)
     const displayText = textToSend || buildPendingAttachmentSummary(pendingAttachments)
@@ -10585,21 +9891,6 @@ export default function App() {
     })
   }
 
-  const handleTaskInputDraftChange = (inputRequestId: string, value: string) => {
-    setTaskInputDrafts((prev) => ({
-      ...prev,
-      [inputRequestId]: value,
-    }))
-    setTaskInputErrors((prev) => {
-      if (!(inputRequestId in prev)) {
-        return prev
-      }
-      const next = { ...prev }
-      delete next[inputRequestId]
-      return next
-    })
-  }
-
   const submitTaskInputReply = async (taskInput: PendingTaskInput, explicitContent?: string) => {
     const content = String(explicitContent ?? taskInputDrafts[taskInput.inputRequestId] ?? '').trim()
     if (!content) {
@@ -10650,103 +9941,6 @@ export default function App() {
       setTaskInputErrors((prev) => ({
         ...prev,
         [taskInput.inputRequestId]: error?.message || 'Unable to send task reply.',
-      }))
-    }
-  }
-
-  const handleMoveActiveToBackground = async () => {
-    const requestId = String(activeStreamingRequestIdRef.current || '').trim()
-    if (!requestId || !window.cosmic?.backgroundGatewayRequest) {
-      return
-    }
-    setBackgroundingRequestId(requestId)
-    setBackgroundTaskErrors((prev) => {
-      if (!(requestId in prev)) {
-        return prev
-      }
-      const next = { ...prev }
-      delete next[requestId]
-      return next
-    })
-    try {
-      await window.cosmic.backgroundGatewayRequest({ requestId })
-      shouldAutoScrollRef.current = true
-      showChatComposer()
-    } catch (error: any) {
-      setBackgroundingRequestId((current) => (current === requestId ? null : current))
-      setBackgroundTaskErrors((prev) => ({
-        ...prev,
-        [requestId]: error?.message || 'Unable to move this response to the background.',
-      }))
-    }
-  }
-
-  const handleBringTaskToForeground = async (task: BackgroundTask) => {
-    const requestId = String(task.requestId || '').trim()
-    if (!requestId) {
-      return
-    }
-    if (task.completed) {
-      markRequestForegrounded(requestId)
-      // Create the assistant message from the background task's stored content
-      // (the original assistant message was removed when the task was backgrounded)
-      const messageId = createAssistantMessageId()
-      const foregroundAssistantMessage = createAssistantMessage({
-        id: messageId,
-        requestId,
-        content: task.partialContent || '',
-        thinking: task.partialThinking || '',
-        activity: task.activity,
-        activityLog: task.activityLog,
-        alphaTerminalLog: task.alphaTerminalLog,
-        alphaConsoleAnchors: task.alphaConsoleAnchors,
-        browserConsoleAnchors: task.browserConsoleAnchors,
-        sheetRunAnchors: task.sheetRunAnchors,
-        progress: task.progress,
-        slideProgress: task.slideProgress,
-        browserProgress: task.browserProgress,
-        producedArtifacts: task.producedArtifacts,
-        sources: task.sources,
-      })
-      setMessages((prev) => {
-        return insertAssistantMessageAfterRequest(prev, requestId, foregroundAssistantMessage)
-      })
-      removeBackgroundTask(requestId)
-      setSelectedBackgroundRequestId(null)
-      patchMessagesForRequest(requestId, (message) => {
-        const next = { ...message }
-        delete next.backgroundState
-        return next
-      })
-      shouldAutoScrollRef.current = false
-      showChatComposer()
-      // Fire-and-forget: tell backend to clear the background flag for persistence
-      window.cosmic?.foregroundGatewayRequest?.({ requestId })?.catch?.(() => {})
-      return
-    }
-    if (!window.cosmic?.foregroundGatewayRequest) {
-      return
-    }
-    setForegroundingRequestId(requestId)
-    setBackgroundTaskErrors((prev) => {
-      if (!(requestId in prev)) {
-        return prev
-      }
-      const next = { ...prev }
-      delete next[requestId]
-      return next
-    })
-    try {
-      await window.cosmic.foregroundGatewayRequest({ requestId })
-      pendingResponseStartScrollRef.current = true
-      shouldAutoScrollRef.current = false
-      showChatComposer()
-      setSelectedBackgroundRequestId(null)
-    } catch (error: any) {
-      setForegroundingRequestId((current) => (current === requestId ? null : current))
-      setBackgroundTaskErrors((prev) => ({
-        ...prev,
-        [requestId]: error?.message || 'Unable to bring this task back to the foreground.',
       }))
     }
   }
@@ -10808,17 +10002,6 @@ export default function App() {
     })?.catch(() => { })
   }
 
-  const handleCancelBackgroundTask = (task: BackgroundTask) => {
-    const requestId = String(task.requestId || '').trim()
-    const taskId = String(task.taskId || '').trim()
-    if (!requestId && !taskId) return
-    applyOptimisticStreamStop(requestId || null, taskId || null)
-    window.cosmic?.cancelGatewayResponse?.({
-      requestId: requestId || undefined,
-      taskId: taskId || undefined,
-    })?.catch(() => { })
-  }
-
   const handleShowLauncherTray = () => {
     hideHoverTooltip()
     setMode('chat')
@@ -10873,10 +10056,6 @@ export default function App() {
     }
     if (tile === 'spaces') {
       showSpacesSurface()
-      return
-    }
-    if (tile === 'task') {
-      showTaskSurface({ focusComposer: pendingTaskInputs.length === 0 })
       return
     }
     showChatComposer()
@@ -11152,12 +10331,11 @@ export default function App() {
   // Render Classes
   const shouldShowTaskInterrupt =
     visibleTaskInterrupts.length > 0 &&
-    mode !== 'task' &&
     mode !== 'meeting' &&
     mode !== 'spaces' &&
     !showLauncherTray
   const shouldShowPrimarySurface = mode !== 'meeting' && mode !== 'spaces' && !showLauncherTray
-  const shouldShowResponseSurface = shouldShowPrimarySurface && (mode === 'task' || messages.length > 0)
+  const shouldShowResponseSurface = shouldShowPrimarySurface && messages.length > 0
   const shouldShowCronResultSurface = displayedCronResultNotifications.length > 0
   // Bottom-right shells obey the family contract (desktopNotifications.ts):
   // standing cards surface only while you are NOT looking at the chat, and
@@ -11184,7 +10362,7 @@ export default function App() {
   const desktopNoticeColumnStyle = {
     ['--desktop-notice-bottom' as string]: `${noticeShellsBase}px`,
   } as React.CSSProperties
-  const effectivePosition = mode === 'spaces' ? 'bottom' : (messages.length > 0 || mode === 'task') ? 'bottom' : searchPosition
+  const effectivePosition = mode === 'spaces' ? 'bottom' : messages.length > 0 ? 'bottom' : searchPosition
   const overlayClass = [
     searchState === 'hidden' ? '' : 'visible',
     effectivePosition === 'middle' ? 'position-middle' : '',
@@ -11230,7 +10408,6 @@ export default function App() {
   const askNoticeShellStyle = {
     ['--ask-user-notice-bottom' as string]: searchState === 'visible' ? '112px' : '24px',
   } as React.CSSProperties
-  const hasMultiplePendingTaskInputs = orderedPendingTaskInputs.length > 1
   const composerPlaceholder =
     authState !== 'authenticated'
       ? 'Sign in to connect Cosmic to your VM...'
@@ -11603,375 +10780,8 @@ export default function App() {
                   onTouchMove={markUserResponseScrollIntent}
                   onPointerDown={markUserResponseScrollIntent}
                 >
-                  {mode === 'task' && (
-                    <div className="task-hub">
-                      <div className="task-hub-header">
-                        <div>
-                          <div className="task-hub-kicker">Task Inbox</div>
-                          <h2 className="task-hub-title">
-                            {taskDashboardCount > 0
-                              ? `${taskDashboardCount} task item${taskDashboardCount === 1 ? '' : 's'} active`
-                              : 'No task activity right now'}
-                          </h2>
-                          <div className="task-hub-subtitle">
-                            {orderedBackgroundTasks.length > 0
-                              ? `${orderedBackgroundTasks.length} background task${orderedBackgroundTasks.length === 1 ? '' : 's'} running or ready`
-                              : 'Background work you move out of chat will collect here.'}
-                          </div>
-                        </div>
-                        <button type="button" className="task-hub-chat-btn" onClick={showChatComposer}>
-                          Return to chat
-                        </button>
-                      </div>
-
-                      {taskDashboardCount > 0 ? (
-                        <div className="task-hub-stack">
-                          {orderedBackgroundTasks.length > 0 && selectedBackgroundTask && (
-                            <div className={`task-hub-section ${orderedBackgroundTasks.length > 1 ? '' : 'single'}`}>
-                                <div className="task-hub-section-header">
-                                  <div className="task-hub-section-kicker">Background tasks</div>
-                                  <div className="task-hub-section-meta">
-                                  {orderedBackgroundTasks.length} running or completed
-                                  </div>
-                                </div>
-                              <div
-                                className={`task-hub-body ${orderedBackgroundTasks.length > 1 ? '' : 'single'} ${
-                                  orderedBackgroundTasks.length > 1 && backgroundTaskListRetracted ? 'task-list-retracted' : ''
-                                }`}
-                              >
-                                {orderedBackgroundTasks.length > 1 && (
-                                  <div className="task-list-pane">
-                                    <div className="task-list">
-                                      {orderedBackgroundTasks.map((task) => (
-                                        <button
-                                          key={task.requestId}
-                                          type="button"
-                                          className={`task-list-item ${selectedBackgroundTask.requestId === task.requestId ? 'active' : ''}`}
-                                          onClick={() => setSelectedBackgroundRequestId(task.requestId)}
-                                        >
-                                          <div className="task-list-item-label-row">
-                                            <span className="task-list-item-label">{task.route || 'Background'}</span>
-                                            <span className="task-list-item-status">
-                                              {task.completed ? (task.failed ? 'Failed' : 'Ready') : 'Streaming'}
-                                            </span>
-                                          </div>
-                                          <div className="task-list-item-question">
-                                            {task.userQueryExcerpt || 'Background task'}
-                                          </div>
-                                          <div className="task-list-item-meta">
-                                            {task.completed
-                                              ? (task.failed ? 'Needs attention' : 'Completed · ready to move to chat')
-                                              : (task.activity || task.progress?.label || 'Working in the background...')}
-                                          </div>
-                                        </button>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                                <div className="task-detail-pane">
-                                  {orderedBackgroundTasks.length > 1 && (
-                                    <button
-                                      type="button"
-                                      className={`task-inbox-list-toggle ${backgroundTaskListRetracted ? 'is-retracted' : ''}`}
-                                      onClick={() => setBackgroundTaskListRetracted((v) => !v)}
-                                      aria-expanded={!backgroundTaskListRetracted}
-                                      aria-label={backgroundTaskListRetracted ? 'Show background task list' : 'Hide background task list'}
-                                    >
-                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                        {backgroundTaskListRetracted ? (
-                                          <path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-                                        ) : (
-                                          <path d="M15 18l-6-6 6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-                                        )}
-                                      </svg>
-                                    </button>
-                                  )}
-                                  {(() => {
-                                    const task = selectedBackgroundTask
-                                    const errorText = backgroundTaskErrors[task.requestId]
-                                    const backgroundMessageId = messages.find((message) => (
-                                      message.role === 'assistant' &&
-                                      message.requestId === task.requestId &&
-                                      Array.isArray(message.producedArtifacts) &&
-                                      message.producedArtifacts.length > 0
-                                    ))?.id || ''
-                                    return (
-                                      <div className="task-card task-detail-card">
-                                        <div className="task-card-topline">
-                                          <div className="task-card-topline-meta">
-                                            <span className="task-card-badge background">
-                                              {task.completed ? (task.failed ? 'Failed' : 'Ready') : 'Background'}
-                                            </span>
-                                            <span className="task-card-meta">{task.taskId || task.requestId}</span>
-                                          </div>
-                                          <div className="task-card-top-actions">
-                                            {!task.completed && (
-                                              <button
-                                                type="button"
-                                                className="task-action-btn task-cancel-btn"
-                                                onClick={() => handleCancelBackgroundTask(task)}
-                                                aria-label="Cancel background task"
-                                              >
-                                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                                  <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-                                                </svg>
-                                                <span>Cancel</span>
-                                              </button>
-                                            )}
-                                            {!task.failed && (
-                                              <button
-                                                type="button"
-                                                className="task-submit-btn task-foreground-btn task-top-foreground-btn"
-                                                disabled={!task.completed && (!canBringBackgroundTaskToForeground || foregroundingRequestId === task.requestId)}
-                                                onClick={() => void handleBringTaskToForeground(task)}
-                                              >
-                                                <img src={bringToForegroundIcon} alt="" aria-hidden="true" className="task-icon-image invert" />
-                                                <span>{task.completed ? 'Move to chat' : foregroundingRequestId === task.requestId ? 'Bringing back...' : 'Bring to foreground'}</span>
-                                              </button>
-                                            )}
-                                          </div>
-                                        </div>
-                                        <div className="task-card-question task-detail-question">
-                                          {task.userQueryExcerpt || 'Background task'}
-                                        </div>
-                                        <div className="task-detail-copy">
-                                          {task.completed
-                                            ? 'This task finished outside the main chat surface. You can review it here or bring future background work back to the foreground.'
-                                            : 'Streaming continues here while you work on something else in chat.'}
-                                        </div>
-                                        {task.progress?.kind === 'docs_parse' && !String(task.partialContent || '').trim() && (
-                                          <DocsProgressCard progress={task.progress} />
-                                        )}
-                                        {task.progress?.kind === 'tabular_parse' && !String(task.partialContent || '').trim() && (
-                                          <TabularProgressCard progress={task.progress} />
-                                        )}
-                                        {task.slideProgress && (
-                                          <SlideBuildCard
-                                            progress={task.slideProgress}
-                                            showThumbs
-                                            streaming={!task.completed && !task.failed}
-                                          />
-                                        )}
-                                        {task.browserProgress && (
-                                          <BrowserRunCard
-                                            progress={task.browserProgress}
-                                            streaming={!task.completed && !task.failed}
-                                            fallbackFrameKey={task.requestId || task.taskId || ''}
-                                          />
-                                        )}
-                                        {task.activity && !task.slideProgress && !task.browserProgress && task.progress?.kind !== 'docs_parse' && task.progress?.kind !== 'tabular_parse' && (
-                                          <div className="assistant-activity task-background-activity">{task.activity}</div>
-                                        )}
-                                        {task.partialThinking && (
-                                          <AssistantCollapsibleSection
-                                            title="Thinking"
-                                            accent="thinking"
-                                            streaming={!task.completed && !task.failed}
-                                            preview={!task.completed && !task.failed ? thinkingPreview(task.partialThinking) : undefined}
-                                          >
-                                            <div className="thinking-block task-thinking-block">
-                                              <div className="thinking-text">{task.partialThinking}</div>
-                                            </div>
-                                          </AssistantCollapsibleSection>
-                                        )}
-                                        {task.activityLog && task.activityLog.length > 0 && (
-                                          <AssistantCollapsibleSection
-                                            title="Flow"
-                                            accent="flow"
-                                            streaming={!task.completed && !task.failed}
-                                            signalEntries={task.activityLog}
-                                          >
-                                            <AssistantFlowTimeline
-                                              entries={task.activityLog}
-                                              showLabel={false}
-                                              streaming={!task.completed && !task.failed}
-                                            />
-                                          </AssistantCollapsibleSection>
-                                        )}
-                                        {String(task.partialContent || '').trim() ? (
-                                          <div className="task-background-preview">
-                                            <ReactMarkdown
-                                              remarkPlugins={ASSISTANT_MARKDOWN_REMARK}
-                                              rehypePlugins={[rehypeKatex]}
-                                              components={assistantMarkdownComponents}
-                                            >
-                                              {task.partialContent}
-                                            </ReactMarkdown>
-                                          </div>
-                                        ) : (
-                                          <div className="task-background-placeholder">
-                                            {task.failed
-                                              ? (task.error || 'This background task failed.')
-                                              : 'Streaming will appear here as this background task progresses.'}
-                                          </div>
-                                        )}
-                                        {backgroundMessageId && (
-                                          <AssistantMessageArtifacts
-                                            messageId={backgroundMessageId}
-                                            producedArtifacts={task.producedArtifacts}
-                                            supportingArtifacts={task.supportingArtifacts}
-                                            downloadingArtifactId={downloadingArtifactId}
-                                            onDownload={handleDownloadProducedArtifact}
-                                          />
-                                        )}
-                                        <div className="task-card-footer">
-                                          <div className="task-card-status">
-                                            {errorText ? (
-                                              <span className="task-card-error">{errorText}</span>
-                                            ) : task.failed ? (
-                                              <span className="task-card-error">{task.error || 'Background task failed.'}</span>
-                                            ) : task.completed ? (
-                                              <span className="task-card-hint">Ready · Bring it back to chat to see the result in context.</span>
-                                            ) : canBringBackgroundTaskToForeground ? (
-                                              <span className="task-card-hint">Streaming in the background — bring it back to watch live.</span>
-                                            ) : (
-                                              <span className="task-card-hint">Finish or background the current foreground stream before bringing another task back.</span>
-                                            )}
-                                          </div>
-                                        </div>
-                                      </div>
-                                    )
-                                  })()}
-                                </div>
-                              </div>
-                            </div>
-                          )}
-
-                          {pendingTaskCount > 0 && selectedTaskInput && (
-                            <div className={`task-hub-section ${hasMultiplePendingTaskInputs ? '' : 'single'}`}>
-                              <div className="task-hub-section-header">
-                                <div className="task-hub-section-kicker">Needs your input</div>
-                                <div className="task-hub-section-meta">
-                                  {pendingTaskCount} waiting
-                                </div>
-                              </div>
-                              <div
-                                className={`task-hub-body ${hasMultiplePendingTaskInputs ? '' : 'single'} ${
-                                  hasMultiplePendingTaskInputs && pendingTaskListRetracted ? 'task-list-retracted' : ''
-                                }`}
-                              >
-                                {hasMultiplePendingTaskInputs && (
-                                  <div className="task-list-pane">
-                                    <div className="task-list">
-                                      {orderedPendingTaskInputs.map((taskInput) => (
-                                        <button
-                                          key={taskInput.inputRequestId}
-                                          type="button"
-                                          className={`task-list-item ${selectedTaskInput.inputRequestId === taskInput.inputRequestId ? 'active' : ''}`}
-                                          onClick={() => setSelectedTaskInputId(taskInput.inputRequestId)}
-                                        >
-                                          <div className="task-list-item-label-row">
-                                            <span className="task-list-item-label">Task</span>
-                                            <span className="task-list-item-status">
-                                              {taskInput.options.length > 0
-                                                ? `${taskInput.options.length} choice${taskInput.options.length === 1 ? '' : 's'}`
-                                                : 'Reply needed'}
-                                            </span>
-                                          </div>
-                                          <div className="task-list-item-question">{taskInput.question}</div>
-                                        </button>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-
-                                <div className="task-detail-pane">
-                                  {hasMultiplePendingTaskInputs && (
-                                    <button
-                                      type="button"
-                                      className={`task-inbox-list-toggle ${pendingTaskListRetracted ? 'is-retracted' : ''}`}
-                                      onClick={() => setPendingTaskListRetracted((v) => !v)}
-                                      aria-expanded={!pendingTaskListRetracted}
-                                      aria-label={pendingTaskListRetracted ? 'Show task input list' : 'Hide task input list'}
-                                    >
-                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                        {pendingTaskListRetracted ? (
-                                          <path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-                                        ) : (
-                                          <path d="M15 18l-6-6 6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-                                        )}
-                                      </svg>
-                                    </button>
-                                  )}
-                                  {(() => {
-                                    const taskInput = selectedTaskInput
-                                    const isSubmitting = Boolean(submittingTaskInputs[taskInput.inputRequestId])
-                                    const draftValue = taskInputDrafts[taskInput.inputRequestId] || ''
-                                    const errorText = taskInputErrors[taskInput.inputRequestId]
-
-                                    return (
-                                      <div className="task-card task-detail-card">
-                                        <div className="task-card-topline">
-                                          <span className="task-card-badge">Awaiting input</span>
-                                          <span className="task-card-meta">{taskInput.taskId}</span>
-                                        </div>
-                                        <div className="task-card-question task-detail-question">{taskInput.question}</div>
-                                        <div className="task-detail-copy">
-                                          Choose a quick option or send a custom reply to resume this task without disturbing your current conversation.
-                                        </div>
-                                        {taskInput.options.length > 0 && (
-                                          <div className="task-card-options">
-                                            {taskInput.options.map((option) => (
-                                              <button
-                                                key={option}
-                                                type="button"
-                                                className="task-option-chip"
-                                                disabled={isSubmitting}
-                                                onClick={() => void submitTaskInputReply(taskInput, option)}
-                                              >
-                                                {option}
-                                              </button>
-                                            ))}
-                                          </div>
-                                        )}
-                                        <textarea
-                                          className="task-reply-input"
-                                          value={draftValue}
-                                          placeholder="Add a reply for this task..."
-                                          disabled={isSubmitting}
-                                          onChange={(event) => handleTaskInputDraftChange(taskInput.inputRequestId, event.target.value)}
-                                        />
-                                        <div className="task-card-footer">
-                                          <div className="task-card-status">
-                                            {errorText ? (
-                                              <span className="task-card-error">{errorText}</span>
-                                            ) : isSubmitting ? (
-                                              <span className="task-card-waiting">Submitting...</span>
-                                            ) : (
-                                              <span className="task-card-hint">Reply keeps the task moving without interrupting your current chat.</span>
-                                            )}
-                                          </div>
-                                          <button
-                                            type="button"
-                                            className="task-submit-btn"
-                                            disabled={isSubmitting}
-                                            onClick={() => void submitTaskInputReply(taskInput)}
-                                          >
-                                            Send reply
-                                          </button>
-                                        </div>
-                                      </div>
-                                    )
-                                  })()}
-                                </div>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="task-empty-state">
-                          <div className="task-empty-icon">◌</div>
-                          <div className="task-empty-title">Tasks will collect here when they need you.</div>
-                          <div className="task-empty-copy">
-                            Long-running orchestrator work can pause for clarification or keep streaming in the background without interrupting your active chat screen.
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
                   {/* MESSAGES */}
-                  {mode !== 'task' && messages.map((msg, idx) => {
+                  {messages.map((msg, idx) => {
                     // The workflow-choice continuation drives the orchestrator
                     // but is not a user query - never render it as a bubble.
                     if (msg.role === 'user' && isSyntheticSlideChoiceMessage(msg.content, (msg as any).metadata)) {
@@ -12260,7 +11070,7 @@ export default function App() {
                     {msg.role === 'user' ? (
                         <>
                           {msg.reaction && (
-                            <span className="query-reaction-badge" aria-hidden="true">
+                            <span key={`${msg.id}:${msg.reaction}`} className="query-reaction-badge" aria-hidden="true">
                               {msg.reaction}
                             </span>
                           )}
@@ -12281,6 +11091,10 @@ export default function App() {
                                   <RotateCcw size={12} strokeWidth={2.2} aria-hidden="true" />
                                   <span>Retry</span>
                                 </button>
+                              ) : msg.midRun.state === 'dispatching' ? (
+                                <span className="mid-run-indicator is-dispatching" aria-hidden="true">
+                                  <span className="mid-run-spinner" />
+                                </span>
                               ) : (
                                 <button
                                   type="button"
@@ -12296,25 +11110,16 @@ export default function App() {
                               )}
                               <ExpandableQueryPill
                                 text={cleanText(msg.content)}
-                                copied={copiedId === `user-${idx}`}
-                                onCopy={() => handleCopy(msg.content, `user-${idx}`)}
+                                copied={copiedId === `user-${msg.id}`}
+                                onCopy={() => handleCopy(msg.content, `user-${msg.id}`)}
                               />
                             </div>
                           ) : (
                             <ExpandableQueryPill
                               text={cleanText(msg.content)}
-                              copied={copiedId === `user-${idx}`}
-                              onCopy={() => handleCopy(msg.content, `user-${idx}`)}
+                              copied={copiedId === `user-${msg.id}`}
+                              onCopy={() => handleCopy(msg.content, `user-${msg.id}`)}
                             />
-                          )}
-                          {msg.backgroundState && (
-                            <div className={`query-background-status ${msg.backgroundState}`}>
-                              {msg.backgroundState === 'working'
-                                ? 'Working in background'
-                                : msg.backgroundState === 'ready'
-                                  ? 'Ready in Tasks'
-                                  : 'Background task failed'}
-                            </div>
                           )}
                           <UserMessageAttachments attachments={msg.attachments} />
                         </>
@@ -12373,6 +11178,8 @@ export default function App() {
                             browserStreaming={messageIsStreaming}
                             sheetStreaming={messageIsStreaming}
                             streaming={messageIsStreaming}
+                            copiedId={copiedId}
+                            onCopy={handleCopy}
                           />
                           <AssistantMessageArtifacts
                             messageId={msg.id}
@@ -12472,7 +11279,7 @@ export default function App() {
                       first inline progress row or first prose chunk lands in
                       the message body above, the transcript itself carries the
                       live status and the indicator steps aside. */}
-                  {mode !== 'task' && isStreaming && !activeDocsProgressMessage && activeStreamQuiet && (
+                  {isStreaming && !activeDocsProgressMessage && activeStreamQuiet && (
                     <div className="streaming-indicator">
                       <div className="streaming-dots" aria-hidden>
                         {[0, 1, 2, 3, 4].map((i) => (
@@ -12525,7 +11332,7 @@ export default function App() {
         )}
 
         {/* SCROLL TO BOTTOM BUTTON */}
-        {shouldShowPrimarySurface && mode !== 'task' && showScrollButton && (
+        {shouldShowPrimarySurface && showScrollButton && (
           <button className="scroll-to-bottom" onClick={scrollToBottom}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
               <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" />
@@ -12556,9 +11363,6 @@ export default function App() {
                       disabled={tile.locked}
                       aria-label={tile.locked ? `${tile.label} locked` : tile.label}
                     >
-                      {tile.id === 'task' && taskDashboardCount > 0 && (
-                        <span className="launchpad-badge">{taskDashboardCount}</span>
-                      )}
                       <div className="launchpad-icon-shell">
                         <LaunchpadIcon tile={tile.id} />
                       </div>
@@ -12567,44 +11371,6 @@ export default function App() {
                   ))}
                 </div>
               ) : (
-                mode === 'task' ? (
-                  <div className="task-toolbar">
-                    <button
-                      className="back-btn"
-                      onClick={handleShowLauncherTray}
-                      onMouseEnter={(event) => showHoverTooltipForElement('Modes', event.currentTarget, 'control')}
-                      onMouseLeave={hideHoverTooltip}
-                      onFocus={(event) => showHoverTooltipForElement('Modes', event.currentTarget, 'control')}
-                      onBlur={hideHoverTooltip}
-                      aria-label="Modes"
-                      style={{ marginRight: 8 }}
-                      type="button"
-                    >
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M14.71 6.71a1 1 0 0 1 0 1.41L10.83 12l3.88 3.88a1 1 0 0 1-1.41 1.41l-4.59-4.59a1 1 0 0 1 0-1.41l4.59-4.59a1 1 0 0 1 1.41 0z" />
-                      </svg>
-                    </button>
-                    <div className="task-toolbar-copy">
-                      <div className="task-toolbar-title">Task Inbox</div>
-                      <div className="task-toolbar-subtitle">
-                        {taskDashboardCount > 0
-                          ? `${backgroundTaskCount} background · ${pendingTaskCount} waiting for input`
-                          : 'No task is waiting right now'}
-                      </div>
-                    </div>
-                    <div className="task-mode-pill" aria-label="Task mode uses the orchestrator">
-                      <span className="task-mode-pill-kicker">Task</span>
-                      <span className="task-mode-pill-model">ORCH</span>
-                    </div>
-                    <button
-                      className="task-toolbar-chat-btn"
-                      onClick={showChatComposer}
-                      type="button"
-                    >
-                      Open chat
-                    </button>
-                  </div>
-                ) : (
                   <>
                     {pendingApprovalCount > 0 && (
                       <button
@@ -12657,7 +11423,6 @@ export default function App() {
                       style={{ marginRight: 8 }}
                       type="button"
                     >
-                      {taskDashboardCount > 0 && <span className="back-btn-badge">{taskDashboardCount}</span>}
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M14.71 6.71a1 1 0 0 1 0 1.41L10.83 12l3.88 3.88a1 1 0 0 1-1.41 1.41l-4.59-4.59a1 1 0 0 1 0-1.41l4.59-4.59a1 1 0 0 1 1.41 0z" />
                       </svg>
@@ -12786,25 +11551,10 @@ export default function App() {
                       </div>
                     </div>
 
-                    {isStreaming && activeStreamingRequestIdRef.current && (
-                      <button
-                        className={`background-task-btn ${backgroundingRequestId === activeStreamingRequestIdRef.current ? 'busy' : ''}`}
-                        onClick={() => void handleMoveActiveToBackground()}
-                        onMouseEnter={(event) => showHoverTooltipForElement('Move to background', event.currentTarget, 'control')}
-                        onMouseLeave={hideHoverTooltip}
-                        onFocus={(event) => showHoverTooltipForElement('Move to background', event.currentTarget, 'control')}
-                        onBlur={hideHoverTooltip}
-                        type="button"
-                        aria-label="Move to background"
-                        disabled={backgroundingRequestId === activeStreamingRequestIdRef.current}
-                      >
-                        <img src={moveToBackgroundIcon} alt="" aria-hidden="true" className="background-task-icon-image invert" />
-                      </button>
-                    )}
-
                     {isStreaming && (hasText || pendingAttachments.length > 0) && (
                       <button
                         className="send-btn active mid-run-send-btn"
+                        onMouseDown={(event) => event.preventDefault()}
                         onClick={() => submitMidRunMessage()}
                         onMouseEnter={(event) => showHoverTooltipForElement('Send', event.currentTarget, 'control')}
                         onMouseLeave={hideHoverTooltip}
@@ -12846,7 +11596,6 @@ export default function App() {
                     )}
                   </div>
                   </>
-                )
               )}
             </div>
           </LiquidGlass>
@@ -12903,16 +11652,6 @@ function LaunchpadIcon({ tile }: { tile: LauncherTileId }) {
         <rect x="4.75" y="7.25" width="11.5" height="9.5" rx="2.1" />
         <path d="M16.5 10.25 20 8.5v7l-3.5-1.75" />
         <circle cx="9.75" cy="12" r="2" />
-      </svg>
-    )
-  }
-  if (tile === 'task') {
-    return (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="6" y="4.75" width="12" height="14.5" rx="2.3" />
-        <path d="M9 4.75h6" />
-        <path d="m9.4 11.8 1.7 1.7 3.5-3.5" />
-        <path d="M9 16.4h6" />
       </svg>
     )
   }

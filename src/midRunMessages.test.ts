@@ -21,10 +21,12 @@ const assistant = (requestId: string, content: string, extra: Partial<MidRunAwar
 const pending = (requestId: string, content: string) => user(requestId, content, { midRun: { state: 'sending' } })
 
 describe('mid-run messages in the transcript', () => {
-  it('a pending bubble goes from sending to waiting without a label, then fails quietly', () => {
+  it('a pending bubble goes from sending to waiting to dispatching, or fails quietly', () => {
     let messages = [user('a', 'find flights'), assistant('a', 'Checking'), pending('b', 'nonstop only')]
     messages = patchPendingBubble(messages, 'b', { state: 'waiting', acked: true })
     expect(messages[2].midRun).toEqual({ state: 'waiting', acked: true })
+    messages = patchPendingBubble(messages, 'b', { state: 'dispatching', acked: true, withdrawing: false })
+    expect(messages[2].midRun).toEqual({ state: 'dispatching', acked: true, withdrawing: false })
     messages = patchPendingBubble(messages, 'b', { state: 'failed', error: 'offline' })
     expect(messages[2].midRun?.state).toBe('failed')
     // Unknown ids are a no-op (same array back).
@@ -41,6 +43,34 @@ describe('mid-run messages in the transcript', () => {
     ])
     // A replayed delivery does not duplicate the anchor.
     expect(applySteerDelivery(after, event)[1].steerAnchors).toHaveLength(1)
+  })
+
+  it('preserves a user bubble reaction onto the created steer anchor on delivery and deduplication', () => {
+    const before = [
+      user('a', 'find flights'),
+      assistant('a', 'Checking flights. '),
+      user('b', 'nonstop only', { midRun: { state: 'waiting', acked: true }, reaction: '🔥' }),
+    ]
+    const after = applySteerDelivery(before, {
+      request_id: 'b',
+      into_request_id: 'a',
+      content: 'nonstop only',
+      stream_offset: 18,
+      delivered_at: '2026-11-11T20:00:00Z',
+    })
+    expect(after[1].steerAnchors).toEqual([
+      { requestId: 'b', content: 'nonstop only', offset: 18, deliveredAt: '2026-11-11T20:00:00Z', reaction: '🔥' },
+    ])
+
+    const hydrated = dropSteeredUserDuplicates([
+      user('a', 'find flights'),
+      user('b', 'nonstop only', { reaction: '👀' }),
+      assistant('a', 'Checking flights. Found two.', {
+        steerAnchors: [{ requestId: 'b', content: 'nonstop only', offset: 18, deliveredAt: null }],
+      }),
+    ])
+    expect(hydrated).toHaveLength(2)
+    expect(hydrated[1].steerAnchors?.[0]?.reaction).toBe('👀')
   })
 
   it('a delivery for a reply that is not on screen just settles the bubble in place', () => {
@@ -80,6 +110,20 @@ describe('mid-run messages in the transcript', () => {
       .toEqual([...first, { requestId: 'c', content: 'y', offset: 5 }])
   })
 
+  it('rebases offsets from server snapshots when preferIncomingOffsets is true while keeping local reactions', () => {
+    const current = [
+      { requestId: 'b', content: 'nonstop only', offset: 42, deliveredAt: '2026-11-11T20:00:00Z', reaction: '🔥' },
+    ]
+    const incoming = [
+      { requestId: 'b', content: 'nonstop only', offset: 0, deliveredAt: '2026-11-11T20:00:02Z' },
+      { requestId: 'c', content: 'under $400', offset: 24, deliveredAt: '2026-11-11T20:00:05Z' },
+    ]
+    expect(mergeSteerAnchors(current, incoming, { preferIncomingOffsets: true })).toEqual([
+      { requestId: 'b', content: 'nonstop only', offset: 0, deliveredAt: '2026-11-11T20:00:02Z', reaction: '🔥' },
+      { requestId: 'c', content: 'under $400', offset: 24, deliveredAt: '2026-11-11T20:00:05Z' },
+    ])
+  })
+
   it('reconnect: held messages keep a pending bubble, ones read while away are dropped', () => {
     const messages = [
       user('a', 'q'),
@@ -94,6 +138,21 @@ describe('mid-run messages in the transcript', () => {
     )
     expect(next.map((message) => message.requestId)).toEqual(['a', 'c', 'd', 'e'])
     expect(next.find((message) => message.requestId === 'e')?.midRun?.state).toBe('waiting')
+
+    // During a live window-show sync (preserveDispatching: true), a bubble in
+    // the brief gap between user_message.dispatched and route_result stays put.
+    const withDispatching = [
+      user('a', 'q'),
+      user('f', 'starting turn', { midRun: { state: 'dispatching', acked: true } }),
+    ]
+    expect(
+      reconcilePendingBubbles(
+        withDispatching,
+        [],
+        (item) => user(item.requestId, item.content, { midRun: { state: 'waiting', acked: true } }),
+        { preserveDispatching: true },
+      ).map((message) => message.requestId),
+    ).toEqual(['a', 'f'])
   })
 })
 

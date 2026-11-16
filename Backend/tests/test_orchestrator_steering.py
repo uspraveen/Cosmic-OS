@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -10,6 +11,7 @@ import pytest
 from orchestrator.config import OrchestratorConfig
 from orchestrator.runtime import OrchestratorRuntime
 from orchestrator.steering import (
+    MAX_STEER_CHARS,
     STEER_PREAMBLE,
     SteerInbox,
     last_message_accepts_user_text,
@@ -212,3 +214,99 @@ def test_render_and_boundary_helpers() -> None:
     assert last_message_accepts_user_text([{"role": "tool", "content": "r"}])
     assert not last_message_accepts_user_text([{"role": "assistant", "content": "partial"}])
     assert not last_message_accepts_user_text([])
+
+
+def test_oversize_steer_is_refused_instead_of_truncated() -> None:
+    inbox = SteerInbox()
+    exact = "a" * MAX_STEER_CHARS
+    oversize = "b" * (MAX_STEER_CHARS + 1)
+    assert inbox.submit("exact", exact) is True
+    assert inbox.submit("oversize", oversize) is False
+    drained = inbox.drain()
+    assert [(item.message_id, item.content) for item in drained] == [("exact", exact)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["anthropic", "fireworks_glm"])
+async def test_steer_inbox_is_closed_before_task_failed(tmp_path, provider: str) -> None:
+    runtime = _runtime(tmp_path, provider=provider)
+    task = _signed_task("signing-secret")
+    inbox_open_at_failed: list[bool] = []
+    refused_at_failed: list[bool] = []
+
+    async def failing_anthropic(*, messages, **_kwargs):
+        assert runtime.submit_user_steer(task.task_id, message_id="m_pre", content="before error") is True
+        raise RuntimeError("upstream exploded")
+        yield  # pragma: no cover
+
+    async def failing_openai(**_kwargs):
+        assert runtime.submit_user_steer(task.task_id, message_id="m_pre", content="before error") is True
+        raise RuntimeError("upstream exploded")
+        yield  # pragma: no cover
+
+    runtime._stream_anthropic_events = failing_anthropic  # type: ignore[method-assign]
+    runtime._stream_openai_chat_events = failing_openai  # type: ignore[method-assign]
+    await runtime.start()
+    try:
+        events = []
+        async for event in runtime.stream_task(task):
+            events.append(event)
+            if event["type"] == "task.failed":
+                run_state = runtime._active_runs.get(task.task_id)  # noqa: SLF001
+                inbox_open_at_failed.append(bool(run_state and run_state.steer_inbox.open))
+                refused_at_failed.append(
+                    runtime.submit_user_steer(task.task_id, message_id="m_post", content="too late")
+                )
+    finally:
+        await runtime.stop()
+
+    assert [e["type"] for e in events] == ["task.created", "task.failed"]
+    assert inbox_open_at_failed == [False]
+    assert refused_at_failed == [False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["anthropic", "fireworks_glm"])
+async def test_steer_inbox_is_closed_before_task_cancelled(tmp_path, provider: str) -> None:
+    runtime = _runtime(tmp_path, provider=provider)
+    task = _signed_task("signing-secret")
+    started = asyncio.Event()
+    inbox_open_at_cancelled: list[bool] = []
+    refused_at_cancelled: list[bool] = []
+    events: list[dict] = []
+
+    async def hanging_anthropic(*, messages, **_kwargs):
+        started.set()
+        await asyncio.Future()
+        yield  # pragma: no cover
+
+    async def hanging_openai(**_kwargs):
+        started.set()
+        await asyncio.Future()
+        yield  # pragma: no cover
+
+    runtime._stream_anthropic_events = hanging_anthropic  # type: ignore[method-assign]
+    runtime._stream_openai_chat_events = hanging_openai  # type: ignore[method-assign]
+    await runtime.start()
+    try:
+        async def consume() -> None:
+            async for event in runtime.stream_task(task):
+                events.append(event)
+                if event["type"] == "task.cancelled":
+                    run_state = runtime._active_runs.get(task.task_id)  # noqa: SLF001
+                    inbox_open_at_cancelled.append(bool(run_state and run_state.steer_inbox.open))
+                    refused_at_cancelled.append(
+                        runtime.submit_user_steer(task.task_id, message_id="m_post", content="too late")
+                    )
+
+        consumer = asyncio.create_task(consume())
+        await started.wait()
+        assert runtime.submit_user_steer(task.task_id, message_id="m_pre", content="before cancel") is True
+        assert await runtime.cancel_task(task.task_id) is True
+        await consumer
+    finally:
+        await runtime.stop()
+
+    assert [e["type"] for e in events] == ["task.created", "task.cancelled"]
+    assert inbox_open_at_cancelled == [False]
+    assert refused_at_cancelled == [False]

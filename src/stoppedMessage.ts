@@ -17,6 +17,7 @@ export type LiveWorkMessage = {
   browserConsoleAnchors?: unknown[] | null
   producedArtifacts?: unknown[] | null
   responseBlocks?: unknown[] | null
+  steerAnchors?: unknown[] | null
 }
 
 const nonEmpty = (value: unknown[] | null | undefined): boolean => Array.isArray(value) && value.length > 0
@@ -31,6 +32,7 @@ export const messageCarriesLiveWork = (message: LiveWorkMessage | null | undefin
     || nonEmpty(message.activityLog)
     || nonEmpty(message.browserConsoleAnchors)
     || nonEmpty(message.producedArtifacts)
-    || nonEmpty(message.responseBlocks),
+    || nonEmpty(message.responseBlocks)
+    || nonEmpty(message.steerAnchors),
   )
 }

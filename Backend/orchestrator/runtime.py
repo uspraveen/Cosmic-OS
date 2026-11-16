@@ -1462,6 +1462,7 @@ class OrchestratorRuntime:
             }
 
         except asyncio.CancelledError:
+            self._close_steer_inbox(task.task_id)
             run_state = self._active_runs.get(task.task_id)
             if run_state and run_state.cancel_requested:
                 message = run_state.cancel_message
@@ -1488,6 +1489,7 @@ class OrchestratorRuntime:
             )
             raise
         except Exception as exc:
+            self._close_steer_inbox(task.task_id)
             if isinstance(exc, OrchestratorTaskError):
                 code = exc.code
                 message = str(exc).strip() or "Orchestrator processing failed."
@@ -1509,6 +1511,7 @@ class OrchestratorRuntime:
                 "error": {"code": code, "message": message, "retryable": retryable},
             }
         finally:
+            self._close_steer_inbox(task.task_id)
             self._record_anthropic_loop_stats(
                 anthropic_requests=locals().get("anthropic_requests", 0),
                 saw_tool_loop=locals().get("saw_tool_loop", False),
@@ -2344,6 +2347,7 @@ class OrchestratorRuntime:
             }
 
         except asyncio.CancelledError:
+            self._close_steer_inbox(task.task_id)
             run_state = self._active_runs.get(task.task_id)
             if run_state and run_state.cancel_requested:
                 message = run_state.cancel_message
@@ -2367,6 +2371,7 @@ class OrchestratorRuntime:
             )
             raise
         except Exception as exc:
+            self._close_steer_inbox(task.task_id)
             code = "FIREWORKS_UPSTREAM_ERROR"
             message = str(exc).strip() or "Fireworks orchestrator processing failed."
             self.task_ledger.mark_failed(task.task_id, code=code, message=message)
@@ -2382,6 +2387,7 @@ class OrchestratorRuntime:
                 "error": {"code": code, "message": message, "retryable": False},
             }
         finally:
+            self._close_steer_inbox(task.task_id)
             self._active_runs.pop(task.task_id, None)
 
     # ════════════════════════════════════════════════════════════
@@ -2473,8 +2479,9 @@ class OrchestratorRuntime:
         run_state = self._active_runs.get(task_id)
         if run_state is None:
             return
+        was_open = run_state.steer_inbox.open
         leftover = run_state.steer_inbox.close()
-        if leftover:
+        if was_open and leftover:
             logger.info(
                 "orchestrator.steer_inbox_closed task_id=%s undelivered=%s",
                 task_id,

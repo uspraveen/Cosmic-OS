@@ -19,7 +19,10 @@ export interface ReactionMessageLike {
   role: string
   requestId?: string | null
   reaction?: string | null
+  steerAnchors?: Array<{ requestId: string; reaction?: string | null }>
 }
+
+export type ReactionTargetMessage = ReactionMessageLike
 
 export interface ParsedReactionEvent {
   emoji: string
@@ -53,7 +56,7 @@ export const parseReactionEvent = (
   }
 }
 
-/** Stamp the emoji on the matching user message, if it is in the list. */
+/** Stamp the emoji on the matching user message or inline steer anchor, if it is in the list. */
 export const applyReactionToMessages = <T extends ReactionMessageLike>(
   messages: T[],
   parsed: ParsedReactionEvent | null,
@@ -61,13 +64,34 @@ export const applyReactionToMessages = <T extends ReactionMessageLike>(
   if (!parsed || (!parsed.requestId && !parsed.messageId)) return messages
   let changed = false
   const next = messages.map((message) => {
-    if (message.role !== 'user') return message
-    const matches =
-      (parsed.requestId && message.requestId === parsed.requestId) ||
-      (parsed.messageId && message.id === parsed.messageId)
-    if (!matches || message.reaction === parsed.emoji) return message
-    changed = true
-    return { ...message, reaction: parsed.emoji }
+    if (message.role === 'user') {
+      const matches =
+        (parsed.requestId && message.requestId === parsed.requestId) ||
+        (parsed.messageId && message.id === parsed.messageId)
+      if (!matches || message.reaction === parsed.emoji) return message
+      changed = true
+      return { ...message, reaction: parsed.emoji }
+    }
+    if (
+      message.role === 'assistant' &&
+      parsed.requestId &&
+      Array.isArray(message.steerAnchors) &&
+      message.steerAnchors.length > 0
+    ) {
+      let anchorChanged = false
+      const nextAnchors = message.steerAnchors.map((anchor) => {
+        if (anchor.requestId !== parsed.requestId || anchor.reaction === parsed.emoji) {
+          return anchor
+        }
+        anchorChanged = true
+        return { ...anchor, reaction: parsed.emoji }
+      })
+      if (anchorChanged) {
+        changed = true
+        return { ...message, steerAnchors: nextAnchors }
+      }
+    }
+    return message
   })
   return changed ? next : messages
 }
